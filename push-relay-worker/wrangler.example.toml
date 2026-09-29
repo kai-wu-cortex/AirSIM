@@ -1,0 +1,45 @@
+name = "airsim-push-relay"
+main = "src/index.mjs"
+compatibility_date = "2026-08-20"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[vars]
+APNS_TEAM_ID = "REPLACE_WITH_APPLE_TEAM_ID"
+APNS_KEY_ID = "REPLACE_WITH_APNS_KEY_ID"
+ALLOWED_BUNDLE_ID = "com.eric3u.airsim"
+WEBRTC_TRANSPORT_READY = "false"
+WEBRTC_ROLLOUT_PERCENT = "0"
+
+[[kv_namespaces]]
+binding = "DEVICES"
+id = "REPLACE_WITH_NEW_AIRSIM_KV_NAMESPACE_ID"
+
+[[durable_objects.bindings]]
+name = "MEDIA"
+class_name = "CallMediaSession"
+
+[[durable_objects.bindings]]
+name = "STATUS"
+class_name = "AgentStatusRegistry"
+
+[[durable_objects.bindings]]
+name = "COMMANDS"
+class_name = "DeviceCommandSession"
+
+[[migrations]]
+tag = "v1-call-media"
+new_sqlite_classes = ["CallMediaSession"]
+
+[[migrations]]
+tag = "v2-agent-status"
+new_sqlite_classes = ["AgentStatusRegistry"]
+
+[[migrations]]
+tag = "v3-device-commands"
+new_sqlite_classes = ["DeviceCommandSession"]
+
+# Add a new AirSIM domain route only after its DNS and Cloudflare Worker
+# configuration have been created. Never reuse DJOneHub production bindings.

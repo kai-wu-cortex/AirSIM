@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+	package="com.airsim.phonecontrol"
+	android:versionCode="2"
+	android:versionName="0.2.0-dev">
+	<queries>
+		<package android:name="moe.shizuku.privileged.api" />
+	</queries>
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+	<uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
+
+    <application
+        android:name=".BridgeApplication"
+        android:allowBackup="false"
+        android:debuggable="true"
+        android:label="AirSIM"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:usesCleartextTraffic="true">
+		<meta-data
+			android:name="moe.shizuku.client.V3_SUPPORT"
+			android:value="true" />
+
+		<provider
+			android:name="rikka.shizuku.ShizukuProvider"
+			android:authorities="com.airsim.phonecontrol.shizuku"
+			android:enabled="true"
+			android:exported="true"
+			android:multiprocess="false"
+			android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="tel" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".DJOneHubInCallService"
+            android:exported="true"
+            android:permission="android.permission.BIND_INCALL_SERVICE">
+            <meta-data android:name="android.telecom.IN_CALL_SERVICE_UI" android:value="true" />
+            <meta-data android:name="android.telecom.IN_CALL_SERVICE_RINGING" android:value="false" />
+            <intent-filter>
+                <action android:name="android.telecom.InCallService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".AgentWatchdogService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <service
+            android:name=".VoWLANGatewayService"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+		<receiver
+			android:name=".DebugCommandReceiver"
+			android:enabled="true"
+			android:exported="true"
+			android:permission="android.permission.DUMP">
+			<intent-filter>
+				<action android:name="com.airsim.phonecontrol.DEBUG_SET_LOCAL_OUTPUT" />
+			</intent-filter>
+		</receiver>
+    </application>
+</manifest>

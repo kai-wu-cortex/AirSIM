@@ -1,0 +1,38 @@
+{
+  "fill" : {
+    "automatic-gradient" : "display-p3:0.23866,0.48516,0.96783,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : "automatic",
+          "image-name" : "phone-fill-system.png",
+          "name" : "Phone",
+          "position" : {
+            "scale" : 0.74,
+            "translation-in-points" : [
+              20.02625000000012,
+              12.012187499999982
+            ]
+          }
+        }
+      ],
+      "name" : "Phone Symbol",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
