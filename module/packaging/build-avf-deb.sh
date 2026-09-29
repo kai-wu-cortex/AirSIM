@@ -7,7 +7,7 @@ version=${AIRSIM_PACKAGE_VERSION:-0.4.2}
 release=${AIRSIM_PACKAGE_RELEASE:-1}
 package_version="$version-$release"
 dist_dir=${AIRSIM_DIST_DIR:-"$repo_root/dist"}
-public_key=${AIRSIM_RELEASE_PUBLIC_KEY_BASE64:-ytpXllvXQ26FCoNhO8rFX0dJKFXYwJaN9uF1L2f2osg=}
+public_key=${AIRSIM_RELEASE_PUBLIC_KEY_BASE64:-7fGe7k6ZJ5xhU5Uljm97EPKRzfSJUULVnaHpUBT8Gho=}
 
 case "$version" in
     ''|*[!0-9A-Za-z.+:~_-]*) printf 'Invalid AIRSIM_PACKAGE_VERSION: %s\n' "$version" >&2; exit 2 ;;
@@ -53,7 +53,7 @@ Installed-Size: $installed_size
 Depends: adduser, dpkg, systemd | systemd-sysv
 Section: net
 Priority: optional
-Homepage: https://github.com/Open-Airsim/AirSIM
+Homepage: https://github.com/kai-wu-cortex/AirSIM
 Description: AirSIM Agent and rescue installer for Android Virtualization Framework
  A single arm64 package for Android AVF guests. Android hardware and vendor
  differences are handled by the companion Android app capability layer.

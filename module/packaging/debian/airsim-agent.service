@@ -1,6 +1,6 @@
 [Unit]
 Description=AirSIM AVF Agent
-Documentation=https://github.com/Open-Airsim/AirSIM
+Documentation=https://github.com/kai-wu-cortex/AirSIM
 Wants=network-online.target airsim-installerd.service
 After=network-online.target airsim-installerd.service
 

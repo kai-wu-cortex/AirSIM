@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const defaultReleasePublicKeyBase64 = "ytpXllvXQ26FCoNhO8rFX0dJKFXYwJaN9uF1L2f2osg="
+const defaultReleasePublicKeyBase64 = "7fGe7k6ZJ5xhU5Uljm97EPKRzfSJUULVnaHpUBT8Gho="
 
 var releasePublicKeyBase64 = defaultReleasePublicKeyBase64
 

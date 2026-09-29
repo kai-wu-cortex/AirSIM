@@ -41,6 +41,15 @@ AIRSIM_RELEASE_PRIVATE_KEY='/secure/path/release-ed25519.pem' \
 
 输出目录默认为 `dist/`，包含 `.deb`、`.sha256` 和 Base64 编码的 `.sig`。没有提供私钥时仅生成开发包与摘要，不能通过 installerd 的发布签名校验。
 
+首个正式 Release 使用的 Ed25519 发布公钥为：
+
+```text
+Base64 raw key: 7fGe7k6ZJ5xhU5Uljm97EPKRzfSJUULVnaHpUBT8Gho=
+DER SHA-256:    a7f6696ec806e5f7500b8526fe6a82f18931fd910ebad8124ee4ef1da823a2e6
+```
+
+私钥必须长期保存在仓库之外并单独备份。丢失私钥后不能为已安装的 installerd 生成可信升级；替换公钥属于密钥轮换，必须设计受信任的迁移流程，不能只上传一个使用新密钥签名的包。
+
 发布到 GitHub Release 时必须上传构建目录中的全部发布文件。Android App 的“一键更新/修复”使用版本化 `.deb` 与同名 `.sig`；首次安装命令使用稳定名称 `airsim-avf-agent_arm64.deb`、`airsim-avf-agent_arm64.deb.sig` 和 `install-avf.sh`。首次安装器由构建脚本写入同一个发行公钥，不从网络下载或信任替代公钥。
 
 ## 首次引导
