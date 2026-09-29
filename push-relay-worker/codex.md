@@ -27,7 +27,7 @@
 - 普通变量：`APNS_TEAM_ID`、`APNS_KEY_ID`、`ALLOWED_BUNDLE_ID`、`WEBRTC_TRANSPORT_READY`、`WEBRTC_ROLLOUT_PERCENT`。
 - 必需 Worker Secret：`APNS_P8`、`DASHBOARD_TOKEN`。
 - `[secrets].required` 只声明 Secret 名称，不包含、生成或上传 Secret 值。
-- `com.example.airsim` 是开源占位符，不能发布。主 App、Watch、Live Activity、provisioning profile、Relay allowlist 与 APNs topic 必须使用操作者自己的统一标识关系。
+- `com.example.airsim` 是源码仓库占位符，不能发布。主 App、Watch、Live Activity、provisioning profile、Relay allowlist 与 APNs topic 必须使用操作者自己的统一标识关系。
 - Debug/development 签名对应 APNs `sandbox`；Release/TestFlight 对应 `production`。
 - Wrangler 只部署基础设施；设备由签名 App 调用 `POST /v1/devices/register` 自注册，不能维护静态设备表或手工预填 KV。
 

@@ -46,7 +46,7 @@ NON-NEGOTIABLE ARCHITECTURE CONTRACTS
 - The installer accepts only the expected signed arm64 Debian package and cannot run arbitrary shell commands.
 - Android application code cannot force-enable AVF functionality removed or hidden by OEM firmware or system-signature restrictions.
 
-APPLE OPEN-SOURCE SIGNING CONTRACT
+APPLE SELF-SIGNING CONTRACT
 - com.example.airsim is a placeholder, not a reusable identity.
 - Every deployer must use their own Apple Developer Team, certificates, profiles, and unique Bundle IDs.
 - Main app: deployer-owned Bundle ID.
@@ -99,5 +99,5 @@ WORKFLOW
 6. Validate locally, then perform explicitly authorized external actions.
 7. Report changed files, exact checks run, unexecuted device/production steps, and remaining risks.
 
-LICENSE NOTE
-The repository currently has no LICENSE file. Do not claim a specific license or infer redistribution rights until the maintainer adds one.
+LICENSE CONTRACT
+AirSIM is licensed under PolyForm-Noncommercial-1.0.0. It is source-available, not OSI open source. Personal study, research, experiment, testing, hobby use, and other purposes explicitly permitted by the license are allowed. Commercial use, paid services, commercial product integration, business use with an anticipated commercial application, and other commercial exploitation require separate written permission from the copyright holder. Preserve LICENSE, NOTICE, Required Notice lines, and applicable third-party notices when modifying or distributing the software.

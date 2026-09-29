@@ -37,7 +37,7 @@
 
 ### 2.1 Apple Developer 与真机签名
 
-需要有效的 Apple Developer Program 团队和一台可用于真机调试的 Mac。本仓库是开源项目，不附带原作者的 App ID、开发团队权限、证书或 provisioning profile。仓库中的 `com.example.airsim` 只是不可直接发布的占位符；每位部署者都必须换成自己控制的唯一反向域名标识，并使用自己的 Apple Developer Team 重新签名。
+需要有效的 Apple Developer Program 团队和一台可用于真机调试的 Mac。本仓库是源码可见、仅限非商业用途的项目，不附带原作者的 App ID、开发团队权限、证书或 provisioning profile。仓库中的 `com.example.airsim` 只是不可直接发布的占位符；每位部署者都必须换成自己控制的唯一反向域名标识，并使用自己的 Apple Developer Team 重新签名。
 
 例如，拥有 `example.org` 的部署者可以选择 `org.example.airsim`。为主 App、Watch App 和 Live Activity Extension 创建三个 Explicit App ID：
 
@@ -55,7 +55,7 @@
 4. Apple Developer 中三个 Explicit App ID、capabilities 和对应 provisioning profile。
 5. Debug/Release 实际签名 entitlement、Relay 注册字段和所有 APNs topic。
 
-不要尝试注册或签名仓库历史版本中的原作者标识；它不属于开源使用者。仅修改 `DEVELOPMENT_TEAM` 也不够，三个 Bundle ID、Watch companion 关系和 Relay allowlist 必须一起修改。
+不要尝试注册或签名仓库历史版本中的原作者标识；它不属于源码使用者。仅修改 `DEVELOPMENT_TEAM` 也不够，三个 Bundle ID、Watch companion 关系和 Relay allowlist 必须一起修改。
 
 主 App 和 Watch App 需要 Push Notifications capability。主 App 的 Background Modes 至少包含 Voice over IP 和 Remote notifications；本项目还使用后台音频。Live Activity Target 需要正确的 ActivityKit 配置。
 

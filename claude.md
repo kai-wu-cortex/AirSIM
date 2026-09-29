@@ -40,7 +40,7 @@
 
 ## Apple 签名规则
 
-`com.example.airsim` 是开源占位符。每位部署者必须用自己的 Apple Developer Team 重新配置：
+`com.example.airsim` 是源码仓库中的占位符。每位部署者必须用自己的 Apple Developer Team 重新配置：
 
 - 主 App：部署者的唯一 Bundle ID。
 - Watch App：主 Bundle ID 加 `.watchkitapp`。
@@ -64,6 +64,10 @@ npx wrangler secret list --config wrangler.toml
 ```
 
 `wrangler.example.toml` 的 `[secrets] required` 只声明名称，不保存值。Secret 不能写入 `[vars]`、Git、构建产物或日志。执行 `secret put` 和生产 `deploy` 都是外部状态变更，只有用户明确要求时才能执行。
+
+## 许可证边界
+
+AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，只授权个人学习、研究、实验及许可证列明的其他非商业用途。不得把项目描述为 OSI 开源软件，也不得协助将 AirSIM 用于收费服务、商业产品、企业内部商业目的或其他预期商业应用，除非用户能提供版权所有者的单独书面商业许可。修改、构建或再分发时必须保留根目录 `LICENSE`、`NOTICE` 和适用的第三方声明。
 
 ## 标准验证
 

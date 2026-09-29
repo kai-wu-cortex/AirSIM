@@ -48,7 +48,10 @@ for expected in \
     './usr/lib/airsim/airsim-installerd' \
     './usr/lib/airsim/agent.env.default' \
     './usr/lib/systemd/system/airsim-agent.service' \
-    './usr/lib/systemd/system/airsim-installerd.service'
+    './usr/lib/systemd/system/airsim-installerd.service' \
+    './usr/share/doc/airsim-avf-agent/copyright' \
+    './usr/share/doc/airsim-avf-agent/NOTICE' \
+    './usr/share/doc/airsim-avf-agent/THIRD_PARTY_NOTICES.md'
 do
     printf '%s\n' "$contents" | grep -qx "$expected"
 done

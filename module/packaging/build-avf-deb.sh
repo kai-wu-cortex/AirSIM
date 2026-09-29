@@ -24,6 +24,7 @@ mkdir -p \
     "$package_root/usr/bin" \
     "$package_root/usr/lib/airsim" \
     "$package_root/usr/lib/systemd/system" \
+    "$package_root/usr/share/doc/airsim-avf-agent" \
     "$control_root" \
     "$dist_dir"
 
@@ -41,6 +42,9 @@ install -m 0644 "$script_dir/debian/agent.env.default" "$package_root/usr/lib/ai
 install -m 0644 "$script_dir/debian/airsim-agent.service" "$package_root/usr/lib/systemd/system/airsim-agent.service"
 install -m 0644 "$script_dir/debian/airsim-installerd.service" "$package_root/usr/lib/systemd/system/airsim-installerd.service"
 install -m 0755 "$script_dir/debian/airsim-avf-pair" "$package_root/usr/bin/airsim-avf-pair"
+install -m 0644 "$repo_root/LICENSE" "$package_root/usr/share/doc/airsim-avf-agent/copyright"
+install -m 0644 "$repo_root/NOTICE" "$package_root/usr/share/doc/airsim-avf-agent/NOTICE"
+install -m 0644 "$repo_root/THIRD_PARTY_NOTICES.md" "$package_root/usr/share/doc/airsim-avf-agent/THIRD_PARTY_NOTICES.md"
 chmod 0755 "$package_root/usr/bin/airsim-agent" "$package_root/usr/lib/airsim/airsim-installerd"
 
 installed_size=$(du -sk "$package_root" | awk '{print $1}')

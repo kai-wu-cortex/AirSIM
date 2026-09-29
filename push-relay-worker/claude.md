@@ -5,7 +5,7 @@
 ## 必须遵守
 
 1. 先确认 Cloudflare account/zone、目标 hostname、Apple Team ID/Key ID、操作者自己的主 Bundle ID，以及 sandbox 或 production 环境。
-2. `com.example.airsim` 仅为开源占位符。部署者必须用自己的 Apple Developer Team 重签主 App、Watch 与 Live Activity，并同步 Relay `ALLOWED_BUNDLE_ID`。
+2. `com.example.airsim` 仅为源码仓库占位符。部署者必须用自己的 Apple Developer Team 重签主 App、Watch 与 Live Activity，并同步 Relay `ALLOWED_BUNDLE_ID`。
 3. App 签名证书/profile 与 Relay 的 APNs `.p8` 是两组不同凭据；CallKit 没有独立服务端证书。
 4. `APNS_P8` 与 `DASHBOARD_TOKEN` 是必需 Worker Secret。`[secrets].required` 只声明名称，绝不能把真实值写入 TOML 或 `[vars]`。
 5. `DASHBOARD_TOKEN` 是 AirSIM Dashboard Bearer token，不是 Cloudflare API token。

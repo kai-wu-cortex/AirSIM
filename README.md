@@ -6,12 +6,17 @@
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
 [![Cloudflare Workers](https://img.shields.io/badge/Relay-Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](push-relay-worker/README.md)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-7c3aed)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/kai-wu-cortex/AirSIM?style=flat&logo=github&label=Stars)](https://github.com/kai-wu-cortex/AirSIM/stargazers)
 
-**AirSIM 是一个以三星 Android 手机为蜂窝通信终端，让 iPhone 和 Apple Watch 远程拨打、接听电话与收发短信的开源跨设备通信项目。** 三星端负责 Android Telecom、短信和系统通话音频；Android AVF Linux Agent 负责设备状态与命令编排；Apple 客户端使用 CallKit、PushKit、ActivityKit 和 VoWLAN；可选的 Cloudflare Workers Relay 提供公网事件、APNs 推送、命令队列与媒体中继。
+**AirSIM 是一个以三星 Android 手机为蜂窝通信终端，让 iPhone 和 Apple Watch 远程拨打、接听电话与收发短信的源码可见跨设备通信项目。** 三星端负责 Android Telecom、短信和系统通话音频；Android AVF Linux Agent 负责设备状态与命令编排；Apple 客户端使用 CallKit、PushKit、ActivityKit 和 VoWLAN；可选的 Cloudflare Workers Relay 提供公网事件、APNs 推送、命令队列与媒体中继。
 
-AirSIM is an open-source cross-device calling and messaging project that connects Samsung Android, iPhone, Apple Watch, Android AVF Linux, CallKit, PushKit, VoWLAN, APNs, and Cloudflare Workers.
+AirSIM is a source-available, noncommercial cross-device calling and messaging project that connects Samsung Android, iPhone, Apple Watch, Android AVF Linux, CallKit, PushKit, VoWLAN, APNs, and Cloudflare Workers.
 
 > 本仓库包含完整源码、构建脚本与部署文档，不提供可复用的 Apple Developer 身份、生产 APNs 密钥、Cloudflare 账户资源或托管 Relay。项目仍处于主动开发阶段，不能替代紧急呼叫能力，生产使用前必须完成目标三星手机、iPhone 和 Apple Watch 的联合验收。
+
+> [!IMPORTANT]
+> 本项目面向个人学习、研究、实验和其他非商业用途。任何商业使用、收费服务、商业产品集成或预期商业应用均未获授权；如需商业许可，必须事先取得版权所有者的单独书面许可。详见 [PolyForm Noncommercial License 1.0.0](LICENSE)。由于禁止商业用途，本项目属于 **source-available**，不是 OSI 定义的开源软件。
 
 **Tags / Topics:** `Samsung Android` · `iPhone` · `Apple Watch` · `CallKit` · `PushKit` · `VoWLAN` · `Android AVF` · `Cloudflare Workers` · `APNs` · `SwiftUI` · `Go`
 
@@ -114,7 +119,7 @@ npx wrangler deploy --dry-run --config wrangler.toml
 
 部署前必须创建自己的 KV、配置 Durable Objects 与自定义域名，并将 `APNS_P8`、`DASHBOARD_TOKEN` 作为 **Worker Secret** 添加，不能写入 Git 或 `[vars]`。完整教程见 [Cloudflare Relay 部署手册](push-relay-worker/README.md)。
 
-## Apple 开源签名要求
+## Apple 自有签名要求
 
 AirSIM 不附带原作者的 Apple Developer Team、App ID、证书或 provisioning profile。每位使用者必须：
 
@@ -172,6 +177,18 @@ xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
 
 AirSIM 当前处于主动开发阶段。仓库已整合 Android、AVF Agent / Installer、iOS / watchOS 与 Cloudflare Relay 源码，并提供本地自动化验证；生产 Relay、Apple 正式签名、目标三星机型兼容性、真实双向通话、后台推送与长期稳定性仍需由部署者在自己的环境中验收。
 
+## 项目趋势
+
+[![AirSIM Star History Chart](https://api.star-history.com/svg?repos=kai-wu-cortex/AirSIM&type=Date)](https://www.star-history.com/#kai-wu-cortex/AirSIM&Date)
+
 ## 许可证
 
-仓库当前尚未包含 `LICENSE` 文件。维护者在对外发布或接受第三方分发前，应明确选择并提交开源许可证；在此之前，请勿仅凭“源代码可见”推断获得了复制、修改或再分发授权。
+AirSIM 采用 [PolyForm Noncommercial License 1.0.0](LICENSE)：
+
+- 允许个人学习、研究、实验、测试、业余项目，以及许可证列明的其他非商业用途。
+- 允许在非商业目的下查看、修改和再分发，但必须随附许可证与 [Required Notice](NOTICE)。
+- **不允许任何商业用途或预期商业应用**；商业授权需另行取得版权所有者的书面许可。
+- 该许可证包含贡献者可授权范围内的专利许可，但不提供任何担保。
+- 第三方组件继续适用其自身许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+禁止商业用途意味着本项目不符合 OSI 的 Open Source Definition。请使用“源码可见”或 “source-available”描述 AirSIM，而不要将其标注为 OSI 开源软件。
