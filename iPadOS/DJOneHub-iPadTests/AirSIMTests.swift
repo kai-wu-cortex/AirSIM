@@ -20,6 +20,14 @@ final class AirSIMTests: XCTestCase {
         }
     }
 
+    func testLegacyModulePCMHandshakeIsRejected() {
+        XCTAssertThrowsError(try PCMRoute.moduleLocal.handshake()) { error in
+            guard case APIError.disabledLegacyRoute = error else {
+                return XCTFail("预期旧模块 PCM 被拦截，实际为 \(error)")
+            }
+        }
+    }
+
     func testDialTransportPrefersVoWLANOverCloud() {
         let route = DialPadTransportPresentation.make(
             vowlanOnline: true,

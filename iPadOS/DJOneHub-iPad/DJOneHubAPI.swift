@@ -184,37 +184,6 @@ struct DJOneHubAPI: Sendable {
     // MARK: 状态、网络、定位与调试
 
     func modemStatus() async throws -> ModemStatus { try await get("api/status") }
-    func networkTraffic() async throws -> NetworkTrafficSnapshot { try await get("api/network/traffic") }
-    func systemPower() async throws -> SystemPowerStatus { try await get("api/system/power") }
-    func cellularPolicy() async throws -> CellularPolicyStatus { try await get("api/network/cellular-policy") }
-    func setCellularPolicy(forceOff: Bool) async throws -> CellularPolicyStatus {
-        try await postDecoded("api/network/cellular-policy", ["force_off": forceOff])
-    }
-    func check4GRoute() async throws -> NetworkCheckResult { try await postDecoded("api/network/check-4g", EmptyBody()) }
-    func checkProxyRoute() async throws -> NetworkCheckResult { try await postDecoded("api/network/check-proxy", EmptyBody()) }
-    func rebootModule() async throws { try await post("api/network/reboot-module", EmptyBody()) }
-    func networkDiagnostic() async throws -> NetworkDiagnostic { try await get("api/network") }
-    func routerStatus() async throws -> RouterStatus { try await get("api/router/status") }
-    func saveRouterConfig(_ config: RouterConfig) async throws -> RouterConfigApplyResponse {
-        try await postDecoded("api/router/config", config)
-    }
-    func setRouterInternet(_ enabled: Bool) async throws -> RouterInternetResponse {
-        try await postDecoded("api/router/internet", ["enabled": enabled])
-    }
-    func resetRouterQuota() async throws { try await post("api/router/quota/reset", EmptyBody()) }
-    func repairRouter() async throws -> RouterRepairResponse {
-        try await postDecoded("api/router/repair", EmptyBody())
-    }
-    func routerClients() async throws -> RouterClientsResponse { try await get("api/router/clients") }
-    func usbProfile() async throws -> USBProfileStatus { try await get("api/usb/profile") }
-    func setUSBProfile(_ mode: String) async throws -> USBProfileStatus {
-        try await postDecoded("api/usb/profile", ["mode": mode])
-    }
-    func gpsStatus() async throws -> GPSStatus { try await get("api/gps") }
-    func gpsStart() async throws -> GPSControlResponse { try await postDecoded("api/gps/start", EmptyBody()) }
-    func gpsStop() async throws -> GPSControlResponse { try await postDecoded("api/gps/stop", EmptyBody()) }
-    func gpsRefresh() async throws -> GPSFixSummary { try await postDecoded("api/gps/refresh", EmptyBody()) }
-    func executeAT(_ command: String) async throws -> ATResult { try await postDecoded("api/at", ["command": command]) }
     func moduleDebug(after sequence: UInt64 = 0, limit: Int = 400) async throws -> ModuleDebugSnapshot {
         var components = URLComponents(url: endpoint("api/debug"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
@@ -227,98 +196,6 @@ struct DJOneHubAPI: Sendable {
         return try await decoded(request, recordVerboseTrace: false)
     }
     func clearModuleDebug() async throws { try await post("api/debug/clear", EmptyBody()) }
-
-    // MARK: eSIM、模块初始化与语音运行时
-
-    func esimOverview() async throws -> ESIMOverview { try await get("api/esim") }
-    func esimHealth() async throws -> ESIMHealth { try await get("api/esim/health") }
-    func esimNotes() async throws -> [String: ESIMNote] {
-        let response: ESIMNotesResponse = try await get("api/esim/notes")
-        return response.notes
-    }
-    func switchESIM(iccid: String, aid: String) async throws -> ESIMSwitchResult {
-        try await postDecoded("api/esim/switch", ["iccid": iccid, "aid": aid])
-    }
-    func renameESIMProfile(iccid: String, aid: String, name: String) async throws {
-        try await send("PATCH", "api/esim/profile", ["iccid": iccid, "aid": aid, "name": name])
-    }
-    func deleteESIMProfile(iccid: String, aid: String) async throws {
-        try await send("DELETE", "api/esim/profile", ["iccid": iccid, "aid": aid])
-    }
-    func saveESIMNote(iccid: String, label: String, phone: String, tags: String) async throws {
-        try await post("api/esim/notes", ["iccid": iccid, "label": label, "phone": phone, "tags": tags])
-    }
-    func probeESIMPhonebook() async throws -> ESIMPhonebookProbe {
-        try await postDecoded("api/esim/phonebook/probe", EmptyBody())
-    }
-    func downloadESIMProfile(smdp: String, matchingID: String, confirmationCode: String, imei: String, aid: String) async throws -> ESIMDownloadResult {
-        try await postDecoded(
-            "api/esim/download",
-            ["smdp": smdp, "matching_id": matchingID, "confirmation_code": confirmationCode, "imei": imei, "aid": aid],
-            timeout: 180
-        )
-    }
-    func moduleSetupStatus() async throws -> ModuleSetupStatus { try await get("api/module/setup") }
-    func initializeModule() async throws -> ModuleSetupStatus {
-        try await postDecoded("api/module/setup", ["confirm": true], timeout: 120)
-    }
-    func voiceRuntimeStatus() async throws -> VoiceRuntimeStatus { try await get("api/voice/status") }
-    func provisionVoiceRuntime() async throws -> VoiceRuntimeStatus {
-        try await postDecoded("api/voice/provision", ["confirm": true], timeout: 180)
-    }
-    func moduleUpdateStatus() async throws -> ModuleUpdateStatus {
-        try await get("api/system/update")
-    }
-
-    func moduleUpdateInstallationState() async throws -> ModuleUpdateInstallationState {
-        try await get("api/system/update/status")
-    }
-
-    func moduleUpdateLog(after offset: Int64) async throws -> ModuleUpdateLogChunk {
-        var components = URLComponents(url: endpoint("api/system/update/log"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "after", value: String(max(0, offset)))]
-        var request = URLRequest(url: components.url!)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 8
-        return try await decoded(request)
-    }
-
-    /// 上传 App 内置的已签名模块更新包；使用文件流避免把 6 MB 运行时一次性放入内存。
-    func uploadModuleUpdate(
-        from fileURL: URL,
-        mode: ModuleUpdateInstallMode = .normal
-    ) async throws -> ModuleUpdateResult {
-        var request = URLRequest(url: endpoint("api/system/update"))
-        request.httpMethod = "POST"
-        request.setValue("application/vnd.djonehub.update+gzip", forHTTPHeaderField: "Content-Type")
-        request.setValue(mode.rawValue, forHTTPHeaderField: "X-DJOneHub-Update-Mode")
-        request.timeoutInterval = 180
-        let response = try await tracedResponse(for: request, uploadFileURL: fileURL)
-        try Self.requireSuccess(response)
-        return try Self.decode(ModuleUpdateResult.self, from: response.body)
-    }
-
-    /// App 已在本地核对 SHA-256 与 Agent 公钥后，若模块仍报告签名无效，
-    /// 视为一次 USB 传输损坏并仅重传一次；第二次失败原样返回，绝不循环安装。
-    func uploadVerifiedModuleUpdate(
-        from fileURL: URL,
-        mode: ModuleUpdateInstallMode
-    ) async throws -> ModuleUpdateResult {
-        do {
-            return try await uploadModuleUpdate(from: fileURL, mode: mode)
-        } catch {
-            guard ModuleUpdatePolicy.shouldRetryVerifiedPackage(message: error.localizedDescription) else {
-                throw error
-            }
-            try await Task.sleep(for: .milliseconds(350))
-            return try await uploadModuleUpdate(from: fileURL, mode: mode)
-        }
-    }
-
-    /// iPad 直连模式下，“完全退出”等价为停止模块内代理；模块重启后由 init 自动恢复。
-    func shutdownModuleAgent() async throws {
-        try await post("api/service/shutdown", ["confirm": true])
-    }
 
     // MARK: HTTP 公共实现
 

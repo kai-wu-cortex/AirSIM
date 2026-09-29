@@ -104,93 +104,6 @@ enum ModuleConnectivityPolicy {
     }
 }
 
-enum ModuleUpdateFailureDisposition: Equatable {
-    case continueCoreServices
-    case failSetup
-}
-
-enum ModuleUpdatePolicy {
-    private static let minimumCoreServicesVersion = "0.3.39"
-
-    static func shouldInstall(installed: String?, available: String) -> Bool {
-        guard let installed = installed?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !installed.isEmpty else {
-            // 版本接口瞬时缺字段时不能把它当作 0.0.0，否则每次连接都会重复上传安装包。
-            return false
-        }
-        return compare(installed, available) < 0
-    }
-
-    static func shouldUseLowSpaceRecovery(message: String?) -> Bool {
-        guard let message else { return false }
-        return message.localizedCaseInsensitiveContains("no space left on device")
-            || message.localizedCaseInsensitiveContains("ENOSPC")
-            || message.localizedCaseInsensitiveContains("空间不足")
-    }
-
-    static func shouldRetryVerifiedPackage(message: String?) -> Bool {
-        guard let message else { return false }
-        return message.localizedCaseInsensitiveContains("签名无效")
-            || message.localizedCaseInsensitiveContains("invalid signature")
-    }
-
-    static func uploadMode(packageName: String) -> ModuleUpdateInstallMode {
-        // 低空间包必须让旧 Agent 在读取请求体之前执行残留清理；这是从
-        // 0.3.41 及更早版本跨版本升级时摆脱 ENOSPC 的引导路径。
-        packageName == "module-update-recovery.djupdate" ? .repair : .normal
-    }
-
-    /// 0.3.39 已具备当前 App 所需的本地通话、短信和事件接口。更新失败时不应
-    /// 因为可选的新能力不可用而把这些核心功能一起锁死。
-    static func failureDisposition(installed: String?) -> ModuleUpdateFailureDisposition {
-        guard let installed = installed?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !installed.isEmpty,
-              compare(installed, minimumCoreServicesVersion) >= 0 else {
-            return .failSetup
-        }
-        return .continueCoreServices
-    }
-
-    static func shouldRunLegacyCleanupBootstrap(installed: String?) -> Bool {
-        guard let installed = installed?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !installed.isEmpty else { return false }
-        return compare(installed, "0.3.43") < 0
-    }
-
-    private static func compare(_ left: String, _ right: String) -> Int {
-        let lhs = left.split(separator: ".").map { Int($0) ?? 0 }
-        let rhs = right.split(separator: ".").map { Int($0) ?? 0 }
-        for index in 0..<max(lhs.count, rhs.count, 3) {
-            let a = index < lhs.count ? lhs[index] : 0
-            let b = index < rhs.count ? rhs[index] : 0
-            if a != b { return a < b ? -1 : 1 }
-        }
-        return 0
-    }
-}
-
-enum ModuleSetupStage: Equatable {
-    case idle
-    case connecting
-    case updating
-    case initializing
-    case checkingAudio
-    case ready
-    case failed(String)
-
-    var title: String {
-        switch self {
-        case .idle: return "等待接入模块"
-        case .connecting: return "正在连接模块"
-        case .updating: return "正在更新模块"
-        case .initializing: return "正在初始化通信"
-        case .checkingAudio: return "正在检查通话音频"
-        case .ready: return "模块已就绪"
-        case let .failed(message): return message
-        }
-    }
-}
-
 /// 移动端 App 的主状态中心：前台轮询模块代理并驱动五个主要页面。
 @MainActor
 final class AppModel: ObservableObject {
@@ -205,11 +118,8 @@ final class AppModel: ObservableObject {
     @Published var isMuted = false
     @Published var isRecording = false
     @Published var errorMessage: String?
-    @Published var setupStage: ModuleSetupStage = .idle
-    @Published private(set) var preparingModule = false
     @Published private(set) var modemStatus: ModemStatus?
     @Published private(set) var agentVersion: String?
-    @Published private(set) var agentCompatibilityNotice: String?
     @Published private(set) var connectionSummary: ModuleConnectionSummary = .offline
     @Published private(set) var cloudAgentStatus: CloudAgentStatus?
     @Published private(set) var remoteCall: CallRecord?
@@ -231,9 +141,7 @@ final class AppModel: ObservableObject {
     private let historyStore = LocalHistoryStore()
 
     private var pollingTask: Task<Void, Never>?
-    private var moduleUpdateTask: Task<Void, Never>?
     private var moduleMetadataTask: Task<Void, Never>?
-    private var nextModuleUpdateAttempt = Date.distantPast
     private var startingCallAudio = false
     private var currentCallTransport: CallTransport?
     private var lockedCallTransport: LockedCallTransport?
@@ -253,14 +161,6 @@ final class AppModel: ObservableObject {
     private var nextModuleMetadataRefresh = Date.distantPast
     private var audioWarmupCallID: String?
     private var lowPowerModeEnabled = true
-    private lazy var embeddedAgentVersion: String = {
-        guard let url = Bundle.main.url(forResource: "EmbeddedModuleUpdate", withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let info = try? JSONDecoder().decode(EmbeddedModuleUpdateInfo.self, from: data) else {
-            return "0.3.7"
-        }
-        return info.version
-    }()
     private let backgroundStandbyKey = "djonehub.background-standby-enabled"
     private let lowPowerModeKey = "djonehub.low-power-mode-enabled"
     private let liveActivityKey = "djonehub.live-activity-enabled"
@@ -404,8 +304,6 @@ final class AppModel: ObservableObject {
         backgroundStandby.setApplicationIsBackground(true)
         moduleMetadataTask?.cancel()
         moduleMetadataTask = nil
-        moduleUpdateTask?.cancel()
-        moduleUpdateTask = nil
         restartPolling()
     }
 
@@ -458,8 +356,6 @@ final class AppModel: ObservableObject {
         pollingGeneration &+= 1
         pollingTask?.cancel()
         pollingTask = nil
-        moduleUpdateTask?.cancel()
-        moduleUpdateTask = nil
         moduleMetadataTask?.cancel()
         moduleMetadataTask = nil
         audio.deactivate()
@@ -832,14 +728,10 @@ final class AppModel: ObservableObject {
     private func refreshModuleMetadata(generation: Int, api: DJOneHubAPI) async {
         defer { moduleMetadataTask = nil }
         async let radioRequest = try? api.modemStatus()
-        async let versionRequest = try? api.moduleUpdateStatus()
-        let (radio, versionStatus) = await (radioRequest, versionRequest)
+        let radio = await radioRequest
         guard !Task.isCancelled, generation == pollingGeneration, isOnline, appIsActive else { return }
         if let radio, modemStatus != radio { modemStatus = radio }
         updateLocalConnectionSummary(cellularState: radio?.cellularState ?? modemStatus?.cellularState)
-        if let version = versionStatus?.installedVersion, !version.isEmpty {
-            if agentVersion != version { agentVersion = version }
-        }
         let lifecycleCall = lifecycleRecord(from: activeCall ?? remoteCall)
         await liveActivity.update(
             call: lifecycleCall,
@@ -1050,248 +942,6 @@ final class AppModel: ObservableObject {
             throw CallKitBridgeError.noReachableTransport
         }
         try await localAPI.sendDTMF(digit)
-    }
-
-    /// 首次接入或用户点“重新检测”时串行完成版本、AT、语音和 USB 模式自检。
-    func prepareModuleForFirstConnection() async {
-        guard !preparingModule else { return }
-        preparingModule = true
-        defer { preparingModule = false }
-        do {
-            setupStage = .connecting
-            let updateStatus = try await api.moduleUpdateStatus()
-            agentVersion = updateStatus.installedVersion
-            if updateStatus.supported,
-               ModuleUpdatePolicy.shouldInstall(
-                   installed: updateStatus.installedVersion,
-                   available: embeddedAgentVersion
-               ),
-               let packageURL = preferredModuleUpdatePackage(for: updateStatus) {
-                setupStage = .updating
-                do {
-                    try validateEmbeddedModuleUpdate(packageURL, status: updateStatus)
-                    try await installLegacyCleanupBootstrapIfNeeded(status: updateStatus)
-                    do {
-                        _ = try await api.uploadVerifiedModuleUpdate(
-                            from: packageURL,
-                            mode: ModuleUpdatePolicy.uploadMode(packageName: packageURL.lastPathComponent)
-                        )
-                    } catch {
-                        guard ModuleUpdatePolicy.shouldUseLowSpaceRecovery(message: error.localizedDescription),
-                              packageURL.lastPathComponent != "module-update-recovery.djupdate",
-                              let recoveryURL = Bundle.main.url(
-                                  forResource: "module-update-recovery",
-                                  withExtension: "djupdate"
-                              ) else { throw error }
-                        try validateEmbeddedModuleUpdate(recoveryURL, status: updateStatus)
-                        _ = try await api.uploadVerifiedModuleUpdate(from: recoveryURL, mode: .repair)
-                    }
-                    try await waitForModuleAgent()
-                    agentCompatibilityNotice = nil
-                } catch {
-                    guard ModuleUpdatePolicy.failureDisposition(installed: updateStatus.installedVersion)
-                            == .continueCoreServices else {
-                        throw error
-                    }
-                    let version = updateStatus.installedVersion ?? "当前"
-                    agentCompatibilityNotice = "Agent \(version) 更新未完成，已启用兼容模式；通话与短信继续可用。可稍后在 Agent 维修中心重试。"
-                }
-            } else {
-                agentCompatibilityNotice = nil
-            }
-
-            setupStage = .initializing
-            let setup = try await api.moduleSetupStatus()
-            if setup.canInitialize { _ = try await api.initializeModule() }
-
-            setupStage = .checkingAudio
-            let voice = try await api.voiceRuntimeStatus()
-            guard voice.ready else {
-                throw ModuleSetupError.notReady(voice.runtimeDetail ?? "模块语音运行时未就绪")
-            }
-            guard await audio.requestMicrophonePermission() else {
-                throw ModuleSetupError.notReady("请允许 DJOneHub 使用麦克风后重试")
-            }
-            let profile = try await api.usbProfile()
-            if profile.mode == "mac" {
-                _ = try await api.setUSBProfile("mobile")
-                try await waitForModuleAgent()
-            }
-            setupStage = .ready
-            UserDefaults.standard.set(true, forKey: "djonehub.first-connection-complete")
-            Task { await contacts.requestAccessAndLoad() }
-        } catch {
-            setupStage = .failed(error.localizedDescription)
-        }
-    }
-
-    func resetModuleSetup() {
-        setupStage = .idle
-        UserDefaults.standard.set(false, forKey: "djonehub.first-connection-complete")
-    }
-
-    private func waitForModuleAgent() async throws {
-        for _ in 0..<20 {
-            try await Task.sleep(for: .seconds(1))
-            // 代理能响应即表示 USB 控制链路已经恢复；AT 子系统的瞬时错误不应阻塞接入向导。
-            if (try? await api.callStatus()) != nil { return }
-        }
-        throw ModuleSetupError.timeout
-    }
-
-    private func scheduleAutomaticModuleUpdate() {
-        // 本项目的安装与更新只针对三星 Bridge；绝不更新大疆模块。
-        return
-    }
-
-    private func installAutomaticModuleUpdateIfNeeded() async {
-        defer { moduleUpdateTask = nil }
-        var observedInstalledVersion = agentVersion
-        do {
-            let status = try await api.moduleUpdateStatus()
-            agentVersion = status.installedVersion
-            observedInstalledVersion = status.installedVersion
-#if DEBUG
-            print("[DJOneHub Update] installed=\(status.installedVersion ?? "unknown") embedded=\(embeddedAgentVersion) supported=\(status.supported)")
-#endif
-            guard status.supported else {
-                // 当前 App 生命周期内无需重复请求版本接口。
-                nextModuleUpdateAttempt = .distantFuture
-                return
-            }
-            guard let installedVersion = status.installedVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !installedVersion.isEmpty else {
-                // 接口短暂缺失版本字段时仅重试查询，绝不误上传安装包。
-                nextModuleUpdateAttempt = Date().addingTimeInterval(30)
-                return
-            }
-            guard ModuleUpdatePolicy.shouldInstall(
-                installed: installedVersion,
-                available: embeddedAgentVersion
-            ) else {
-                agentCompatibilityNotice = nil
-                nextModuleUpdateAttempt = .distantFuture
-                return
-            }
-            guard let packageURL = preferredModuleUpdatePackage(for: status) else {
-                nextModuleUpdateAttempt = Date().addingTimeInterval(30)
-                return
-            }
-            try validateEmbeddedModuleUpdate(packageURL, status: status)
-            try await installLegacyCleanupBootstrapIfNeeded(status: status)
-            let result: ModuleUpdateResult
-            do {
-                result = try await api.uploadVerifiedModuleUpdate(
-                    from: packageURL,
-                    mode: ModuleUpdatePolicy.uploadMode(packageName: packageURL.lastPathComponent)
-                )
-            } catch {
-                guard ModuleUpdatePolicy.shouldUseLowSpaceRecovery(message: error.localizedDescription),
-                      packageURL.lastPathComponent != "module-update-recovery.djupdate",
-                      let recoveryURL = Bundle.main.url(
-                          forResource: "module-update-recovery",
-                          withExtension: "djupdate"
-                      ) else { throw error }
-                try validateEmbeddedModuleUpdate(recoveryURL, status: status)
-#if DEBUG
-                print("[DJOneHub Update] retrying with signed low-space recovery")
-#endif
-                result = try await api.uploadVerifiedModuleUpdate(from: recoveryURL, mode: .repair)
-            }
-#if DEBUG
-            print("[DJOneHub Update] upload updated=\(result.updated) version=\(result.version ?? "unknown") restart=\(result.restartRequired ?? false)")
-#endif
-            try await waitForModuleAgent()
-            agentCompatibilityNotice = nil
-            nextModuleUpdateAttempt = .distantFuture
-        } catch is CancellationError {
-            return
-        } catch {
-#if DEBUG
-            print("[DJOneHub Update] failed: \(error.localizedDescription)")
-#endif
-            if ModuleUpdatePolicy.failureDisposition(installed: observedInstalledVersion)
-                == .continueCoreServices {
-                let version = observedInstalledVersion ?? "当前"
-                agentCompatibilityNotice = "Agent \(version) 更新未完成，已启用兼容模式；通话与短信继续可用。可稍后在 Agent 维修中心重试。"
-            }
-            // 模块重启或 USB 网络尚未稳定时退避重试，不用后台错误弹窗打断用户；
-            // 兼容 Agent 的通话、短信和 PushKit 轮询继续运行。
-            nextModuleUpdateAttempt = Date().addingTimeInterval(30)
-        }
-    }
-
-    private func preferredModuleUpdatePackage(for status: ModuleUpdateStatus) -> URL? {
-        guard let fullURL = Bundle.main.url(forResource: "module-update", withExtension: "djupdate"),
-              let recoveryURL = Bundle.main.url(
-                  forResource: "module-update-recovery",
-                  withExtension: "djupdate"
-              ) else { return nil }
-        let attributes = { (url: URL) -> UInt64 in
-            guard let values = try? FileManager.default.attributesOfItem(atPath: url.path),
-                  let size = values[.size] as? NSNumber else { return 0 }
-            return size.uint64Value
-        }
-        let kind = ModuleUpdatePackagePolicy.package(
-            fullBytes: attributes(fullURL),
-            recoveryBytes: attributes(recoveryURL),
-            dataFreeBytes: status.dataFreeBytes,
-            installedVersion: status.installedVersion,
-            targetVersion: embeddedAgentVersion
-        )
-        return kind == .recovery ? recoveryURL : fullURL
-    }
-
-    private func validateEmbeddedModuleUpdate(_ packageURL: URL, status: ModuleUpdateStatus) throws {
-        guard let infoURL = Bundle.main.url(forResource: "EmbeddedModuleUpdate", withExtension: "json"),
-              let data = try? Data(contentsOf: infoURL),
-              let info = try? JSONDecoder().decode(EmbeddedModuleUpdateInfo.self, from: data) else {
-            throw ModuleUpdateIntegrityError.missingPackageDigest
-        }
-        let kind: ModuleUpdatePackageKind
-        switch packageURL.lastPathComponent {
-        case "module-update-recovery.djupdate": kind = .recovery
-        case "module-update-cleanup.djupdate": kind = .cleanup
-        default: kind = .full
-        }
-        try ModuleUpdatePackageIntegrity.validate(
-            packageURL: packageURL,
-            kind: kind,
-            info: info,
-            agentPublicKeyID: status.publicKeyID
-        )
-    }
-
-    private func installLegacyCleanupBootstrapIfNeeded(status: ModuleUpdateStatus) async throws {
-        let recoveryBytes: UInt64 = {
-            guard let recoveryURL = Bundle.main.url(
-                forResource: "module-update-recovery",
-                withExtension: "djupdate"
-            ),
-            let attributes = try? FileManager.default.attributesOfItem(atPath: recoveryURL.path),
-            let size = attributes[.size] as? NSNumber else { return 0 }
-            return size.uint64Value
-        }()
-        let precleanNeedsBootstrap = recoveryBytes > 0
-            && ModuleUpdatePackagePolicy.shouldRunPrecleanBootstrap(
-                installedVersion: status.installedVersion,
-                targetVersion: embeddedAgentVersion,
-                dataFreeBytes: status.dataFreeBytes,
-                recoveryBytes: recoveryBytes
-            )
-        guard precleanNeedsBootstrap else { return }
-        guard let cleanupURL = Bundle.main.url(
-            forResource: "module-update-cleanup",
-            withExtension: "djupdate"
-        ) else {
-            throw ModuleUpdateIntegrityError.missingPackageDigest
-        }
-        try validateEmbeddedModuleUpdate(cleanupURL, status: status)
-        _ = try await api.uploadVerifiedModuleUpdate(from: cleanupURL, mode: .repair)
-        // preclean 会短暂重启旧 Agent。等待其真正恢复后才上传低空间恢复包，
-        // 避免第二阶段被退出中的旧进程接收一半。
-        try await Task.sleep(for: .seconds(3))
-        try await waitForModuleAgent()
     }
 
     func toggleMute() async {

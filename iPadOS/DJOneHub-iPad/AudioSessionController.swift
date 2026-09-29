@@ -26,7 +26,7 @@ enum PCMRoute: Equatable, Sendable {
 
     func handshake() throws -> Data {
         switch self {
-        case .moduleLocal: return Data("DJ1PCM1\n".utf8)
+        case .moduleLocal: throw APIError.disabledLegacyRoute
         case let .vowlan(_, credential): return try VoWLANPCMHandshake.make(credential: credential)
         }
     }
