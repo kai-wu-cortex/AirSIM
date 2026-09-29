@@ -1,12 +1,14 @@
 {
   "fill" : {
-    "automatic-gradient" : "display-p3:0.23866,0.48516,0.96783,1.00000"
+    "automatic-gradient" : "display-p3:1.00000,1.00000,1.00000,1.00000"
   },
   "groups" : [
     {
       "layers" : [
         {
-          "fill" : "automatic",
+          "fill" : {
+            "automatic-gradient" : "display-p3:0.18431,0.50196,0.92941,1.00000"
+          },
           "image-name" : "phone-fill-system.png",
           "name" : "Phone",
           "position" : {
@@ -21,11 +23,11 @@
       "name" : "Phone Symbol",
       "shadow" : {
         "kind" : "neutral",
-        "opacity" : 0.5
+        "opacity" : 0
       },
       "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
+        "enabled" : false,
+        "value" : 0
       }
     }
   ],

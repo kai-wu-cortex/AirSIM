@@ -18,7 +18,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>com.eric3u.airsim.messaging</string>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).messaging</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>im</string>

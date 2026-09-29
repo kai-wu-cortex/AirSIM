@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+case "${3:-}" in
+    Package) printf 'airsim-avf-agent\n' ;;
+    Architecture) printf 'arm64\n' ;;
+    *) printf 'unexpected dpkg-deb field: %s\n' "${3:-}" >&2; exit 2 ;;
+esac

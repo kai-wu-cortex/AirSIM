@@ -31,6 +31,10 @@ public final class AppConfig {
         return preferences(context).getString("token", "");
     }
 
+	public static String installerEndpoint(Context context) {
+		return AVFNetworkPolicy.installerEndpointForAgent(endpoint(context));
+	}
+
     public static String mode(Context context) {
         return preferences(context).getString("mode", MODE_REMOTE_SILENT);
     }
@@ -68,7 +72,7 @@ public final class AppConfig {
         return context.getSharedPreferences(FILE, Context.MODE_PRIVATE);
     }
 
-	private static String discoverAVFEndpoint() {
+	static String discoverAVFEndpoint() {
 		try {
 			NetworkInterface avf = NetworkInterface.getByName("avf_tap_fixed");
 			if (avf == null || !avf.isUp()) return "";

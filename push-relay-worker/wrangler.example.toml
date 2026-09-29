@@ -3,15 +3,55 @@ main = "src/index.mjs"
 compatibility_date = "2026-08-20"
 workers_dev = true
 
+# Production example: set workers_dev = false above, then uncomment this block.
+# Replace the hostname when deploying to a user-owned domain.
+# [[routes]]
+# pattern = "push.remotepilot.site"
+# custom_domain = true
+
 [observability]
 enabled = true
 
 [vars]
 APNS_TEAM_ID = "REPLACE_WITH_APPLE_TEAM_ID"
 APNS_KEY_ID = "REPLACE_WITH_APNS_KEY_ID"
-ALLOWED_BUNDLE_ID = "com.eric3u.airsim"
+ALLOWED_BUNDLE_ID = "com.example.airsim"
 WEBRTC_TRANSPORT_READY = "false"
 WEBRTC_ROLLOUT_PERCENT = "0"
+
+# REQUIRED WORKER SECRETS
+#
+# This section declares required secret NAMES only. It does not contain, create,
+# or upload either secret VALUE. Never add APNS_P8 = "..." or
+# DASHBOARD_TOKEN = "..." to this TOML file or to [vars].
+#
+# APNS_P8:
+#   Complete contents of the Apple AuthKey_<KEY_ID>.p8 PEM file. The key must
+#   match APNS_KEY_ID and APNS_TEAM_ID above. Keep the BEGIN/END lines.
+# DASHBOARD_TOKEN:
+#   A separately generated random Bearer token; use at least 32 random bytes.
+#   This is an AirSIM application token, not a Cloudflare API token.
+#
+# Interactive production setup after copying this file to wrangler.toml and
+# replacing every placeholder:
+#   npx wrangler secret put APNS_P8 --config wrangler.toml
+#   # Paste the complete multi-line .p8 when Wrangler prompts for the value.
+#   npx wrangler secret put DASHBOARD_TOKEN --config wrangler.toml
+#   # Paste a password-manager-generated random token when prompted.
+#   npx wrangler secret list --config wrangler.toml
+#
+# `secret list` shows names, never values. `secret put` creates and immediately
+# deploys a new Worker version, so treat it as a production change. For an
+# initial/CI deployment, both values can instead be supplied together from an
+# ignored .env.production file:
+#   npx wrangler deploy --config wrangler.toml --secrets-file .env.production
+#
+# Local-only example file (never commit it):
+#   .dev.vars
+#   APNS_P8="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+#   DASHBOARD_TOKEN="replace-with-a-password-manager-generated-random-token"
+[secrets]
+required = ["APNS_P8", "DASHBOARD_TOKEN"]
 
 [[kv_namespaces]]
 binding = "DEVICES"
@@ -41,5 +81,5 @@ new_sqlite_classes = ["AgentStatusRegistry"]
 tag = "v3-device-commands"
 new_sqlite_classes = ["DeviceCommandSession"]
 
-# Add a new AirSIM domain route only after its DNS and Cloudflare Worker
-# configuration have been created. Never reuse AirSIM production bindings.
+# Confirm the target account, DNS hostname and resource IDs before deployment.
+# Never reuse another AirSIM production environment's bindings or secrets.

@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+
+release_base=${AIRSIM_RELEASE_BASE_URL:-https://github.com/kai-wu-cortex/AirSIM/releases/latest/download}
+test_root=${AIRSIM_BOOTSTRAP_TEST_ROOT:-}
+release_public_key='@AIRSIM_RELEASE_PUBLIC_KEY_BASE64@'
+
+if [ -z "$test_root" ]; then
+    if [ "$(id -u)" -ne 0 ]; then
+        printf '请以 root 运行：curl -fsSL <installer-url> | sudo sh\n' >&2
+        exit 1
+    fi
+    case "$release_base" in
+        https://*) ;;
+        *) printf '发布地址必须使用 HTTPS。\n' >&2; exit 2 ;;
+    esac
+else
+    case "$release_base" in
+        file://*) ;;
+        *) printf '测试模式只接受 file:// 发布地址。\n' >&2; exit 2 ;;
+    esac
+fi
+
+case "$(uname -m)" in
+    arm64|aarch64) ;;
+    *) printf 'AirSIM AVF Agent 只支持 arm64 Linux。\n' >&2; exit 3 ;;
+esac
+
+for command_name in curl openssl base64 dpkg-deb apt-get install; do
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        printf '缺少首次安装依赖：%s\n' "$command_name" >&2
+        exit 4
+    fi
+done
+
+state_directory="$test_root/var/lib/airsim-installerd/packages"
+if [ -e "$state_directory/current.deb" ]; then
+    printf '首次安装已完成；后续更新请使用 AirSIM Android App。\n' >&2
+    exit 5
+fi
+
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/airsim-one-click.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+package="$work_dir/airsim-avf-agent_arm64.deb"
+signature_text="$work_dir/airsim-avf-agent_arm64.deb.sig"
+
+download() {
+    source_url=$1
+    destination=$2
+    if [ -n "$test_root" ]; then
+        curl -fsSL "$source_url" -o "$destination"
+    else
+        curl -fsSL --proto '=https' --tlsv1.2 --retry 3 \
+            "$source_url" -o "$destination"
+    fi
+}
+
+printf '正在下载 AirSIM AVF Agent 最新签名包…\n'
+download "$release_base/airsim-avf-agent_arm64.deb" "$package"
+download "$release_base/airsim-avf-agent_arm64.deb.sig" "$signature_text"
+
+if ! printf '%s' "$release_public_key" | base64 -d > "$work_dir/public.raw" 2>/dev/null; then
+    printf '%s' "$release_public_key" | base64 -D > "$work_dir/public.raw"
+fi
+if [ "$(wc -c < "$work_dir/public.raw" | tr -d ' ')" -ne 32 ]; then
+    printf '安装器内置发行公钥无效。\n' >&2
+    exit 6
+fi
+printf '\060\052\060\005\006\003\053\145\160\003\041\000' > "$work_dir/public.der"
+cat "$work_dir/public.raw" >> "$work_dir/public.der"
+openssl pkey -pubin -inform DER -in "$work_dir/public.der" -out "$work_dir/public.pem" >/dev/null
+
+if ! base64 -d < "$signature_text" > "$work_dir/signature.bin" 2>/dev/null; then
+    base64 -D < "$signature_text" > "$work_dir/signature.bin"
+fi
+openssl pkeyutl -verify -pubin -inkey "$work_dir/public.pem" -rawin \
+    -in "$package" -sigfile "$work_dir/signature.bin" >/dev/null
+
+package_name=$(dpkg-deb --field "$package" Package)
+architecture=$(dpkg-deb --field "$package" Architecture)
+if [ "$package_name" != airsim-avf-agent ] || [ "$architecture" != arm64 ]; then
+    printf '拒绝安装包：Package=%s Architecture=%s\n' "$package_name" "$architecture" >&2
+    exit 7
+fi
+
+printf '签名与 arm64 包身份验证通过，正在安装…\n'
+apt-get install -y "$package"
+if [ -n "$test_root" ]; then
+    install -d -m 0700 "$state_directory"
+    install -m 0600 "$package" "$state_directory/current.deb"
+else
+    install -d -o root -g root -m 0700 "$state_directory"
+    install -o root -g root -m 0600 "$package" "$state_directory/current.deb"
+fi
+
+printf 'AirSIM AVF Agent 首次安装完成，并已保留回滚包。\n'
+"$test_root/usr/bin/airsim-avf-pair"

@@ -13,8 +13,8 @@ import (
 	sgp22 "github.com/damonto/euicc-go/v2"
 )
 
-const (
-	agentDataDirectory = "/data/airsim"
+var (
+	agentDataDirectory = agentDataDirectoryFrom(os.Getenv)
 	notesFilePath      = agentDataDirectory + "/esim-notes.json"
 	voiceRuntimePath   = agentDataDirectory + "/voice-runtime"
 )

@@ -1,0 +1,98 @@
+AirSIM RELAY DEPLOYMENT CONTRACT
+VERSION: repository source of truth
+FULL RUNBOOK: push-relay-worker/README.md
+
+[SCOPE]
+BACKEND_PRESENT=true
+WORKER_ENTRY=src/index.mjs
+LEGACY_HOST=https://push.remotepilot.site
+DEPLOY_TARGET=operator-owned Cloudflare account and hostname
+DEVICE_ENROLLMENT=signed App POST /v1/devices/register
+WRANGLER_DOES_NOT_ENROLL_DEVICES=true
+
+[CLOUDFLARE_BINDINGS]
+KV=DEVICES
+DO_MEDIA=MEDIA/CallMediaSession
+DO_STATUS=STATUS/AgentStatusRegistry
+DO_COMMANDS=COMMANDS/DeviceCommandSession
+MIGRATIONS=v1-call-media,v2-agent-status,v3-device-commands
+MIGRATION_RULE=preserve existing order; append new tags only
+
+[PLAIN_VARS]
+APNS_TEAM_ID=Apple Team identifier; not secret
+APNS_KEY_ID=Apple APNs key identifier; not private key
+ALLOWED_BUNDLE_ID=operator-owned main App Bundle ID
+WEBRTC_TRANSPORT_READY=false until separately validated
+WEBRTC_ROLLOUT_PERCENT=0 until separately approved
+
+[REQUIRED_WORKER_SECRETS]
+NAMES=APNS_P8,DASHBOARD_TOKEN
+DECLARATION=[secrets].required
+DECLARATION_CONTAINS_VALUES=false
+APNS_P8=complete AuthKey_<KEY_ID>.p8 PEM matching APNS_KEY_ID and APNS_TEAM_ID
+DASHBOARD_TOKEN=independent AirSIM Dashboard Bearer token with at least 32 random bytes
+DASHBOARD_TOKEN_IS_CLOUDFLARE_API_TOKEN=false
+INTERACTIVE_SET=npx wrangler secret put SECRET_NAME --config wrangler.toml
+VERIFY_NAMES=npx wrangler secret list --config wrangler.toml
+ATOMIC_FIRST_OR_CI_DEPLOY=npx wrangler deploy --config wrangler.toml --secrets-file .env.production
+SECRET_PUT_DEPLOYS_IMMEDIATELY=true
+GRADUAL_SECRET_COMMAND=npx wrangler versions secret put SECRET_NAME --config wrangler.toml
+NEVER_STORE_VALUES_IN=wrangler.toml,[vars],source,README,logs,chat,git,cache
+
+[APPLE_IDENTITY]
+PLACEHOLDER_MAIN_BUNDLE=com.example.airsim
+PLACEHOLDER_MUST_BE_REPLACED=true
+MAIN_BUNDLE=unique ID controlled by operator Apple Developer Team
+WATCH_BUNDLE=MAIN_BUNDLE.watchkitapp
+LIVE_ACTIVITY_BUNDLE=MAIN_BUNDLE.liveactivity
+IPHONE_VOIP_TOPIC=MAIN_BUNDLE.voip
+WATCH_VOIP_TOPIC=WATCH_BUNDLE.voip
+LIVE_ACTIVITY_TOPIC=MAIN_BUNDLE.push-type.liveactivity
+DEBUG_SIGNING=aps-environment development + relay environment sandbox
+RELEASE_TESTFLIGHT_SIGNING=aps-environment production + relay environment production
+APP_SIGNING_CREDENTIALS_ARE_APNS_P8=false
+CALLKIT_HAS_SEPARATE_SERVER_CERTIFICATE=false
+
+[DEVICE_REGISTRATION]
+ENDPOINT=POST /v1/devices/register
+IDENTITY=device_id + device_secret length 16..512
+TOKEN_REQUIREMENT=at least one valid hexadecimal APNs token
+ENVIRONMENTS=sandbox,production
+SECRET_STORAGE=SHA-256 hash only
+REREGISTRATION=same device_id requires same device_secret
+TOKEN_ROTATION=App re-registers automatically
+DO_NOT_PREPOPULATE_KV=true
+
+[SAFE_SEQUENCE]
+1=Read README, Wrangler template, package lock, and current source
+2=Run npm ci; npm test; npm run check
+3=Run npx wrangler whoami and confirm account with operator
+4=Inspect hostname DNS, Custom Domain, and routes without mutation
+5=Copy template to ignored wrangler.toml and replace every placeholder
+6=With authorization, create a new DEVICES KV namespace
+7=Run npx wrangler deploy --dry-run --config wrangler.toml
+8=Reject deploy if REPLACE_WITH_, com.example.airsim, wrong resource, or wrong hostname remains
+9=With explicit authorization, inject both required secrets
+10=With explicit authorization, deploy Worker
+11=Verify /healthz, Dashboard auth, device registration, and real PushKit-to-CallKit delivery
+12=Record previous Worker version for rollback
+
+[NEVER]
+- Never request, print, commit, cache, or persist secret values.
+- Never reuse another environment's KV, Durable Objects, hostname, device records, or credentials.
+- Never delete or reorder deployed Durable Object migrations.
+- Never overwrite an occupied hostname or DNS record without an approved migration.
+- Never hand-edit KV to add a device or bypass device_secret authentication.
+- Never fix BadDeviceToken by blindly changing APNs environment.
+- Never claim real push success from dry-run, unit tests, or health checks alone.
+
+[ROLLBACK]
+PRIMARY=roll back to previous Worker version
+PRESERVE=KV namespaces, Durable Object storage, migration history, device identity
+BAD_DEVICE_TOKEN=verify sandbox/production and token rotation
+DEVICE_TOKEN_NOT_FOR_TOPIC=verify Bundle ID, profile, and APNs topic
+INVALID_PROVIDER_TOKEN=verify P8, Key ID, and Team ID belong together
+
+[COMPLETION_REPORT]
+INCLUDE=tests,Worker version,hostname,health,Dashboard auth,APNs environment,device registration,real push result,rollback point,unverified items
+REDACT=all credentials,full APNs tokens,device secrets,full phone numbers,media

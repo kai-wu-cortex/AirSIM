@@ -63,7 +63,7 @@ func TestAndroidPairRegistrationStoresValidatedPushIdentityWithoutEchoingSecrets
 		"device_secret":"0123456789abcdef0123456789abcdef",
 		"voip_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"alert_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		"bundle_id":"com.eric3u.airsim","environment":"production",
+		"bundle_id":"com.example.airsim","environment":"production",
 		"relay_url":"https://push.example.com","media_transport":"legacy_pcm"
 	}`
 	request := httptest.NewRequest(http.MethodPost, "/api/android/pair/register", strings.NewReader(registration))

@@ -1,0 +1,44 @@
+#!/bin/sh
+set -e
+
+if ! getent group airsim >/dev/null 2>&1; then
+    addgroup --system airsim
+fi
+if ! getent passwd airsim >/dev/null 2>&1; then
+    adduser --system --ingroup airsim --home /var/lib/airsim --no-create-home \
+        --disabled-password --disabled-login --shell /usr/sbin/nologin airsim
+fi
+
+install -d -o root -g root -m 0755 /etc/airsim
+if [ ! -e /etc/airsim/agent.env ]; then
+    install -o root -g airsim -m 0640 /usr/lib/airsim/agent.env.default /etc/airsim/agent.env
+fi
+
+install -d -o airsim -g airsim -m 0750 /var/lib/airsim
+install -d -o root -g root -m 0700 /var/lib/airsim-installerd
+
+if [ ! -s /var/lib/airsim/control.token ]; then
+    umask 0077
+    token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    printf '%s\n' "$token" > /var/lib/airsim/control.token
+fi
+chown root:airsim /var/lib/airsim/control.token
+chmod 0640 /var/lib/airsim/control.token
+
+# Preserve old device identity and state when upgrading from the pre-Debian layout.
+if [ -d /data/airsim ] && [ -z "$(find /var/lib/airsim -mindepth 1 ! -name control.token -print -quit 2>/dev/null)" ]; then
+    cp -a /data/airsim/. /var/lib/airsim/
+    chown -R airsim:airsim /var/lib/airsim
+    chown root:airsim /var/lib/airsim/control.token
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    systemctl enable airsim-installerd.service airsim-agent.service >/dev/null || true
+    # Do not restart installerd from inside its own dpkg child process. The old
+    # rescue process remains alive until the VM restarts or is restarted safely.
+    systemctl start airsim-installerd.service || true
+    systemctl restart airsim-agent.service || true
+fi
+
+exit 0

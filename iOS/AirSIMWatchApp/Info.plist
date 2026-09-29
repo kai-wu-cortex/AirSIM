@@ -33,6 +33,6 @@
 	<key>WKApplication</key>
 	<true/>
 	<key>WKCompanionAppBundleIdentifier</key>
-	<string>com.eric3u.airsim</string>
+	<string>$(INFOPLIST_KEY_WKCompanionAppBundleIdentifier)</string>
 </dict>
 </plist>

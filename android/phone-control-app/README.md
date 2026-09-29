@@ -11,6 +11,8 @@
 - 提供限时配对窗口与六位确认码。
 - 在三星热点接口上发布经过认证的 VoWLAN 控制与 PCM 服务。
 - 维护前台守护服务、Shizuku 状态和故障诊断。
+- 通过独立 AVF installerd 检查、安装和回滚签名 Debian 包。
+- 启动时检测 AVF、AOSP Linux Terminal 和 AVF 私网状态，并提供可复制的一键安装命令。
 
 ## 运行要求
 
@@ -39,11 +41,24 @@ android/phone-control-app/build/android/AirSIM-Phone-Bridge-debug.apk
 ## 三星手机配置
 
 1. 安装 APK 并启动 AirSIM。
-2. 在系统设置中选择 AirSIM 作为默认电话 App。
-3. 启动 Shizuku，并在 AirSIM 的 Shizuku 区域完成授权。
-4. 配置 AVF Agent 地址与 bearer token。
-5. 确认 Agent、音频桥和 VoWLAN 状态均为就绪。
-6. 打开两分钟配对窗口，让 iPhone 输入三星端显示的六位配对码。
+2. 如果启动提示显示 AVF Linux 尚未运行，点“启动 Linux Terminal”；若 Terminal 未启用，点“打开开发者选项”并启用 Linux 开发环境。
+3. Linux 首次启动后，复制并在 Terminal 中执行：
+
+   ```sh
+   curl -fsSL --proto '=https' --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/latest/download/install-avf.sh | sudo sh
+   ```
+
+4. 在系统设置中选择 AirSIM 作为默认电话 App。
+5. 启动 Shizuku，并在 AirSIM 的 Shizuku 区域完成授权。
+6. 配置 AVF Agent 地址与 bearer token。
+7. 确认 Agent、音频桥和 VoWLAN 状态均为就绪。
+8. 打开两分钟配对窗口，让 iPhone 输入三星端显示的六位配对码。
+
+首次安装命令也固定显示在 App 的“设置 → AVF Linux 首次安装”中，可随时复制。App 只会在 AVF 未启动，或 AVF 已启动但 Agent 尚未配置时显示启动提示。
+
+## 厂商系统兼容性边界
+
+AirSIM 会识别小米、Redmi、OPPO、OnePlus、realme、vivo、iQOO 和荣耀等厂商，并区分“Terminal 已安装但停用”“Terminal 未安装”和“系统未公开 AVF”三种情况。App 可以启动已安装的 AOSP Linux Terminal，或跳转到开发者选项，但普通第三方 App 无法强制补装厂商固件删除的 Terminal、打开未公开的 AVF 系统功能，或绕过系统签名权限。遇到后两种情况需要厂商系统更新、包含 Terminal 的系统镜像，或由 OEM 将 AirSIM 作为特权系统组件集成。
 
 ## 通话与音频策略
 
@@ -56,3 +71,6 @@ android/phone-control-app/build/android/AirSIM-Phone-Bridge-debug.apk
 - VoWLAN 仅绑定有效的三星热点地址，不监听通用网络接口。
 - 所有控制请求均执行路由白名单、消息大小、时间戳、随机数与 HMAC 校验。
 - 原始 PCM、配对明文和认证材料不得进入诊断日志。
+- Agent API 使用 AVF 端口 `7575`，救援安装服务使用 `7576`；两者复用首次引导生成的控制 token。
+- Android 管理端只提交签名的 `airsim-avf-agent_*_arm64.deb`，芯片厂商差异由 App 的能力探测处理，不选择不同 Debian 包。
+- “检查并安装最新 Agent”从 `kai-wu-cortex/AirSIM` 的最新 GitHub Release 选择唯一的 `airsim-avf-agent_*_arm64.deb` 及同名 `.sig`；Release 缺包、缺签名、多包或非 HTTPS 下载都会被拒绝。

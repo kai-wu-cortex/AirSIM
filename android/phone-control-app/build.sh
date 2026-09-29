@@ -58,7 +58,10 @@ while IFS= read -r -d '' source; do SOURCES+=("$source"); done < <(find "$ROOT/.
 CLASSES_ARGS=()
 while IFS= read -r -d '' class_file; do CLASSES_ARGS+=("$class_file"); done < <(find "$CLASSES" -name '*.class' -print0)
 "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 29 --output "$DEX" "${CLASSES_ARGS[@]}" "${SHIZUKU_JARS[@]}"
-"$BUILD_TOOLS/aapt2" link -o "$OUT/unsigned.apk" -I "$ANDROID_JAR" --manifest "$ROOT/AndroidManifest.xml"
+COMPILED_RES="$OUT/compiled-res.zip"
+"$BUILD_TOOLS/aapt2" compile --dir "$ROOT/res" -o "$COMPILED_RES"
+"$BUILD_TOOLS/aapt2" link -o "$OUT/unsigned.apk" -I "$ANDROID_JAR" \
+  --manifest "$ROOT/AndroidManifest.xml" "$COMPILED_RES"
 (cd "$DEX" && zip -q -j "$OUT/unsigned.apk" classes.dex)
 "$BUILD_TOOLS/zipalign" -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 

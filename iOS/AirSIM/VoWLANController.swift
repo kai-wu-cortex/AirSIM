@@ -231,7 +231,7 @@ final class VoWLANController: ObservableObject {
 
     var onAvailabilityChange: ((VoWLANAvailability) -> Void)?
 
-    private let queue = DispatchQueue(label: "com.eric3u.airsim.vowlan.discovery")
+    private let queue = DispatchQueue(label: "com.example.airsim.vowlan.discovery")
     private var browser: NWBrowser?
     private var browserLifecycle = VoWLANBrowserLifecycle()
     private var discoveredEndpoint: VoWLANEndpoint?

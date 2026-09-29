@@ -1116,7 +1116,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     var onDownlinkFrame: ((_ bytes: Int, _ peak: Int, _ jitterBufferFrames: Int, _ droppedFrames: Int) -> Void)?
     var onUplinkFrame: ((_ bytes: Int, _ peak: Int) -> Void)?
 
-    private let queue = DispatchQueue(label: "com.eric3u.airsim.iphone-cloud-media")
+    private let queue = DispatchQueue(label: "com.example.airsim.iphone-cloud-media")
     private var webSocket: URLSessionWebSocketTask?
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?

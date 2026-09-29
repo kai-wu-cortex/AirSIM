@@ -314,7 +314,7 @@ final class WatchCallSession: NSObject, ObservableObject {
 #endif
         notifyCompanion(event: "watch_voip_registration", extra: [
             "watch_voip_token": token.map { String(format: "%02x", $0) }.joined(),
-            "watch_bundle_id": Bundle.main.bundleIdentifier ?? "com.eric3u.airsim.watchkitapp",
+            "watch_bundle_id": Bundle.main.bundleIdentifier ?? "com.example.airsim.watchkitapp",
         ])
     }
 
@@ -390,7 +390,7 @@ extension WatchCallSession: PKPushRegistryDelegate {
         guard type == .voIP else { return }
         notifyCompanion(event: "watch_voip_registration", extra: [
             "watch_voip_token": "",
-            "watch_bundle_id": Bundle.main.bundleIdentifier ?? "com.eric3u.airsim.watchkitapp",
+            "watch_bundle_id": Bundle.main.bundleIdentifier ?? "com.example.airsim.watchkitapp",
         ])
     }
 
@@ -666,7 +666,7 @@ private final class WatchCallMediaBridge: @unchecked Sendable {
     var onRemoteEnded: (() -> Void)?
     var onStatus: ((String) -> Void)?
 
-    private let queue = DispatchQueue(label: "com.eric3u.airsim.watch-media")
+    private let queue = DispatchQueue(label: "com.example.airsim.watch-media")
     private var webSocket: URLSessionWebSocketTask?
     private var localTransport: WatchLocalPCMTransport?
     private var engine: AVAudioEngine?
@@ -900,7 +900,7 @@ private final class WatchLocalPCMTransport: @unchecked Sendable {
     private let onPCM: (Data) -> Void
     private let onReady: () -> Void
     private let onFailure: (String) -> Void
-    private let queue = DispatchQueue(label: "com.eric3u.airsim.watch-local-pcm")
+    private let queue = DispatchQueue(label: "com.example.airsim.watch-local-pcm")
     private var connection: NWConnection?
     private var generation = 0
     private var stopped = false

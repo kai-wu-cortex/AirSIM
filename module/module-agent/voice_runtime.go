@@ -21,8 +21,6 @@ const (
 	voiceHelperSHA256     = "13d034205664071db51120f349af7f785df58e269eeb07f531af5be18d0af228"
 	voiceRoutePIDFile     = "/run/mavo-voice-route.pid"
 	voiceSessionPIDFile   = "/run/mavo-voice-session.pid"
-	voiceRouteLogFile     = agentDataDirectory + "/log/voice-route.log"
-	voiceRouteLogBackup   = agentDataDirectory + "/log/voice-route.log.1"
 	voiceRouteLogMaxBytes = 1024 * 1024
 	voiceNetworkListen    = "192.168.225.1:7580"
 	voiceMediaRouteFIFO   = "/run/voc_svr"
@@ -34,6 +32,11 @@ const (
 	// helper 启动后只等待 TCP listener；客户端握手由独立观察器确认，不能在
 	// 启动函数内等待尚未执行的 Dial。
 	voiceListenerReadyTimeout = 5 * time.Second
+)
+
+var (
+	voiceRouteLogFile   = agentDataDirectory + "/log/voice-route.log"
+	voiceRouteLogBackup = agentDataDirectory + "/log/voice-route.log.1"
 )
 
 var voiceRuntimeFiles = map[string]string{

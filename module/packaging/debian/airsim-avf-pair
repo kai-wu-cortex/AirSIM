@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+token_file=/var/lib/airsim/control.token
+if [ "$(id -u)" -ne 0 ]; then
+    printf 'Run with sudo: sudo airsim-avf-pair\n' >&2
+    exit 1
+fi
+if [ ! -s "$token_file" ]; then
+    printf 'AirSIM pairing token is unavailable. Reinstall or repair airsim-avf-agent.\n' >&2
+    exit 1
+fi
+
+printf 'Agent endpoint:    http://<AVF-guest-address>:7575\n'
+printf 'Installer endpoint: http://<AVF-guest-address>:7576\n'
+printf 'Control token:     %s\n' "$(tr -d ' \r\n' < "$token_file")"
+printf 'Enter the Agent endpoint and token once in the AirSIM Android app.\n'

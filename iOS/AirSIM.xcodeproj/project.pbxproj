@@ -549,7 +549,7 @@
 				CODE_SIGN_ENTITLEMENTS = "$(AIRSIM_PUSH_ENTITLEMENTS)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 72;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				AIRSIM_APNS_ENVIRONMENT = sandbox;
 				AIRSIM_PUSH_ENTITLEMENTS = "AirSIM/AirSIM.entitlements";
 				AIRSIM_PUSH_RELAY_URL = "";
@@ -557,7 +557,7 @@
 				INFOPLIST_FILE = "AirSIM/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.3;
 				MARKETING_VERSION = 0.9.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim;
 				PRODUCT_NAME = AirSIM;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -575,7 +575,7 @@
 				CODE_SIGN_ENTITLEMENTS = "$(AIRSIM_PUSH_ENTITLEMENTS)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 72;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				AIRSIM_APNS_ENVIRONMENT = production;
 				AIRSIM_PUSH_ENTITLEMENTS = "AirSIM/AirSIM.entitlements";
 				AIRSIM_PUSH_RELAY_URL = "";
@@ -583,7 +583,7 @@
 				INFOPLIST_FILE = "AirSIM/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 16.3;
 				MARKETING_VERSION = 0.9.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim;
 				PRODUCT_NAME = AirSIM;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -599,7 +599,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 72;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AirSIMLiveActivityExtension/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.3;
@@ -609,7 +609,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 0.9.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim.liveactivity;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.liveactivity;
 				PRODUCT_NAME = AirSIMLiveActivityExtension;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -625,7 +625,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 72;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AirSIMLiveActivityExtension/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.3;
@@ -635,7 +635,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 0.9.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim.liveactivity;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.liveactivity;
 				PRODUCT_NAME = AirSIMLiveActivityExtension;
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -650,10 +650,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.3;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -666,10 +666,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.3;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -685,16 +685,16 @@
 				CODE_SIGN_ENTITLEMENTS = "AirSIMWatchApp/AirSIMWatchApp.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 72;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "AirSIMWatchApp/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = AirSIM;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
-				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.eric3u.airsim;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.example.airsim;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 0.9.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim.watchkitapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.watchkitapp;
 				PRODUCT_NAME = AirSIMWatchApp;
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;
@@ -714,15 +714,15 @@
 				CODE_SIGN_ENTITLEMENTS = "AirSIMWatchApp/AirSIMWatchApp.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 72;
-				DEVELOPMENT_TEAM = 2VQ94C2355;
+				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "AirSIMWatchApp/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = AirSIM;
 				INFOPLIST_KEY_CFBundleIconName = AppIcon;
-				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.eric3u.airsim;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.example.airsim;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 0.9.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.eric3u.airsim.watchkitapp;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.watchkitapp;
 				PRODUCT_NAME = AirSIMWatchApp;
 				SDKROOT = watchos;
 				SKIP_INSTALL = YES;

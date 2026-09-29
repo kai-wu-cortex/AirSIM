@@ -1,0 +1,33 @@
+[Unit]
+Description=AirSIM AVF Agent
+Documentation=https://github.com/Open-Airsim/AirSIM
+Wants=network-online.target airsim-installerd.service
+After=network-online.target airsim-installerd.service
+
+[Service]
+Type=simple
+User=airsim
+Group=airsim
+EnvironmentFile=-/etc/airsim/agent.env
+ExecStart=/usr/bin/airsim-agent
+Restart=always
+RestartSec=2s
+StateDirectory=airsim
+StateDirectoryMode=0750
+RuntimeDirectory=airsim
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

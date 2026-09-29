@@ -6,6 +6,14 @@ import (
 )
 
 const runtimeProfileEnvironment = "AIRSIM_RUNTIME_PROFILE"
+const agentDataDirectoryEnvironment = "AIRSIM_DATA_DIR"
+
+func agentDataDirectoryFrom(getenv func(string) string) string {
+	if configured := strings.TrimSpace(getenv(agentDataDirectoryEnvironment)); configured != "" {
+		return configured
+	}
+	return "/var/lib/airsim"
+}
 
 type runtimeProfile struct {
 	Name                string

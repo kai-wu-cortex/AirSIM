@@ -46,8 +46,8 @@ func testPushRegistration(relayURL string) pushRegistration {
 		DeviceID: "iphone-air", DeviceSecret: strings.Repeat("s", 32),
 		VoIPToken: strings.Repeat("a", 64), AlertToken: strings.Repeat("b", 64),
 		WatchVoIPToken: strings.Repeat("c", 64),
-		WatchBundleID:  "com.eric3u.airsim.watchkitapp",
-		BundleID:       "com.eric3u.airsim", Environment: "sandbox", RelayURL: relayURL,
+		WatchBundleID:  "com.example.airsim.watchkitapp",
+		BundleID:       "com.example.airsim", Environment: "sandbox", RelayURL: relayURL,
 	}
 }
 

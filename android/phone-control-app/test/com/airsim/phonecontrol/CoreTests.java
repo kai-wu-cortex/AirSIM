@@ -2,6 +2,86 @@ package com.airsim.phonecontrol;
 
 public final class CoreTests {
     public static void main(String[] args) throws Exception {
+		assertEquals(AVFStartupPolicy.State.RUNNING,
+				AVFStartupPolicy.assess(true, true, true, true));
+		assertEquals(AVFStartupPolicy.State.READY_TO_START,
+				AVFStartupPolicy.assess(true, true, true, false));
+		assertEquals(AVFStartupPolicy.State.TERMINAL_DISABLED,
+				AVFStartupPolicy.assess(true, true, false, false));
+		assertEquals(AVFStartupPolicy.State.TERMINAL_MISSING,
+				AVFStartupPolicy.assess(true, false, false, false));
+		assertEquals(AVFStartupPolicy.State.AVF_UNSUPPORTED,
+				AVFStartupPolicy.assess(false, false, false, false));
+		assertTrue(AVFStartupPolicy.shouldPrompt(AVFStartupPolicy.State.RUNNING, false));
+		assertTrue(!AVFStartupPolicy.shouldPrompt(AVFStartupPolicy.State.RUNNING, true));
+		assertTrue(AVFStartupPolicy.shouldPrompt(AVFStartupPolicy.State.READY_TO_START, true));
+		assertTrue(AVFStartupPolicy.isRestrictedChinaOEM("Xiaomi"));
+		assertTrue(AVFStartupPolicy.isRestrictedChinaOEM("OPPO"));
+		assertTrue(AVFStartupPolicy.isRestrictedChinaOEM("vivo"));
+		assertTrue(AVFStartupPolicy.isRestrictedChinaOEM("HONOR"));
+		assertTrue(!AVFStartupPolicy.isRestrictedChinaOEM("samsung"));
+		assertEquals(
+				"curl -fsSL --proto '=https' --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/latest/download/install-avf.sh | sudo sh",
+				AVFStartupPolicy.installCommand());
+
+		java.util.Map<String, String> releaseAssets = new java.util.LinkedHashMap<>();
+		releaseAssets.put("notes.txt", "https://example.test/notes.txt");
+		releaseAssets.put("airsim-avf-agent_0.4.2-1_arm64.deb.sig", "https://example.test/agent.deb.sig");
+		releaseAssets.put("airsim-avf-agent_0.4.2-1_arm64.deb", "https://example.test/agent.deb");
+		ReleaseAssetSelector.Selection selection = ReleaseAssetSelector.select(releaseAssets);
+		assertEquals("airsim-avf-agent_0.4.2-1_arm64.deb", selection.packageName());
+		assertEquals("https://example.test/agent.deb", selection.packageURL());
+		assertEquals("https://example.test/agent.deb.sig", selection.signatureURL());
+		try {
+			ReleaseAssetSelector.select(java.util.Map.of(
+					"airsim-avf-agent_0.4.2-1_arm64.deb", "https://example.test/agent.deb"));
+			throw new AssertionError("release without detached signature must fail");
+		} catch (IllegalArgumentException expected) {
+			assertContains(expected.getMessage(), "签名");
+		}
+
+		java.util.concurrent.atomic.AtomicReference<String> installerRequest = new java.util.concurrent.atomic.AtomicReference<>("");
+		com.sun.net.httpserver.HttpServer installer = com.sun.net.httpserver.HttpServer.create(
+				new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+		installer.createContext("/v1/status", exchange -> {
+			installerRequest.set(exchange.getRequestMethod() + " " + exchange.getRequestHeaders().getFirst("Authorization"));
+			byte[] payload = "{\"phase\":\"idle\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, payload.length);
+			try (java.io.OutputStream output = exchange.getResponseBody()) { output.write(payload); }
+		});
+		installer.createContext("/v1/packages/install", exchange -> {
+			byte[] body = exchange.getRequestBody().readAllBytes();
+			installerRequest.set(exchange.getRequestMethod() + " "
+					+ exchange.getRequestHeaders().getFirst("Content-Type") + " "
+					+ exchange.getRequestHeaders().getFirst("X-Airsim-Signature") + " "
+					+ exchange.getRequestHeaders().getFirst("X-Airsim-Install-Mode") + " "
+					+ new String(body, java.nio.charset.StandardCharsets.UTF_8));
+			byte[] payload = "{\"phase\":\"completed\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, payload.length);
+			try (java.io.OutputStream output = exchange.getResponseBody()) { output.write(payload); }
+		});
+		installer.createContext("/v1/packages/rollback", exchange -> {
+			installerRequest.set(exchange.getRequestMethod());
+			exchange.sendResponseHeaders(204, -1);
+			exchange.close();
+		});
+		installer.start();
+		try {
+			InstallerClient installerClient = new InstallerClient(
+					"http://127.0.0.1:" + installer.getAddress().getPort(),
+					"test-installer-token-1234567890");
+			assertContains(installerClient.status(), "idle");
+			assertEquals("GET Bearer test-installer-token-1234567890", installerRequest.get());
+			assertContains(installerClient.install("deb-data".getBytes(java.nio.charset.StandardCharsets.UTF_8), "base64-signature"), "completed");
+			assertEquals("POST application/vnd.debian.binary-package base64-signature normal deb-data", installerRequest.get());
+			assertContains(installerClient.repair("deb-data".getBytes(java.nio.charset.StandardCharsets.UTF_8), "base64-signature"), "completed");
+			assertEquals("POST application/vnd.debian.binary-package base64-signature repair deb-data", installerRequest.get());
+			installerClient.rollback();
+			assertEquals("POST", installerRequest.get());
+		} finally {
+			installer.stop(0);
+		}
+
 		com.sun.net.httpserver.HttpServer upstream = com.sun.net.httpserver.HttpServer.create(
 				new java.net.InetSocketAddress("127.0.0.1", 0), 0);
 		upstream.createContext("/api/calls/audio/host/warmup", exchange -> {
@@ -167,8 +247,15 @@ public final class CoreTests {
 		assertEquals(121_000L, session.expiresAtMillis());
 		assertEquals("http://172.29.240.25:7575", AVFNetworkPolicy.agentEndpoint("172.29.240.24"));
 		assertEquals("http://10.185.5.25:7575", AVFNetworkPolicy.agentEndpoint("10.185.5.63"));
+		assertEquals("http://172.29.240.25:7576", AVFNetworkPolicy.installerEndpoint("172.29.240.24"));
+		assertEquals("http://10.185.5.25:7576", AVFNetworkPolicy.installerEndpoint("10.185.5.63"));
 		assertEquals("", AVFNetworkPolicy.agentEndpoint("192.168.2.86"));
 		assertTrue(AVFNetworkPolicy.isAgentEndpoint("http://172.29.240.25:7575"));
+		assertTrue(AVFNetworkPolicy.isInstallerEndpoint("http://172.29.240.25:7576"));
+		assertEquals("http://172.29.240.25:7576",
+				AVFNetworkPolicy.installerEndpointForAgent("http://172.29.240.25:7575"));
+		assertEquals("", AVFNetworkPolicy.installerEndpointForAgent("http://192.168.2.86:7575"));
+		assertTrue(!AVFNetworkPolicy.isInstallerEndpoint("http://172.29.240.25:7575"));
 		assertTrue(AVFNetworkPolicy.isAgentEndpoint("http://10.185.5.25:7575"));
 		assertTrue(!AVFNetworkPolicy.isAgentEndpoint("http://192.168.2.86:7575"));
 		assertTrue(!AVFNetworkPolicy.isAgentEndpoint("https://172.29.240.25:7575"));

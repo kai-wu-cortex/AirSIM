@@ -14,10 +14,12 @@ Agent 运行在三星 Android 的 AVF Linux 环境中，连接三星控制 App�
 ## 构建与测试
 
 ```sh
-cd module/module-agent
-go test ./...
-GOOS=linux GOARCH=arm64 go build -o /tmp/airsim-agent .
+(cd module/module-agent && go test ./...)
+(cd module/avf-installerd && go test ./...)
+./module/packaging/test.sh
 ```
+
+正式部署使用仓库根目录下 `module/packaging/build-avf-deb.sh` 生成的单一 `arm64` Debian 包。Agent 安装到 `/usr/bin/airsim-agent`，独立救援安装器安装到 `/usr/lib/airsim/airsim-installerd`。
 
 ## 必需配置
 
@@ -25,7 +27,8 @@ GOOS=linux GOARCH=arm64 go build -o /tmp/airsim-agent .
 AIRSIM_RUNTIME_PROFILE=android-avf
 AIRSIM_VOICE_BACKEND=samsung_android
 AIRSIM_SAMSUNG_PCM_ADDRESS=<AVF_PRIVATE_IP>:7580
-AIRSIM_ANDROID_CONTROL_TOKEN_FILE=/path/to/airsim-android-control.token
+AIRSIM_DATA_DIR=/var/lib/airsim
+AIRSIM_ANDROID_CONTROL_TOKEN_FILE=/var/lib/airsim/control.token
 ```
 
 控制 token 文件必须只允许 Agent 服务账号读取。私网地址和 token 不得提交到仓库或写入公开日志。
@@ -38,7 +41,7 @@ AIRSIM_ANDROID_CONTROL_TOKEN_FILE=/path/to/airsim-android-control.token
 AIRSIM_RUNTIME_PROFILE=android-avf \
 AIRSIM_VOICE_BACKEND=samsung_android \
 AIRSIM_SAMSUNG_PCM_ADDRESS=<AVF_PRIVATE_IP>:7580 \
-/usr/local/bin/airsim-agent --startup-probe voice-backend
+/usr/bin/airsim-agent --startup-probe voice-backend
 ```
 
 探针会验证配置、私网地址、TCP 连接与 `AIRSIMPCM1` / `AIRSIMREADY` 握手。
@@ -61,3 +64,4 @@ AIRSIM_SAMSUNG_PCM_ADDRESS=<AVF_PRIVATE_IP>:7580 \
 - 日志隐藏 Android 控制请求正文、短信内容、设备 Secret 和 PCM 数据。
 - Relay、Android App 和 Agent 的协议字段必须同步发布。
 - 生产部署前需要完成三星实机通话、短信、重启恢复和长时间稳定性验收。
+- Agent 本身不再安装更新；Android App 通过独立 `airsim-installerd` 校验签名、安装、健康检查和回滚。

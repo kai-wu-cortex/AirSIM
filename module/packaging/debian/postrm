@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = purge ]; then
+    rm -f /etc/airsim/agent.env
+    rmdir /etc/airsim 2>/dev/null || true
+    rm -rf /var/lib/airsim /var/lib/airsim-installerd
+    if getent passwd airsim >/dev/null 2>&1; then
+        deluser --system airsim >/dev/null 2>&1 || true
+    fi
+fi
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+
+exit 0

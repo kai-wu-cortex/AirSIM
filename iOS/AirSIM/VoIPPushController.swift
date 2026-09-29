@@ -492,7 +492,7 @@ final class VoIPPushController: NSObject {
         static let liveActivityPushToStartToken = "airsim.live-activity-push-to-start-token"
         static let deviceID = "airsim.push-device-id"
         static let relayURL = "airsim.push-relay-url"
-        static let keychainService = "com.eric3u.airsim.push"
+        static let keychainService = "com.example.airsim.push"
         static let keychainAccount = "device-secret"
     }
 
@@ -1085,9 +1085,9 @@ final class VoIPPushController: NSObject {
             token: token,
             alertToken: defaults.string(forKey: Keys.alertToken) ?? "",
             watchVoIPToken: defaults.string(forKey: Keys.watchVoIPToken) ?? "",
-            watchBundleID: defaults.string(forKey: Keys.watchBundleID) ?? "com.eric3u.airsim.watchkitapp",
+            watchBundleID: defaults.string(forKey: Keys.watchBundleID) ?? "com.example.airsim.watchkitapp",
             liveActivityPushToStartToken: defaults.string(forKey: Keys.liveActivityPushToStartToken) ?? "",
-            bundleID: Bundle.main.bundleIdentifier ?? "com.eric3u.airsim",
+            bundleID: Bundle.main.bundleIdentifier ?? "com.example.airsim",
             environment: APNsEnvironment.current,
             relayURL: relayURL,
             mediaTransport: CloudMediaTransportPreference.requested().rawValue,

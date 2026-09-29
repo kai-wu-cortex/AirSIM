@@ -2,6 +2,15 @@ package main
 
 import "testing"
 
+func TestAgentDataDirectoryUsesFHSDefaultAndEnvironmentOverride(t *testing.T) {
+	if got := agentDataDirectoryFrom(func(string) string { return "" }); got != "/var/lib/airsim" {
+		t.Fatalf("default data directory=%q", got)
+	}
+	if got := agentDataDirectoryFrom(func(string) string { return " /srv/airsim-state " }); got != "/srv/airsim-state" {
+		t.Fatalf("configured data directory=%q", got)
+	}
+}
+
 func TestRuntimeProfileDefaultsToAndroidAVF(t *testing.T) {
 	profile := runtimeProfileFrom("")
 	if profile.Name != "android-avf" || !profile.AndroidTelecom || profile.RequiresModem || profile.DirectModule {

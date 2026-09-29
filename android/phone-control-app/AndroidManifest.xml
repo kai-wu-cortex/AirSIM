@@ -5,6 +5,7 @@
 	android:versionName="0.2.0-dev">
 	<queries>
 		<package android:name="moe.shizuku.privileged.api" />
+		<package android:name="com.android.virtualization.terminal" />
 	</queries>
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
@@ -23,7 +24,9 @@
         android:name=".BridgeApplication"
         android:allowBackup="false"
         android:debuggable="true"
+        android:icon="@mipmap/ic_launcher"
         android:label="AirSIM"
+        android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="true">

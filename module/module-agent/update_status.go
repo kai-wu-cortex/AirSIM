@@ -16,11 +16,14 @@ import (
 	"time"
 )
 
-const (
+var (
 	moduleUpdateStatePath = agentDataDirectory + "/update-state.json"
 	moduleUpdateLogPath   = agentDataDirectory + "/log/update.log"
-	moduleUpdateLogMax    = 256 * 1024
-	moduleUpdateLogChunk  = 64 * 1024
+)
+
+const (
+	moduleUpdateLogMax   = 256 * 1024
+	moduleUpdateLogChunk = 64 * 1024
 )
 
 type moduleUpdateState struct {

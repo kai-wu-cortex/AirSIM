@@ -26,8 +26,9 @@ const (
 	moduleUpdatePlatform    = "qdc507-armv7-linux-3.18.44"
 	moduleUpdateContentType = "application/vnd.airsim.update+gzip"
 	moduleUpdateMaxBytes    = 16 * 1024 * 1024
-	moduleUpdateMarker      = agentDataDirectory + "/update-pending"
 )
+
+var moduleUpdateMarker = agentDataDirectory + "/update-pending"
 
 type moduleUpdateManifest struct {
 	FormatVersion int                `json:"format_version"`

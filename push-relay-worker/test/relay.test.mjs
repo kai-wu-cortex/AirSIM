@@ -130,7 +130,7 @@ function testEnvironment() {
     APNS_TEAM_ID: "TEAMTEST01",
     APNS_KEY_ID: "KEYTEST001",
     APNS_P8: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-    ALLOWED_BUNDLE_ID: "com.eric3u.airsim",
+    ALLOWED_BUNDLE_ID: "com.example.airsim",
     DASHBOARD_TOKEN: "dashboard-test-token-0123456789",
   };
 }
@@ -149,9 +149,9 @@ const registration = {
   voip_token: "a".repeat(64),
   alert_token: "b".repeat(64),
   watch_voip_token: "c".repeat(64),
-  watch_bundle_id: "com.eric3u.airsim.watchkitapp",
+  watch_bundle_id: "com.example.airsim.watchkitapp",
   live_activity_push_to_start_token: "d".repeat(64),
-  bundle_id: "com.eric3u.airsim",
+  bundle_id: "com.example.airsim",
   environment: "sandbox",
   relay_url: "https://push.airsim.example",
 };
@@ -815,27 +815,27 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   }
   assert.equal(captured.length, 5);
   assert.equal(captured[0].options.headers["apns-push-type"], "voip");
-  assert.equal(captured[0].options.headers["apns-topic"], "com.eric3u.airsim.voip");
+  assert.equal(captured[0].options.headers["apns-topic"], "com.example.airsim.voip");
   assert.equal(captured[0].options.headers["apns-collapse-id"], "d9b59660-05bb-4ea8-9aeb-4505b35c93f9");
   assert.equal(captured[0].payload.call_secret, "watch-call-secret-0123456789abcdef");
   assert.equal(captured[0].payload.media_url, "wss://push.airsim.example/v1/calls/d9b59660-05bb-4ea8-9aeb-4505b35c93f9/connect");
   assert.equal(captured[1].options.headers["apns-push-type"], "voip");
-  assert.equal(captured[1].options.headers["apns-topic"], "com.eric3u.airsim.watchkitapp.voip");
+  assert.equal(captured[1].options.headers["apns-topic"], "com.example.airsim.watchkitapp.voip");
   assert.equal(captured[1].options.headers["apns-collapse-id"], "d9b59660-05bb-4ea8-9aeb-4505b35c93f9");
   assert.equal(captured[1].payload.event, "incoming_call");
   assert.equal(captured[1].payload.call_secret, "watch-call-secret-0123456789abcdef");
   assert.equal(captured[2].options.headers["apns-push-type"], "alert");
-  assert.equal(captured[2].options.headers["apns-topic"], "com.eric3u.airsim");
+  assert.equal(captured[2].options.headers["apns-topic"], "com.example.airsim");
   assert.equal(captured[2].payload.event, "incoming_call_mirror");
   assert.equal(captured[2].payload.aps.alert.title, "10010");
   assert.equal(captured[3].options.headers["apns-push-type"], "liveactivity");
-  assert.equal(captured[3].options.headers["apns-topic"], "com.eric3u.airsim.push-type.liveactivity");
+  assert.equal(captured[3].options.headers["apns-topic"], "com.example.airsim.push-type.liveactivity");
   assert.equal(captured[3].payload.aps.event, "start");
   assert.equal(captured[3].payload.aps["input-push-token"], 1);
   assert.equal(captured[3].payload.aps["attributes-type"], "AirSIMCallActivityAttributes");
   assert.equal(captured[3].payload.aps["content-state"].callID, "call-1");
   assert.equal(captured[4].options.headers["apns-push-type"], "alert");
-  assert.equal(captured[4].options.headers["apns-topic"], "com.eric3u.airsim");
+  assert.equal(captured[4].options.headers["apns-topic"], "com.example.airsim");
   assert.equal(captured[4].payload.aps.alert.body, "余额提醒");
 
   const storedCall = JSON.parse(await env.DEVICES.get("call:d9b59660-05bb-4ea8-9aeb-4505b35c93f9"));
@@ -921,11 +921,11 @@ test("registered ActivityKit update token is preferred over push-to-start and ow
 
 test("watch token requires the signed companion bundle id", () => {
   assert.equal(
-    validateRegistration({ ...registration, watch_bundle_id: "com.attacker.watch" }, "com.eric3u.airsim"),
+    validateRegistration({ ...registration, watch_bundle_id: "com.attacker.watch" }, "com.example.airsim"),
     "watch bundle id is not allowed",
   );
   assert.equal(
-    validateRegistration({ ...registration, watch_bundle_id: "" }, "com.eric3u.airsim"),
+    validateRegistration({ ...registration, watch_bundle_id: "" }, "com.example.airsim"),
     "watch bundle id is not allowed",
   );
 });
@@ -954,7 +954,7 @@ test("Watch-only VoIP registration can receive a native Watch call", async () =>
     globalThis.fetch = originalFetch;
   }
   assert.equal(captured.length, 1);
-  assert.equal(captured[0].options.headers["apns-topic"], "com.eric3u.airsim.watchkitapp.voip");
+  assert.equal(captured[0].options.headers["apns-topic"], "com.example.airsim.watchkitapp.voip");
 });
 
 test("Watch answer sends a background ownership event to iPhone CallKit", async () => {
@@ -1006,7 +1006,7 @@ test("legacy Agent call remains available on iPhone while Watch media is skipped
     globalThis.fetch = originalFetch;
   }
   assert.equal(captured.length, 3);
-  assert.equal(captured[0].options.headers["apns-topic"], "com.eric3u.airsim.voip");
+  assert.equal(captured[0].options.headers["apns-topic"], "com.example.airsim.voip");
   assert.equal(captured[1].options.headers["apns-push-type"], "alert");
   assert.equal(captured[2].options.headers["apns-push-type"], "liveactivity");
 });
@@ -1229,7 +1229,7 @@ test("wrong device secret is rejected before APNs", async () => {
 });
 
 test("registration is pinned to the signed app bundle", () => {
-  assert.equal(validateRegistration({ ...registration, bundle_id: "com.attacker.app" }, "com.eric3u.airsim"), "bundle id is not allowed");
+  assert.equal(validateRegistration({ ...registration, bundle_id: "com.attacker.app" }, "com.example.airsim"), "bundle id is not allowed");
 });
 
 test("provider JWT is ES256-shaped and names the Apple key", async () => {

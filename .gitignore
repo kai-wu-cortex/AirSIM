@@ -23,5 +23,7 @@ iOS/build/
 push-relay-worker/node_modules/
 push-relay-worker/.wrangler/
 push-relay-worker/wrangler.toml
+push-relay-worker/.dev.vars*
+push-relay-worker/.env*
 module/module-agent/*.bin
 module/module-agent/*.tar.gz

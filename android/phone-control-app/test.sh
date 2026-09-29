@@ -80,6 +80,9 @@ mkdir -p "$OUT"
   "$ROOT"/test/com/airsim/phonecontrol/AppConfig.java \
   "$ROOT"/test/com/airsim/phonecontrol/BridgeLog.java \
   "$ROOT"/src/com/airsim/phonecontrol/AgentClient.java \
+  "$ROOT"/src/com/airsim/phonecontrol/InstallerClient.java \
+  "$ROOT"/src/com/airsim/phonecontrol/ReleaseAssetSelector.java \
+  "$ROOT"/src/com/airsim/phonecontrol/AVFStartupPolicy.java \
   "$ROOT"/src/com/airsim/phonecontrol/TelecomStateMapper.java \
 	"$ROOT"/src/com/airsim/phonecontrol/PrivilegedBridgeProtocol.java \
 	"$ROOT"/src/com/airsim/phonecontrol/PrivilegedBridgeCoordinator.java \

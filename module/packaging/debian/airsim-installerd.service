@@ -1,0 +1,23 @@
+[Unit]
+Description=AirSIM AVF Agent Rescue Installer
+Documentation=https://github.com/Open-Airsim/AirSIM
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=AIRSIM_INSTALLER_TOKEN_FILE=/var/lib/airsim/control.token
+Environment=AIRSIM_INSTALLER_STATE_DIR=/var/lib/airsim-installerd
+Environment=AIRSIM_INSTALLER_LISTEN=0.0.0.0:7576
+ExecStart=/usr/lib/airsim/airsim-installerd
+Restart=always
+RestartSec=2s
+StateDirectory=airsim-installerd
+StateDirectoryMode=0700
+PrivateTmp=yes
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

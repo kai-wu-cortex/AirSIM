@@ -19,8 +19,9 @@ import (
 	"time"
 )
 
+var agentVersion = "0.4.2"
+
 const (
-	agentVersion = "0.4.2"
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。
 	listenAddress = "0.0.0.0:7575"
 	// DATA11 桥与原厂 DATA1 完全分离，禁止重新使用 ql_manager_server 占用的 /dev/smd7。
@@ -349,9 +350,9 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 	mux.HandleFunc("/api/module/setup", a.moduleSetup)
 	mux.HandleFunc("/api/voice/status", a.voiceStatus)
 	mux.HandleFunc("/api/voice/provision", a.voiceProvision)
-	mux.HandleFunc("/api/system/update", a.systemUpdate)
-	mux.HandleFunc("/api/system/update/status", a.systemUpdateStatus)
-	mux.HandleFunc("/api/system/update/log", a.systemUpdateLog)
+	mux.HandleFunc("/api/system/update", installerServiceRequired)
+	mux.HandleFunc("/api/system/update/status", installerServiceRequired)
+	mux.HandleFunc("/api/system/update/log", installerServiceRequired)
 	mux.HandleFunc("/api/service/shutdown", a.shutdown)
 	mux.HandleFunc("/", func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/" {
@@ -416,6 +417,10 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 			fields)
 		logger.Printf("%s %s %s", request.Method, request.URL.Path, duration)
 	})
+}
+
+func installerServiceRequired(response http.ResponseWriter, _ *http.Request) {
+	writeError(response, http.StatusGone, "Agent 自更新已停用；请通过 Android App 连接 AVF installerd 端口 7576")
 }
 
 // allowedRemote 把控制面限制在模块自身和 CDC ECM 子网。

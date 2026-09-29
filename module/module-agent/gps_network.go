@@ -327,7 +327,7 @@ func (a *agent) readUSBConfiguration() (usbConfiguration, string, error) {
 	return configuration, raw, nil
 }
 
-const usbMacModeMarker = agentDataDirectory + "/usb-mode-mac"
+var usbMacModeMarker = agentDataDirectory + "/usb-mode-mac"
 
 func persistUSBModeMarker(path, mode string) (bool, error) {
 	wantMac := mode == "mac"

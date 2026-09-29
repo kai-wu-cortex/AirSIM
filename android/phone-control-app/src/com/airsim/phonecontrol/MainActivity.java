@@ -2,6 +2,7 @@ package com.airsim.phonecontrol;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.role.RoleManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -73,6 +74,7 @@ public final class MainActivity extends Activity {
     private String selectedMode;
     private TextView status;
     private TextView shizukuStatus;
+	private TextView installerStatus;
     private TextView pairingStatus;
     private TextView pairingCodeView;
     private TextView pairingCountdownView;
@@ -81,6 +83,7 @@ public final class MainActivity extends Activity {
     private boolean realtimeLogging = true;
     private boolean agentOnline;
     private String agentDetail = "待检测";
+	private boolean avfStartupPromptShown;
 
     private PairingServer pairingServer;
     private CountDownTimer pairingCountdown;
@@ -112,8 +115,16 @@ public final class MainActivity extends Activity {
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
-        }
+		} else {
+			checkAVFEnvironmentAtStartup();
+		}
     }
+
+	@Override public void onRequestPermissionsResult(
+			int requestCode, String[] permissions, int[] grantResults) {
+		super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+		if (requestCode == 101) checkAVFEnvironmentAtStartup();
+	}
 
     private void configureWindow() {
         getWindow().setStatusBarColor(BG);
@@ -386,6 +397,50 @@ public final class MainActivity extends Activity {
         agentCard.addView(save, matchWithTop(12));
         root.addView(agentCard, matchWithTop(10));
 
+		root.addView(sectionTitle("AVF Linux 首次安装"), matchWithTop(22));
+		LinearLayout bootstrapCard = card(SURFACE, 22);
+		bootstrapCard.setOrientation(LinearLayout.VERTICAL);
+		bootstrapCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+		AVFEnvironmentDetector.Snapshot avf = AVFEnvironmentDetector.inspect(this);
+		bootstrapCard.addView(label(avfEnvironmentSummary(avf), 14, TEXT, Gravity.START));
+		TextView installCommand = label(AVFStartupPolicy.installCommand(), 12, MUTED, Gravity.START);
+		installCommand.setTextIsSelectable(true);
+		installCommand.setPadding(0, dp(10), 0, dp(4));
+		bootstrapCard.addView(installCommand);
+		LinearLayout bootstrapActions = row();
+		TextView copyInstall = secondaryButton("复制一键安装命令");
+		copyInstall.setOnClickListener(ignored -> copyAVFInstallCommand());
+		TextView openLinux = secondaryButton("启动 Linux Terminal");
+		openLinux.setOnClickListener(ignored -> openAVFTerminalOrSettings());
+		bootstrapActions.addView(copyInstall, weightedWithEnd(5));
+		bootstrapActions.addView(openLinux, weightedWithStart(5));
+		bootstrapCard.addView(bootstrapActions, matchWithTop(10));
+		TextView developerOptions = secondaryButton("打开开发者选项");
+		developerOptions.setOnClickListener(ignored -> AVFEnvironmentActions.openDeveloperOptions(this));
+		bootstrapCard.addView(developerOptions, matchWithTop(10));
+		root.addView(bootstrapCard, matchWithTop(10));
+
+		root.addView(sectionTitle("AVF Agent 管理"), matchWithTop(22));
+		LinearLayout installerCard = card(SURFACE, 22);
+		installerCard.setOrientation(LinearLayout.VERTICAL);
+		installerCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+		installerStatus = label("正在读取 installerd 状态…", 13, MUTED, Gravity.START);
+		installerCard.addView(installerStatus);
+		TextView updateAgent = primaryButton("检查并安装最新 Agent", BLUE);
+		updateAgent.setOnClickListener(ignored -> runAgentMaintenance("update"));
+		installerCard.addView(updateAgent, matchWithTop(12));
+		LinearLayout installerActions = row();
+		TextView repairAgent = secondaryButton("修复当前版本");
+		repairAgent.setOnClickListener(ignored -> runAgentMaintenance("repair"));
+		TextView rollbackAgent = secondaryButton("回滚上一版本");
+		rollbackAgent.setTextColor(WARNING);
+		rollbackAgent.setOnClickListener(ignored -> runAgentMaintenance("rollback"));
+		installerActions.addView(repairAgent, weightedWithEnd(5));
+		installerActions.addView(rollbackAgent, weightedWithStart(5));
+		installerCard.addView(installerActions, matchWithTop(10));
+		root.addView(installerCard, matchWithTop(10));
+		refreshInstallerStatus();
+
         root.addView(sectionTitle("Shizuku 权限与 PCM 桥"), matchWithTop(22));
         LinearLayout shizukuCard = card(SURFACE, 22);
         shizukuCard.setOrientation(LinearLayout.VERTICAL);
@@ -635,6 +690,105 @@ public final class MainActivity extends Activity {
             }
         });
     }
+
+	private void checkAVFEnvironmentAtStartup() {
+		if (avfStartupPromptShown) return;
+		AVFEnvironmentDetector.Snapshot snapshot = AVFEnvironmentDetector.inspect(this);
+		boolean agentConfigured = AppConfig.configured(this);
+		if (!AVFStartupPolicy.shouldPrompt(snapshot.state(), agentConfigured)) return;
+		avfStartupPromptShown = true;
+		boolean needsInstall = snapshot.state() == AVFStartupPolicy.State.RUNNING && !agentConfigured;
+		boolean canLaunch = snapshot.state() == AVFStartupPolicy.State.READY_TO_START;
+		AlertDialog dialog = new AlertDialog.Builder(this)
+				.setTitle(needsInstall ? "安装 AirSIM AVF Agent" : "需要启动 AVF Linux 环境")
+				.setMessage(avfEnvironmentSummary(snapshot)
+						+ (needsInstall
+						? "\n\n请复制一键安装命令并在 Linux Terminal 中粘贴执行。"
+						: "\n\n启动 Linux 后，在 Terminal 中粘贴 AirSIM 一键安装命令。"))
+				.setPositiveButton(needsInstall ? "复制安装命令"
+						: canLaunch ? "启动 Linux Terminal" : "打开开发者选项",
+						(ignored, which) -> {
+							if (needsInstall) copyAVFInstallCommand();
+							else if (canLaunch) openAVFTerminalOrSettings();
+							else AVFEnvironmentActions.openDeveloperOptions(this);
+						})
+				.setNeutralButton(needsInstall ? "打开 Linux Terminal" : "复制安装命令",
+						(ignored, which) -> {
+							if (needsInstall) openAVFTerminalOrSettings();
+							else copyAVFInstallCommand();
+						})
+				.setNegativeButton("稍后", null)
+				.create();
+		dialog.show();
+	}
+
+	private String avfEnvironmentSummary(AVFEnvironmentDetector.Snapshot snapshot) {
+		return switch (snapshot.state()) {
+			case RUNNING -> "AVF Linux 已启动，可连接 Agent。";
+			case READY_TO_START -> "系统已提供 AVF 和 Linux Terminal，但虚拟 Linux 尚未启动。";
+			case TERMINAL_DISABLED -> "系统包含 Linux Terminal，但当前被开发者选项停用。";
+			case TERMINAL_MISSING -> snapshot.restrictedChinaOEM()
+					? "当前国产 ROM 未提供 AOSP Linux Terminal 组件；AirSIM 无法用普通应用权限强制补装或开启。"
+					: "系统声明支持 AVF，但未安装 AOSP Linux Terminal 组件。";
+			case AVF_UNSUPPORTED -> snapshot.restrictedChinaOEM()
+					? "当前国产 ROM 没有向第三方应用公开 AVF Linux 能力，无法由 AirSIM 强制开启。"
+					: "当前系统没有公开 AVF 能力，请检查系统版本和厂商支持。";
+		};
+	}
+
+	private void openAVFTerminalOrSettings() {
+		if (!AVFEnvironmentActions.openTerminal(this)) {
+			AVFEnvironmentActions.openDeveloperOptions(this);
+			toast("未找到可启动的 Linux Terminal，请在开发者选项中启用");
+		}
+	}
+
+	private void copyAVFInstallCommand() {
+		getSystemService(ClipboardManager.class).setPrimaryClip(
+				ClipData.newPlainText("AirSIM AVF 一键安装", AVFStartupPolicy.installCommand()));
+		toast("AVF 一键安装命令已复制");
+	}
+
+	private void refreshInstallerStatus() {
+		if (installerStatus == null) return;
+		Executors.newSingleThreadExecutor().execute(() -> {
+			try {
+				String value = new AgentReleaseManager(this).status();
+				runOnUiThread(() -> {
+					if (installerStatus != null) installerStatus.setText("installerd 在线\n" + value);
+				});
+			} catch (Exception error) {
+				runOnUiThread(() -> {
+					if (installerStatus != null) installerStatus.setText("installerd 不可用 · " + error.getMessage());
+				});
+			}
+		});
+	}
+
+	private void runAgentMaintenance(String action) {
+		if (installerStatus != null) installerStatus.setText("Agent 操作进行中 · " + action);
+		Executors.newSingleThreadExecutor().execute(() -> {
+			try {
+				AgentReleaseManager manager = new AgentReleaseManager(this);
+				String result = switch (action) {
+					case "repair" -> manager.repairLatest();
+					case "rollback" -> manager.rollback();
+					default -> manager.installLatest();
+				};
+				runOnUiThread(() -> {
+					if (installerStatus != null) installerStatus.setText("Agent 操作完成\n" + result);
+					toast("AVF Agent 操作完成");
+					refreshAgent();
+				});
+			} catch (Exception error) {
+				BridgeLog.error("avf_agent_maintenance_failed action=" + action, error);
+				runOnUiThread(() -> {
+					if (installerStatus != null) installerStatus.setText("Agent 操作失败 · " + error.getMessage());
+					toast("AVF Agent 操作失败");
+				});
+			}
+		});
+	}
 
     private void updateVisibleStatus() {
         if (status != null) status.setText(roleText() + "\nAgent：" + agentDetail);

@@ -550,6 +550,20 @@ func TestRoutesRejectPublicRemote(t *testing.T) {
 	}
 }
 
+func TestLegacySelfUpdateRoutesDirectClientsToInstallerService(t *testing.T) {
+	a := newAgent("unused")
+	request := httptest.NewRequest(http.MethodPost, "/api/system/update", strings.NewReader("legacy-package"))
+	request.RemoteAddr = "127.0.0.1:10001"
+	response := httptest.NewRecorder()
+	a.routes(testLogger()).ServeHTTP(response, request)
+	if response.Code != http.StatusGone {
+		t.Fatalf("legacy update status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "7576") {
+		t.Fatalf("legacy update response does not identify installerd: %s", response.Body.String())
+	}
+}
+
 func TestCoreCallAndSMSRoutesRemainAvailableForLegacyApps(t *testing.T) {
 	a := newAgent("unused")
 	handler := a.routes(testLogger())
