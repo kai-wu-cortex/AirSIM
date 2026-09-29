@@ -1,10 +1,10 @@
-# DJOneHub VoWLAN Design
+# AirSIM VoWLAN Design
 
 Date: 2026-09-11
 
 ## Goal
 
-When an already paired iPhone is connected to the Samsung phone's hotspot, DJOneHub must place and answer cellular calls through a local VoWLAN path. The control plane and bidirectional PCM remain on the hotspot LAN for the lifetime of that call. When VoWLAN is unavailable before a call begins, DJOneHub uses the existing cloud Relay path.
+When an already paired iPhone is connected to the Samsung phone's hotspot, AirSIM must place and answer cellular calls through a local VoWLAN path. The control plane and bidirectional PCM remain on the hotspot LAN for the lifetime of that call. When VoWLAN is unavailable before a call begins, AirSIM uses the existing cloud Relay path.
 
 The user-visible name is **VoWLAN**. The names `WLANECM` and `LANCalling` are retired from UI strings, logs, diagnostics, and newly introduced wire fields.
 
@@ -13,7 +13,7 @@ The user-visible name is **VoWLAN**. The names `WLANECM` and `LANCalling` are re
 The current implementation already provides:
 
 - Samsung hotspot operation and a reachable hotspot address;
-- one-time Bonjour discovery under `_djonehub-pair._tcp`;
+- one-time Bonjour discovery under `_airsim-pair._tcp`;
 - encrypted iPhone-to-Samsung pairing;
 - Android-to-Agent authenticated control over the AVF-private network;
 - Android Telecom call control;
@@ -61,13 +61,13 @@ Each VoWLAN control request carries:
 - a random nonce;
 - an HMAC-SHA256 signature over method, path, body digest, timestamp, and nonce.
 
-Android rejects invalid signatures, expired timestamps, repeated nonces, oversized requests, non-private peers, and routes outside the VoWLAN allowlist. The PCM connection uses an authenticated preface containing the version, timestamp, nonce, and HMAC before Android opens the internal `DJ1PCM1` connection. Secrets and raw PCM are never written to debug logs.
+Android rejects invalid signatures, expired timestamps, repeated nonces, oversized requests, non-private peers, and routes outside the VoWLAN allowlist. The PCM connection uses an authenticated preface containing the version, timestamp, nonce, and HMAC before Android opens the internal `AIRSIMPCM1` connection. Secrets and raw PCM are never written to debug logs.
 
 Re-pairing replaces the old VoWLAN secret. Removing the paired device deletes it from Android private storage and iOS Keychain.
 
 ## Discovery and availability
 
-The existing `_djonehub-pair._tcp` service remains limited to the two-minute pairing window. The foreground gateway separately advertises `_djonehub-vowlan._tcp` while all of these conditions are true:
+The existing `_airsim-pair._tcp` service remains limited to the two-minute pairing window. The foreground gateway separately advertises `_airsim-vowlan._tcp` while all of these conditions are true:
 
 - Samsung hotspot interface is active;
 - Android-to-Agent AVF health check passes;
@@ -93,7 +93,7 @@ After authenticating a request, Android forwards it to the Agent through the cur
 
 ## Android PCM gateway
 
-After validating the VoWLAN PCM preface, Android opens the AVF-private shell PCM endpoint, performs the internal `DJ1PCM1` / `DJ1READY` handshake, and returns a VoWLAN-ready acknowledgement to iOS. It then relays full-duplex 8 kHz mono PCM16LE in 320-byte frames.
+After validating the VoWLAN PCM preface, Android opens the AVF-private shell PCM endpoint, performs the internal `AIRSIMPCM1` / `AIRSIMREADY` handshake, and returns a VoWLAN-ready acknowledgement to iOS. It then relays full-duplex 8 kHz mono PCM16LE in 320-byte frames.
 
 Only one authenticated PCM client is permitted for the active call. The gateway closes both directions when either peer disconnects, when Android Telecom reports that the call ended, or when the hotspot interface disappears. It logs aggregate bytes, frames, peaks, timing, and closure reason, but never payload bytes.
 

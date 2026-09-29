@@ -91,7 +91,7 @@ public final class VoWLANPCMRelay implements Closeable {
             internal = new Socket();
             internal.connect(shellPCM, 3_000);
             internal.setTcpNoDelay(true);
-            internal.getOutputStream().write("DJ1PCM1\n".getBytes(StandardCharsets.US_ASCII));
+            internal.getOutputStream().write("AIRSIMPCM1\n".getBytes(StandardCharsets.US_ASCII));
             byte[] ready = internal.getInputStream().readNBytes(8);
             if (!Arrays.equals(ready, VoWLANPCMProtocol.READY.getBytes(StandardCharsets.US_ASCII))) {
                 throw new IOException("shell PCM handshake failed");

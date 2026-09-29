@@ -24,7 +24,7 @@ import (
 const (
 	moduleUpdateFormat      = 1
 	moduleUpdatePlatform    = "qdc507-armv7-linux-3.18.44"
-	moduleUpdateContentType = "application/vnd.djonehub.update+gzip"
+	moduleUpdateContentType = "application/vnd.airsim.update+gzip"
 	moduleUpdateMaxBytes    = 16 * 1024 * 1024
 	moduleUpdateMarker      = agentDataDirectory + "/update-pending"
 )
@@ -85,7 +85,7 @@ func (a *agent) systemUpdate(response http.ResponseWriter, request *http.Request
 		return
 	}
 	defer moduleUpdateRunMu.Unlock()
-	mode := strings.TrimSpace(request.Header.Get("X-DJOneHub-Update-Mode"))
+	mode := strings.TrimSpace(request.Header.Get("X-AirSIM-Update-Mode"))
 	if mode == "" {
 		mode = "normal"
 	}
@@ -126,7 +126,7 @@ func (a *agent) systemUpdate(response http.ResponseWriter, request *http.Request
 	))
 
 	request.Body = http.MaxBytesReader(response, request.Body, moduleUpdateMaxBytes)
-	temporary, err := os.CreateTemp("/data/local/tmp", "djonehub-update-*.tar.gz")
+	temporary, err := os.CreateTemp("/data/local/tmp", "airsim-update-*.tar.gz")
 	if err != nil {
 		updateModuleInstallState(operationID, mode, "failed", "", 100, "无法创建安装缓存", err, false)
 		writeError(response, http.StatusInternalServerError, "无法创建更新临时文件: "+err.Error())
@@ -192,16 +192,16 @@ func (a *agent) systemUpdate(response http.ResponseWriter, request *http.Request
 	go func() {
 		time.Sleep(750 * time.Millisecond)
 		const restartScript = `
-/etc/init.d/djonehub_agent stop >>/data/djonehub/log/update.log 2>&1
+/etc/init.d/airsim_agent stop >>/data/airsim/log/update.log 2>&1
 sleep 1
-/etc/init.d/djonehub_agent start >>/data/djonehub/log/update.log 2>&1 || exit 1
+/etc/init.d/airsim_agent start >>/data/airsim/log/update.log 2>&1 || exit 1
 count=0
 while test "$count" -lt 20; do
   if wget -qO- http://127.0.0.1:7575/api/health 2>/dev/null | grep -q '"ok":true'; then
-    if test "$(cat /data/djonehub/update-pending 2>/dev/null)" = "$1"; then
-      rm -f /data/djonehub/update-pending
+    if test "$(cat /data/airsim/update-pending 2>/dev/null)" = "$1"; then
+      rm -f /data/airsim/update-pending
       rm -rf "$1"
-      printf 'update-confirmed backup=%s\n' "$1" >>/data/djonehub/log/update.log
+      printf 'update-confirmed backup=%s\n' "$1" >>/data/airsim/log/update.log
     fi
     exit 0
   fi
@@ -210,7 +210,7 @@ while test "$count" -lt 20; do
 done
 exit 1
 `
-		command := exec.Command("/bin/sh", "-c", restartScript, "djonehub-update", backupDirectory)
+		command := exec.Command("/bin/sh", "-c", restartScript, "airsim-update", backupDirectory)
 		_ = command.Start()
 	}()
 }
@@ -224,7 +224,7 @@ func cleanupStaleModuleUpdateArtifacts(dataRoot, temporaryRoot, markerPath strin
 		pendingBackup = filepath.Clean(strings.TrimSpace(string(marker)))
 	}
 	patterns := []string{
-		filepath.Join(temporaryRoot, "djonehub-update-*.tar.gz"),
+		filepath.Join(temporaryRoot, "airsim-update-*.tar.gz"),
 		filepath.Join(dataRoot, ".update-stage-*"),
 		filepath.Join(dataRoot, "backup", "app-update-*"),
 	}

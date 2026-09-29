@@ -22,7 +22,7 @@ type voiceBackendConfig struct {
 }
 
 func loadVoiceBackend(getenv func(string) string) (voiceBackendConfig, error) {
-	kind := voiceBackendKind(strings.TrimSpace(getenv("DJONEHUB_VOICE_BACKEND")))
+	kind := voiceBackendKind(strings.TrimSpace(getenv("AIRSIM_VOICE_BACKEND")))
 	if kind == "" {
 		kind = voiceBackendSamsungAndroid
 	}
@@ -30,7 +30,7 @@ func loadVoiceBackend(getenv func(string) string) (voiceBackendConfig, error) {
 	case voiceBackendQDC507:
 		return voiceBackendConfig{kind: kind, endpoint: qdc507PCMEndpoint}, nil
 	case voiceBackendSamsungAndroid:
-		endpoint := strings.TrimSpace(getenv("DJONEHUB_SAMSUNG_PCM_ADDRESS"))
+		endpoint := strings.TrimSpace(getenv("AIRSIM_SAMSUNG_PCM_ADDRESS"))
 		if err := validateSamsungPCMEndpoint(endpoint); err != nil {
 			return voiceBackendConfig{}, err
 		}

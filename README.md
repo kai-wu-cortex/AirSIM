@@ -1,6 +1,6 @@
 # AirSIM — Samsung 通话链路独立项目
 
-此目录是从原 DJOneHub 工作树复制出的独立开发项目，原仓库未被移动或覆盖。范围为三星 Android 电话端、Shizuku 音频桥、Android AVF Linux Agent、iPhone/Watch 的三星 VoWLAN 与云端通话，以及独立 Cloudflare Relay。
+此目录是从旧项目工作树复制出的独立开发项目，原仓库未被移动或覆盖。范围为三星 Android 电话端、Shizuku 音频桥、Android AVF Linux Agent、iPhone/Watch 的三星 VoWLAN 与云端通话，以及独立 Cloudflare Relay。
 
 | 目录 | 用途 |
 | --- | --- |
@@ -12,9 +12,9 @@
 
 ## 隔离边界
 
-- Android 包名为 `com.airsim.phonecontrol` / `com.airsim.bridge`，iOS/Watch Bundle ID 为 `com.eric3u.airsim*`；**不会覆盖**现有三星端或 DJOneHub iOS 安装。
-- iOS 默认入口仅显示三星配对、VoWLAN 与独立 Relay。大疆首次连接向导、设置页、Agent 维修 UI 和三个 QDC507 固件包没有进入 App 构建。拨号、短信与轮询仅选择已验证的三星 VoWLAN 或云端；不会回退到 `192.168.225.1`。
-- Agent 源码仍保留来自原项目的 QDC507 兼容实现及 `DJOneHub` 协议字段，**不可把它当作已完成裁剪的三星专用发行包**。运行时默认 profile 为 `android-avf`。发布前需要进一步拆除 QDC507 编译路径与旧更新器，并做实机回归。
+- Android 包名为 `com.airsim.phonecontrol` / `com.airsim.bridge`，iOS/Watch Bundle ID 为 `com.eric3u.airsim*`；**不会覆盖**旧项目的三星端或 iOS 安装。
+- iOS 默认入口仅显示三星配对、VoWLAN 与独立 Relay。旧 QDC507 模块的首次连接向导、设置页、Agent 维修 UI 和三个固件包没有进入 App 构建。拨号、短信与轮询仅选择已验证的三星 VoWLAN 或云端；不会回退到 `192.168.225.1`。
+- Agent 源码仍保留来自旧项目的 QDC507 兼容实现，**不可把它当作已完成裁剪的三星专用发行包**。运行时默认 profile 为 `android-avf`。发布前需要进一步拆除 QDC507 编译路径与旧更新器，并做实机回归。
 - Relay 的 `wrangler.example.toml` 仅是模板；独立 KV、Durable Objects、APNs 密钥、域名和苹果签名均需另行配置。没有使用原生产地址或密钥。
 
 ## 本地验证

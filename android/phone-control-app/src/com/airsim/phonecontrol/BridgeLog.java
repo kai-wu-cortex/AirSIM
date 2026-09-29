@@ -11,9 +11,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
 public final class BridgeLog {
-    private static final String TAG = "DJOneHubBridge";
-    private static final String FILE_NAME = "djonehub-debug.log";
-    private static final String PREVIOUS_FILE_NAME = "djonehub-debug.previous.log";
+    private static final String TAG = "AirSIMBridge";
+    private static final String FILE_NAME = "airsim-debug.log";
+    private static final String PREVIOUS_FILE_NAME = "airsim-debug.previous.log";
     private static final long MAX_FILE_BYTES = 512L * 1024L;
     private static final Object LOCK = new Object();
     private static volatile Context applicationContext;

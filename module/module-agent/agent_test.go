@@ -57,7 +57,7 @@ func TestAudioHostConfigExposesListenerReadinessBeforeHandshake(t *testing.T) {
 		t.Fatalf("route_listening=%v, want true", payload["route_listening"])
 	}
 	if payload["route_ready"] != false {
-		t.Fatalf("route_ready=%v, want false before DJ1READY", payload["route_ready"])
+		t.Fatalf("route_ready=%v, want false before AIRSIMREADY", payload["route_ready"])
 	}
 }
 
@@ -582,7 +582,7 @@ func TestDebugEndpointCapturesHTTPInputAndOutput(t *testing.T) {
 
 	platformRequest := httptest.NewRequest("GET", "/api/platform", nil)
 	platformRequest.RemoteAddr = "127.0.0.1:10001"
-	platformRequest.Header.Set("X-DJOneHub-Trace-ID", "trace-http-platform")
+	platformRequest.Header.Set("X-AirSIM-Trace-ID", "trace-http-platform")
 	platformResponse := httptest.NewRecorder()
 	handler.ServeHTTP(platformResponse, platformRequest)
 	if platformResponse.Code != http.StatusOK {
@@ -1089,7 +1089,7 @@ func TestModuleUpdateCompletionDoesNotConfirmDifferentRunningVersion(t *testing.
 func TestCleanupStaleModuleUpdateArtifactsPreservesPendingRollback(t *testing.T) {
 	root := t.TempDir()
 	temporaryRoot := filepath.Join(root, "tmp")
-	dataRoot := filepath.Join(root, "djonehub")
+	dataRoot := filepath.Join(root, "airsim")
 	backupRoot := filepath.Join(dataRoot, "backup")
 	for _, path := range []string{
 		temporaryRoot,
@@ -1102,7 +1102,7 @@ func TestCleanupStaleModuleUpdateArtifactsPreservesPendingRollback(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	staleUpload := filepath.Join(temporaryRoot, "djonehub-update-stale.tar.gz")
+	staleUpload := filepath.Join(temporaryRoot, "airsim-update-stale.tar.gz")
 	if err := os.WriteFile(staleUpload, []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}

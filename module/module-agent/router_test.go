@@ -257,7 +257,7 @@ func TestBuildPortForwardPlanUsesOwnedNATChainOnly(t *testing.T) {
 		joined = append(joined, strings.Join(action.Arguments, " "))
 	}
 	all := strings.Join(joined, "\n")
-	if !strings.Contains(all, "-A DJONEHUB_DNAT -p tcp --dport 9443 -j DNAT --to-destination 192.168.225.20:443") {
+	if !strings.Contains(all, "-A AIRSIM_DNAT -p tcp --dport 9443 -j DNAT --to-destination 192.168.225.20:443") {
 		t.Fatalf("缺少受控 DNAT 规则:\n%s", all)
 	}
 	if strings.Contains(all, "-F PREROUTING") || strings.Contains(all, "-F POSTROUTING") {

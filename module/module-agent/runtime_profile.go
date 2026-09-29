@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const runtimeProfileEnvironment = "DJONEHUB_RUNTIME_PROFILE"
+const runtimeProfileEnvironment = "AIRSIM_RUNTIME_PROFILE"
 
 type runtimeProfile struct {
 	Name                string

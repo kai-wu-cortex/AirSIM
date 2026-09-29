@@ -63,14 +63,14 @@ public final class BridgeUnitTests {
         ByteArrayOutputStream response = new ByteArrayOutputStream();
         BridgeProtocol.acceptHandshake(
             new ByteArrayInputStream(BridgeProtocol.CLIENT_HELLO), response);
-        check(response.toString(StandardCharsets.US_ASCII).equals("DJ1READY"),
+        check(response.toString(StandardCharsets.US_ASCII).equals("AIRSIMREADY"),
             "ready response");
         check(BridgeProtocol.FRAME_BYTES == 320, "frame bytes");
 
         boolean failed = false;
         try {
             BridgeProtocol.acceptHandshake(
-                new ByteArrayInputStream("DJ1PCM2\n".getBytes(StandardCharsets.US_ASCII)),
+                new ByteArrayInputStream("AIRSIMPCM2\n".getBytes(StandardCharsets.US_ASCII)),
                 new ByteArrayOutputStream());
         } catch (IllegalArgumentException expected) {
             failed = true;

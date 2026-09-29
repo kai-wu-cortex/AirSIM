@@ -24,7 +24,7 @@ const (
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。
 	listenAddress = "0.0.0.0:7575"
 	// DATA11 桥与原厂 DATA1 完全分离，禁止重新使用 ql_manager_server 占用的 /dev/smd7。
-	atDevice = "/dev/djonehub_data11"
+	atDevice = "/dev/airsim_data11"
 )
 
 type agent struct {
@@ -405,7 +405,7 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 			"duration": duration.String(), "request_bytes": strconv.FormatInt(requestCapture.total, 10),
 			"response_bytes": strconv.FormatInt(capturedResponse.capture.total, 10),
 		}
-		if traceID := strings.TrimSpace(request.Header.Get("X-DJOneHub-Trace-ID")); traceID != "" {
+		if traceID := strings.TrimSpace(request.Header.Get("X-AirSIM-Trace-ID")); traceID != "" {
 			if len(traceID) > 128 {
 				traceID = traceID[:128]
 			}

@@ -6,7 +6,7 @@ This protocol transfers the existing iOS `AgentPushRegistration` to the Linux Ag
 
 ## Discovery
 
-- DNS-SD service: `_djonehub-pair._tcp.local.`
+- DNS-SD service: `_airsim-pair._tcp.local.`
 - TXT `v`: `1`
 - TXT `session`: random UUID
 - TXT `key`: base64url-encoded 32-byte ephemeral X25519 public key
@@ -20,7 +20,7 @@ iOS creates an ephemeral X25519 key pair and derives:
 
 ```text
 shared = X25519(iOS_private, Samsung_public)
-key = HKDF-SHA256(shared, salt=UTF8(session), info=UTF8("DJOneHubPair/v1:" + code), length=32)
+key = HKDF-SHA256(shared, salt=UTF8(session), info=UTF8("AirSIMPair/v1:" + code), length=32)
 sealed_registration = nonce(12) || AES-256-GCM(registration_json, key, aad=UTF8(session))
 ```
 

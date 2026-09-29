@@ -15,7 +15,7 @@ func TestVoiceBackendDefaultsToSamsungAndRequiresPrivateEndpoint(t *testing.T) {
 		t.Fatal("未设置三星 PCM 私网端点时必须拒绝启动")
 	}
 	config, err := loadVoiceBackend(func(key string) string {
-		if key == "DJONEHUB_SAMSUNG_PCM_ADDRESS" { return "192.168.240.1:7580" }
+		if key == "AIRSIM_SAMSUNG_PCM_ADDRESS" { return "192.168.240.1:7580" }
 		return ""
 	})
 	if err != nil {
@@ -35,8 +35,8 @@ func TestVoiceBackendDefaultsToSamsungAndRequiresPrivateEndpoint(t *testing.T) {
 func TestSamsungVoiceBackendRequiresExplicitPrivateEndpoint(t *testing.T) {
 	lookup := func(key string) string {
 		values := map[string]string{
-			"DJONEHUB_VOICE_BACKEND":       "samsung_android",
-			"DJONEHUB_SAMSUNG_PCM_ADDRESS": "192.168.240.1:7580",
+			"AIRSIM_VOICE_BACKEND":       "samsung_android",
+			"AIRSIM_SAMSUNG_PCM_ADDRESS": "192.168.240.1:7580",
 		}
 		return values[key]
 	}
@@ -62,7 +62,7 @@ func TestSamsungVoiceBackendRejectsUnsafeEndpoints(t *testing.T) {
 	} {
 		t.Run(endpoint, func(t *testing.T) {
 			_, err := loadVoiceBackend(func(key string) string {
-				if key == "DJONEHUB_VOICE_BACKEND" {
+				if key == "AIRSIM_VOICE_BACKEND" {
 					return "samsung_android"
 				}
 				return endpoint
@@ -76,7 +76,7 @@ func TestSamsungVoiceBackendRejectsUnsafeEndpoints(t *testing.T) {
 
 func TestVoiceBackendRejectsUnknownKind(t *testing.T) {
 	_, err := loadVoiceBackend(func(key string) string {
-		if key == "DJONEHUB_VOICE_BACKEND" {
+		if key == "AIRSIM_VOICE_BACKEND" {
 			return "other"
 		}
 		return ""
@@ -194,7 +194,7 @@ func TestSamsungVoiceRouteDoesNotStartQDC507Processes(t *testing.T) {
 	}
 	service.markVoiceBackendHandshakeReady()
 	if !service.voice.snapshot().Ready {
-		t.Fatal("DJ1READY 握手后应标记三星 PCM 后端就绪")
+		t.Fatal("AIRSIMREADY 握手后应标记三星 PCM 后端就绪")
 	}
 	service.stopVoiceRoute()
 	stopped := service.voice.snapshot()
@@ -208,16 +208,16 @@ func TestProbeVoicePCMBackendPerformsLegacyHandshake(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		defer server.Close()
-		hello := make([]byte, len("DJ1PCM1\n"))
+		hello := make([]byte, len("AIRSIMPCM1\n"))
 		if _, err := io.ReadFull(server, hello); err != nil {
 			done <- err
 			return
 		}
-		if string(hello) != "DJ1PCM1\n" {
+		if string(hello) != "AIRSIMPCM1\n" {
 			done <- &voiceBackendTestError{}
 			return
 		}
-		if _, err := server.Write([]byte("DJ1READY")); err != nil {
+		if _, err := server.Write([]byte("AIRSIMREADY")); err != nil {
 			done <- err
 			return
 		}

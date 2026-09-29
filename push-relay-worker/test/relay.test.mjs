@@ -435,7 +435,7 @@ test("call control is durable, idempotent, and delivered after the Agent reconne
     {
       headers: {
         authorization: `Bearer ${registration.device_secret}`,
-        "x-djonehub-device-id": registration.device_id,
+        "x-airsim-device-id": registration.device_id,
       },
     },
   ), env);
@@ -497,7 +497,7 @@ test("call control rejects stale generations and cross-device reads", async () =
     {
       headers: {
         authorization: `Bearer ${secondDevice.device_secret}`,
-        "x-djonehub-device-id": secondDevice.device_id,
+        "x-airsim-device-id": secondDevice.device_id,
       },
     },
   ), env);
@@ -832,7 +832,7 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   assert.equal(captured[3].options.headers["apns-topic"], "com.eric3u.airsim.push-type.liveactivity");
   assert.equal(captured[3].payload.aps.event, "start");
   assert.equal(captured[3].payload.aps["input-push-token"], 1);
-  assert.equal(captured[3].payload.aps["attributes-type"], "DJOneHubCallActivityAttributes");
+  assert.equal(captured[3].payload.aps["attributes-type"], "AirSIMCallActivityAttributes");
   assert.equal(captured[3].payload.aps["content-state"].callID, "call-1");
   assert.equal(captured[4].options.headers["apns-push-type"], "alert");
   assert.equal(captured[4].options.headers["apns-topic"], "com.eric3u.airsim");
@@ -1028,7 +1028,7 @@ test("call websocket authenticates the per-call secret before reaching its durab
     get(id) {
       return {
         async fetch(request) {
-          forwarded.push({ id, role: request.headers.get("x-djonehub-role") });
+          forwarded.push({ id, role: request.headers.get("x-airsim-role") });
           return new Response("forwarded", { status: 200 });
         },
       };

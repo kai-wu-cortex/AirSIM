@@ -23,7 +23,7 @@ import javax.crypto.spec.SecretKeySpec;
 public final class PairingCrypto {
     private static final byte[] X25519_PRIVATE_PREFIX = hex("302e020100300506032b656e04220420");
     private static final byte[] X25519_PUBLIC_PREFIX = hex("302a300506032b656e032100");
-    private static final byte[] INFO_PREFIX = "DJOneHubPair/v1:".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] INFO_PREFIX = "AirSIMPair/v1:".getBytes(StandardCharsets.UTF_8);
 
     private PairingCrypto() {}
 

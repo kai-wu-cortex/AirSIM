@@ -264,7 +264,7 @@ struct WatchIncomingNotificationPlan: Equatable, Sendable {
             .reduce(into: [String]()) { result, value in
                 if !result.contains(value) { result.append(value) }
             }
-        identifier = "djonehub.watch.incoming.\(payload.callID)"
+        identifier = "airsim.watch.incoming.\(payload.callID)"
         title = "AirSIM 来电"
         body = parts.isEmpty ? "模块收到来电" : parts.joined(separator: " · ")
     }

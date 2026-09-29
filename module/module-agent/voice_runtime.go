@@ -273,7 +273,7 @@ func (a *agent) ensureVoiceRouteListening() error {
 	defer release()
 
 	// 上一通电话可能还在异步退出。旧进程占着 7580 时直接返回会让新电话
-	// 永远等不到 DJ1READY，这是“能拨出但接听后回拨失败”的典型竞态。
+	// 永远等不到 AIRSIMREADY，这是“能拨出但接听后回拨失败”的典型竞态。
 	a.voice.mu.Lock()
 	if a.voice.command != nil || a.voice.routeCommand != nil {
 		oldCommand := a.voice.command

@@ -85,7 +85,7 @@ public final class AgentClient {
             connection.setReadTimeout(readTimeout);
             connection.setUseCaches(false);
             connection.setRequestProperty("Authorization", "Bearer " + token);
-            connection.setRequestProperty("X-DJOneHub-Trace-ID", traceID);
+            connection.setRequestProperty("X-AirSIM-Trace-ID", traceID);
             if (body != null) {
                 connection.setDoOutput(true);
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");

@@ -1,10 +1,10 @@
 # AirSIM Samsung Phone Audio Bridge
 
-This shell-UID Android service exposes the Samsung cellular call audio path through the legacy DJOneHub module PCM contract:
+This shell-UID Android service exposes the Samsung cellular call audio path through the AirSIM PCM contract:
 
 - cellular remote party to Relay: `AudioRecord.VOICE_DOWNLINK`
 - Relay/iOS microphone to cellular remote party: `USAGE_VOICE_COMMUNICATION` plus Samsung tag `VOICE_TX`
-- transport: `DJ1PCM1\n` / `DJ1READY`, then full-duplex 8 kHz mono PCM16LE
+- transport: `AIRSIMPCM1\n` / `AIRSIMREADY`, then full-duplex 8 kHz mono PCM16LE
 - Relay frame: 320 bytes / 20 ms
 
 The bridge never stores PCM. JSONL logs contain lifecycle, route, aggregate byte/frame/peak counts, and errors only.
@@ -43,17 +43,17 @@ Install the systemd drop-in after replacing `AVF_ANDROID_IP` with the current pr
 
 ```ini
 [Service]
-Environment=DJONEHUB_VOICE_BACKEND=samsung_android
-Environment=DJONEHUB_SAMSUNG_PCM_ADDRESS=AVF_ANDROID_IP:7580
+Environment=AIRSIM_VOICE_BACKEND=samsung_android
+Environment=AIRSIM_SAMSUNG_PCM_ADDRESS=AVF_ANDROID_IP:7580
 ```
 
 Run the backend handshake probe before restarting the service:
 
 ```sh
-DJONEHUB_RUNTIME_PROFILE=android-avf \
-DJONEHUB_VOICE_BACKEND=samsung_android \
-DJONEHUB_SAMSUNG_PCM_ADDRESS=AVF_ANDROID_IP:7580 \
-/usr/local/bin/djonehub-agent --startup-probe voice-backend
+AIRSIM_RUNTIME_PROFILE=android-avf \
+AIRSIM_VOICE_BACKEND=samsung_android \
+AIRSIM_SAMSUNG_PCM_ADDRESS=AVF_ANDROID_IP:7580 \
+/usr/local/bin/airsim-agent --startup-probe voice-backend
 ```
 
 The Agent health response reports `voice_backend=samsung_android` and `call_audio=true` but does not expose the configured private endpoint.

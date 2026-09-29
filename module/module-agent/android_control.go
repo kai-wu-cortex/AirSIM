@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-const androidControlTokenEnvironment = "DJONEHUB_ANDROID_CONTROL_TOKEN"
-const androidControlTokenFileEnvironment = "DJONEHUB_ANDROID_CONTROL_TOKEN_FILE"
+const androidControlTokenEnvironment = "AIRSIM_ANDROID_CONTROL_TOKEN"
+const androidControlTokenFileEnvironment = "AIRSIM_ANDROID_CONTROL_TOKEN_FILE"
 
 func loadAndroidControlToken(getenv func(string) string) (string, error) {
 	if path := strings.TrimSpace(getenv(androidControlTokenFileEnvironment)); path != "" {

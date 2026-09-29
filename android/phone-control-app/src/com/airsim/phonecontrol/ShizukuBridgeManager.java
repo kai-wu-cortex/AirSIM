@@ -68,7 +68,7 @@ final class ShizukuBridgeManager {
                 .daemon(true)
                 .processNameSuffix("pcm_shell")
                 .debuggable(true)
-                .tag("djonehub-pcm-v1")
+                .tag("airsim-pcm-v1")
                 .version(2);
         Shizuku.addBinderReceivedListenerSticky(binderReceived);
         Shizuku.addBinderDeadListener(binderDead);

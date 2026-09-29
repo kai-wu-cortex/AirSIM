@@ -776,7 +776,7 @@ func (a *agent) connectCloudPCM(
 			return
 		}
 		// 只等待 7580 开始监听，随后立即建立客户端连接。完整 ready 状态必须
-		// 在 DJ1PCM1/DJ1READY 握手和双向线程启动后才成立。
+		// 在 AIRSIMPCM1/AIRSIMREADY 握手和双向线程启动后才成立。
 		connection, err := establishCloudPCMConnection(
 			ctx,
 			a.ensureVoiceRouteListening,
@@ -978,12 +978,12 @@ func (a *agent) startOutgoingCloudPCM(
 
 const (
 	cloudPCMFrameBytes       = 320 // 20 ms, 8 kHz, mono PCM16LE
-	cloudPCMProtocolFramedV1 = "djpm1"
+	cloudPCMProtocolFramedV1 = "airsim-pcm-v1"
 	cloudPCMFrameHeaderBytes = 20
 	cloudPCMFrameVersion     = byte(1)
 )
 
-var cloudPCMFrameMagic = [4]byte{'D', 'J', 'P', 'M'}
+var cloudPCMFrameMagic = [4]byte{'A', 'S', 'P', 'M'}
 
 type cloudPCMFrame struct {
 	Sequence              uint32
@@ -1015,15 +1015,15 @@ func decodeCloudPCMFrame(wire []byte) (cloudPCMFrame, bool, error) {
 		return cloudPCMFrame{Payload: wire}, false, nil
 	}
 	if len(wire) < cloudPCMFrameHeaderBytes {
-		return cloudPCMFrame{}, true, errors.New("DJPM1 PCM 帧头不完整")
+		return cloudPCMFrame{}, true, errors.New("AirSIM PCM 帧头不完整")
 	}
 	headerBytes := int(binary.BigEndian.Uint16(wire[6:8]))
 	if wire[4] != cloudPCMFrameVersion || headerBytes != cloudPCMFrameHeaderBytes {
-		return cloudPCMFrame{}, true, errors.New("DJPM1 PCM 帧版本无效")
+		return cloudPCMFrame{}, true, errors.New("AirSIM PCM 帧版本无效")
 	}
 	payload := wire[headerBytes:]
 	if len(payload) != cloudPCMFrameBytes {
-		return cloudPCMFrame{}, true, fmt.Errorf("DJPM1 PCM 负载长度=%d，期望 %d", len(payload), cloudPCMFrameBytes)
+		return cloudPCMFrame{}, true, fmt.Errorf("AirSIM PCM 负载长度=%d，期望 %d", len(payload), cloudPCMFrameBytes)
 	}
 	return cloudPCMFrame{
 		Sequence:              binary.BigEndian.Uint32(wire[8:12]),
@@ -1058,14 +1058,14 @@ func (framer *cloudPCMFramer) buffered() int { return len(framer.pending) }
 
 func cloudPCMHandshake(connection net.Conn) error {
 	_ = connection.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := connection.Write([]byte("DJ1PCM1\n")); err != nil {
+	if _, err := connection.Write([]byte("AIRSIMPCM1\n")); err != nil {
 		return err
 	}
-	acknowledgement := make([]byte, len("DJ1READY"))
+	acknowledgement := make([]byte, len("AIRSIMREADY"))
 	if _, err := io.ReadFull(connection, acknowledgement); err != nil {
 		return err
 	}
-	if string(acknowledgement) != "DJ1READY" {
+	if string(acknowledgement) != "AIRSIMREADY" {
 		return errors.New("模块 PCM 握手无效")
 	}
 	return connection.SetDeadline(time.Time{})
@@ -1138,7 +1138,7 @@ func dialCloudWebSocketAuthorized(ctx context.Context, endpoint, bearerToken str
 		authorization = "Authorization: Bearer " + bearerToken + "\r\n"
 	}
 	request := fmt.Sprintf(
-		"GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n%sUser-Agent: DJOneHub-QDC507/%s\r\n\r\n",
+		"GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n%sUser-Agent: AirSIM-QDC507/%s\r\n\r\n",
 		path, target.Host, key, authorization, agentVersion,
 	)
 	if _, err := io.WriteString(connection, request); err != nil {

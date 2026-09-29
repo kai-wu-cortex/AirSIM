@@ -23,10 +23,10 @@ import (
 const (
 	routerLANInterface         = "bridge0"
 	routerLANSubnet            = "192.168.225.0/24"
-	routerManagedNATChain      = "DJONEHUB_DNAT"
+	routerManagedNATChain      = "AIRSIM_DNAT"
 	routerHistoryRetentionDays = 31
-	routerHostsBegin           = "# DJONEHUB WRT LITE BEGIN"
-	routerHostsEnd             = "# DJONEHUB WRT LITE END"
+	routerHostsBegin           = "# AIRSIM WRT LITE BEGIN"
+	routerHostsEnd             = "# AIRSIM WRT LITE END"
 )
 
 var errRouterRateShapingUnavailable = errors.New("当前 QDC507 内核未包含 TBF/HTB，无法启用速率整形")

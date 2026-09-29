@@ -286,7 +286,7 @@ function dashboardHTML(nonce) {
   </aside>
   <div class="toast" id="toast" role="status" hidden></div>
   <script nonce="${nonce}">
-    const $=s=>document.querySelector(s), tokenKey='djonehub-dashboard-token'; let timer,selectedDevice,toastTimer,lastFocus;
+    const $=s=>document.querySelector(s), tokenKey='airsim-dashboard-token'; let timer,selectedDevice,toastTimer,lastFocus;
     const escapeText=v=>String(v??'');
     const relative=iso=>{const s=Math.max(0,Math.floor((Date.now()-Date.parse(iso))/1000));if(s<60)return s+' 秒前';if(s<3600)return Math.floor(s/60)+' 分钟前';return Math.floor(s/3600)+' 小时前'};
     const stateLabel=s=>({registered:'已注册',searching:'搜索网络',denied:'注册被拒',unregistered:'未注册',unknown:'未知'})[s]||'未知';

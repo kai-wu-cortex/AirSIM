@@ -69,7 +69,7 @@ func TestCloudPCMFrameRoundTripsSequenceTimestampAndPayload(t *testing.T) {
 		t.Fatalf("解码带头 PCM 帧失败: %v", err)
 	}
 	if !framed {
-		t.Fatal("DJPM1 帧应被识别为带序号媒体帧")
+		t.Fatal("AirSIM PCM 帧应被识别为带序号媒体帧")
 	}
 	if frame.Sequence != 42 || frame.TimestampMilliseconds != 1_800_000_000_123 {
 		t.Fatalf("帧身份=(%d,%d)，期望 (42,1800000000123)", frame.Sequence, frame.TimestampMilliseconds)

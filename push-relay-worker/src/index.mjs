@@ -147,7 +147,7 @@ async function connectDeviceCommands(request, env, deviceID) {
 
   const stub = env.COMMANDS.get(env.COMMANDS.idFromName(deviceID));
   const headers = new Headers(request.headers);
-  headers.set("x-djonehub-device-id", deviceID);
+  headers.set("x-airsim-device-id", deviceID);
   return stub.fetch(new Request("https://commands.internal/connect", { headers }));
 }
 
@@ -322,7 +322,7 @@ async function readCallActionResult(request, env, pathCallUUID, commandID) {
   }
   const authorization = request.headers.get("authorization") || "";
   const deviceSecret = authorization.match(/^Bearer\s+(.+)$/i)?.[1] || "";
-  const deviceID = request.headers.get("x-djonehub-device-id") || "";
+  const deviceID = request.headers.get("x-airsim-device-id") || "";
   const authenticated = await authenticate({
     device_id: deviceID,
     device_secret: deviceSecret,
@@ -740,10 +740,10 @@ async function connectCallMedia(request, env, callUUID) {
   const id = env.MEDIA.idFromName(callUUID.toLowerCase());
   const stub = env.MEDIA.get(id);
   const headers = new Headers(request.headers);
-  headers.set("x-djonehub-role", role);
-  headers.set("x-djonehub-call-id", call.call_id || "");
-  headers.set("x-djonehub-call-uuid", callUUID.toLowerCase());
-  headers.set("x-djonehub-generation", String(call.generation || 1));
+  headers.set("x-airsim-role", role);
+  headers.set("x-airsim-call-id", call.call_id || "");
+  headers.set("x-airsim-call-uuid", callUUID.toLowerCase());
+  headers.set("x-airsim-generation", String(call.generation || 1));
   const forwarded = new Request("https://media.internal/session", { headers });
   return stub.fetch(forwarded);
 }
@@ -758,7 +758,7 @@ export class CallMediaSession {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return jsonResponse(426, { error: "websocket upgrade required" });
     }
-    const role = request.headers.get("x-djonehub-role");
+    const role = request.headers.get("x-airsim-role");
     if (role !== "agent" && !MEDIA_CLIENT_ROLES.has(role)) {
       return jsonResponse(400, { error: "invalid media role" });
     }
@@ -778,9 +778,9 @@ export class CallMediaSession {
       role,
       owner: inheritsOwnership,
       pendingControl: inheritedPendingControl,
-      callID: request.headers.get("x-djonehub-call-id") || "",
-      callUUID: request.headers.get("x-djonehub-call-uuid") || "",
-      generation: Number(request.headers.get("x-djonehub-generation")) || 1,
+      callID: request.headers.get("x-airsim-call-id") || "",
+      callUUID: request.headers.get("x-airsim-call-uuid") || "",
+      generation: Number(request.headers.get("x-airsim-generation")) || 1,
     });
     this.state.acceptWebSocket(server, [role]);
     if (role === "agent") this.flushPendingControls(server);
@@ -1147,8 +1147,8 @@ async function receiveCall(request, env) {
         aps: {
           alert: { title: displayName, body: alertBody },
           sound: "default",
-          category: "DJONEHUB_INCOMING_CALL_MIRROR",
-          "thread-id": `djonehub-call-${call.call_uuid}`,
+          category: "AIRSIM_INCOMING_CALL_MIRROR",
+          "thread-id": `airsim-call-${call.call_uuid}`,
           "interruption-level": "time-sensitive",
         },
         event: "incoming_call_mirror",
@@ -1251,7 +1251,7 @@ async function receiveSMS(request, env) {
     aps: {
       alert: { title: message.sender, body: content },
       sound: "default",
-      "thread-id": `djonehub-sms-${message.sender}`.slice(0, 64),
+      "thread-id": `airsim-sms-${message.sender}`.slice(0, 64),
       "content-available": 1,
     },
     event: "incoming_sms",
@@ -1573,7 +1573,7 @@ function liveActivityPayload({ event, callID, number, displayName, phase, starte
   if (event === "start") {
     // iOS 18+ 要求显式请求该活动自己的 update token；App 随后会回传 Relay。
     aps["input-push-token"] = 1;
-    aps["attributes-type"] = "DJOneHubCallActivityAttributes";
+    aps["attributes-type"] = "AirSIMCallActivityAttributes";
     aps.attributes = { moduleName: "AirSIM" };
     aps.alert = { title: displayName, body: "模块语音来电", sound: "default" };
   }
@@ -1703,7 +1703,7 @@ function deviceKey(deviceID) {
 async function boundedCollapseID(value) {
   const text = stringValue(value);
   if (encoder.encode(text).byteLength <= 64) return text;
-  return `dj-${(await sha256Hex(text)).slice(0, 61)}`;
+  return `airsim-${(await sha256Hex(text)).slice(0, 57)}`;
 }
 
 async function sha256Hex(value) {

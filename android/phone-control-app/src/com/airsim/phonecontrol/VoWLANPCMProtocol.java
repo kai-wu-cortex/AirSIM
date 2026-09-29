@@ -1,8 +1,8 @@
 package com.airsim.phonecontrol;
 
 public final class VoWLANPCMProtocol {
-    public static final String MAGIC = "DJ1VWL1";
-    public static final String READY = "DJ1READY";
+    public static final String MAGIC = "AIRSIMVWL1";
+    public static final String READY = "AIRSIMREADY";
 
     private VoWLANPCMProtocol() {}
 

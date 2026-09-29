@@ -15,8 +15,8 @@ import (
 
 const (
 	usbCarrierPath           = "/sys/class/net/ecm0/carrier"
-	usbRebindStampPath       = "/run/djonehub-usb-rebind.uptime"
-	usbGadgetRebindStampPath = "/run/djonehub-ecm-gadget-rebind.uptime"
+	usbRebindStampPath       = "/run/airsim-usb-rebind.uptime"
+	usbGadgetRebindStampPath = "/run/airsim-ecm-gadget-rebind.uptime"
 	usbLinkDebounce          = 10 * time.Second
 	usbCarrierPollInterval   = time.Second
 	usbRebindMinimumSpacing  = 5 * time.Minute

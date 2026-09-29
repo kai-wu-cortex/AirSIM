@@ -8,8 +8,8 @@ import java.util.Arrays;
 
 final class BridgeProtocol {
     static final int FRAME_BYTES = 320;
-    static final byte[] CLIENT_HELLO = "DJ1PCM1\n".getBytes(StandardCharsets.US_ASCII);
-    static final byte[] SERVER_READY = "DJ1READY".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] CLIENT_HELLO = "AIRSIMPCM1\n".getBytes(StandardCharsets.US_ASCII);
+    static final byte[] SERVER_READY = "AIRSIMREADY".getBytes(StandardCharsets.US_ASCII);
 
     private BridgeProtocol() {}
 

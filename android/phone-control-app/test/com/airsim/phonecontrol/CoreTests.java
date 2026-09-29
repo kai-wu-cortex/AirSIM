@@ -131,8 +131,8 @@ public final class CoreTests {
 		byte[] key = PairingCrypto.deriveKey(
 				PairingCrypto.hex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"),
 				"9f9dc60b-3a36-4a0a-b87a-63a3ffb27145", "266145");
-		assertEquals("b6a2f9bdfb1e18788e51248f28f03e11a27991acc410e1c3942d10e893629671", PairingCrypto.hex(key));
-		byte[] sealed = PairingCrypto.hex("000102030405060708090a0b3d593b003c838130121871e8cd0b80bffe1581035f38a8167d83c83cb4a01dde734f70dcc6cfbd43a5d7c55a68a356c47624f16433fc13024d85749765fc7ab775065389bedb72fc1b");
+		assertEquals("a01f0098a807d3923ac6930169d7bd73ebaba0f9cb8a31381d88f576cfef7a8d", PairingCrypto.hex(key));
+		byte[] sealed = PairingCrypto.hex("000102030405060708090a0b75c99492c4401dcfc20a6a6f866ccf092fef1cf95cdce42915b5d24efa51fd61134af0e9f488d4bb0bd3b1bcad3265595a84229eaa120de59e4076434505756dad54e1aa5f1ede1d30");
 		assertEquals("{\"device_id\":\"device-test\",\"device_secret\":\"secret-test\"}",
 				new String(PairingCrypto.open(sealed, key, "9f9dc60b-3a36-4a0a-b87a-63a3ffb27145"), java.nio.charset.StandardCharsets.UTF_8));
 		assertEquals("AAEC_v8", PairingCrypto.base64URL(PairingCrypto.hex("000102feff")));
@@ -205,7 +205,7 @@ public final class CoreTests {
 		assertTrue(!replayCache.accept("nonce-1", 1_001L));
 		assertTrue(replayCache.accept("nonce-1", 1_031L));
 		VoWLANPCMProtocol.Preface pcmPreface = VoWLANPCMProtocol.parse(
-				"DJ1VWL1 1789090000 nonce-1 xyJYZyGVDVSARzo3dd9vM_luQBhKeneDd6vk2VWmIkE\n");
+				"AIRSIMVWL1 1789090000 nonce-1 xyJYZyGVDVSARzo3dd9vM_luQBhKeneDd6vk2VWmIkE\n");
 		assertEquals(1789090000L, pcmPreface.timestamp());
 		assertEquals("nonce-1", pcmPreface.nonce());
 		assertEquals("xyJYZyGVDVSARzo3dd9vM_luQBhKeneDd6vk2VWmIkE", pcmPreface.signature());

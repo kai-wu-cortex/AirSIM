@@ -42,4 +42,4 @@ tag = "v3-device-commands"
 new_sqlite_classes = ["DeviceCommandSession"]
 
 # Add a new AirSIM domain route only after its DNS and Cloudflare Worker
-# configuration have been created. Never reuse DJOneHub production bindings.
+# configuration have been created. Never reuse AirSIM production bindings.

@@ -70,10 +70,10 @@ public final class VoWLANControlGateway implements Closeable {
                 respond(peer, 404, "{\"error\":\"not_found\"}");
                 return;
             }
-            long timestamp = Long.parseLong(request.headers.getOrDefault("x-djonehub-vowlan-timestamp", "0"));
-            String nonce = request.headers.getOrDefault("x-djonehub-vowlan-nonce", "");
-            String signature = request.headers.getOrDefault("x-djonehub-vowlan-signature", "");
-            if (!"1".equals(request.headers.get("x-djonehub-vowlan-version"))) {
+            long timestamp = Long.parseLong(request.headers.getOrDefault("x-airsim-vowlan-timestamp", "0"));
+            String nonce = request.headers.getOrDefault("x-airsim-vowlan-nonce", "");
+            String signature = request.headers.getOrDefault("x-airsim-vowlan-signature", "");
+            if (!"1".equals(request.headers.get("x-airsim-vowlan-version"))) {
                 respond(peer, 401, "{\"error\":\"authentication_failed\"}");
                 return;
             }

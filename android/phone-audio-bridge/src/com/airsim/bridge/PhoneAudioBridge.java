@@ -108,7 +108,7 @@ public final class PhoneAudioBridge {
                             } finally {
                                 gate.release(client);
                             }
-                        }, "djonehub-phone-audio-session");
+                        }, "airsim-phone-audio-session");
                         session.start();
                     }
                 }
@@ -210,13 +210,13 @@ public final class PhoneAudioBridge {
             };
             Thread downlink = new Thread(
                 () -> captureDownlink(recorder, client, stats, running, stop),
-                "djonehub-phone-downlink");
+                "airsim-phone-downlink");
             Thread uplink = new Thread(
                 () -> playUplink(track, client, started, stats, running, stop),
-                "djonehub-phone-uplink");
+                "airsim-phone-uplink");
             Thread reporter = new Thread(
                 () -> reportStats(started, stats, running),
-                "djonehub-phone-stats");
+                "airsim-phone-stats");
             downlink.start();
             uplink.start();
             reporter.start();
@@ -410,7 +410,7 @@ public final class PhoneAudioBridge {
         fields.put("elapsed_ms", started == 0 ? 0 : SystemClock.elapsedRealtime() - started);
         fields.put("event", event);
         fields.put("pid", Process.myPid());
-        fields.put("protocol", "dj1pcm1");
+        fields.put("protocol", "airsimpcm1");
         fields.put("sdk", Build.VERSION.SDK_INT);
         fields.put("uid", Process.myUid());
         fields.putAll(extra);

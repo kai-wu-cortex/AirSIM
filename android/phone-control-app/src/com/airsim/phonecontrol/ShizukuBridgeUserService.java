@@ -17,7 +17,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 public final class ShizukuBridgeUserService extends Binder {
-    private static final String TAG = "DJOneHubShizuku";
+    private static final String TAG = "AirSIMShizuku";
     private static final int DESTROY_TRANSACTION = 16777115;
     private static final int DESTROY_TRANSACTION_AIDL = 16777114;
 
@@ -85,7 +85,7 @@ public final class ShizukuBridgeUserService extends Binder {
             builder.environment().put("CLASSPATH", sourceApk);
             bridgeProcess = builder.start();
             java.lang.Process launched = bridgeProcess;
-            Thread monitor = new Thread(() -> monitorBridge(launched), "djonehub-shizuku-pcm-monitor");
+            Thread monitor = new Thread(() -> monitorBridge(launched), "airsim-shizuku-pcm-monitor");
             monitor.setDaemon(true);
             monitor.start();
             Log.i(TAG, "PCM bridge process started");
@@ -97,7 +97,7 @@ public final class ShizukuBridgeUserService extends Binder {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                 launched.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
-            while ((line = reader.readLine()) != null) Log.i("DJOneHubPCM", line);
+            while ((line = reader.readLine()) != null) Log.i("AirSIMPCM", line);
         } catch (IOException error) {
             Log.w(TAG, "PCM log stream ended", error);
         }

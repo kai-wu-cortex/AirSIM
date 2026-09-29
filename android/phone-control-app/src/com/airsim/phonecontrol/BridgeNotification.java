@@ -8,7 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 
 public final class BridgeNotification {
-    public static final String CHANNEL = "djonehub_bridge_status";
+    public static final String CHANNEL = "airsim_bridge_status";
     public static final int WATCHDOG_ID = 5071;
     private static final int CALL_ID = 5072;
     public static final int VOWLAN_ID = 5073;

@@ -721,7 +721,7 @@ func (p *pushManager) postJSONResponse(client *http.Client, endpoint string, val
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("User-Agent", "DJOneHub-QDC507/"+agentVersion)
+	request.Header.Set("User-Agent", "AirSIM-QDC507/"+agentVersion)
 	response, err := client.Do(request)
 	if err != nil {
 		return err

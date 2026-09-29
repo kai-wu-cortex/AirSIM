@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	agentDataDirectory = "/data/djonehub"
+	agentDataDirectory = "/data/airsim"
 	notesFilePath      = agentDataDirectory + "/esim-notes.json"
 	voiceRuntimePath   = agentDataDirectory + "/voice-runtime"
 )
