@@ -1,30 +1,38 @@
-# AirSIM Samsung Phone Audio Bridge
+# AirSIM 三星通话音频桥
 
-This shell-UID Android service exposes the Samsung cellular call audio path through the AirSIM PCM contract:
+该组件运行在三星 Android 的 Shizuku `UserService` 中，以 shell UID 访问系统通话音频，并向 AirSIM 控制 App 与 AVF Agent 提供双向 PCM。
 
-- cellular remote party to Relay: `AudioRecord.VOICE_DOWNLINK`
-- Relay/iOS microphone to cellular remote party: `USAGE_VOICE_COMMUNICATION` plus Samsung tag `VOICE_TX`
-- transport: `AIRSIMPCM1\n` / `AIRSIMREADY`, then full-duplex 8 kHz mono PCM16LE
-- Relay frame: 320 bytes / 20 ms
+## 音频方向
 
-The bridge never stores PCM. JSONL logs contain lifecycle, route, aggregate byte/frame/peak counts, and errors only.
+- 下行：`AudioRecord.VOICE_DOWNLINK` → Agent / Relay → iPhone 或 Apple Watch
+- 上行：iPhone 或 Apple Watch 麦克风 → Agent / Relay → `USAGE_VOICE_COMMUNICATION` 与三星 `VOICE_TX`
+- 格式：8 kHz、单声道、PCM16LE、每帧 320 字节
+- 握手：`AIRSIMPCM1\n` / `AIRSIMREADY`
 
-## Build
+音频桥不保存 PCM。JSONL 日志仅包含生命周期、路由、帧数、字节数、峰值与错误信息。
+
+## 构建与测试
 
 ```sh
 ./android/phone-audio-bridge/build.sh
 ```
 
-## Development-phone lifecycle
+构建会同时运行 JVM 单元测试，并输出：
 
-The listener must use Android's AVF-private interface, not Wi-Fi, hotspot, cellular, or a wildcard address. Resolve it on every VM boot:
+```text
+android/phone-audio-bridge/build/airsim-phone-audio-bridge.jar
+```
+
+## 三星设备运行
+
+音频桥必须绑定 Android AVF 私网接口。每次 AVF 启动后先解析当前地址：
 
 ```sh
 adb -s DEVICE shell 'ip -o -4 addr show avf_tap_fixed'
 ssh -p 2222 droid@127.0.0.1 'ip route'
 ```
 
-Start and inspect the bridge:
+启动和检查：
 
 ```sh
 ADB=/path/to/adb ADB_SERIAL=DEVICE LISTEN_HOST=AVF_ANDROID_IP \
@@ -35,11 +43,11 @@ ADB=/path/to/adb ADB_SERIAL=DEVICE \
   ./android/phone-audio-bridge/run-device-bridge.sh logs
 ```
 
-The runner rejects unrecognized and externally reachable interfaces. It starts with `nohup`, but Android may still reclaim a shell process. Samsung Terminal may also release the AVF VM when its process loses the VM reference. Until the thin Android control app/watchdog exists, a paired development host must detect and restart both layers.
+Runner 会拒绝通配地址、外部 Wi-Fi、热点、蜂窝和其他非 AVF 私网接口。
 
-## Linux Agent
+## Agent 配置
 
-Install the systemd drop-in after replacing `AVF_ANDROID_IP` with the current private address:
+systemd 环境示例：
 
 ```ini
 [Service]
@@ -47,7 +55,7 @@ Environment=AIRSIM_VOICE_BACKEND=samsung_android
 Environment=AIRSIM_SAMSUNG_PCM_ADDRESS=AVF_ANDROID_IP:7580
 ```
 
-Run the backend handshake probe before restarting the service:
+启动前可执行握手探针：
 
 ```sh
 AIRSIM_RUNTIME_PROFILE=android-avf \
@@ -56,8 +64,9 @@ AIRSIM_SAMSUNG_PCM_ADDRESS=AVF_ANDROID_IP:7580 \
 /usr/local/bin/airsim-agent --startup-probe voice-backend
 ```
 
-The Agent health response reports `voice_backend=samsung_android` and `call_audio=true` but does not expose the configured private endpoint.
+## 运行边界
 
-## Verified boundary
-
-The Android audio capability and Agent-to-bridge handshake are verified. A real Relay/iOS speech call still requires the Android Telecom control plane to publish call state and execute answer/reject/hangup. Do not claim automatic silent incoming calls or 10-second local failover from this media component alone.
+- 仅允许一个已认证客户端占用当前通话的 PCM 会话。
+- 通话结束、热点变化或任一方向断开时立即关闭双向流。
+- Android 可能回收 shell 进程；控制 App 的 Shizuku 管理器负责检测并重启服务。
+- 真实双向语音必须与 Android Telecom 控制面、AVF Agent 和 iOS/watchOS 客户端联合验证。

@@ -1,25 +1,48 @@
-# AirSIM — Samsung 通话链路独立项目
+# AirSIM
 
-此目录是从旧项目工作树复制出的独立开发项目，原仓库未被移动或覆盖。范围为三星 Android 电话端、Shizuku 音频桥、Android AVF Linux Agent、iPhone/Watch 的三星 VoWLAN 与云端通话，以及独立 Cloudflare Relay。
+AirSIM 是以三星 Android 手机为蜂窝通信终端的跨设备通话与短信系统。三星端负责运营商通话、短信和系统音频控制；Android AVF 中的 Agent 负责设备状态、云端连接和命令编排；iPhone 与 Apple Watch 提供 CallKit、拨号、接听、短信和通话界面；Cloudflare Relay 提供公网事件、推送与媒体中继。
 
-| 目录 | 用途 |
-| --- | --- |
-| `android/phone-control-app` | 三星默认电话 App、热点配对、VoWLAN、诊断 |
-| `android/phone-audio-bridge` | Shizuku shell UID 双向 PCM 桥 |
-| `module/module-agent` | Android AVF Agent 与 Relay 客户端 |
-| `iPadOS` | iPhone/Watch VoWLAN、CallKit、短信和云端媒体 |
-| `push-relay-worker` | AirSIM 专用 Cloudflare Worker 模板、测试 |
+## 系统组成
 
-## 隔离边界
+| 目录 | 组件 | 主要职责 |
+| --- | --- | --- |
+| `android/phone-control-app` | 三星 Android 控制 App | 默认电话角色、Android Telecom、配对、VoWLAN、短信与守护服务 |
+| `android/phone-audio-bridge` | 三星音频桥 | 通过 Shizuku 提供双向通话 PCM |
+| `module/module-agent` | Android AVF Agent | 控制 API、设备状态、Relay 心跳、命令与媒体编排 |
+| `iOS` | iPhone / Apple Watch App | CallKit、PushKit、VoWLAN、短信、实时活动与通话媒体 |
+| `push-relay-worker` | Cloudflare Relay | 设备注册、APNs、云端命令、Dashboard 与公网媒体 |
 
-- Android 包名为 `com.airsim.phonecontrol` / `com.airsim.bridge`，iOS/Watch Bundle ID 为 `com.eric3u.airsim*`；**不会覆盖**旧项目的三星端或 iOS 安装。
-- iOS 默认入口仅显示三星配对、VoWLAN 与独立 Relay。旧 QDC507 模块的首次连接向导、设置页、Agent 维修 UI 和三个固件包没有进入 App 构建。拨号、短信与轮询仅选择已验证的三星 VoWLAN 或云端；不会回退到 `192.168.225.1`。
-- Agent 源码仍保留来自旧项目的 QDC507 兼容实现，**不可把它当作已完成裁剪的三星专用发行包**。运行时默认 profile 为 `android-avf`。发布前需要进一步拆除 QDC507 编译路径与旧更新器，并做实机回归。
-- Relay 的 `wrangler.example.toml` 仅是模板；独立 KV、Durable Objects、APNs 密钥、域名和苹果签名均需另行配置。没有使用原生产地址或密钥。
+## 通信链路
+
+局域网模式使用三星热点或同一局域网：
+
+```text
+iPhone / Apple Watch
+        │ VoWLAN 控制与 PCM
+        ▼
+三星 Android 控制 App
+        │ AVF 私网
+        ▼
+Android AVF Agent ── Android Telecom / Shizuku 音频桥
+```
+
+远程模式通过独立 Relay：
+
+```text
+iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Android
+```
+
+每通电话在建立时选择 VoWLAN 或云端 Relay，并在通话结束前保持该传输路径。
+
+## 开发环境
+
+- Android：JDK 17、Android SDK Platform 35、Build Tools 35
+- iOS / watchOS：Xcode
+- Agent：Go
+- Relay：Node.js 与 Cloudflare Wrangler
+- 三星测试手机：Android Telecom、Shizuku、无线调试与 Android AVF 环境
 
 ## 本地验证
-
-Android：JDK 17、Android SDK Platform/Build Tools 35；iOS：Xcode；Agent：Go；Relay：Node.js。
 
 ```sh
 ./android/phone-control-app/test.sh
@@ -27,10 +50,28 @@ Android：JDK 17、Android SDK Platform/Build Tools 35；iOS：Xcode；Agent：G
 ./android/phone-control-app/build.sh
 (cd module/module-agent && go test ./...)
 (cd push-relay-worker && npm test && npm run check)
-xcodebuild -project iPadOS/AirSIM.xcodeproj -scheme AirSIM \
-  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build-for-testing
+xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
 ```
 
-三星端需要用户自行设置为默认电话 App、授权 Shizuku，并与 Agent 进行一次性配对。请勿把 AVF 私网服务、PCM Bridge 或设备密钥暴露到公网。项目内不应提交 APK、调试 keystore、APNs `.p8`、Agent bearer token、配对凭据及 PCM 数据。
+## 三星设备部署流程
 
-当前仅完成源码分离和本机构建；**未**签名安装、部署 Relay、迁移已有用户凭据或验证三星实机双向通话。新包名意味着旧应用的配对与授权不会自动继承。
+1. 在三星手机安装 AirSIM，并将其设置为默认电话 App。
+2. 启动 Shizuku，向 AirSIM 授予权限，并确认音频桥可用。
+3. 在 Android AVF 中部署 Agent，配置私网地址、控制令牌和 Relay 注册信息。
+4. 在三星端开启配对窗口，在 iPhone 上输入六位配对码。
+5. 验证 VoWLAN 健康状态、拨号、接听、短信和双向音频。
+6. 配置独立 Cloudflare Relay 与 APNs 后，再验证远程模式。
+
+## 安全要求
+
+- AVF 服务和 PCM 端口只能监听三星设备内部私网。
+- VoWLAN 请求必须经过时间戳、随机数和 HMAC 校验。
+- 配对密钥、设备 Secret、Agent token、APNs `.p8` 和真实号码不得提交到仓库。
+- 日志只能记录生命周期、计数和错误，不得记录密钥或 PCM 内容。
+- APK、签名文件、生产配置和本地 Relay 密钥均由 `.gitignore` 排除。
+
+## 当前状态
+
+仓库已完成 Android、Agent、iOS/watchOS 与 Relay 的源码整合和本地自动化验证。生产 Relay、Apple 签名、三星实机长期稳定性和真实双向通话仍需在目标环境中完成验收。

@@ -9,7 +9,7 @@ android/phone-audio-bridge/build/
 **/.build/
 **/DerivedData/
 **/build-device/
-iPadOS/build/
+iOS/build/
 *.ipa
 *.apk
 *.aab

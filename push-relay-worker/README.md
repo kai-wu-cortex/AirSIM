@@ -1,20 +1,57 @@
-# AirSIM Push Relay
+# AirSIM Cloudflare Relay
 
-AirSIM 的独立 Cloudflare Worker。处理三星 AVF Agent 心跳、设备注册、CallKit/PushKit 来电、短信 APNs、Dashboard 与公网双向 PCM。`wrangler.example.toml` 不含生产 namespace、路由或密钥，不能直接部署到既有旧版 Worker。
+该 Worker 为三星 Android AirSIM 系统提供公网控制与媒体中继，使 iPhone 和 Apple Watch 在不连接三星局域网时仍可接收来电、发送命令和使用通话音频。
 
-## 本地检查
+## 主要职责
+
+- 注册 iPhone、Apple Watch、Live Activity 与三星 AVF Agent。
+- 接收 Agent 心跳、通话事件、短信事件和设备状态。
+- 发送 iPhone PushKit、通知 APNs、Watch VoIP 与 ActivityKit 推送。
+- 维护设备命令、通话动作及其结果。
+- 通过 Durable Objects 中继已认证的双向媒体 WebSocket。
+- 提供受保护的运维 Dashboard 与虚拟来电测试入口。
+
+## 本地验证
 
 ```sh
+cd push-relay-worker
 npm ci
 npm test
 npm run check
 ```
 
-## 新环境部署准备
+## Cloudflare 资源
 
-1. 复制 `wrangler.example.toml` 为本地 `wrangler.toml`，填入**新建**的 AirSIM KV namespace 与 Apple Team/Key ID；配置新域名。
-2. 在 Apple Developer 建立 `com.eric3u.airsim`、Watch 和 Activity 扩展对应 App ID、PushKit/APNs 能力及签名。不要复用旧版 App 的配置文件或假定旧 token 可用。
-3. 用 `wrangler secret put APNS_P8` 与 `wrangler secret put DASHBOARD_TOKEN` 设置新环境密钥。不要提交 `.p8`、设备 Secret、Dashboard token 或真实用户号码。
-4. 验证全新 AirSIM 注册、Agent 心跳和 APNs sandbox/production 环境，然后再进行域名切换与实机测试。
+部署环境需要独立创建：
 
-Worker、Agent 和 iOS 的 JSON 与媒体协议字段必须同步演进；这不是将新 Worker 部署到原生产域名的许可。
+- KV namespace
+- 设备状态与命令 Durable Objects
+- Worker 路由或自定义域名
+- Dashboard 访问 token
+- Apple APNs 私钥、Team ID 与 Key ID
+
+复制模板并填写新环境配置：
+
+```sh
+cp wrangler.example.toml wrangler.toml
+wrangler secret put APNS_P8
+wrangler secret put DASHBOARD_TOKEN
+```
+
+## Apple 配置
+
+在 Apple Developer 中为以下 Bundle ID 配置 App ID、PushKit、APNs、ActivityKit 与签名：
+
+- `com.eric3u.airsim`
+- `com.eric3u.airsim.watchkitapp`
+- `com.eric3u.airsim.liveactivity`
+
+部署后分别验证 APNs sandbox 与 production 环境，确认 iPhone、Watch 和实时活动使用正确 topic。
+
+## 安全要求
+
+- 设备 Secret、Dashboard token 和 APNs `.p8` 只能通过 Worker Secret 保存。
+- 所有设备命令必须绑定已认证的设备身份。
+- 通话媒体必须校验 call UUID、角色、generation 与单次 call secret。
+- Dashboard 不显示完整凭据、Push token、电话号码或媒体内容。
+- Worker、Agent 和 iOS/watchOS 的 JSON 与媒体协议变更必须同步发布。

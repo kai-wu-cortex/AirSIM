@@ -1,12 +1,63 @@
 # AirSIM Android AVF Agent
 
-此 Agent 源自旧项目控制面，但 AirSIM 的普通服务启动现在只接受 `android-avf` + `samsung_android`，缺少三星私网 PCM 地址时会拒绝启动。不会自动打开 QDC507 的 AT 端口，也不附带 QDC507 构建、刷写或固件包。
+Agent 运行在三星 Android 的 AVF Linux 环境中，连接三星控制 App、通话音频桥、Cloudflare Relay 与 iPhone/Apple Watch 客户端。
+
+## 主要职责
+
+- 暴露通话、短信、设备状态和诊断 API。
+- 接收三星 Android 上报的 Telecom 与短信事件。
+- 向三星控制 App 分发拨号、接听、拒接、挂断、DTMF 和短信命令。
+- 管理 Relay 心跳、设备注册、云端命令与通话媒体。
+- 校验 Android 控制 token，并限制私网调用来源。
+- 监控三星 PCM 后端并上报媒体健康状态。
+
+## 构建与测试
 
 ```sh
+cd module/module-agent
 go test ./...
 GOOS=linux GOARCH=arm64 go build -o /tmp/airsim-agent .
 ```
 
-部署时须在设备内明确配置 `AIRSIM_RUNTIME_PROFILE=android-avf`、`AIRSIM_VOICE_BACKEND=samsung_android`、`AIRSIM_SAMSUNG_PCM_ADDRESS=<AVF 私网 IP>:7580`，以及 `AIRSIM_ANDROID_CONTROL_TOKEN_FILE` 指向权限受限的本地 token 文件。更换这些配置名时需要 Android、iOS 与 Agent 同步迁移。请勿把 token 或设备私网地址提交到仓库。
+## 必需配置
 
-Go 源码中仍有旧 QDC507 兼容函数与接口模型。它们在 AirSIM 正常启动路径被拒绝，但**尚未完成代码级裁剪与三星实机验证**。不要直接把此源码当作已审核的三星发行包。
+```sh
+AIRSIM_RUNTIME_PROFILE=android-avf
+AIRSIM_VOICE_BACKEND=samsung_android
+AIRSIM_SAMSUNG_PCM_ADDRESS=<AVF_PRIVATE_IP>:7580
+AIRSIM_ANDROID_CONTROL_TOKEN_FILE=/path/to/airsim-android-control.token
+```
+
+控制 token 文件必须只允许 Agent 服务账号读取。私网地址和 token 不得提交到仓库或写入公开日志。
+
+## 启动验证
+
+在重启正式服务前运行：
+
+```sh
+AIRSIM_RUNTIME_PROFILE=android-avf \
+AIRSIM_VOICE_BACKEND=samsung_android \
+AIRSIM_SAMSUNG_PCM_ADDRESS=<AVF_PRIVATE_IP>:7580 \
+/usr/local/bin/airsim-agent --startup-probe voice-backend
+```
+
+探针会验证配置、私网地址、TCP 连接与 `AIRSIMPCM1` / `AIRSIMREADY` 握手。
+
+## 与三星控制 App 的接口
+
+三星 App 使用受保护的 `/api/android/*` 接口完成：
+
+- 配对注册
+- 通话与短信事件上报
+- 命令长轮询
+- 命令结果回传
+- 健康状态与能力查询
+
+外部客户端不得直接访问 AVF 内部控制地址。VoWLAN 由三星 App 执行认证、路由白名单和响应大小限制后再转发。
+
+## 安全与运维
+
+- 服务运行配置固定为 `android-avf` 与 `samsung_android`。
+- 日志隐藏 Android 控制请求正文、短信内容、设备 Secret 和 PCM 数据。
+- Relay、Android App 和 Agent 的协议字段必须同步发布。
+- 生产部署前需要完成三星实机通话、短信、重启恢复和长时间稳定性验收。
