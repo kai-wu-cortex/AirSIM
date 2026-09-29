@@ -9,19 +9,26 @@ import (
 	"time"
 )
 
-func TestVoiceBackendDefaultsToQDC507(t *testing.T) {
-	config, err := loadVoiceBackend(func(string) string { return "" })
+func TestVoiceBackendDefaultsToSamsungAndRequiresPrivateEndpoint(t *testing.T) {
+	_, err := loadVoiceBackend(func(string) string { return "" })
+	if err == nil {
+		t.Fatal("未设置三星 PCM 私网端点时必须拒绝启动")
+	}
+	config, err := loadVoiceBackend(func(key string) string {
+		if key == "DJONEHUB_SAMSUNG_PCM_ADDRESS" { return "192.168.240.1:7580" }
+		return ""
+	})
 	if err != nil {
 		t.Fatalf("默认语音后端失败: %v", err)
 	}
-	if config.kind != voiceBackendQDC507 {
-		t.Fatalf("默认后端=%q，期望 %q", config.kind, voiceBackendQDC507)
+	if config.kind != voiceBackendSamsungAndroid {
+		t.Fatalf("默认后端=%q，期望 %q", config.kind, voiceBackendSamsungAndroid)
 	}
-	if config.endpoint != "192.168.225.1:7580" {
+	if config.endpoint != "192.168.240.1:7580" {
 		t.Fatalf("默认端点=%q", config.endpoint)
 	}
-	if !config.requiresLocalRuntime() {
-		t.Fatal("QDC507 必须准备本机语音运行时")
+	if config.requiresLocalRuntime() {
+		t.Fatal("AirSIM 不得准备 QDC507 本机语音运行时")
 	}
 }
 

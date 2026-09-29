@@ -136,7 +136,7 @@ func main() {
 		// 使用最早可见标记，区分包初始化崩溃与 main 内部崩溃。
 		fmt.Println("启动探针标记: main-entry")
 	}
-	logger := log.New(os.Stdout, "qdc507-agent: ", log.LstdFlags|log.LUTC)
+	logger := log.New(os.Stdout, "airsim-agent: ", log.LstdFlags|log.LUTC)
 	go startRuntimeMonitor(logger)
 	probed, err := runStartupProbe(logger)
 	if err != nil {
@@ -147,15 +147,13 @@ func main() {
 	}
 
 	service := newAgent(atDevice)
-	modemAvailable := true
-	if err := service.at.open(); err != nil {
-		if service.profile.RequiresModem {
-			logger.Fatalf("无法打开基带 AT 端口: %v", err)
-		}
-		modemAvailable = false
-		logger.Printf("运行配置 %s 不直通基带，以控制面降级模式启动: %v", service.profile.Name, err)
-		service.debug.add("system", "degraded", "modem hardware unavailable", err.Error(), map[string]string{"runtime_profile": service.profile.Name})
+	if !service.profile.AndroidTelecom {
+		logger.Fatal("AirSIM 仅支持 android-avf 运行配置，不启动 QDC507 模块模式")
 	}
+	if service.voiceBackendErr != nil || service.voiceBackend.kind != voiceBackendSamsungAndroid {
+		logger.Fatalf("AirSIM 需要有效的三星私网 PCM 地址: %v", service.voiceBackendErr)
+	}
+	modemAvailable := false
 	if modemAvailable {
 		defer service.at.close()
 		service.at.startURCMonitor()

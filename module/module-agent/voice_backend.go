@@ -24,7 +24,7 @@ type voiceBackendConfig struct {
 func loadVoiceBackend(getenv func(string) string) (voiceBackendConfig, error) {
 	kind := voiceBackendKind(strings.TrimSpace(getenv("DJONEHUB_VOICE_BACKEND")))
 	if kind == "" {
-		kind = voiceBackendQDC507
+		kind = voiceBackendSamsungAndroid
 	}
 	switch kind {
 	case voiceBackendQDC507:
@@ -49,7 +49,7 @@ func (a *agent) voicePCMEndpoint() (string, error) {
 		return "", a.voiceBackendErr
 	}
 	if a.voiceBackend.kind == "" && a.voiceBackend.endpoint == "" {
-		return qdc507PCMEndpoint, nil
+		return "", errors.New("AirSIM 三星 PCM 端点未配置")
 	}
 	if a.voiceBackend.endpoint == "" {
 		return "", errors.New("语音 PCM 端点未配置")
@@ -85,7 +85,7 @@ func samsungPCMEndpointForRoute(configured string, route map[string]string) stri
 
 func (a *agent) usesLocalVoiceRuntime() bool {
 	return a.voiceBackendErr == nil &&
-		(a.voiceBackend.kind == "" || a.voiceBackend.requiresLocalRuntime())
+		a.voiceBackend.requiresLocalRuntime()
 }
 
 func (a *agent) voiceBackendName() string {
@@ -93,7 +93,7 @@ func (a *agent) voiceBackendName() string {
 		return "invalid"
 	}
 	if a.voiceBackend.kind == "" {
-		return string(voiceBackendQDC507)
+		return "unconfigured"
 	}
 	return string(a.voiceBackend.kind)
 }

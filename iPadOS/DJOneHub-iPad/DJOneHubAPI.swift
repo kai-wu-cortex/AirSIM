@@ -7,7 +7,8 @@ enum LocalAgentRoute: Equatable, Sendable {
     var baseURL: URL {
         switch self {
         case .moduleLocal:
-            return URL(string: "http://192.168.225.1:7575/")!
+            // Legacy case retained only for decoding compatibility. AirSIM never contacts QDC507.
+            return URL(string: "http://127.0.0.1:9/")!
         case let .vowlan(endpoint, _):
             return endpoint.controlBaseURL
         }
@@ -15,7 +16,7 @@ enum LocalAgentRoute: Equatable, Sendable {
 
     var traceDescription: String {
         switch self {
-        case .moduleLocal: return "USB ECM · 固定模块私网"
+        case .moduleLocal: return "已停用的旧模块路线"
         case .vowlan: return "VoWLAN · 同一局域网"
         }
     }
@@ -372,6 +373,9 @@ struct DJOneHubAPI: Sendable {
         uploadFileURL: URL? = nil,
         recordVerboseTrace: Bool = true
     ) async throws -> WiredHTTPResponse {
+        guard AirSIMRoutePolicy.permits(route) else {
+            throw APIError.disabledLegacyRoute
+        }
         var request = originalRequest
         let method = request.httpMethod?.uppercased() ?? "GET"
         let path: String = {
@@ -446,12 +450,14 @@ enum APIError: LocalizedError {
     case invalidResponse
     case http(Int, String?)
     case unreadablePayload(String)
+    case disabledLegacyRoute
 
     var errorDescription: String? {
         switch self {
         case .invalidResponse: return "模块代理返回了无效响应"
         case let .http(status, message): return message?.isEmpty == false ? message : "请求失败（HTTP \(status)）"
         case let .unreadablePayload(message): return message
+        case .disabledLegacyRoute: return "AirSIM 不支持旧大疆模块控制路线"
         }
     }
 }

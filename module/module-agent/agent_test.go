@@ -938,7 +938,7 @@ func TestStopVoiceRouteIsIdempotentWhileCleanupIsRunning(t *testing.T) {
 	}
 }
 
-func TestStopVoiceRouteOnlyStopsMediaAfterSuccessfulStart(t *testing.T) {
+func TestSamsungStopVoiceRouteNeverTouchesQDC507Media(t *testing.T) {
 	original := stopVoiceMediaRouteForLifecycle
 	defer func() { stopVoiceMediaRouteForLifecycle = original }()
 	stops := 0
@@ -950,11 +950,11 @@ func TestStopVoiceRouteOnlyStopsMediaAfterSuccessfulStart(t *testing.T) {
 		t.Fatalf("未启动 PCM 的拒接路径不应清理媒体，实际=%d", stops)
 	}
 
-	withPCM := &agent{}
+	withPCM := &agent{voiceBackend: voiceBackendConfig{kind: voiceBackendSamsungAndroid}}
 	withPCM.voice.mediaRouteStarted = true
 	withPCM.stopVoiceRoute()
-	if stops != 1 {
-		t.Fatalf("已启动 PCM 的通话结束应清理一次媒体，实际=%d", stops)
+	if stops != 0 {
+		t.Fatalf("三星 PCM 停止时不得执行 QDC507 媒体清理，实际=%d", stops)
 	}
 	if withPCM.voice.mediaRouteStarted {
 		t.Fatal("清理后 mediaRouteStarted 必须复位")

@@ -9,6 +9,17 @@ final class AirSIMTests: XCTestCase {
         XCTAssertFalse(AirSIMRoutePolicy.permits(.moduleLocal))
     }
 
+    func testLegacyModuleRequestIsRejectedBeforeNetworkAccess() async {
+        do {
+            _ = try await DJOneHubAPI().health()
+            XCTFail("旧模块路线不应发出请求")
+        } catch APIError.disabledLegacyRoute {
+            // Expected: the old DJI route is blocked at the transport boundary.
+        } catch {
+            XCTFail("预期得到旧路线已停用错误，实际为 \(error)")
+        }
+    }
+
     func testDialTransportPrefersVoWLANOverCloud() {
         let route = DialPadTransportPresentation.make(
             vowlanOnline: true,
