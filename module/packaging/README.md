@@ -32,7 +32,7 @@ airsim-avf-agent_<version>-<release>_arm64.deb
 构建正式包时，将 Ed25519 私钥保存在仓库之外，并把对应的 32 字节原始公钥以 Base64 注入 installer：
 
 ```sh
-AIRSIM_PACKAGE_VERSION=0.4.2 \
+AIRSIM_PACKAGE_VERSION=0.4.3 \
 AIRSIM_PACKAGE_RELEASE=1 \
 AIRSIM_RELEASE_PUBLIC_KEY_BASE64='<base64-raw-public-key>' \
 AIRSIM_RELEASE_PRIVATE_KEY='/secure/path/release-ed25519.pem' \

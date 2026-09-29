@@ -4,6 +4,11 @@ set -eu
 release_base=${AIRSIM_RELEASE_BASE_URL:-https://github.com/kai-wu-cortex/AirSIM/releases/latest/download}
 test_root=${AIRSIM_BOOTSTRAP_TEST_ROOT:-}
 release_public_key='@AIRSIM_RELEASE_PUBLIC_KEY_BASE64@'
+license_url=https://github.com/kai-wu-cortex/AirSIM/blob/main/LICENSE
+required_notice='Required Notice: Copyright 2026 AirSIM contributors. AirSIM is licensed under the PolyForm Noncommercial License 1.0.0. Commercial use requires separate written permission from the copyright holder.'
+
+printf '%s\n' "$required_notice"
+printf 'License terms: %s\n' "$license_url"
 
 if [ -z "$test_root" ]; then
     if [ "$(id -u)" -ne 0 ]; then

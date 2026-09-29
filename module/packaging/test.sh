@@ -11,13 +11,13 @@ release_public=$(openssl pkey -in "$test_root/release-private.pem" -pubout -outf
     | tail -c 32 | base64 | tr -d '\n')
 
 AIRSIM_DIST_DIR="$test_root/dist" \
-AIRSIM_PACKAGE_VERSION=0.4.2 \
+AIRSIM_PACKAGE_VERSION=0.4.3 \
 AIRSIM_PACKAGE_RELEASE=1 \
 AIRSIM_RELEASE_PUBLIC_KEY_BASE64="$release_public" \
 AIRSIM_RELEASE_PRIVATE_KEY="$test_root/release-private.pem" \
     "$script_dir/build-avf-deb.sh"
 
-package="$test_root/dist/airsim-avf-agent_0.4.2-1_arm64.deb"
+package="$test_root/dist/airsim-avf-agent_0.4.3-1_arm64.deb"
 test -f "$package"
 test -f "$package.sha256"
 test -f "$package.sig"
@@ -38,7 +38,7 @@ mkdir -p "$extract_dir"
 
 control=$(tar -xOzf "$extract_dir/control.tar.gz" ./control)
 printf '%s\n' "$control" | grep -qx 'Package: airsim-avf-agent'
-printf '%s\n' "$control" | grep -qx 'Version: 0.4.2-1'
+printf '%s\n' "$control" | grep -qx 'Version: 0.4.3-1'
 printf '%s\n' "$control" | grep -qx 'Architecture: arm64'
 
 contents=$(tar -tzf "$extract_dir/data.tar.gz")

@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-version=${AIRSIM_PACKAGE_VERSION:-0.4.2}
+version=${AIRSIM_PACKAGE_VERSION:-0.4.3}
 release=${AIRSIM_PACKAGE_RELEASE:-1}
 package_version="$version-$release"
 dist_dir=${AIRSIM_DIST_DIR:-"$repo_root/dist"}
