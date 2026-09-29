@@ -1,0 +1,105 @@
+# AirSIM 全项目 Claude 部署辅助
+
+你正在处理 AirSIM：一个用三星 Android 手机承载蜂窝通话与短信，并让 iPhone / Apple Watch 通过 VoWLAN 或 Cloudflare Relay 使用这些能力的多端项目。
+
+## 开始前
+
+依次完成：
+
+1. 阅读根目录 `README.md`。
+2. 阅读目标子目录的 `README.md`、源码和测试。
+3. 运行 `git status --short`，保留用户现有改动。
+4. 用 `rg` 查找跨端协议、环境变量、端口或 Bundle ID 的全部引用。
+5. 只修改任务需要的文件，并同步相关测试与文档。
+
+不要依赖旧品牌、旧部署域名或记忆中的 Cloudflare/Apple 行为。当前源码和锁定版本是事实来源。
+
+## 系统边界
+
+- `android/phone-control-app`：三星默认电话角色、Android Telecom、短信、VoWLAN、配对、AVF 启动引导和安装管理。
+- `android/phone-audio-bridge`：Shizuku `UserService`，负责双向通话 PCM。
+- `module/module-agent`：AVF Linux 中的设备状态、控制 API、Relay 与媒体编排。
+- `module/avf-installerd`：独立救援安装服务，只安装通过签名和包元数据校验的 Debian 包。
+- `module/packaging`：单一 `arm64` Debian 包、systemd 单元、签名与首次安装脚本。
+- `iOS`：iPhone、Apple Watch、CallKit、PushKit、ActivityKit、短信和传输选择。
+- `push-relay-worker`：Cloudflare Worker、KV、Durable Objects、APNs、Dashboard 与 WebSocket。
+
+跨组件协议变更必须同时更新生产者、消费者、模型、测试和文档。不得只让一端编译通过。
+
+## 强制安全规则
+
+1. AVF Agent、installerd 和 PCM 只能监听内部私网或 loopback。
+2. VoWLAN 必须保留时间戳、nonce、HMAC、路由白名单和大小限制。
+3. 通话 PCM 不落盘，日志不能包含 PCM、完整短信、Push token 或 Secret。
+4. Agent 不得自行更新；更新、修复和回滚只能由独立 installerd 执行。
+5. installerd 不得执行任意 shell，也不得接受错误包名、非 `arm64` 或未签名包。
+6. 紧急呼叫交给系统电话能力，不得宣称 AirSIM 可承担紧急通信。
+7. 普通 Android App 不能绕过 OEM 或系统签名限制强制开启被隐藏/删除的 AVF 功能。
+
+严禁提交或回显：`APNS_P8`、`DASHBOARD_TOKEN`、Cloudflare API token、Apple `.p8`、设备 Secret、Agent token、HMAC、Debian 发布私钥、Android keystore、Apple 证书/profile、真实号码和短信内容。
+
+## Apple 签名规则
+
+`com.example.airsim` 是开源占位符。每位部署者必须用自己的 Apple Developer Team 重新配置：
+
+- 主 App：部署者的唯一 Bundle ID。
+- Watch App：主 Bundle ID 加 `.watchkitapp`。
+- Live Activity：主 Bundle ID 加 `.liveactivity`。
+- 测试 Target：主 Bundle ID 加 `.tests`。
+- Watch companion 标识：等于主 App Bundle ID。
+- Relay `ALLOWED_BUNDLE_ID`：等于主 App Bundle ID。
+
+只改 Team 或签名证书而保留他人的 Bundle ID 不可行。Debug token 对应 APNs sandbox，TestFlight/App Store token 对应 production；不能混用。
+
+## Relay 规则
+
+生产者必须使用自己的 Cloudflare 账户、KV、Durable Objects 和自定义域名。历史域名不是硬编码依赖。
+
+`APNS_P8` 与 `DASHBOARD_TOKEN` 是必需 Worker Secret：
+
+```sh
+npx wrangler secret put APNS_P8 --config wrangler.toml
+npx wrangler secret put DASHBOARD_TOKEN --config wrangler.toml
+npx wrangler secret list --config wrangler.toml
+```
+
+`wrangler.example.toml` 的 `[secrets] required` 只声明名称，不保存值。Secret 不能写入 `[vars]`、Git、构建产物或日志。执行 `secret put` 和生产 `deploy` 都是外部状态变更，只有用户明确要求时才能执行。
+
+## 标准验证
+
+```sh
+./android/phone-control-app/test.sh
+./android/phone-audio-bridge/build.sh
+./android/phone-control-app/build.sh
+sh ./android/phone-control-app/verify-apk.sh
+(cd module/module-agent && go test ./...)
+(cd module/avf-installerd && go test ./...)
+./module/packaging/test.sh
+(cd push-relay-worker && npm test && npm run check)
+xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+```
+
+按变更范围运行最小充分验证。修改协议或共享配置时运行两端测试；发布前运行全套。文档变更至少执行 `git diff --check`、相对链接检查和敏感值扫描。
+
+## 部署顺序
+
+1. 构建并安装三星 Android App，设置默认电话角色并授权 Shizuku。
+2. 启动 AVF Linux，执行经过核对的一键安装脚本，保存 AVF 私网地址与控制 token。
+3. 验证 Agent、installerd、音频桥和 Android Telecom 控制面。
+4. 使用部署者自己的 Apple 身份配置并签名 iOS/watchOS 工程。
+5. 如需远程模式，创建独立 Relay 资源、设置 Secret、dry-run 后再部署。
+6. 先验证 VoWLAN，再验证公网 Relay、APNs sandbox/production 和 Watch 链路。
+7. 完成三星来电/去电、短信、双向音频、后台唤醒、断网、重启和回滚验收。
+
+## 报告格式
+
+最终回复要区分：
+
+- 已修改与已验证。
+- 尚未执行的真机或生产操作。
+- 需要用户提供的账户、设备、签名或域名条件。
+- 已知风险与下一步。
+
+不要把 dry-run 写成部署成功，不要把模拟器编译写成真机可用，也不要把代码中的能力写成已经通过运营商网络验收。

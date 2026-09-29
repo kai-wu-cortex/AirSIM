@@ -1,0 +1,103 @@
+AIRSIM PROJECT CONTEXT
+======================
+
+PURPOSE
+AirSIM is a cross-device calling and messaging project. A Samsung Android phone owns the carrier call and SMS capabilities. iPhone and Apple Watch clients use those capabilities over authenticated VoWLAN or an independently deployed Cloudflare Relay.
+
+PRIMARY SEARCH / PRODUCT TERMS
+Samsung Android, iPhone, Apple Watch, cross-device calling, cross-device SMS, CallKit, PushKit, ActivityKit, VoWLAN, Android AVF Linux, Cloudflare Workers, APNs, Shizuku, Android Telecom.
+
+AUTHORITATIVE SOURCES
+1. Read /README.md.
+2. Read the README in every component being changed.
+3. Treat current source code, tests, build scripts, package locks, Xcode project settings, and Wrangler template as authoritative.
+4. Search all protocol consumers before changing shared fields, ports, routes, environment variables, Bundle IDs, or persistence formats.
+
+COMPONENTS
+android/phone-control-app
+  Samsung Android default-phone integration, Android Telecom, SMS, pairing, VoWLAN, AVF detection, bootstrap prompt, Agent update/repair/rollback UI.
+
+android/phone-audio-bridge
+  Shizuku UserService for in-memory bidirectional call PCM. It must bind only to the AVF private interface.
+
+module/module-agent
+  Go service inside Android AVF Linux. Device state, authenticated control API, Relay heartbeat, commands, call/media orchestration.
+
+module/avf-installerd
+  Independent rescue installer. Accepts only signed Debian packages with the expected package name and arm64 architecture. Performs health checks and rollback. Never executes arbitrary shell input.
+
+module/packaging
+  Builds one airsim-avf-agent_<version>-<release>_arm64.deb plus signatures and bootstrap assets. Hardware differences belong in Android capability detection, not separate Debian packages.
+
+iOS
+  iPhone, Apple Watch, Live Activity, CallKit, PushKit, VoWLAN, SMS, APNs, and transport selection. Minimum project settings currently target iOS 16.3 and watchOS 10.
+
+push-relay-worker
+  Cloudflare Worker, KV, Durable Objects, APNs provider, command/media WebSockets, health endpoint, and authenticated Dashboard.
+
+NON-NEGOTIABLE ARCHITECTURE CONTRACTS
+- The Samsung Android phone remains the carrier endpoint.
+- Emergency calls must remain with the system phone capability.
+- AVF services and PCM must listen only on the internal private network or loopback.
+- VoWLAN control requires route allowlists, timestamp, nonce, HMAC, and size checks.
+- A call chooses VoWLAN or Relay at setup and does not silently switch transport during that call.
+- PCM stays in memory and on the network; never store it on disk or in logs.
+- The main Agent does not self-update. Android manages updates through airsim-installerd.
+- The installer accepts only the expected signed arm64 Debian package and cannot run arbitrary shell commands.
+- Android application code cannot force-enable AVF functionality removed or hidden by OEM firmware or system-signature restrictions.
+
+APPLE OPEN-SOURCE SIGNING CONTRACT
+- com.example.airsim is a placeholder, not a reusable identity.
+- Every deployer must use their own Apple Developer Team, certificates, profiles, and unique Bundle IDs.
+- Main app: deployer-owned Bundle ID.
+- Watch app: main Bundle ID + .watchkitapp.
+- Live Activity: main Bundle ID + .liveactivity.
+- Tests: main Bundle ID + .tests.
+- WKCompanionAppBundleIdentifier equals the main app Bundle ID.
+- Relay ALLOWED_BUNDLE_ID equals the main app Bundle ID.
+- Development tokens use APNs sandbox. TestFlight/App Store tokens use APNs production.
+- Simulator success does not prove PushKit, CallKit, APNs, Watch, or carrier-call behavior.
+
+REQUIRED RELAY SECRETS
+APNS_P8
+  Complete Apple AuthKey_<KEY_ID>.p8 PEM. Must match APNS_KEY_ID and APNS_TEAM_ID.
+
+DASHBOARD_TOKEN
+  Independent random bearer token, preferably at least 32 random bytes. It is not a Cloudflare API token.
+
+Both are mandatory Cloudflare Worker Secrets. The Wrangler template may declare their names only. Never place values in [vars], tracked files, logs, examples, cache, or artifacts.
+
+OTHER PROHIBITED DATA
+Cloudflare API tokens, device secrets, Agent tokens, pairing keys, HMACs, Debian release private keys, Android keystores, Apple signing identities, provisioning profiles, real phone numbers, full SMS bodies, push tokens, and PCM data.
+
+STANDARD VALIDATION
+./android/phone-control-app/test.sh
+./android/phone-audio-bridge/build.sh
+./android/phone-control-app/build.sh
+sh ./android/phone-control-app/verify-apk.sh
+(cd module/module-agent && go test ./...)
+(cd module/avf-installerd && go test ./...)
+./module/packaging/test.sh
+(cd push-relay-worker && npm test && npm run check)
+xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build-for-testing
+
+Run validation proportional to the change. Cross-component protocol changes require tests on every affected side. Documentation-only changes require at least git diff --check, local-link validation, placeholder review, and a secret scan.
+
+DEPLOYMENT BOUNDARIES
+- Do not deploy Cloudflare production resources without an explicit user request.
+- Do not upload an Apple build, create a release, install on a real device, push Git commits, rotate secrets, or send real pushes without explicit user authorization.
+- Use only the user-specified account, host, device, domain, Apple Team, and signing identity.
+- Do not infer a production domain from historical examples.
+- A dry-run is not a deployment. A simulator build is not real-device validation. Source code capability is not carrier-network acceptance.
+
+WORKFLOW
+1. Inspect git status and preserve user changes.
+2. Read relevant documentation, source, tests, and locked tool versions.
+3. Search all consumers with rg.
+4. Make the smallest coherent change.
+5. Update tests and documentation together.
+6. Validate locally, then perform explicitly authorized external actions.
+7. Report changed files, exact checks run, unexecuted device/production steps, and remaining risks.
+
+LICENSE NOTE
+The repository currently has no LICENSE file. Do not claim a specific license or infer redistribution rights until the maintainer adds one.
