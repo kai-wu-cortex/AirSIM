@@ -111,10 +111,13 @@ public final class MainActivity extends Activity {
         }
         refreshStatus();
         refreshAgent();
-        if (Build.VERSION.SDK_INT >= 33
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 101);
+		String[] missingPermissions = RuntimePermissionPolicy.missingPermissions(
+				Build.VERSION.SDK_INT,
+				checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED,
+				Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+						== PackageManager.PERMISSION_GRANTED);
+        if (missingPermissions.length > 0) {
+            requestPermissions(missingPermissions, 101);
 		} else {
 			checkAVFEnvironmentAtStartup();
 		}

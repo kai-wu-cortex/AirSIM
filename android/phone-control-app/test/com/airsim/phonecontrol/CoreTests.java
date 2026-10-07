@@ -23,6 +23,12 @@ public final class CoreTests {
 		assertEquals(
 				"bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'",
 				AVFStartupPolicy.installCommand());
+		assertArrayEquals(new String[]{
+				"android.permission.CALL_PHONE", "android.permission.POST_NOTIFICATIONS"},
+				invokeMissingRuntimePermissions(36, false, false));
+		assertArrayEquals(new String[]{"android.permission.CALL_PHONE"},
+				invokeMissingRuntimePermissions(32, false, false));
+		assertArrayEquals(new String[0], invokeMissingRuntimePermissions(36, true, true));
 
 		java.util.Map<String, String> releaseAssets = new java.util.LinkedHashMap<>();
 		releaseAssets.put("notes.txt", "https://example.test/notes.txt");
@@ -141,6 +147,10 @@ public final class CoreTests {
         assertEquals("active", TelecomStateMapper.toWireState(4));
         assertEquals("ended", TelecomStateMapper.toWireState(7));
         assertEquals("unknown", TelecomStateMapper.toWireState(99));
+		assertEquals("", invokeTelecomAction(() -> {}));
+		assertContains(invokeTelecomAction(() -> {
+			throw new SecurityException("CALL_PHONE permission required");
+		}), "SecurityException: CALL_PHONE permission required");
 		assertTrue(invokeSilencePolicy("remote_silent", "dialing"));
 		assertTrue(invokeSilencePolicy("remote_silent", "incoming"));
 		assertTrue(invokeSilencePolicy("remote_silent", "active"));
@@ -405,6 +415,30 @@ public final class CoreTests {
 					.invoke(null, input);
 		} catch (NoSuchMethodException error) {
 			throw new AssertionError("PCM relay does not read the complete AIRSIMREADY frame", error);
+		}
+	}
+
+	private static String[] invokeMissingRuntimePermissions(
+			int sdk, boolean callPhoneGranted, boolean notificationsGranted) throws Exception {
+		try {
+			Class<?> policy = Class.forName("com.airsim.phonecontrol.RuntimePermissionPolicy");
+			return (String[]) policy.getDeclaredMethod(
+					"missingPermissions", int.class, boolean.class, boolean.class)
+					.invoke(null, sdk, callPhoneGranted, notificationsGranted);
+		} catch (ClassNotFoundException error) {
+			throw new AssertionError("CALL_PHONE runtime permission policy is missing", error);
+		}
+	}
+
+	private static String invokeTelecomAction(Runnable action) throws Exception {
+		try {
+			Class<?> invocation = Class.forName("com.airsim.phonecontrol.TelecomInvocation");
+			java.util.concurrent.Executor direct = Runnable::run;
+			return (String) invocation.getDeclaredMethod(
+					"run", java.util.concurrent.Executor.class, Runnable.class, long.class)
+					.invoke(null, direct, action, 1_000L);
+		} catch (ClassNotFoundException error) {
+			throw new AssertionError("Telecom runtime failures are not captured", error);
 		}
 	}
 

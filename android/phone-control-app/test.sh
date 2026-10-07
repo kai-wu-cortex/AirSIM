@@ -83,7 +83,9 @@ mkdir -p "$OUT"
   "$ROOT"/src/com/airsim/phonecontrol/InstallerClient.java \
   "$ROOT"/src/com/airsim/phonecontrol/ReleaseAssetSelector.java \
   "$ROOT"/src/com/airsim/phonecontrol/AVFStartupPolicy.java \
+	"$ROOT"/src/com/airsim/phonecontrol/RuntimePermissionPolicy.java \
   "$ROOT"/src/com/airsim/phonecontrol/TelecomStateMapper.java \
+	"$ROOT"/src/com/airsim/phonecontrol/TelecomInvocation.java \
 	"$ROOT"/src/com/airsim/phonecontrol/PrivilegedBridgeProtocol.java \
 	"$ROOT"/src/com/airsim/phonecontrol/PrivilegedBridgeCoordinator.java \
   "$ROOT"/src/com/airsim/phonecontrol/WireJson.java \

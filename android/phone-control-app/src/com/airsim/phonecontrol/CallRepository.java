@@ -54,8 +54,11 @@ public final class CallRepository {
         if (!command.isSupported()) return ActionResult.failure("unsupported action");
         if ("dial".equals(command.action)) {
             if (command.number.isEmpty()) return ActionResult.failure("number missing");
-            new Handler(Looper.getMainLooper()).post(() -> telecomManager.placeCall(Uri.parse("tel:" + command.number), null));
-            return ActionResult.success();
+            String error = TelecomInvocation.run(
+                    task -> new Handler(Looper.getMainLooper()).post(task),
+                    () -> telecomManager.placeCall(Uri.parse("tel:" + command.number), null),
+                    2_000L);
+            return error.isEmpty() ? ActionResult.success() : ActionResult.failure(error);
         }
         Call call = CALLS.get(command.callId);
         if (call == null) return ActionResult.failure("active call id mismatch");
