@@ -15,8 +15,9 @@ public final class AVFStartupPolicy {
     private static final Set<String> RESTRICTED_CHINA_OEMS = Set.of(
             "xiaomi", "redmi", "oppo", "oneplus", "realme", "vivo", "iqoo", "honor");
     private static final String INSTALL_COMMAND =
-            "curl -fsSL --proto '=https' --tlsv1.2 " +
-            "https://github.com/kai-wu-cortex/AirSIM/releases/latest/download/install-avf.sh | sudo sh";
+            "bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 " +
+            "--proto =https --proto-redir =https --tlsv1.2 " +
+            "https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'";
 
     private AVFStartupPolicy() {}
 

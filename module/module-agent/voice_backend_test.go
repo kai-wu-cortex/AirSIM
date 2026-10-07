@@ -103,6 +103,9 @@ func TestHealthReportsVoiceBackendWithoutEndpoint(t *testing.T) {
 	if payload["voice_backend"] != "samsung_android" {
 		t.Fatalf("健康接口语音后端=%v", payload["voice_backend"])
 	}
+	if payload["product"] != "airsim" {
+		t.Fatalf("健康接口产品身份=%v", payload["product"])
+	}
 	if payload["ok"] != true {
 		t.Fatalf("三星外部后端配置有效时 Agent 应在线: ok=%v", payload["ok"])
 	}

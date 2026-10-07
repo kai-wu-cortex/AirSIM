@@ -33,7 +33,7 @@ type usbFaultSnapshot struct {
 	GadgetFunctions   string            `json:"gadget_functions"`
 	GadgetEnabled     string            `json:"gadget_enabled"`
 	AgentPID          int               `json:"agent_pid"`
-	AgentListening    bool              `json:"agent_listening_7575"`
+	AgentListening    bool              `json:"agent_listening_8575"`
 	FactoryPID        string            `json:"ql_manager_server_pid,omitempty"`
 	FactoryPIDChanged bool              `json:"ql_manager_server_pid_changed"`
 	CallID            string            `json:"call_id,omitempty"`
@@ -197,7 +197,7 @@ func (a *agent) captureUSBFaultSnapshot(phase, trigger, reason string) usbFaultS
 		GadgetFunctions: readDebugFile(usbGadgetPath + "/functions"),
 		GadgetEnabled:   readDebugFile(usbGadgetPath + "/enable"),
 		AgentPID:        os.Getpid(),
-		AgentListening:  procTCPListening("/proc/net/tcp", 7575) || procTCPListening("/proc/net/tcp6", 7575),
+		AgentListening:  procTCPListening("/proc/net/tcp", 8575) || procTCPListening("/proc/net/tcp6", 8575),
 		FactoryPID:      processIDsByName("ql_manager_server"),
 	}
 	if descriptor, ok := a.currentCloudCallDescriptor(); ok {

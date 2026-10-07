@@ -11,6 +11,7 @@
 3. 运行 `git status --short`，保留用户现有改动。
 4. 用 `rg` 查找跨端协议、环境变量、端口或 Bundle ID 的全部引用。
 5. 只修改任务需要的文件，并同步相关测试与文档。
+6. 安装、配对或恢复任务还要阅读 `docs/AVF_INSTALL_GUIDE.md` 与 `LLM.txt`；今后相关修改同步更新根目录和对应组件 README、安装指南、`LLM.txt`、`codex.md`、`claude.md`。
 
 不要依赖旧品牌、旧部署域名或记忆中的 Cloudflare/Apple 行为。当前源码和锁定版本是事实来源。
 
@@ -35,6 +36,7 @@
 5. installerd 不得执行任意 shell，也不得接受错误包名、非 `arm64` 或未签名包。
 6. 紧急呼叫交给系统电话能力，不得宣称 AirSIM 可承担紧急通信。
 7. 普通 Android App 不能绕过 OEM 或系统签名限制强制开启被隐藏/删除的 AVF 功能。
+8. AVF 的 `/api/health` 只证明 Agent 可达；`8576` installerd、控制 token 与真实电话链路必须分别验证。不要硬编码唯一 AVF 网段，也不要用清除 Terminal 数据或删除 `current.deb` 作为常规修复。
 
 严禁提交或回显：`APNS_P8`、`DASHBOARD_TOKEN`、Cloudflare API token、Apple `.p8`、设备 Secret、Agent token、HMAC、Debian 发布私钥、Android keystore、Apple 证书/profile、真实号码和短信内容。
 
@@ -90,8 +92,9 @@ xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
 ## 部署顺序
 
 1. 构建并安装三星 Android App，设置默认电话角色并授权 Shizuku。
-2. 启动 AVF Linux，执行经过核对的一键安装脚本，保存 AVF 私网地址与控制 token。
-3. 验证 Agent、installerd、音频桥和 Android Telecom 控制面。
+2. 启动 AVF Linux，按 `docs/AVF_INSTALL_GUIDE.md` 在 Debian Terminal 中执行带 `pipefail` 和超时的签名安装命令；App 按钮只负责复制，不能替用户在来宾系统执行。已有 `current.deb` 且 `8576` 不可用时应恢复 installerd，而非删除回滚包。运行 `sudo airsim-avf-pair`，保存当前动态 AVF 地址与控制 token。源码引导脚本的修复只有在明确授权发布新 Release 后才会进入线上命令。
+   若报 `udev` 与 `libudev1` 精确版本依赖冲突，先读取 `apt-cache policy` 和 `sudo apt-get -s -f install` 的模拟结果，不自动运行 `apt --fix-broken install`；引导脚本要在安装 Agent 前检查现有 Debian 包状态。
+3. 分别验证 `8575` AirSIM Agent（`product=airsim`）、`8576` installerd、音频桥和 Android Telecom 控制面。现有 DJOneHub 保留在 `7575`；旧 AirSIM Release 会与它冲突，不能用于共存安装。Terminal 的 `VM is not in stopped state` 应先无损排查启动冲突，不归因于 Agent 包。
 4. 使用部署者自己的 Apple 身份配置并签名 iOS/watchOS 工程。
 5. 如需远程模式，创建独立 Relay 资源、设置 Secret、dry-run 后再部署。
 6. 先验证 VoWLAN，再验证公网 Relay、APNs sandbox/production 和 Watch 链路。

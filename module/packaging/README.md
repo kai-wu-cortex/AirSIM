@@ -32,7 +32,7 @@ airsim-avf-agent_<version>-<release>_arm64.deb
 构建正式包时，将 Ed25519 私钥保存在仓库之外，并把对应的 32 字节原始公钥以 Base64 注入 installer：
 
 ```sh
-AIRSIM_PACKAGE_VERSION=0.4.3 \
+AIRSIM_PACKAGE_VERSION=0.4.4 \
 AIRSIM_PACKAGE_RELEASE=1 \
 AIRSIM_RELEASE_PUBLIC_KEY_BASE64='<base64-raw-public-key>' \
 AIRSIM_RELEASE_PRIVATE_KEY='/secure/path/release-ed25519.pem' \
@@ -54,25 +54,27 @@ DER SHA-256:    a7f6696ec806e5f7500b8526fe6a82f18931fd910ebad8124ee4ef1da823a2e6
 
 ## 首次引导
 
-首次进入 AVF Linux Terminal 后，只需执行：
+首次进入 AVF Linux Terminal 后，确认 Debian 提示符可用，再执行。v0.4.4 签名 Release 尚未发布时，此版本化链接不能使用，也不能在 DJOneHub 共存设备上改用旧版 v0.4.3 安装脚本：
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://github.com/kai-wu-cortex/AirSIM/releases/latest/download/install-avf.sh \
-  | sudo sh
+bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'
 ```
 
-脚本会检查当前系统为 arm64，下载最新稳定名称包，使用脚本内置的 Ed25519 发行公钥验签，再检查 Debian 包名和架构。验证通过后才安装服务、保留首个回滚包，并显示配对所需的 AVF 地址说明与控制 token。把 Agent 地址和 token 保存到 AirSIM Android App 后，后续检查、安装和回滚均通过 `airsim-installerd` 完成。
+`pipefail` 确保 GitHub 下载失败不会被 `sudo sh` 的空输入掩盖。脚本检查 arm64、下载稳定名称包、用内置 Ed25519 公钥验签并核对 Debian 包身份。安装后保留首个回滚包，等待 `airsim-agent`、`airsim-installerd` 与 Agent 健康端点就绪；任一失败都以非零状态退出并打印无损排障命令，不再报告“安装完成”。成功后可运行 `sudo airsim-avf-pair` 查看配对信息，将当前动态 AVF 来宾地址和 token 保存到 Android App。完整步骤见[AVF 安装与无损排障指南](../../docs/AVF_INSTALL_GUIDE.md)。
 
-该入口仅用于首次安装；检测到已保留的 `current.deb` 时会拒绝重复执行，并提示用户改用 Android App 更新。AVF 镜像需要预装 `curl`、`openssl`、`base64`、`dpkg-deb`、`apt-get` 和 `install`。如果镜像缺少其中任一命令，脚本会在改动系统前停止并报告缺失项。
+该入口也可恢复已有安装：检测到保留的 `current.deb` 时先重载、启用并启动服务；健康检查仍失败才用本地保留包 `apt-get install --reinstall` 修复服务文件，不下载新包、不覆盖回滚包。若仍不能恢复，打印 systemd 排障命令并非零退出。旧 GitHub Release 中的脚本可能仍拒绝重复执行；必须重新发布新的 `install-avf.sh` 才能让手机获得此修复，不能删除 `current.deb` 或清除整个 AVF 数据来绕过保护。AVF 镜像需要预装 `bash`、`curl`、`openssl`、`base64`、`dpkg-deb`、`apt-get`、`systemctl` 和 `install`。如果镜像缺少安装依赖，脚本会在改动系统前停止并报告缺失项。
+
+安装前先用 `apt-get check` 检查 AVF Debian 的现有依赖状态；例如 `udev` 与 `libudev1` 版本不一致时中止，不自动运行可能移除系统组件的 `apt --fix-broken install`。维护者应先看 `apt-cache policy udev libudev1` 与 `sudo apt-get -s -f install` 的模拟计划，再决定是否只升级对应的 `libudev1`；步骤见[安装指南](../../docs/AVF_INSTALL_GUIDE.md)。
+
+与 DJOneHub 共存时，AirSIM Agent 独占 `8575`、installerd 独占 `8576`，不会接管原服务的 `7575`。首次安装器会在写入 Debian 包前检查这两个端口是否被其他进程占用；Agent `/api/health` 还必须返回 `product=airsim`。**旧 GitHub Release 不包含此迁移**，重新构建、签名并发布前，不要在已有 DJOneHub 的 AVF 内运行在线安装命令。
 
 如果需要离线安装，仍可使用 release 中的 `airsim-avf-bootstrap.sh`、版本化 `.deb`、`.sig` 和 `.public.pem` 三个参数模式。发布公钥指纹应通过独立可信渠道核对。
 
 ## Android 管理协议
 
-- `GET http://<AVF>:7576/v1/status`
-- `POST http://<AVF>:7576/v1/packages/install`
-- `POST http://<AVF>:7576/v1/packages/rollback`
+- `GET http://<AVF>:8576/v1/status`
+- `POST http://<AVF>:8576/v1/packages/install`
+- `POST http://<AVF>:8576/v1/packages/rollback`
 
 所有请求必须来自 AVF 私网或 loopback，并携带共享 bearer token。安装请求必须使用 `application/vnd.debian.binary-package`，在 `X-AirSIM-Signature` 中携带 `.deb` 的 Ed25519 签名，并通过 `X-AirSIM-Install-Mode` 选择 `normal` 或 `repair`。`normal` 只接受更高版本，`repair` 只接受当前相同版本；降级只能使用服务器保留包的 rollback 接口。installerd 只接受包名 `airsim-avf-agent`、架构 `arm64` 的包，不提供任意 shell 执行接口。
 

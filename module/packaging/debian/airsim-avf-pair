@@ -11,7 +11,19 @@ if [ ! -s "$token_file" ]; then
     exit 1
 fi
 
-printf 'Agent endpoint:    http://<AVF-guest-address>:7575\n'
-printf 'Installer endpoint: http://<AVF-guest-address>:7576\n'
+guest_address='<AVF-guest-address>'
+if command -v ip >/dev/null 2>&1; then
+    default_interface=$(ip -4 route show default 2>/dev/null | awk '/^default / { print $5; exit }')
+    if [ -n "$default_interface" ]; then
+        discovered=$(ip -o -4 addr show dev "$default_interface" 2>/dev/null |
+            awk '{ split($4, address, "/"); print address[1]; exit }')
+        if [ -n "$discovered" ]; then
+            guest_address=$discovered
+        fi
+    fi
+fi
+
+printf 'Agent endpoint:    http://%s:8575\n' "$guest_address"
+printf 'Installer endpoint: http://%s:8576\n' "$guest_address"
 printf 'Control token:     %s\n' "$(tr -d ' \r\n' < "$token_file")"
 printf 'Enter the Agent endpoint and token once in the AirSIM Android app.\n'

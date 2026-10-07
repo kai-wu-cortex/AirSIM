@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-version=${AIRSIM_PACKAGE_VERSION:-0.4.3}
+version=${AIRSIM_PACKAGE_VERSION:-0.4.4}
 release=${AIRSIM_PACKAGE_RELEASE:-1}
 package_version="$version-$release"
 dist_dir=${AIRSIM_DIST_DIR:-"$repo_root/dist"}
@@ -104,7 +104,8 @@ else
 fi
 
 install -m 0755 "$script_dir/bootstrap-avf.sh" "$dist_dir/airsim-avf-bootstrap.sh"
-sed "s|@AIRSIM_RELEASE_PUBLIC_KEY_BASE64@|$public_key|g" \
+sed -e "s|@AIRSIM_RELEASE_PUBLIC_KEY_BASE64@|$public_key|g" \
+    -e "s|@AIRSIM_PACKAGE_VERSION@|$version|g" \
     "$script_dir/install-avf.sh.in" > "$dist_dir/install-avf.sh"
 chmod 0755 "$dist_dir/install-avf.sh"
 

@@ -2,3 +2,6 @@
 set -eu
 
 printf '%s\n' "$*" > "$AIRSIM_BOOTSTRAP_APT_LOG"
+if [ "${AIRSIM_BOOTSTRAP_APT_BROKEN:-}" = 1 ] && [ "$1" = check ]; then
+    exit 100
+fi

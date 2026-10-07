@@ -27,11 +27,11 @@ func main() {
 	}
 	stateDirectory := environment("AIRSIM_INSTALLER_STATE_DIR", "/var/lib/airsim-installerd")
 	server := &http.Server{
-		Addr: environment("AIRSIM_INSTALLER_LISTEN", "0.0.0.0:7576"),
+		Addr: environment("AIRSIM_INSTALLER_LISTEN", "0.0.0.0:8576"),
 		Handler: newInstallerServer(installerConfig{
 			Token: strings.TrimSpace(string(tokenData)), PublicKey: publicKey,
 			StateDirectory: stateDirectory,
-		}, systemInstallerBackend{healthURL: "http://127.0.0.1:7575/api/health"}),
+		}, systemInstallerBackend{healthURL: "http://127.0.0.1:8575/api/health"}),
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       90 * time.Second,
 		WriteTimeout:      30 * time.Second,

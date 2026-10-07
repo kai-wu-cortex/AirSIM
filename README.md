@@ -88,15 +88,19 @@ sh ./android/phone-control-app/verify-apk.sh
 
 ### 3. 首次安装 Android AVF Agent
 
-进入 Android AVF Linux Terminal，执行：
+进入 Android AVF Linux Terminal，确认 Debian 提示符可用后执行（`pipefail` 会让下载失败明确报错，避免空脚本被误判为安装成功）。**只有 v0.4.4 签名 Release 正式发布后，此版本化链接才可使用**；在已有 DJOneHub 的 AVF 中不要回退到 v0.4.3 的旧安装链接：
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://github.com/kai-wu-cortex/AirSIM/releases/latest/download/install-avf.sh \
-  | sudo sh
+bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'
 ```
 
-安装器只接受匹配的 `arm64` Debian 包和 Ed25519 签名。完成后，将显示的 AVF 地址与控制 token 保存到三星 Android App。后续更新、修复和回滚由独立的 `airsim-installerd` 完成；详见 [AVF Debian 发布文档](module/packaging/README.md)。
+App 仅复制命令，必须在 Debian Terminal 中粘贴执行。安装器只接受匹配的 `arm64` Debian 包和 Ed25519 签名。**只有 Agent 与 installerd 健康检查均通过才算安装完成。**修复版引导脚本遇到已有 `current.deb` 时优先恢复服务，必要时从保留包重装，不再把“已安装”变成无法修复的死路。随后在 Terminal 运行 `sudo airsim-avf-pair`，把控制 token 保存到三星 Android App；AVF 地址取当前设备动态分配的来宾私网地址，不能照抄示例网段。后续更新、修复和回滚由独立的 `airsim-installerd` 完成。若 App 显示“尚未配对”或 `8576` 不可用，见 [AVF 安装与无损排障指南](docs/AVF_INSTALL_GUIDE.md)；包细节见 [AVF Debian 发布文档](module/packaging/README.md)。仓库源码的修复须重新签名并发布 GitHub Release，才会进入上述在线安装命令。
+
+如果 `apt` 报 `udev` 与 `libudev1` 版本不一致，先按安装指南模拟系统依赖修复，不要直接运行可能删除系统组件的 `apt --fix-broken install`。修复版引导脚本会在安装 Agent 前拦截已有的 Debian 依赖故障。
+
+同一 AVF 内可以保留 DJOneHub：AirSIM 专用 Agent / installer 端口为 `8575` / `8576`，不占用 DJOneHub 的 `7575`。安装前核对 GitHub Release 已包含这次端口迁移；旧版在线安装包仍会监听 `7575`，**不要在 DJOneHub 并存环境运行旧版命令**。
+
+0.4.4 的变更、签名发布要求和共存验收清单见 [Release Markdown](docs/releases/0.4.4.md)。
 
 ### 4. 配置并签名 iPhone / Apple Watch App
 
@@ -139,6 +143,7 @@ AirSIM 不附带原作者的 Apple Developer Team、App ID、证书或 provision
 | [三星通话音频桥](android/phone-audio-bridge/README.md) | Shizuku 音频桥构建、运行和 PCM 边界 |
 | [Android AVF Agent](module/module-agent/README.md) | Agent 配置、API、安全与启动探针 |
 | [AVF Debian 发布](module/packaging/README.md) | `.deb` 构建、签名、首次安装、升级与回滚 |
+| [AVF 安装与无损排障](docs/AVF_INSTALL_GUIDE.md) | Terminal、控制令牌、双服务健康检查与启动冲突恢复 |
 | [iOS 与 watchOS](iOS/README.md) | Xcode、Bundle ID、Apple 签名、CallKit、PushKit 与真机测试 |
 | [Cloudflare Relay](push-relay-worker/README.md) | Wrangler、KV、Durable Objects、APNs、Secret 与自定义域名 |
 | [VoWLAN 设计](docs/2026-09-11-vowlan-design.md) | 本地传输设计与协议边界 |

@@ -6,11 +6,11 @@ public final class AVFNetworkPolicy {
     private AVFNetworkPolicy() {}
 
     public static String agentEndpoint(String androidHost) {
-		return endpoint(androidHost, 7575);
+		return endpoint(androidHost, 8575);
 	}
 
 	public static String installerEndpoint(String androidHost) {
-		return endpoint(androidHost, 7576);
+		return endpoint(androidHost, 8576);
 	}
 
 	private static String endpoint(String androidHost, int port) {
@@ -33,17 +33,17 @@ public final class AVFNetworkPolicy {
     }
 
     public static boolean isAgentEndpoint(String value) {
-		return isEndpoint(value, 7575);
+		return isEndpoint(value, 8575);
 	}
 
 	public static boolean isInstallerEndpoint(String value) {
-		return isEndpoint(value, 7576);
+		return isEndpoint(value, 8576);
 	}
 
 	public static String installerEndpointForAgent(String value) {
 		if (!isAgentEndpoint(value)) return "";
 		URI uri = URI.create(value.trim());
-		return "http://" + uri.getHost() + ":7576";
+		return "http://" + uri.getHost() + ":8576";
 	}
 
 	private static boolean isEndpoint(String value, int port) {

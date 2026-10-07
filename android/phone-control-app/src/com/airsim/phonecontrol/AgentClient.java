@@ -31,6 +31,14 @@ public final class AgentClient {
         return request("GET", "/api/android/status", null, 5_000);
     }
 
+    public String health() throws Exception {
+        String payload = request("GET", "/api/health", null, 5_000);
+        if (!payload.matches("(?s).*\\\"product\\\"\\s*:\\s*\\\"airsim\\\".*")) {
+            throw new IllegalStateException("目标不是 AirSIM Agent");
+        }
+        return payload;
+    }
+
     public String nextCommand() throws Exception {
         return request("GET", "/api/android/commands/next?wait=25", null, 32_000);
     }

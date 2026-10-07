@@ -9,7 +9,7 @@ import java.net.NetworkInterface;
 import java.util.Enumeration;
 
 public final class AppConfig {
-    public static final String DEFAULT_ENDPOINT = "http://10.185.5.25:7575";
+    public static final String DEFAULT_ENDPOINT = "http://10.185.5.25:8575";
     public static final String MODE_REMOTE_SILENT = "remote_silent";
     public static final String MODE_LOCAL_AND_PUSH = "local_and_push";
     private static final String FILE = "control";
@@ -23,6 +23,9 @@ public final class AppConfig {
             return discovered;
         }
         String fallback = preferences(context).getString("endpoint", DEFAULT_ENDPOINT);
+        if (fallback != null && fallback.endsWith(":7575")) {
+            fallback = fallback.substring(0, fallback.length() - 5) + ":8575";
+        }
         BridgeLog.debug("agent_endpoint_selected source=saved endpoint=" + fallback);
         return fallback;
     }

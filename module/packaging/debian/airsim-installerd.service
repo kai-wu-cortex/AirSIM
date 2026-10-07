@@ -8,7 +8,7 @@ After=network-online.target
 Type=simple
 Environment=AIRSIM_INSTALLER_TOKEN_FILE=/var/lib/airsim/control.token
 Environment=AIRSIM_INSTALLER_STATE_DIR=/var/lib/airsim-installerd
-Environment=AIRSIM_INSTALLER_LISTEN=0.0.0.0:7576
+Environment=AIRSIM_INSTALLER_LISTEN=0.0.0.0:8576
 ExecStart=/usr/lib/airsim/airsim-installerd
 Restart=always
 RestartSec=2s

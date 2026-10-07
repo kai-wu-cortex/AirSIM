@@ -75,11 +75,12 @@ func (backend systemInstallerBackend) agentHealthy(version string) bool {
 		if err == nil {
 			var payload struct {
 				OK      bool   `json:"ok"`
+				Product string `json:"product"`
 				Version string `json:"version"`
 			}
 			decodeErr := json.NewDecoder(response.Body).Decode(&payload)
 			response.Body.Close()
-			if decodeErr == nil && response.StatusCode == http.StatusOK && payload.OK && payload.Version == version {
+			if decodeErr == nil && response.StatusCode == http.StatusOK && payload.OK && payload.Product == "airsim" && payload.Version == version {
 				return true
 			}
 		}

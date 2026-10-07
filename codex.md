@@ -1,6 +1,6 @@
 # AirSIM 全项目 Codex 部署辅助
 
-本文为 AI 编码代理提供 AirSIM 全仓库的事实来源、构建顺序、部署边界和安全约束。开始任务前先阅读根目录 `README.md`，再阅读所修改组件的 README 和实际源码。源码与测试是协议事实来源；本文不能替代它们。
+本文为 AI 编码代理提供 AirSIM 全仓库的事实来源、构建顺序、部署边界和安全约束。开始任务前先阅读根目录 `README.md`，再阅读所修改组件的 README 和实际源码。涉及 AVF 安装、配对或恢复时，还要阅读 `docs/AVF_INSTALL_GUIDE.md` 和 `LLM.txt`。源码与测试是协议事实来源；本文不能替代它们。
 
 ## 1. 项目目标
 
@@ -75,8 +75,9 @@ git grep -nE 'BEGIN (EC |)PRIVATE KEY|APNS_P8[[:space:]]*=|DASHBOARD_TOKEN[[:spa
 3. 用 `rg` 定位协议字段、环境变量、Bundle ID、端口和所有消费者。
 4. 先修改最小必要范围，再同步测试与文档。
 5. 先运行目标组件验证，再按跨组件影响扩大验证范围。
-6. 部署前做 Secret、占位符、Bundle ID、Cloudflare 资源和目标环境检查。
-7. 最终报告列出已改文件、验证结果、未执行的真机/生产步骤和剩余风险。
+6. 涉及安装流程、端口、版本或恢复方式时，同步更新相关组件 README、`docs/AVF_INSTALL_GUIDE.md`、`LLM.txt`、`codex.md` 与 `claude.md`；不要只改 App 文案或脚本一端。
+7. 部署前做 Secret、占位符、Bundle ID、Cloudflare 资源和目标环境检查。
+8. 最终报告列出已改文件、验证结果、未执行的真机/生产步骤和剩余风险。
 
 未经用户明确要求，不执行 Cloudflare 生产部署、Apple 发布、GitHub Release、真实设备安装、远程推送或 Git push。即使用户要求部署，也必须使用其明确指定的账户、设备、域名和签名身份，不得猜测。
 
@@ -135,6 +136,10 @@ npx wrangler deploy --dry-run --config wrangler.toml
 - AirSIM 已设为默认电话 App；Shizuku 已运行并授权。
 - AVF Linux 已启动，首次安装脚本的来源和签名公钥已核对。
 - Android App 保存了正确的 AVF 私网地址和控制 token。
+- `airsim-agent` 与 `airsim-installerd` 分别在 8575、8576 通过设备侧检查，并核对 Agent `/api/health` 的 `product=airsim`。已有 DJOneHub 可保留在 7575；旧 AirSIM Release 仍占用 7575，未发布端口迁移版前不得在共存设备执行旧在线安装命令。Agent 健康成功不能替代 installerd、控制令牌和真实通话验收；AVF 网段会动态变化。
+- `cannot create runner / VM is not in stopped state` 是 Android Terminal 启动状态问题，不能直接清除 Linux 数据或当作 Debian 安装失败；按 `docs/AVF_INSTALL_GUIDE.md` 无损排障。
+- App 的“一键安装”入口仅复制命令，不会在 AVF Debian 内自动执行。若 Agent `8575` 在线而 installerd `8576` 离线，先按指南检查并恢复已有服务；修复版引导脚本能复用保留的 `current.deb`，旧 Release 仍可能拒绝重复安装。不得删除回滚包来绕过检查，未获明确发布授权不得把源码修复称为线上已生效。
+- 若 Debian 提示 `udev` / `libudev1` 版本不匹配，先看 `apt-cache policy udev libudev1` 与 `sudo apt-get -s -f install`；AirSIM 包无直接 `libudev1` 依赖。引导脚本应提前 `apt-get check` 并停止，不自动修复系统包、移除组件或降级。
 - Agent、installerd 与音频桥健康；外部网络无法访问内部端口。
 - 拨号、接听、拒接、挂断、DTMF、短信、双向 PCM 和重启恢复已验证。
 

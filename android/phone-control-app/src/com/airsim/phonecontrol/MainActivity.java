@@ -410,7 +410,8 @@ public final class MainActivity extends Activity {
 		LinearLayout bootstrapActions = row();
 		TextView copyInstall = secondaryButton("复制一键安装命令");
 		copyInstall.setOnClickListener(ignored -> copyAVFInstallCommand());
-		TextView openLinux = secondaryButton("启动 Linux Terminal");
+		TextView openLinux = secondaryButton(avf.state() == AVFStartupPolicy.State.RUNNING
+				? "打开 Linux Terminal" : "启动 Linux Terminal");
 		openLinux.setOnClickListener(ignored -> openAVFTerminalOrSettings());
 		bootstrapActions.addView(copyInstall, weightedWithEnd(5));
 		bootstrapActions.addView(openLinux, weightedWithStart(5));
@@ -675,10 +676,13 @@ public final class MainActivity extends Activity {
         updateVisibleStatus();
         Executors.newSingleThreadExecutor().execute(() -> {
             try {
-                new AgentClient(this).status();
+                boolean paired = AppConfig.configured(this);
+                AgentClient client = new AgentClient(this);
+                if (paired) client.status();
+                else client.health();
                 runOnUiThread(() -> {
-                    agentOnline = true;
-                    agentDetail = "在线";
+                    agentOnline = paired;
+                    agentDetail = paired ? "在线" : "可达 · 尚未配对控制令牌";
                     updateVisibleStatus();
                 });
             } catch (Exception error) {
@@ -700,12 +704,13 @@ public final class MainActivity extends Activity {
 		boolean needsInstall = snapshot.state() == AVFStartupPolicy.State.RUNNING && !agentConfigured;
 		boolean canLaunch = snapshot.state() == AVFStartupPolicy.State.READY_TO_START;
 		AlertDialog dialog = new AlertDialog.Builder(this)
-				.setTitle(needsInstall ? "安装 AirSIM AVF Agent" : "需要启动 AVF Linux 环境")
+				.setTitle(needsInstall ? "配置 AirSIM AVF Agent" : "需要启动 AVF Linux 环境")
 				.setMessage(avfEnvironmentSummary(snapshot)
 						+ (needsInstall
-						? "\n\n请复制一键安装命令并在 Linux Terminal 中粘贴执行。"
+						? "\n\n若尚未安装，复制首次安装命令到 Linux Terminal；" +
+								"若 Agent 已运行，先执行 sudo airsim-avf-pair 配对并检查 installerd。"
 						: "\n\n启动 Linux 后，在 Terminal 中粘贴 AirSIM 一键安装命令。"))
-				.setPositiveButton(needsInstall ? "复制安装命令"
+				.setPositiveButton(needsInstall ? "复制首次安装命令"
 						: canLaunch ? "启动 Linux Terminal" : "打开开发者选项",
 						(ignored, which) -> {
 							if (needsInstall) copyAVFInstallCommand();
@@ -751,6 +756,12 @@ public final class MainActivity extends Activity {
 
 	private void refreshInstallerStatus() {
 		if (installerStatus == null) return;
+		if (!AppConfig.configured(this)) {
+			installerStatus.setText("尚未配对控制令牌。先在 AVF Linux Terminal 完成首次签名安装，" +
+					"再运行 sudo airsim-avf-pair，将令牌保存到上方配置。" +
+					"已有 Agent 但安装服务不可用时，先在 Terminal 检查 airsim-installerd 服务，不要清除 Linux 数据。");
+			return;
+		}
 		Executors.newSingleThreadExecutor().execute(() -> {
 			try {
 				String value = new AgentReleaseManager(this).status();
@@ -759,13 +770,22 @@ public final class MainActivity extends Activity {
 				});
 			} catch (Exception error) {
 				runOnUiThread(() -> {
-					if (installerStatus != null) installerStatus.setText("installerd 不可用 · " + error.getMessage());
+					if (installerStatus != null) installerStatus.setText("installerd 不可用 · " +
+							error.getClass().getSimpleName() +
+							"。请在 Linux Terminal 检查 sudo systemctl status airsim-installerd；" +
+							"不要清除 Linux 数据。");
 				});
 			}
 		});
 	}
 
 	private void runAgentMaintenance(String action) {
+		if (!AppConfig.configured(this)) {
+			if (installerStatus != null) installerStatus.setText(
+					"尚未配对。先完成 AVF Linux 首次安装并运行 sudo airsim-avf-pair，" +
+					"保存控制令牌后再更新、修复或回滚。");
+			return;
+		}
 		if (installerStatus != null) installerStatus.setText("Agent 操作进行中 · " + action);
 		Executors.newSingleThreadExecutor().execute(() -> {
 			try {

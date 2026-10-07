@@ -37,8 +37,12 @@ if [ -d /run/systemd/system ]; then
     systemctl enable airsim-installerd.service airsim-agent.service >/dev/null || true
     # Do not restart installerd from inside its own dpkg child process. The old
     # rescue process remains alive until the VM restarts or is restarted safely.
-    systemctl start airsim-installerd.service || true
-    systemctl restart airsim-agent.service || true
+    if ! systemctl start airsim-installerd.service; then
+        printf '%s\n' 'Warning: airsim-installerd did not start; inspect journalctl -u airsim-installerd.' >&2
+    fi
+    if ! systemctl restart airsim-agent.service; then
+        printf '%s\n' 'Warning: airsim-agent did not start; inspect journalctl -u airsim-agent.' >&2
+    fi
 fi
 
 exit 0

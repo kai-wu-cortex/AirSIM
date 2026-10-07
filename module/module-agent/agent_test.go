@@ -559,7 +559,7 @@ func TestLegacySelfUpdateRoutesDirectClientsToInstallerService(t *testing.T) {
 	if response.Code != http.StatusGone {
 		t.Fatalf("legacy update status=%d body=%s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "7576") {
+	if !strings.Contains(response.Body.String(), "8576") {
 		t.Fatalf("legacy update response does not identify installerd: %s", response.Body.String())
 	}
 }

@@ -2,6 +2,8 @@
 
 Agent 运行在三星 Android 的 AVF Linux 环境中，连接三星控制 App、通话音频桥、Cloudflare Relay 与 iPhone/Apple Watch 客户端。
 
+首次安装、控制令牌配对、`8575` Agent 可达但 `8576` installerd 不可用、以及 Terminal 启动冲突的无损排障步骤，统一见 [AVF 安装指南](../../docs/AVF_INSTALL_GUIDE.md)。`/api/health` 成功不代表安装服务或配对已经就绪。
+
 ## 主要职责
 
 - 暴露通话、短信、设备状态和诊断 API。

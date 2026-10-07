@@ -21,7 +21,7 @@ public final class CoreTests {
 		assertTrue(AVFStartupPolicy.isRestrictedChinaOEM("HONOR"));
 		assertTrue(!AVFStartupPolicy.isRestrictedChinaOEM("samsung"));
 		assertEquals(
-				"curl -fsSL --proto '=https' --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/latest/download/install-avf.sh | sudo sh",
+				"bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'",
 				AVFStartupPolicy.installCommand());
 
 		java.util.Map<String, String> releaseAssets = new java.util.LinkedHashMap<>();
@@ -89,16 +89,42 @@ public final class CoreTests {
 			exchange.sendResponseHeaders(409, payload.length);
 			try (java.io.OutputStream output = exchange.getResponseBody()) { output.write(payload); }
 		});
+		upstream.createContext("/api/health", exchange -> {
+			byte[] payload = "{\"ok\":true,\"product\":\"airsim\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, payload.length);
+			try (java.io.OutputStream output = exchange.getResponseBody()) { output.write(payload); }
+		});
 		upstream.start();
 		try {
 			AgentClient client = new AgentClient(
 					"http://127.0.0.1:" + upstream.getAddress().getPort(), "test-token");
+			assertContains(client.health(), "\"ok\":true");
 			AgentClient.ForwardResponse response = client.forwardVoWLAN(
 					"POST", "/api/calls/audio/host/warmup", "{}");
 			assertEquals(409, response.status());
 			assertContains(response.payload(), "当前没有进行中的通话");
 		} finally {
 			upstream.stop(0);
+		}
+		com.sun.net.httpserver.HttpServer otherProduct = com.sun.net.httpserver.HttpServer.create(
+				new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+		otherProduct.createContext("/api/health", exchange -> {
+			byte[] payload = "{\"ok\":true,\"version\":\"0.4.2\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, payload.length);
+			try (java.io.OutputStream output = exchange.getResponseBody()) { output.write(payload); }
+		});
+		otherProduct.start();
+		try {
+			AgentClient client = new AgentClient(
+					"http://127.0.0.1:" + otherProduct.getAddress().getPort(), "test-token");
+			try {
+				client.health();
+				throw new AssertionError("other product was mistaken for AirSIM");
+			} catch (IllegalStateException expected) {
+				assertContains(expected.getMessage(), "AirSIM Agent");
+			}
+		} finally {
+			otherProduct.stop(0);
 		}
 
 		TrackingPeer failingPeer = new TrackingPeer();
@@ -245,20 +271,21 @@ public final class CoreTests {
 		}
 		assertTrue(session.code().matches("[0-9]{6}"));
 		assertEquals(121_000L, session.expiresAtMillis());
-		assertEquals("http://172.29.240.25:7575", AVFNetworkPolicy.agentEndpoint("172.29.240.24"));
-		assertEquals("http://10.185.5.25:7575", AVFNetworkPolicy.agentEndpoint("10.185.5.63"));
-		assertEquals("http://172.29.240.25:7576", AVFNetworkPolicy.installerEndpoint("172.29.240.24"));
-		assertEquals("http://10.185.5.25:7576", AVFNetworkPolicy.installerEndpoint("10.185.5.63"));
+		assertEquals("http://172.29.240.25:8575", AVFNetworkPolicy.agentEndpoint("172.29.240.24"));
+		assertEquals("http://10.185.5.25:8575", AVFNetworkPolicy.agentEndpoint("10.185.5.63"));
+		assertEquals("http://172.29.240.25:8576", AVFNetworkPolicy.installerEndpoint("172.29.240.24"));
+		assertEquals("http://10.185.5.25:8576", AVFNetworkPolicy.installerEndpoint("10.185.5.63"));
 		assertEquals("", AVFNetworkPolicy.agentEndpoint("192.168.2.86"));
-		assertTrue(AVFNetworkPolicy.isAgentEndpoint("http://172.29.240.25:7575"));
-		assertTrue(AVFNetworkPolicy.isInstallerEndpoint("http://172.29.240.25:7576"));
-		assertEquals("http://172.29.240.25:7576",
-				AVFNetworkPolicy.installerEndpointForAgent("http://172.29.240.25:7575"));
-		assertEquals("", AVFNetworkPolicy.installerEndpointForAgent("http://192.168.2.86:7575"));
-		assertTrue(!AVFNetworkPolicy.isInstallerEndpoint("http://172.29.240.25:7575"));
-		assertTrue(AVFNetworkPolicy.isAgentEndpoint("http://10.185.5.25:7575"));
-		assertTrue(!AVFNetworkPolicy.isAgentEndpoint("http://192.168.2.86:7575"));
-		assertTrue(!AVFNetworkPolicy.isAgentEndpoint("https://172.29.240.25:7575"));
+		assertTrue(AVFNetworkPolicy.isAgentEndpoint("http://172.29.240.25:8575"));
+		assertTrue(AVFNetworkPolicy.isInstallerEndpoint("http://172.29.240.25:8576"));
+		assertEquals("http://172.29.240.25:8576",
+				AVFNetworkPolicy.installerEndpointForAgent("http://172.29.240.25:8575"));
+		assertEquals("", AVFNetworkPolicy.installerEndpointForAgent("http://192.168.2.86:8575"));
+		assertTrue(!AVFNetworkPolicy.isInstallerEndpoint("http://172.29.240.25:8575"));
+		assertTrue(AVFNetworkPolicy.isAgentEndpoint("http://10.185.5.25:8575"));
+		assertTrue(!AVFNetworkPolicy.isAgentEndpoint("http://10.185.5.25:7575"));
+		assertTrue(!AVFNetworkPolicy.isAgentEndpoint("http://192.168.2.86:8575"));
+		assertTrue(!AVFNetworkPolicy.isAgentEndpoint("https://172.29.240.25:8575"));
 		byte[] vowlanSecret = PairingCrypto.hex(
 				"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
 		String vowlanCanonical = VoWLANAuth.canonicalRequest(

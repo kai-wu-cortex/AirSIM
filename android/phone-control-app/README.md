@@ -42,19 +42,21 @@ android/phone-control-app/build/android/AirSIM-Phone-Bridge-debug.apk
 
 1. 安装 APK 并启动 AirSIM。
 2. 如果启动提示显示 AVF Linux 尚未运行，点“启动 Linux Terminal”；若 Terminal 未启用，点“打开开发者选项”并启用 Linux 开发环境。
-3. Linux 首次启动后，复制并在 Terminal 中执行：
+3. Linux 首次启动后，确认 v0.4.4 签名 Release 已发布，再复制并在 Terminal 中执行；未发布时不要改用占用 DJOneHub `7575` 的旧版安装脚本：
 
    ```sh
-   curl -fsSL --proto '=https' --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/latest/download/install-avf.sh | sudo sh
+   bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'
    ```
 
 4. 在系统设置中选择 AirSIM 作为默认电话 App。
 5. 启动 Shizuku，并在 AirSIM 的 Shizuku 区域完成授权。
-6. 配置 AVF Agent 地址与 bearer token。
+6. 在 Terminal 运行 `sudo airsim-avf-pair`，从当前 AVF 私网确定 Agent 地址，把输出的控制 token 保存到 App。不要把 token 粘贴到日志、截图或仓库。
 7. 确认 Agent、音频桥和 VoWLAN 状态均为就绪。
 8. 打开两分钟配对窗口，让 iPhone 输入三星端显示的六位配对码。
 
-首次安装命令也固定显示在 App 的“设置 → AVF Linux 首次安装”中，可随时复制。App 只会在 AVF 未启动，或 AVF 已启动但 Agent 尚未配置时显示启动提示。
+安装命令也固定显示在 App 的“设置 → AVF Linux 首次安装”中，可随时复制；**复制不会自动运行**，须在 Debian Terminal 粘贴并按回车。App 只会在 AVF 未启动，或 AVF 已启动但 Agent 尚未配置时显示启动提示。`Agent 可达 · 尚未配对` 只表示 `8575` 的无凭据健康检查通过，不代表安装管理或通话控制已就绪；`installerd` 还需要 `8576` 服务和控制 token。修复版线上引导脚本遇到已有 `current.deb` 会优先恢复服务而非拒绝运行；发布前仍需按[AVF 安装与无损排障指南](../../docs/AVF_INSTALL_GUIDE.md)手动检查 systemd 服务，不要清除 Linux Terminal 数据。
+
+Terminal 若报 `udev` 需要较新 `libudev1`、`unmet dependencies`，属于 AVF Debian 包状态问题。先在 Terminal 运行 `apt-cache policy udev libudev1` 和 `sudo apt-get -s -f install`，检查模拟计划；不要直接让 App 或脚本自动执行 `apt --fix-broken install`。
 
 ## 厂商系统兼容性边界
 
@@ -66,11 +68,12 @@ AirSIM 会识别小米、Redmi、OPPO、OnePlus、realme、vivo、iQOO 和荣耀
 
 ## 网络与安全
 
-- Agent 配置仅接受 AVF 私网 `10.185.5.0/24` 内的地址。
+- Agent 配置仅接受 AVF 私网地址；AVF 网段由系统动态分配，不能固定为 `10.185.5.0/24`。App 优先根据 `avf_tap_fixed` 所在网段推断来宾地址，仍需在当前设备上验证。
 - bearer token 只保存在 Android 私有偏好设置中，不写入日志。
 - VoWLAN 仅绑定有效的三星热点地址，不监听通用网络接口。
 - 所有控制请求均执行路由白名单、消息大小、时间戳、随机数与 HMAC 校验。
 - 原始 PCM、配对明文和认证材料不得进入诊断日志。
-- Agent API 使用 AVF 端口 `7575`，救援安装服务使用 `7576`；两者复用首次引导生成的控制 token。
+- Agent API 使用 AVF 端口 `8575`，救援安装服务使用 `8576`；两者复用首次引导生成的控制 token。
+- 旧版 AirSIM 保存的 `:7575` 地址会迁移到 `:8575`；`7575` 可能属于同机 DJOneHub，不再视为 AirSIM 在线证据。未发布端口迁移版 Agent 前，不能用旧版在线包做共存安装。
 - Android 管理端只提交签名的 `airsim-avf-agent_*_arm64.deb`，芯片厂商差异由 App 的能力探测处理，不选择不同 Debian 包。
 - “检查并安装最新 Agent”从 `kai-wu-cortex/AirSIM` 的最新 GitHub Release 选择唯一的 `airsim-avf-agent_*_arm64.deb` 及同名 `.sig`；Release 缺包、缺签名、多包或非 HTTPS 下载都会被拒绝。

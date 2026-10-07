@@ -1,5 +1,7 @@
 # AirSIM 三星通话音频桥
 
+若 AVF Linux Terminal、Agent 或 installerd 尚未就绪，先按[AVF 安装与无损排障指南](../../docs/AVF_INSTALL_GUIDE.md)分别验证 `8575`、`8576` 和控制令牌。PCM 桥待启动不等于 Debian 包损坏，也不应通过清除 AVF 数据处理。
+
 该组件运行在三星 Android 的 Shizuku `UserService` 中，以 shell UID 访问系统通话音频，并向 AirSIM 控制 App 与 AVF Agent 提供双向 PCM。
 
 ## 音频方向

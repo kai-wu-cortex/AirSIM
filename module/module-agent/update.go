@@ -198,7 +198,7 @@ sleep 1
 /etc/init.d/airsim_agent start >>/data/airsim/log/update.log 2>&1 || exit 1
 count=0
 while test "$count" -lt 20; do
-  if wget -qO- http://127.0.0.1:7575/api/health 2>/dev/null | grep -q '"ok":true'; then
+  if wget -qO- http://127.0.0.1:8575/api/health 2>/dev/null | grep -q '"product":"airsim"'; then
     if test "$(cat /data/airsim/update-pending 2>/dev/null)" = "$1"; then
       rm -f /data/airsim/update-pending
       rm -rf "$1"

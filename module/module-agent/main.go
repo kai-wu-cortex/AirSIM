@@ -19,11 +19,11 @@ import (
 	"time"
 )
 
-var agentVersion = "0.4.3"
+var agentVersion = "0.4.4"
 
 const (
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。
-	listenAddress = "0.0.0.0:7575"
+	listenAddress = "0.0.0.0:8575"
 	// DATA11 桥与原厂 DATA1 完全分离，禁止重新使用 ql_manager_server 占用的 /dev/smd7。
 	atDevice = "/dev/airsim_data11"
 )
@@ -420,7 +420,7 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 }
 
 func installerServiceRequired(response http.ResponseWriter, _ *http.Request) {
-	writeError(response, http.StatusGone, "Agent 自更新已停用；请通过 Android App 连接 AVF installerd 端口 7576")
+	writeError(response, http.StatusGone, "Agent 自更新已停用；请通过 Android App 连接 AVF installerd 端口 8576")
 }
 
 // allowedRemote 把控制面限制在模块自身和 CDC ECM 子网。
@@ -593,6 +593,7 @@ func (a *agent) health(response http.ResponseWriter, request *http.Request) {
 		lastSuccess = atHealth.LastSuccess.UTC().Format(time.RFC3339Nano)
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
+		"product":                 "airsim",
 		"ok":                      agentHealthy,
 		"version":                 agentVersion,
 		"platform":                a.profile.Platform,
