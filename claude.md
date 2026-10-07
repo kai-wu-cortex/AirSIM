@@ -57,7 +57,9 @@ v0.4.5 是一次签名信任根迁移：v0.4.4 的私钥未留存，旧 installe
 
 ## Relay 规则
 
-生产者必须使用自己的 Cloudflare 账户、KV、Durable Objects 和自定义域名。历史域名不是硬编码依赖。
+生产者必须使用自己的 Cloudflare 账户、KV、Durable Objects 和自定义域名。维护者 AirSIM Worker 是 `airsim-push-relay`，地址为 `https://airsim-push.remotepilot.site`，只允许 `com.eric3u.airsim`；它不是第三方重签 App 的公共服务。DJOneHub 的 `https://push.remotepilot.site` 必须保持独立，AirSIM 不得接管其 hostname、KV、Durable Objects 或 Dashboard token。客户端和 Agent 不能把任何历史域名当作硬编码依赖。
+
+截至 2026-10-08，维护者部署只完成了健康检查与 Dashboard 鉴权验收，AirSIM 环境尚无设备注册；不得据此宣称真实 APNs、Agent 心跳或云端 PCM 已通过。
 
 `APNS_P8` 与 `DASHBOARD_TOKEN` 是必需 Worker Secret：
 

@@ -35,6 +35,12 @@ AIRSIM_ANDROID_CONTROL_TOKEN_FILE=/var/lib/airsim/control.token
 
 控制 token 文件必须只允许 Agent 服务账号读取。私网地址和 token 不得提交到仓库或写入公开日志。
 
+## 云端 Relay 配置
+
+Agent 不硬编码公网域名；它使用 iPhone 配对注册中下发的 `relay_url`。维护者 `com.eric3u.airsim` 构建使用 `https://airsim-push.remotepilot.site`，而 DJOneHub 继续使用 `https://push.remotepilot.site`。两套 Worker、KV、Durable Objects、设备身份和命令/媒体会话相互隔离，AirSIM Agent 不得连接 DJOneHub Relay。
+
+重新签名的部署者必须配置自己的 Relay 地址、`ALLOWED_BUNDLE_ID` 和 APNs 凭据。Relay `/healthz` 成功只证明 Worker 可访问；还要分别验证设备注册、Agent 心跳、命令拉取、APNs 和媒体 WebSocket。
+
 ## 启动验证
 
 在重启正式服务前运行：

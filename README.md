@@ -13,7 +13,7 @@
 
 AirSIM is a source-available, noncommercial cross-device calling and messaging project that connects Samsung Android, iPhone, Apple Watch, Android AVF Linux, CallKit, PushKit, VoWLAN, APNs, and Cloudflare Workers.
 
-> 本仓库包含完整源码、构建脚本与部署文档，不提供可复用的 Apple Developer 身份、生产 APNs 密钥、Cloudflare 账户资源或托管 Relay。项目仍处于主动开发阶段，不能替代紧急呼叫能力，生产使用前必须完成目标三星手机、iPhone 和 Apple Watch 的联合验收。
+> 本仓库包含完整源码、构建脚本与部署文档，不提供可复用的 Apple Developer 身份、生产 APNs 密钥或 Cloudflare 账户资源。维护者部署了仅供自身签名构建测试的 AirSIM Relay，但它不是面向第三方 Bundle ID 的公共托管服务，也不提供可用性承诺；重新签名的使用者必须自行部署 Relay。项目不能替代紧急呼叫能力，生产使用前必须完成目标三星手机、iPhone 和 Apple Watch 的联合验收。
 
 > [!IMPORTANT]
 > 本项目面向个人学习、研究、实验和其他非商业用途。任何商业使用、收费服务、商业产品集成或预期商业应用均未获授权；如需商业许可，必须事先取得版权所有者的单独书面许可。详见 [PolyForm Noncommercial License 1.0.0](LICENSE)。由于禁止商业用途，本项目属于 **source-available**，不是 OSI 定义的开源软件。
@@ -44,11 +44,13 @@ iPhone / Apple Watch
 Android AVF Linux Agent
 ```
 
-远程模式通过部署者自己的 Relay：
+远程模式通过与签名身份配套的独立 Relay：
 
 ```text
 iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Android
 ```
+
+维护者当前使用 `https://airsim-push.remotepilot.site`，只允许 `com.eric3u.airsim`。DJOneHub 继续使用 `https://push.remotepilot.site`；两个域名背后是相互独立的 Worker、KV、Durable Objects 和 Dashboard token，禁止交叉复用。其他签名身份必须使用自己的域名、Cloudflare 资源和 APNs 凭据。
 
 每通电话在建立时选择 VoWLAN 或 Relay，并在本次通话结束前保持同一传输路径，避免媒体和控制面在通话中途漂移。
 
@@ -119,6 +121,20 @@ open iOS/AirSIM.xcodeproj
 
 ### 5. 可选：部署 Cloudflare Relay
 
+维护者部署信息：
+
+| 项目 | 当前值 |
+| --- | --- |
+| Worker | `airsim-push-relay` |
+| AirSIM 地址 | `https://airsim-push.remotepilot.site` |
+| 允许的主 Bundle ID | `com.eric3u.airsim` |
+| DJOneHub 地址 | `https://push.remotepilot.site`，保持独立 |
+| 必需 Secret | `APNS_P8`、`DASHBOARD_TOKEN`，只保存于 Cloudflare Secret |
+
+截至 2026-10-08，AirSIM 与 DJOneHub 的 `/healthz` 均返回各自服务名，AirSIM Dashboard 已验证匿名 `401`、正确 Bearer token `200`。AirSIM 新环境尚无设备注册，因此真实 PushKit、APNs、Agent 心跳和云端 PCM 仍属于待验收项。
+
+上表不是公共接入承诺。使用自己 Apple Developer Team 和 Bundle ID 重签时，应按下面的流程部署自己的 Relay：
+
 ```sh
 cd push-relay-worker
 npm ci
@@ -187,7 +203,7 @@ xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
 
 ## 项目状态
 
-AirSIM 当前处于主动开发阶段。仓库已整合 Android、AVF Agent / Installer、iOS / watchOS 与 Cloudflare Relay 源码，并提供本地自动化验证；生产 Relay、Apple 正式签名、目标三星机型兼容性、真实双向通话、后台推送与长期稳定性仍需由部署者在自己的环境中验收。
+AirSIM 当前处于主动开发阶段。仓库已整合 Android、AVF Agent / Installer、iOS / watchOS 与 Cloudflare Relay 源码，并提供本地自动化验证。维护者 AirSIM Relay 已通过独立域名上线并完成健康检查与 Dashboard 鉴权，但尚未完成该新环境的设备注册、真实 PushKit/APNs 和云端 PCM 验收；Apple 正式签名、目标三星机型兼容性、真实双向通话、后台推送与长期稳定性仍需各部署者在自己的环境中验证。
 
 ## 项目趋势
 

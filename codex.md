@@ -43,6 +43,7 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是
 8. PCM 只在内存与网络中处理，不保存到磁盘或诊断日志。
 9. iOS/watchOS 工程中的 `com.example.airsim` 是占位符。部署者必须使用自己的 Apple Team、唯一 Bundle ID、证书和 provisioning profile。
 10. Relay 的 `ALLOWED_BUNDLE_ID` 必须等于重新签名后的主 iOS App Bundle ID。
+11. AirSIM 与 DJOneHub 必须使用不同 hostname、Worker、KV、Durable Objects 和 Dashboard token。维护者 AirSIM hostname 是 `airsim-push.remotepilot.site`；`push.remotepilot.site` 属于 DJOneHub，不得由 AirSIM 接管。
 
 ## 4. 安全与 Secret 规则
 
@@ -120,6 +121,8 @@ xcodebuild -project iOS/AirSIM.xcodeproj \
 
 ### Cloudflare Relay
 
+维护者生产事实（截至 2026-10-08）：Worker 名为 `airsim-push-relay`，hostname 为 `https://airsim-push.remotepilot.site`，只允许 `com.eric3u.airsim`。它与 `https://push.remotepilot.site` 上的 DJOneHub Worker 完全隔离，不是供任意重签 Bundle ID 使用的公共 Relay。已验证两边 `/healthz`、AirSIM Dashboard 匿名 `401` 与正确凭据 `200`；AirSIM 环境当前没有设备注册，不能声称真实 APNs、Agent 心跳或云端 PCM 已验收。
+
 ```sh
 cd push-relay-worker
 npm ci
@@ -156,6 +159,7 @@ npx wrangler deploy --dry-run --config wrangler.toml
 ### Relay
 
 - 使用部署者自己的 Cloudflare 账户、KV、Durable Objects 和域名。
+- AirSIM hostname 不得复用或覆盖 DJOneHub 的 `push.remotepilot.site`；维护者部署使用 `airsim-push.remotepilot.site`。
 - `APNS_P8` 与 `DASHBOARD_TOKEN` 仅存在于 Secret Store。
 - 测试、语法检查和 dry-run 通过。
 - `/healthz`、Dashboard 鉴权、设备注册、Agent 心跳、APNs 和 WebSocket 已验证。

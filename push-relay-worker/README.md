@@ -4,6 +4,22 @@
 
 > 本文中的域名、Cloudflare 资源、Apple Team ID 和密钥都必须替换成部署者自己的值。不要复用其他 AirSIM 环境的 KV、Durable Objects、Dashboard token、设备 Secret 或 APNs 私钥。
 
+## 维护者部署状态（2026-10-08）
+
+| 项目 | 状态 |
+| --- | --- |
+| Worker | `airsim-push-relay` |
+| Custom Domain | `https://airsim-push.remotepilot.site` |
+| `ALLOWED_BUNDLE_ID` | `com.eric3u.airsim` |
+| Worker 协议版本 | `/healthz` 报告 `0.2.0` |
+| 存储 | AirSIM 专用 `DEVICES` KV 与 `MEDIA`、`STATUS`、`COMMANDS` Durable Objects |
+| Secret | `APNS_P8`、`DASHBOARD_TOKEN` 名称已配置；值不在仓库中 |
+| DJOneHub 隔离 | `https://push.remotepilot.site` 继续返回 `djonehub-push-relay` |
+
+已验证 AirSIM `/healthz` 返回 `airsim-push-relay`，Dashboard 匿名 API 返回 `401`、正确 Bearer token 返回 `200`。记录检查时 AirSIM 环境的设备数和事件数均为 0，因此这只能证明基础设施、路由和 Dashboard 鉴权已就绪，不能证明真实设备注册、PushKit/APNs、Agent 心跳、命令或 PCM 媒体已经通过。
+
+该地址只服务维护者控制的 `com.eric3u.airsim` 签名构建，不是公共多租户 Relay。任何使用自己 Apple Developer Team 和 Bundle ID 的部署者，都必须创建自己的 Worker、KV/DO、hostname、Secrets 和 APNs 配置。
+
 ## 1. 仓库中的实现
 
 主要文件：

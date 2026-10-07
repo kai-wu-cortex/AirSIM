@@ -6,6 +6,11 @@ FULL RUNBOOK: push-relay-worker/README.md
 BACKEND_PRESENT=true
 WORKER_ENTRY=src/index.mjs
 MAINTAINER_PRODUCTION_HOST=https://airsim-push.remotepilot.site
+MAINTAINER_WORKER=airsim-push-relay
+MAINTAINER_ALLOWED_BUNDLE=com.eric3u.airsim
+MAINTAINER_PUBLIC_MULTITENANT=false
+MAINTAINER_VERIFIED_2026_10_08=health,Dashboard anonymous 401,Dashboard authenticated 200
+MAINTAINER_UNVERIFIED_2026_10_08=device registration,real APNs,Agent heartbeat,cloud PCM
 DJONEHUB_HOST=https://push.remotepilot.site
 HOST_ISOLATION=AirSIM must not take over the DJOneHub hostname
 DEPLOY_TARGET=operator-owned Cloudflare account and hostname

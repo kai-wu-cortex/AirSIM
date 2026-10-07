@@ -35,7 +35,7 @@ iOS/AirSIM.xcodeproj
 3. 在三星端打开两分钟配对窗口。
 4. 在 iPhone 输入三星端显示的六位配对码。
 5. 等待 VoWLAN 状态显示为就绪。
-6. 如需远程模式，在设置中填写独立 Relay 地址并启用云端通话与短信。
+6. 如需远程模式，在“云端 Relay”填写与当前签名身份匹配的独立 Relay 地址，点击“保存 Relay 地址”，再启用“远程通话与短信”。维护者 `com.eric3u.airsim` 构建使用 `https://airsim-push.remotepilot.site`；其他 Bundle ID 必须使用自行部署的 Relay。
 
 ## 构建与测试
 
@@ -70,6 +70,8 @@ xcodebuild -project iOS/AirSIM.xcodeproj \
 只替换签名证书而保留其他人的 Bundle ID 不会获得对应 App ID/APNs topic 的权限。主 App、Watch、Live Activity、provisioning profile 与 Relay 必须使用同一套标识关系。
 
 Relay 地址通过 `AIRSIM_PUSH_RELAY_URL` 注入，APNs 环境通过 `AIRSIM_APNS_ENVIRONMENT` 配置。Debug 开发签名对应 APNs `sandbox`，Release/TestFlight 对应 `production`。
+
+不要把 DJOneHub 的 `https://push.remotepilot.site` 填入 AirSIM。该地址只允许 DJOneHub Bundle ID；AirSIM 与 DJOneHub 的设备注册、命令队列、媒体会话和 Dashboard 相互隔离。维护者 AirSIM 地址也只接受 `com.eric3u.airsim`，开源使用者更换 Bundle ID 后必须同步更换 Relay `ALLOWED_BUNDLE_ID` 和 APNs 凭据。
 
 新安装需要重新完成三星配对、通知授权、CallKit/PushKit 注册和 Watch 配套安装。
 

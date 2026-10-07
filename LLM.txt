@@ -35,6 +35,15 @@ iOS
 push-relay-worker
   Cloudflare Worker, KV, Durable Objects, APNs provider, command/media WebSockets, health endpoint, and authenticated Dashboard.
 
+MAINTAINER RELAY STATUS (2026-10-08)
+- AirSIM Worker name: airsim-push-relay
+- AirSIM host: https://airsim-push.remotepilot.site
+- Allowed main Bundle ID: com.eric3u.airsim
+- DJOneHub host: https://push.remotepilot.site
+- The two products use separate Workers, KV, Durable Objects, hostnames, and Dashboard tokens.
+- The maintainer endpoint is not a public multi-tenant relay for independently re-signed apps.
+- Health and Dashboard authentication are verified. No AirSIM device was registered at the recorded check, so real APNs, Agent heartbeat, and cloud PCM remain unverified for this environment.
+
 NON-NEGOTIABLE ARCHITECTURE CONTRACTS
 - The Samsung Android phone remains the carrier endpoint.
 - Emergency calls must remain with the system phone capability.
@@ -88,6 +97,7 @@ DEPLOYMENT BOUNDARIES
 - Do not upload an Apple build, create a release, install on a real device, push Git commits, rotate secrets, or send real pushes without explicit user authorization.
 - Use only the user-specified account, host, device, domain, Apple Team, and signing identity.
 - Do not infer a production domain from historical examples.
+- Never bind AirSIM to the DJOneHub host or reuse DJOneHub storage. Independently re-signed apps must deploy their own Relay and APNs credentials.
 - A dry-run is not a deployment. A simulator build is not real-device validation. Source code capability is not carrier-network acceptance.
 
 WORKFLOW

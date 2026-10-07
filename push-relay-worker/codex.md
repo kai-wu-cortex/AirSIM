@@ -8,6 +8,8 @@
 
 AirSIM 必须使用独立于 DJOneHub 的 Worker、KV、Durable Objects、Dashboard token 和 hostname。本项目维护者使用 `https://airsim-push.remotepilot.site`；`https://push.remotepilot.site` 继续属于 DJOneHub，禁止 AirSIM 部署接管或复用。
 
+维护者部署截至 2026-10-08 已验证 `/healthz`、Dashboard 匿名 `401` 和正确 Bearer token `200`；检查时尚无 AirSIM 设备注册。不要把基础设施与鉴权就绪描述成真实 APNs、Agent 心跳、命令或云端 PCM 已验收。
+
 以下操作必须取得用户明确授权后才能执行：创建 Cloudflare 资源、写入或轮换 Secret、部署 Worker、绑定或迁移域名、修改 DNS、回滚线上版本。只读检查、测试和 `wrangler deploy --dry-run` 可以先执行。
 
 ## 操作者必须自行持有
