@@ -6,6 +6,8 @@
 
 目标是将 AirSIM Relay 安全部署到操作者自己的 Cloudflare 账户，并让使用操作者 Apple Developer Team 重新签名的 iPhone/Watch App 完成自动注册、PushKit → CallKit 来电和 Dashboard 鉴权。
 
+AirSIM 必须使用独立于 DJOneHub 的 Worker、KV、Durable Objects、Dashboard token 和 hostname。本项目维护者使用 `https://airsim-push.remotepilot.site`；`https://push.remotepilot.site` 继续属于 DJOneHub，禁止 AirSIM 部署接管或复用。
+
 以下操作必须取得用户明确授权后才能执行：创建 Cloudflare 资源、写入或轮换 Secret、部署 Worker、绑定或迁移域名、修改 DNS、回滚线上版本。只读检查、测试和 `wrangler deploy --dry-run` 可以先执行。
 
 ## 操作者必须自行持有
@@ -107,6 +109,7 @@ curl --fail --show-error https://YOUR_RELAY_HOST/healthz
 - 不读取、打印、提交、缓存或转存任何真实 Secret。
 - 不把 `.p8` 或 Dashboard token 写进 `[vars]`、TOML、源码、README、命令参数或日志。
 - 不使用原作者或 `com.example.airsim` 的 Bundle ID/App ID 签名。
+- 不把 AirSIM Worker 绑定到正在承载 DJOneHub 的 hostname，也不复用 DJOneHub 的 KV/DO。
 - 不删除或重排 Durable Object migration，不删除 KV/DO 来“重新部署”。
 - 不手工修改设备记录绕过 `device_secret` 校验。
 - 不声称 CallKit 有独立服务端证书；Relay 使用 APNs token key。

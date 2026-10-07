@@ -5,7 +5,9 @@ FULL RUNBOOK: push-relay-worker/README.md
 [SCOPE]
 BACKEND_PRESENT=true
 WORKER_ENTRY=src/index.mjs
-LEGACY_HOST=https://push.remotepilot.site
+MAINTAINER_PRODUCTION_HOST=https://airsim-push.remotepilot.site
+DJONEHUB_HOST=https://push.remotepilot.site
+HOST_ISOLATION=AirSIM must not take over the DJOneHub hostname
 DEPLOY_TARGET=operator-owned Cloudflare account and hostname
 DEVICE_ENROLLMENT=signed App POST /v1/devices/register
 WRANGLER_DOES_NOT_ENROLL_DEVICES=true
@@ -80,6 +82,7 @@ DO_NOT_PREPOPULATE_KV=true
 [NEVER]
 - Never request, print, commit, cache, or persist secret values.
 - Never reuse another environment's KV, Durable Objects, hostname, device records, or credentials.
+- Never bind AirSIM to a DJOneHub production hostname; use a dedicated AirSIM hostname and Worker.
 - Never delete or reorder deployed Durable Object migrations.
 - Never overwrite an occupied hostname or DNS record without an approved migration.
 - Never hand-edit KV to add a device or bypass device_secret authentication.

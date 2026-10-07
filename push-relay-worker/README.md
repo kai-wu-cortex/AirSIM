@@ -1,6 +1,6 @@
 # AirSIM Cloudflare Relay 部署手册
 
-`push-relay-worker/` 中已经包含可部署的 Relay 后端，而不是域名占位文件。它负责 AirSIM iPhone、Apple Watch、Live Activity 与 Android AVF Agent 之间的公网控制、APNs 推送、状态同步、命令队列和通话媒体中继。历史生产域名是 `https://push.remotepilot.site`；新环境可以继续使用该域名，也可以换成用户自己的 Cloudflare 自定义域名。
+`push-relay-worker/` 中已经包含可部署的 Relay 后端，而不是域名占位文件。它负责 AirSIM iPhone、Apple Watch、Live Activity 与 Android AVF Agent 之间的公网控制、APNs 推送、状态同步、命令队列和通话媒体中继。AirSIM 与 DJOneHub 应使用相互隔离的 Worker、KV、Durable Objects 和域名；本项目维护者的 AirSIM 生产域名是 `https://airsim-push.remotepilot.site`，其他部署者应换成自己控制的 Cloudflare 自定义域名。
 
 > 本文中的域名、Cloudflare 资源、Apple Team ID 和密钥都必须替换成部署者自己的值。不要复用其他 AirSIM 环境的 KV、Durable Objects、Dashboard token、设备 Secret 或 APNs 私钥。
 
@@ -153,11 +153,11 @@ id = "YOUR_KV_NAMESPACE_ID"
 workers_dev = false
 
 [[routes]]
-pattern = "push.remotepilot.site"
+pattern = "airsim-push.remotepilot.site"
 custom_domain = true
 ```
 
-如果使用自有域名，将 `pattern` 替换成例如 `push.example.com`。Custom Domain 部署会由 Cloudflare 建立 DNS 记录并签发证书；该 hostname 不能预先存在冲突的 CNAME。若旧的 `push.remotepilot.site` 已指向另一 Worker，先在 Cloudflare Dashboard 确认当前绑定和流量，再迁移，避免覆盖在线环境。
+将示例中的 `pattern` 改为 AirSIM 专用 hostname，例如 `airsim-push.remotepilot.site` 或 `airsim-push.example.com`。Custom Domain 部署会由 Cloudflare 建立 DNS 记录并签发证书；该 hostname 不能预先存在冲突的 CNAME。不要把 AirSIM Worker 绑定到正在承载 DJOneHub 的 `push.remotepilot.site`，也不要复用 DJOneHub 的 KV、Durable Objects 或 Dashboard token。
 
 ### 4.3 写入 Secret
 
@@ -253,7 +253,7 @@ npm run deploy
 验证：
 
 ```sh
-curl --fail --show-error https://push.remotepilot.site/healthz
+curl --fail --show-error https://airsim-push.remotepilot.site/healthz
 ```
 
 预期响应类似：
@@ -267,7 +267,7 @@ Dashboard 页面位于 `/dashboard`。其 API 使用 Bearer token：
 ```sh
 curl --fail --show-error \
   -H "Authorization: Bearer ${AIRSIM_DASHBOARD_TOKEN}" \
-  https://push.remotepilot.site/dashboard/api/summary
+  https://airsim-push.remotepilot.site/dashboard/api/summary
 ```
 
 不要在 shell history、截图或工单中暴露真实 token。
@@ -276,7 +276,7 @@ curl --fail --show-error \
 
 主 App 的 `Info.plist` 从构建设置读取：
 
-- `AIRSIM_PUSH_RELAY_URL`：例如 `https://push.remotepilot.site`，不要带尾部路径。
+- `AIRSIM_PUSH_RELAY_URL`：例如 `https://airsim-push.remotepilot.site`，不要带尾部路径。
 - `AIRSIM_APNS_ENVIRONMENT`：Debug 使用 `sandbox`，Release/TestFlight 使用 `production`。
 - `APS_ENVIRONMENT`：Debug 为 `development`，Release 为 `production`，必须与签名 profile 一致。
 
@@ -287,7 +287,7 @@ xcodebuild \
   -project iOS/AirSIM.xcodeproj \
   -scheme AirSIM \
   -configuration Debug \
-  AIRSIM_PUSH_RELAY_URL=https://push.remotepilot.site \
+  AIRSIM_PUSH_RELAY_URL=https://airsim-push.remotepilot.site \
   AIRSIM_APNS_ENVIRONMENT=sandbox \
   APS_ENVIRONMENT=development
 ```
@@ -322,7 +322,7 @@ curl --fail-with-body \
     "environment":"sandbox",
     "media_transport":"legacy_pcm"
   }' \
-  https://push.remotepilot.site/v1/devices/register
+  https://airsim-push.remotepilot.site/v1/devices/register
 ```
 
 不要对生产设备复制此示例 Secret。生产 Secret 应由 App 随机生成并保存在 Keychain 中。

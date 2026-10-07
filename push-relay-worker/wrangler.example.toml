@@ -4,9 +4,9 @@ compatibility_date = "2026-08-20"
 workers_dev = true
 
 # Production example: set workers_dev = false above, then uncomment this block.
-# Replace the hostname when deploying to a user-owned domain.
+# AirSIM should use a dedicated hostname instead of taking over a DJOneHub relay.
 # [[routes]]
-# pattern = "push.remotepilot.site"
+# pattern = "airsim-push.remotepilot.site"
 # custom_domain = true
 
 [observability]

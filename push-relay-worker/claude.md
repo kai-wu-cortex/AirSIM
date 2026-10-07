@@ -2,6 +2,8 @@
 
 协助部署前，依次阅读 `README.md`、`wrangler.example.toml`、`package.json`、`src/index.mjs`、`src/status-store.mjs` 和 `src/dashboard.mjs`。源码是接口事实来源；不能用旧 DJOneHub 配置、其他 AirSIM 环境资源或记忆中的 Wrangler 行为代替核对。
 
+AirSIM 必须使用独立于 DJOneHub 的 Worker、KV、Durable Objects、Dashboard token 和 hostname。本项目维护者使用 `https://airsim-push.remotepilot.site`；不得让 AirSIM 接管 DJOneHub 的 `https://push.remotepilot.site`。
+
 ## 必须遵守
 
 1. 先确认 Cloudflare account/zone、目标 hostname、Apple Team ID/Key ID、操作者自己的主 Bundle ID，以及 sandbox 或 production 环境。
