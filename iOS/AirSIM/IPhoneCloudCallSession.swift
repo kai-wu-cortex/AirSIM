@@ -191,6 +191,112 @@ enum CloudMediaTransportPreference {
     }
 }
 
+struct CloudPCMPlaybackWindow {
+    static let completionType: AVAudioPlayerNodeCompletionCallbackType = .dataRendered
+    private(set) var scheduledPackets = 0
+    var availablePackets: Int { max(0, 12 - scheduledPackets) }
+    mutating func schedulePacket() { scheduledPackets += 1 }
+    mutating func didRenderPacket() { scheduledPackets = max(0, scheduledPackets - 1) }
+}
+
+/// Bounds network backlog and sends one 20 ms PCM packet at a time.
+struct CloudPCMUplinkSendQueue {
+    private var pending: [(pcm: Data, capturedAt: TimeInterval)] = []
+    private var lastSendAt: TimeInterval?
+    private(set) var inFlightAt: TimeInterval?
+    private(set) var droppedPackets: UInt64 = 0
+    var pendingPackets: Int { pending.count }
+
+    mutating func enqueue(_ pcm: Data, at now: TimeInterval) {
+        guard pcm.count == 320 else { return }
+        pending.append((pcm, now))
+        if pending.count > 50 {
+            pending.removeFirst()
+            droppedPackets &+= 1
+        }
+    }
+
+    mutating func next(at now: TimeInterval) -> Data? {
+        guard inFlightAt == nil else { return nil }
+        while let first = pending.first, now - first.capturedAt > 1 {
+            pending.removeFirst()
+            droppedPackets &+= 1
+        }
+        guard !pending.isEmpty, lastSendAt.map({ now - $0 >= 0.019 }) ?? true else { return nil }
+        lastSendAt = now
+        inFlightAt = now
+        return pending.removeFirst().pcm
+    }
+
+    mutating func complete() { inFlightAt = nil }
+}
+
+struct CloudPCMBufferedFrame {
+    let sequence: UInt32
+    let pcm: Data
+}
+
+/// Raw AirSIM PCM has no wire sequence, so callers assign monotonic arrival
+/// numbers. The reserve absorbs relay bursts without ever growing unbounded.
+struct CloudPCMAdaptiveJitterBuffer {
+    private var frames: [UInt32: CloudPCMBufferedFrame] = [:]
+    private var expectedSequence: UInt32?
+    private var lastArrivalAt: Date?
+    private var estimatedJitter: TimeInterval = 0
+    private(set) var targetFrameCount = 10
+    private(set) var isPrimed = false
+    private(set) var droppedFrameCount: UInt64 = 0
+    var bufferedFrameCount: Int { frames.count }
+
+    mutating func enqueue(sequence: UInt32, pcm: Data, arrivedAt: Date) {
+        guard pcm.count == 320 else { return }
+        if let expectedSequence, Int32(bitPattern: sequence &- expectedSequence) < 0 {
+            droppedFrameCount &+= 1
+            return
+        }
+        guard frames[sequence] == nil else { droppedFrameCount &+= 1; return }
+        if let previous = lastArrivalAt {
+            let delta = arrivedAt.timeIntervalSince(previous)
+            if delta >= 0 {
+                estimatedJitter += (abs(delta - 0.02) - estimatedJitter) / 16
+                targetFrameCount = max(targetFrameCount, min(30, 10 + Int(estimatedJitter * 200)))
+            }
+        }
+        lastArrivalAt = arrivedAt
+        frames[sequence] = CloudPCMBufferedFrame(sequence: sequence, pcm: pcm)
+        while frames.count > 50, let oldest = frames.keys.min() {
+            frames.removeValue(forKey: oldest)
+            droppedFrameCount &+= 1
+            if expectedSequence == oldest { expectedSequence = oldest &+ 1 }
+        }
+        if !isPrimed, frames.count >= targetFrameCount { isPrimed = true }
+    }
+
+    mutating func dequeue(maxFrames: Int) -> [CloudPCMBufferedFrame] {
+        guard isPrimed, maxFrames > 0 else { return [] }
+        if expectedSequence == nil { expectedSequence = frames.keys.min() }
+        var ready: [CloudPCMBufferedFrame] = []
+        while ready.count < maxFrames, !frames.isEmpty {
+            guard let expected = expectedSequence else { break }
+            if let frame = frames.removeValue(forKey: expected) {
+                ready.append(frame)
+                expectedSequence = expected &+ 1
+            } else if let next = frames.keys.min(), next > expected {
+                droppedFrameCount &+= UInt64(next - expected)
+                expectedSequence = next
+            } else { break }
+        }
+        return ready
+    }
+
+    mutating func notePlaybackUnderrun() {
+        targetFrameCount = min(30, targetFrameCount + 5)
+        isPrimed = false
+    }
+
+    mutating func reset() { self = CloudPCMAdaptiveJitterBuffer() }
+}
+
 enum CloudCallRetryPolicy {
     /// CallKit 激活音频会话与 AVAudioEngine 可用之间会有短暂竞争；覆盖约 12 秒，
     /// 同时限制重试次数，避免真实权限错误形成后台空转。
@@ -1116,15 +1222,20 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     var onDownlinkFrame: ((_ bytes: Int, _ peak: Int, _ jitterBufferFrames: Int, _ droppedFrames: Int) -> Void)?
     var onUplinkFrame: ((_ bytes: Int, _ peak: Int) -> Void)?
 
-    private let queue = DispatchQueue(label: "com.example.airsim.iphone-cloud-media")
+    private let queue = DispatchQueue(label: "com.example.airsim.iphone-cloud-media", qos: .userInteractive)
     private var webSocket: URLSessionWebSocketTask?
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var encoder: IPhoneCloudVoicePCMEncoder?
     private var uplinkBuffer = Data()
-    private var pendingDownlink = Data()
-    private var scheduledFrames = 0
-    private(set) var hasReceivedDownlink = false
+    private var uplinkSender = CloudPCMUplinkSendQueue()
+    private var uplinkTimer: DispatchSourceTimer?
+    private var uplinkGeneration = UUID()
+    private var jitterBuffer = CloudPCMAdaptiveJitterBuffer()
+    private var playbackWindow = CloudPCMPlaybackWindow()
+    private var playbackGeneration = UUID()
+    private var downlinkSequence: UInt32 = 0
+    private var receivedDownlink = false
     private var muted = false
     private var stopped = true
     private var controlOperations: [String: CloudCallControlOperationIdentity] = [:]
@@ -1133,7 +1244,8 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         queue.sync { webSocket != nil && !stopped }
     }
 
-    var isAudioRunning: Bool { engine?.isRunning == true }
+    var isAudioRunning: Bool { queue.sync { engine?.isRunning == true } }
+    var hasReceivedDownlink: Bool { queue.sync { receivedDownlink } }
 
     var audioRouteDescription: String {
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
@@ -1281,7 +1393,9 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         }
     }
 
-    func startAudio() throws {
+    func startAudio() throws { try queue.sync { try startAudioLocked() } }
+
+    private func startAudioLocked() throws {
         if engine?.isRunning == true { return }
         if #available(iOS 17.0, *) {
             guard AVAudioApplication.shared.recordPermission == .granted else {
@@ -1310,10 +1424,11 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         guard inputFormat.channelCount > 0, inputFormat.sampleRate >= 8_000 else {
             throw IPhoneCloudCallError.microphoneUnavailable
         }
+        let generation = uplinkGeneration
         input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
             let pcm = encoder.encode(buffer)
-            if !pcm.isEmpty { enqueueUplink(pcm) }
+            if !pcm.isEmpty { enqueueUplink(pcm, generation: generation) }
         }
         do {
             engine.prepare()
@@ -1328,21 +1443,33 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         self.engine = engine
         self.player = player
         self.encoder = encoder
-        if !pendingDownlink.isEmpty {
-            let pending = pendingDownlink
-            pendingDownlink.removeAll(keepingCapacity: true)
-            schedulePlayback(pending)
-        }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(20), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.pumpUplink() }
+        uplinkTimer = timer
+        timer.resume()
+        drainPlayback()
     }
 
-    func stopAudio() {
+    func stopAudio() { queue.sync { stopAudioLocked() } }
+
+    private func stopAudioLocked() {
+        playbackGeneration = UUID()
+        uplinkGeneration = UUID()
+        uplinkTimer?.cancel()
+        uplinkTimer = nil
+        uplinkSender = CloudPCMUplinkSendQueue()
+        uplinkBuffer.removeAll(keepingCapacity: false)
         if engine != nil { engine?.inputNode.removeTap(onBus: 0) }
         player?.stop()
         engine?.stop()
         engine = nil
         player = nil
         encoder = nil
-        scheduledFrames = 0
+        playbackWindow = CloudPCMPlaybackWindow()
+        jitterBuffer.reset()
+        downlinkSequence = 0
+        receivedDownlink = false
     }
 
     func stop() {
@@ -1353,11 +1480,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
             webSocket = nil
             uplinkBuffer.removeAll(keepingCapacity: false)
             controlOperations.removeAll(keepingCapacity: false)
-        }
-        DispatchQueue.main.async { [weak self] in
-            self?.stopAudio()
-            self?.pendingDownlink.removeAll(keepingCapacity: false)
-            self?.hasReceivedDownlink = false
+            stopAudioLocked()
         }
     }
 
@@ -1368,7 +1491,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
                 guard !self.stopped, self.webSocket === socket else { return }
                 switch result {
                 case let .success(.data(data)):
-                    DispatchQueue.main.async { self.schedulePlayback(data) }
+                    self.schedulePlayback(data)
                     self.receiveNext(socket)
                 case let .success(.string(text)):
                     self.consumeControl(text)
@@ -1389,15 +1512,15 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         onControl?(control)
     }
 
-    private func enqueueUplink(_ data: Data) {
+    private func enqueueUplink(_ data: Data, generation: UUID) {
+        let capturedAt = ProcessInfo.processInfo.systemUptime
         queue.async { [weak self] in
-            guard let self, !stopped else { return }
+            guard let self, !stopped, uplinkGeneration == generation else { return }
             uplinkBuffer.append(data)
             while uplinkBuffer.count >= 320 {
                 let frame = Data(uplinkBuffer.prefix(320))
                 uplinkBuffer.removeFirst(320)
-                onUplinkFrame?(frame.count, Self.peak(of: frame))
-                webSocket?.send(.data(frame)) { _ in }
+                uplinkSender.enqueue(frame, at: capturedAt)
             }
             if uplinkBuffer.count > 2_560 {
                 uplinkBuffer = Data(uplinkBuffer.suffix(320))
@@ -1405,32 +1528,61 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         }
     }
 
-    private func schedulePlayback(_ pcm: Data) {
-        guard !pcm.isEmpty else { return }
-        hasReceivedDownlink = true
-        let frameCount = max(1, pcm.count / 320)
-        let pcmPeak = Self.peak(of: pcm)
-        guard let player, engine?.isRunning == true else {
-            pendingDownlink.append(pcm)
-            var droppedFrames = 0
-            if pendingDownlink.count > 3_200 {
-                droppedFrames = max(1, (pendingDownlink.count - 3_200) / 320)
-                pendingDownlink = Data(pendingDownlink.suffix(3_200))
+    private func pumpUplink() {
+        guard !stopped, let socket = webSocket else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let inFlight = uplinkSender.inFlightAt, now - inFlight >= 6 {
+            stopped = true
+            webSocket = nil
+            socket.cancel(with: .goingAway, reason: nil)
+            onConnectionLost?()
+            return
+        }
+        guard let frame = uplinkSender.next(at: now) else { return }
+        let generation = uplinkGeneration
+        socket.send(.data(frame)) { [weak self, weak socket] error in
+            guard let self, let socket else { return }
+            self.queue.async {
+                guard !self.stopped, self.webSocket === socket,
+                      self.uplinkGeneration == generation else { return }
+                guard error == nil else {
+                    self.stopped = true
+                    self.webSocket = nil
+                    socket.cancel(with: .goingAway, reason: nil)
+                    self.onConnectionLost?()
+                    return
+                }
+                self.uplinkSender.complete()
+                self.onUplinkFrame?(frame.count, Self.peak(of: frame))
             }
-            onDownlinkFrame?(
-                pcm.count,
-                pcmPeak,
-                max(0, pendingDownlink.count / 320),
-                droppedFrames
-            )
-            return
         }
+    }
+
+    private func schedulePlayback(_ pcm: Data) {
+        guard !pcm.isEmpty, pcm.count.isMultiple(of: 320) else { return }
+        receivedDownlink = true
+        let droppedBefore = jitterBuffer.droppedFrameCount
+        let now = Date()
+        for offset in stride(from: 0, to: pcm.count, by: 320) {
+            jitterBuffer.enqueue(sequence: downlinkSequence,
+                                 pcm: Data(pcm[offset..<(offset + 320)]), arrivedAt: now)
+            downlinkSequence &+= 1
+        }
+        drainPlayback()
+        onDownlinkFrame?(pcm.count, Self.peak(of: pcm),
+                         jitterBuffer.bufferedFrameCount + playbackWindow.scheduledPackets,
+                         Int(jitterBuffer.droppedFrameCount - droppedBefore))
+    }
+
+    private func drainPlayback() {
+        guard let player, engine?.isRunning == true else { return }
+        let ready = jitterBuffer.dequeue(maxFrames: playbackWindow.availablePackets)
+        for frame in ready { schedulePacket(frame.pcm, player: player) }
+        if !ready.isEmpty, !player.isPlaying { player.play() }
+    }
+
+    private func schedulePacket(_ pcm: Data, player: AVAudioPlayerNode) {
         let frames = pcm.count / 2
-        guard frames > 0 else { return }
-        guard scheduledFrames + frames <= 3_200 else {
-            onDownlinkFrame?(pcm.count, pcmPeak, max(0, scheduledFrames / 160), frameCount)
-            return
-        }
         guard
               let format = AVAudioFormat(
                   commonFormat: .pcmFormatFloat32,
@@ -1450,15 +1602,19 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
                 output[frame] = Float(Int16(bitPattern: bits)) / 32_768
             }
         }
-        scheduledFrames += frames
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+        playbackWindow.schedulePacket()
+        let generation = playbackGeneration
+        player.scheduleBuffer(buffer, completionCallbackType: CloudPCMPlaybackWindow.completionType) { [weak self] _ in
             self?.queue.async {
-                self?.scheduledFrames = max(0, (self?.scheduledFrames ?? 0) - frames)
+                guard let self, self.playbackGeneration == generation else { return }
+                self.playbackWindow.didRenderPacket()
+                self.onDownlinkPlayback?()
+                self.drainPlayback()
+                if self.playbackWindow.scheduledPackets == 0 {
+                    self.jitterBuffer.notePlaybackUnderrun()
+                }
             }
         }
-        if !player.isPlaying { player.play() }
-        onDownlinkFrame?(pcm.count, pcmPeak, max(0, scheduledFrames / 160), 0)
-        onDownlinkPlayback?()
     }
 
     private static func peak(of pcm: Data) -> Int {

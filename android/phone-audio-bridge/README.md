@@ -4,7 +4,7 @@
 
 该组件运行在三星 Android 的 Shizuku `UserService` 中，以 shell UID 访问系统通话音频，并向 AirSIM 控制 App 与 AVF Agent 提供双向 PCM。
 
-当前应用发布基线为 [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0)，AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。云端媒体只连接与当前 AirSIM 签名身份匹配的 Relay；维护者地址是 `https://airsim-push.remotepilot.site`，不是 DJOneHub 的 `https://push.remotepilot.site`。
+当前应用发布基线为 [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1)，AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。云端媒体只连接与当前 AirSIM 签名身份匹配的 Relay；维护者地址是 `https://airsim-push.remotepilot.site`，不是 DJOneHub 的 `https://push.remotepilot.site`。
 
 ## 音频方向
 

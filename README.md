@@ -4,7 +4,7 @@
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
-[![Apps release](https://img.shields.io/badge/Apps-v0.9.0-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0)
+[![Apps release](https://img.shields.io/badge/Apps-v0.9.1-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1)
 [![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.5-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)
 [![Cloudflare Relay](https://img.shields.io/badge/Relay-airsim--push.remotepilot.site-F38020?logo=cloudflare&logoColor=white)](https://airsim-push.remotepilot.site/healthz)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
@@ -29,6 +29,7 @@ AirSIM is a source-available, noncommercial cross-device calling and messaging p
 - **CallKit 与 PushKit**：在 iPhone 上呈现系统来电界面，并支持 VoIP push 唤醒与来电上报。
 - **VoWLAN 本地直连**：iPhone 与三星手机处于同一局域网或三星热点时，使用经过 HMAC 认证的控制与 PCM 链路。
 - **云端 Relay**：通过独立部署的 Cloudflare Worker、KV 与 Durable Objects 连接 Android AVF Agent 和 Apple 客户端。
+- **可观察的模式与自检**：Android 首页和 iOS 设置页显示当前 VoWLAN / 云端状态；iOS 可依次验证 Push 凭据、AirSIM Relay 身份、设备注册和 AVF Agent 90 秒心跳。
 - **AVF 一键安装与救援**：首次在 Android AVF Linux Terminal 执行单行命令；后续由 Android App 管理签名 Debian 包的更新、修复和回滚。
 - **三星通话音频桥**：通过 Shizuku `UserService` 在内存中转发双向 PCM，不保存通话音频。
 
@@ -75,14 +76,14 @@ iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Andro
 
 | 组件 | 当前版本或地址 |
 | --- | --- |
-| 三星 Android App、iPhone / Apple Watch App | [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0) |
+| 三星 Android App、iPhone / Apple Watch App | [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1) |
 | Android AVF Linux Agent | [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)（Debian 包版本 `0.4.5-1`） |
 | AirSIM Relay | `0.2.0` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
 | DJOneHub Relay | `https://push.remotepilot.site`（独立服务，AirSIM 不得使用） |
 
 ### 应用发布包
 
-[AirSIM Apps v0.9.0](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0) 提供正式签名的 Android APK 与可自行重签的 unsigned iOS IPA。Android v0.9.0 首次使用长期发布证书，不能覆盖旧 debug 签名包；iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.0 发布说明](docs/releases/0.9.0.md)。
+[AirSIM Apps v0.9.1](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1) 提供正式签名的 Android APK 与可自行重签的 unsigned iOS IPA。本版修复与 DJOneHub 共存时的 VoWLAN 端口冲突，并改善云端通话音频缓冲。正式签名 APK 可覆盖使用同一发布证书的 v0.9.0；旧 debug 签名包仍需先卸载。iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.1 发布说明](docs/releases/0.9.1.md)。
 
 ### 1. 准备开发环境
 

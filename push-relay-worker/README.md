@@ -12,7 +12,7 @@
 | Custom Domain | `https://airsim-push.remotepilot.site` |
 | `ALLOWED_BUNDLE_ID` | `com.eric3u.airsim` |
 | Worker 协议版本 | `/healthz` 报告 `0.2.0` |
-| 配套应用发布 | [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0) |
+| 配套应用发布 | [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1) |
 | 配套 AVF Agent | [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)，Debian 包 `0.4.5-1` |
 | 存储 | AirSIM 专用 `DEVICES` KV 与 `MEDIA`、`STATUS`、`COMMANDS` Durable Objects |
 | Secret | `APNS_P8`、`DASHBOARD_TOKEN` 名称已配置；值不在仓库中 |

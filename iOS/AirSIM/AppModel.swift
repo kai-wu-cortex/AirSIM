@@ -180,6 +180,40 @@ final class AppModel: ObservableObject {
         audio.active || cloudCallAudioState.isConnected || VirtualCallTTSController.shared.isPrepared
     }
 
+    var connectionModePresentation: ConnectionModePresentation {
+        ConnectionModePresentation.make(
+            vowlanOnline: vowlan.availability.isOnlineForDisplay,
+            cloudModeEnabled: CloudModePreference.isEnabled(),
+            cloudOnline: cloudAgentStatus?.cloudOnline == true
+        )
+    }
+
+    @discardableResult
+    func refreshCloudStatusForDiagnostics() async -> CloudAgentStatus? {
+        guard CloudModePreference.isEnabled() else {
+            cloudAgentStatus = nil
+            return nil
+        }
+        do {
+            let status = try await VoIPPushController.shared.fetchCloudAgentStatusForDiagnostics()
+            cloudAgentStatus = status
+            if !vowlan.availability.isOnlineForDisplay {
+                connectionSummary = ModuleConnectionPolicy.summary(
+                    localControlReachable: false,
+                    cloudHeartbeatFresh: status.cloudOnline,
+                    cellularState: status.cellularState
+                )
+            }
+            return status
+        } catch {
+            cloudAgentStatus = nil
+            if !vowlan.availability.isOnlineForDisplay {
+                connectionSummary = .offline
+            }
+            return nil
+        }
+    }
+
     var callUsesVoWLAN: Bool { currentCallTransport == .vowlan }
 
     var dialPadTransportPresentation: DialPadTransportPresentation? {

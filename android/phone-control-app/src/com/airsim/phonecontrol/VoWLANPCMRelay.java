@@ -40,15 +40,15 @@ public final class VoWLANPCMRelay implements Closeable {
                 || !internal.getAddress().isSiteLocalAddress()) {
             throw new IllegalArgumentException("shell PCM must be AVF-private port 7580");
         }
-        ServerSocket created = new ServerSocket();
-        created.setReuseAddress(true);
-        created.bind(new InetSocketAddress(hotspot, port), 2);
+        ServerSocket created = VoWLANPortBinder.bind(hotspot, port, 2);
         shellPCM = internal;
         server = created;
         workers.execute(() -> acceptLoop(created));
         BridgeLog.info("vowlan_pcm_listening port=" + created.getLocalPort());
         return created.getLocalPort();
     }
+
+    public int localPort() { return server == null ? -1 : server.getLocalPort(); }
 
     private void acceptLoop(ServerSocket active) {
         while (!active.isClosed()) {

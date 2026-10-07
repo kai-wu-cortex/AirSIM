@@ -4,6 +4,9 @@ AIRSIM PROJECT CONTEXT
 PURPOSE
 AirSIM is a cross-device calling and messaging project. A Samsung Android phone owns the carrier call and SMS capabilities. iPhone and Apple Watch clients use those capabilities over authenticated VoWLAN or an independently deployed Cloudflare Relay.
 
+CURRENT RELEASE BASELINE (2026-10-08)
+Android/iOS Apps v0.9.1 (build 73); AVF Agent v0.4.5 (Debian 0.4.5-1); Relay protocol 0.2.0.
+
 PRIMARY SEARCH / PRODUCT TERMS
 Samsung Android, iPhone, Apple Watch, cross-device calling, cross-device SMS, CallKit, PushKit, ActivityKit, VoWLAN, Android AVF Linux, Cloudflare Workers, APNs, Shizuku, Android Telecom.
 

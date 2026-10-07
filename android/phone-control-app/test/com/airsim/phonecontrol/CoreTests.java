@@ -2,6 +2,16 @@ package com.airsim.phonecontrol;
 
 public final class CoreTests {
     public static void main(String[] args) throws Exception {
+		java.net.Inet4Address loopback = (java.net.Inet4Address) java.net.InetAddress.getByName("127.0.0.1");
+		try (java.net.ServerSocket occupied = new java.net.ServerSocket(0, 1, loopback);
+				java.net.ServerSocket fallback = VoWLANPortBinder.bind(loopback, occupied.getLocalPort(), 2)) {
+			assertTrue(fallback.getLocalPort() != occupied.getLocalPort());
+			assertEquals(loopback, fallback.getInetAddress());
+		}
+		try (java.net.ServerSocket preferred = VoWLANPortBinder.bind(loopback, 0, 2)) {
+			assertTrue(preferred.getLocalPort() >= 1024);
+			assertEquals(loopback, preferred.getInetAddress());
+		}
 		assertEquals(AVFStartupPolicy.State.RUNNING,
 				AVFStartupPolicy.assess(true, true, true, true));
 		assertEquals(AVFStartupPolicy.State.READY_TO_START,
@@ -394,6 +404,14 @@ public final class CoreTests {
 				MainScreenPresentation.eventBody(detailed));
 		assertTrue(MainScreenPresentation.isErrorLog(detailed));
 		assertEquals("plain log entry", MainScreenPresentation.eventBody("plain log entry"));
+		assertEquals("VoWLAN 模式", MainScreenPresentation.connectionModeTitle(
+				true, true, true, ""));
+		assertEquals("云端模式", MainScreenPresentation.connectionModeTitle(
+				false, true, true, ""));
+		assertEquals("云端链路异常", MainScreenPresentation.connectionModeTitle(
+				false, true, true, "推送中继返回 HTTP 401"));
+		assertEquals("云端 Relay 已配置，等待 Agent 心跳验证",
+				MainScreenPresentation.connectionModeDetail(false, true, true, ""));
 		assertEquals("vowlan_state paired=true pcm_ready=false",
 				MainScreenPresentation.latestContaining(
 						"push_status ok=true\nvowlan_state paired=true pcm_ready=false",

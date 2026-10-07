@@ -96,6 +96,9 @@ public final class MainActivity extends Activity {
     private boolean pushConfigured;
     private String pushDetail = "尚未检查";
     private String pushDiagnostic = "尚未读取 Agent 的 Push 状态";
+	private boolean cloudEnabled;
+	private boolean cloudRelayConfigured;
+	private String cloudLastError = "";
 	private boolean avfStartupPromptShown;
 
     private PairingServer pairingServer;
@@ -254,6 +257,22 @@ public final class MainActivity extends Activity {
         hero.setClickable(true);
         hero.setOnClickListener(ignored -> showFeatureDetails(Feature.VOWLAN));
         root.addView(hero, matchWithTop(16));
+
+        String connectionMode = MainScreenPresentation.connectionModeTitle(
+                vowlanReady(), cloudEnabled, cloudRelayConfigured, cloudLastError);
+        String connectionDetail = MainScreenPresentation.connectionModeDetail(
+                vowlanReady(), cloudEnabled, cloudRelayConfigured, cloudLastError);
+        int connectionColor = vowlanReady() ? CYAN
+                : cloudEnabled && cloudRelayConfigured && cloudLastError.isEmpty() ? BLUE : WARNING;
+        LinearLayout connectionCard = card(SURFACE, 18);
+        connectionCard.setOrientation(LinearLayout.VERTICAL);
+        connectionCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+        connectionCard.addView(overline("当前连接模式"));
+        TextView connectionTitle = label(connectionMode, 18, connectionColor, Gravity.START);
+        connectionTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        connectionCard.addView(connectionTitle, matchWithTop(5));
+        connectionCard.addView(label(connectionDetail, 13, MUTED, Gravity.START), matchWithTop(5));
+        root.addView(connectionCard, matchWithTop(12));
 
         LinearLayout firstHealthRow = row();
         LinearLayout agentTile = healthTile(
@@ -777,6 +796,8 @@ public final class MainActivity extends Activity {
                         if (generation != agentRefreshGeneration) return;
                         pushConfigured = false;
                         pushDetail = "状态不可读";
+                        cloudRelayConfigured = false;
+                        cloudLastError = DebugRedactor.sanitize(pushError);
                         pushDiagnostic = "读取 /api/push/status 失败："
                                 + DebugRedactor.sanitize(pushError);
                         updateVisibleStatus();
@@ -790,6 +811,8 @@ public final class MainActivity extends Activity {
                     agentDetail = "离线 · " + error.getClass().getSimpleName();
                     pushConfigured = false;
                     pushDetail = "Agent 不可达";
+                    cloudRelayConfigured = false;
+                    cloudLastError = "Linux Agent 不可达";
                     pushDiagnostic = "先恢复 Linux Agent；当前无法查询 /api/push/status。";
                     if (showResult) setAgentRefreshMessage("刷新失败 · GET " + path
                             + "\nAgent：" + address + "\n原因："
@@ -814,10 +837,13 @@ public final class MainActivity extends Activity {
         boolean enabled = result.optBoolean("cloud_enabled", false);
         boolean calls = result.optBoolean("call_push_ready", false);
         boolean messages = result.optBoolean("message_push_ready", false);
-        pushConfigured = enabled && calls && messages;
-        pushDetail = !enabled ? "云端已关闭" : pushConfigured ? "推送已配置" : "配置不完整";
         String relay = result.optString("relay_url", "");
         String lastError = result.optString("last_error", "");
+        cloudEnabled = enabled;
+        cloudRelayConfigured = enabled && result.optBoolean("configured", false) && !relay.isEmpty();
+        cloudLastError = DebugRedactor.sanitize(lastError);
+        pushConfigured = enabled && calls && messages;
+        pushDetail = !enabled ? "云端已关闭" : pushConfigured ? "推送已配置" : "配置不完整";
         pushDiagnostic = "云端开关：" + (enabled ? "开启" : "关闭")
                 + "\n来电 Push：" + (calls ? "已配置" : "未就绪")
                 + " · 短信 Push：" + (messages ? "已配置" : "未就绪")

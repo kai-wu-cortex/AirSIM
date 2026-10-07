@@ -2,7 +2,7 @@
 
 该目录包含面向三星 Android 电话端的 iPhone、Apple Watch、Live Activity 与共享模型。客户端通过 VoWLAN 直连三星手机，或通过独立 Cloudflare Relay 使用远程通话与短信。
 
-当前正式应用版本为 [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0)（iOS build `72`），配套 AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者 `com.eric3u.airsim` 构建使用 `https://airsim-push.remotepilot.site`；自行更换 Bundle ID 后必须使用自己的 Relay 和 APNs 凭据。
+当前正式应用版本为 [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1)（iOS build `73`），配套 AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者 `com.eric3u.airsim` 构建使用 `https://airsim-push.remotepilot.site`；自行更换 Bundle ID 后必须使用自己的 Relay 和 APNs 凭据。
 
 ## Xcode 工程
 
@@ -28,6 +28,9 @@ iOS/AirSIM.xcodeproj
 - Apple Watch 拨号、接听和通话媒体
 - 短信列表、发送、通知和联系人整合
 - VoWLAN 与云端 Relay 传输选择
+- 云端 PCM 使用有界缓冲与 20 毫秒发送节奏，降低突发网络抖动时的卡顿风险。
+- 设置页实时显示当前 VoWLAN / 云端模式与 Agent 心跳状态
+- 四阶段云端自检：本机 Push 凭据、Relay 身份、设备注册、Agent 心跳
 - 本地通话记录、诊断和媒体健康状态
 
 ## 首次配置
@@ -38,6 +41,7 @@ iOS/AirSIM.xcodeproj
 4. 在 iPhone 输入三星端显示的六位配对码。
 5. 等待 VoWLAN 状态显示为就绪。
 6. 如需远程模式，在“云端 Relay”填写与当前签名身份匹配的独立 Relay 地址，点击“保存 Relay 地址”，再启用“远程通话与短信”。维护者 `com.eric3u.airsim` 构建使用 `https://airsim-push.remotepilot.site`；其他 Bundle ID 必须使用自行部署的 Relay。
+7. 打开“设置 → 云端模式自检”。四项全部通过才代表云端控制链路可用；“Relay 身份”会拒绝 DJOneHub 或其他服务，“Agent 心跳”要求 AVF Agent 在最近 90 秒内上报。自检不会拨号或发送短信。
 
 ## 构建与测试
 

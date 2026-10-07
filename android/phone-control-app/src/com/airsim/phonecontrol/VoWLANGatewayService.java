@@ -19,8 +19,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class VoWLANGatewayService extends Service {
-    public static final int CONTROL_PORT = 7590;
-    public static final int PCM_PORT = 7591;
+    // DJOneHub owns 7590/7591 on devices where both apps are installed.
+    // AirSIM advertises these independent ports through Bonjour.
+    public static final int CONTROL_PORT = 7592;
+    public static final int PCM_PORT = 7593;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private volatile boolean running;
     private VoWLANControlGateway control;
@@ -130,20 +132,25 @@ public final class VoWLANGatewayService extends Service {
         control = nextControl;
         pcm = nextPCM;
         activeHotspot = host;
+        if (control.localPort() != CONTROL_PORT || pcm.localPort() != PCM_PORT) {
+            BridgeLog.info("vowlan_preferred_port_occupied control_port=" + control.localPort()
+                    + " pcm_port=" + pcm.localPort());
+        }
         advertise();
-        BridgeLog.info("vowlan_ready hotspot=" + host + " control_port=" + CONTROL_PORT + " pcm_port=" + PCM_PORT);
+        BridgeLog.info("vowlan_ready hotspot=" + host + " control_port=" + control.localPort()
+                + " pcm_port=" + pcm.localPort());
     }
 
     private void advertise() {
         NsdServiceInfo info = new NsdServiceInfo();
         info.setServiceName("AirSIM-Samsung-VoWLAN");
         info.setServiceType("_airsim-vowlan._tcp.");
-        info.setPort(CONTROL_PORT);
+        info.setPort(control.localPort());
         info.setAttribute("v", "1");
         info.setAttribute("device", "samsung-phone");
         info.setAttribute("host", activeHotspot);
-        info.setAttribute("control_port", Integer.toString(CONTROL_PORT));
-        info.setAttribute("pcm_port", Integer.toString(PCM_PORT));
+        info.setAttribute("control_port", Integer.toString(control.localPort()));
+        info.setAttribute("pcm_port", Integer.toString(pcm.localPort()));
         info.setAttribute("caps", "control,pcm");
         advertisement = new NsdManager.RegistrationListener() {
             @Override public void onServiceRegistered(NsdServiceInfo ignored) {}

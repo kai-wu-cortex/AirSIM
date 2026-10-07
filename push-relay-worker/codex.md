@@ -2,7 +2,7 @@
 
 本文件用于指导 Codex 协助部署 `push-relay-worker`。部署事实以当前源码、`README.md`、`wrangler.example.toml` 和 `package-lock.json` 为准；文档与源码冲突时，先指出差异，不得猜测生产配置。
 
-当前兼容基线（2026-10-08）为 Apps `v0.9.0`、AVF Agent `v0.4.5`（Debian `0.4.5-1`）与 Relay 协议 `0.2.0`。维护者地址是 `https://airsim-push.remotepilot.site`；`https://push.remotepilot.site` 仅属于 DJOneHub。
+当前兼容基线（2026-10-08）为 Apps `v0.9.1`、AVF Agent `v0.4.5`（Debian `0.4.5-1`）与 Relay 协议 `0.2.0`。维护者地址是 `https://airsim-push.remotepilot.site`；`https://push.remotepilot.site` 仅属于 DJOneHub。
 
 ## 目标与边界
 

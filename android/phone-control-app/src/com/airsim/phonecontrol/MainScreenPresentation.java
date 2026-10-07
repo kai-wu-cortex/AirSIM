@@ -3,6 +3,34 @@ package com.airsim.phonecontrol;
 public final class MainScreenPresentation {
     private MainScreenPresentation() {}
 
+    public static String connectionModeTitle(
+            boolean vowlanReady,
+            boolean cloudEnabled,
+            boolean relayConfigured,
+            String lastError) {
+        if (vowlanReady) return "VoWLAN 模式";
+        if (cloudEnabled && relayConfigured && lastError != null && !lastError.isBlank()) {
+            return "云端链路异常";
+        }
+        if (cloudEnabled && relayConfigured) return "云端模式";
+        if (cloudEnabled) return "云端尚未配置";
+        return "VoWLAN 未连接";
+    }
+
+    public static String connectionModeDetail(
+            boolean vowlanReady,
+            boolean cloudEnabled,
+            boolean relayConfigured,
+            String lastError) {
+        if (vowlanReady) return "三星局域网控制与 PCM 已就绪；通话优先走 VoWLAN";
+        if (cloudEnabled && relayConfigured && lastError != null && !lastError.isBlank()) {
+            return "Relay / Agent 最近错误：" + lastError;
+        }
+        if (cloudEnabled && relayConfigured) return "云端 Relay 已配置，等待 Agent 心跳验证";
+        if (cloudEnabled) return "云端已开启，但 Relay 或设备注册不完整";
+        return "请连接同一 Wi-Fi / 三星热点，或开启并配置云端 Relay";
+    }
+
     public static String formatPairingCode(String code) {
         if (code == null) return "--- ---";
         String digits = code.replaceAll("[^0-9]", "");

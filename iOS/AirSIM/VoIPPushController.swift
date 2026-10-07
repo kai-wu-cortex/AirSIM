@@ -182,6 +182,147 @@ enum CloudModePreference {
     }
 }
 
+enum RelayConfiguration {
+    static let maintainerBundleID = "com.eric3u.airsim"
+    static let maintainerRelayURL = "https://airsim-push.remotepilot.site"
+    private static let legacyDJOneHubRelayURL = "https://push.remotepilot.site"
+
+    static func effectiveURL(
+        stored: String?,
+        buildSetting: String?,
+        bundleID: String?
+    ) -> String {
+        let stored = stored?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !stored.isEmpty {
+            let canonicalStored = stored.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if bundleID == maintainerBundleID, canonicalStored == legacyDJOneHubRelayURL {
+                return maintainerRelayURL
+            }
+            return stored
+        }
+        let buildSetting = buildSetting?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !buildSetting.isEmpty { return buildSetting }
+        return bundleID == maintainerBundleID ? maintainerRelayURL : ""
+    }
+}
+
+enum RelayHealthValidation {
+    private struct Payload: Decodable {
+        let ok: Bool
+        let service: String
+        let version: String
+    }
+
+    static func accepts(statusCode: Int, data: Data) -> Bool {
+        version(statusCode: statusCode, data: data) != nil
+    }
+
+    static func version(statusCode: Int, data: Data) -> String? {
+        guard statusCode == 200,
+              let payload = try? JSONDecoder().decode(Payload.self, from: data),
+              payload.ok,
+              payload.service == "airsim-push-relay",
+              !payload.version.isEmpty else { return nil }
+        return payload.version
+    }
+}
+
+enum AirSIMConnectionMode: Equatable, Sendable {
+    case vowlan
+    case cloud
+    case offline
+}
+
+struct ConnectionModePresentation: Equatable, Sendable {
+    let mode: AirSIMConnectionMode
+    let title: String
+    let status: String
+    let detail: String
+
+    static func make(
+        vowlanOnline: Bool,
+        cloudModeEnabled: Bool,
+        cloudOnline: Bool
+    ) -> ConnectionModePresentation {
+        if vowlanOnline {
+            return ConnectionModePresentation(
+                mode: .vowlan,
+                title: "VoWLAN",
+                status: "已连接",
+                detail: cloudOnline ? "局域网优先，云端可回退" : "同一 Wi-Fi / 三星热点"
+            )
+        }
+        if cloudModeEnabled {
+            return ConnectionModePresentation(
+                mode: .cloud,
+                title: "云端",
+                status: cloudOnline ? "已连接" : "不可达",
+                detail: cloudOnline ? "独立 Relay 与 Agent 心跳正常" : "运行云端模式自检定位故障"
+            )
+        }
+        return ConnectionModePresentation(
+            mode: .offline,
+            title: "未连接",
+            status: "离线",
+            detail: "VoWLAN 不可达且云端模式已关闭"
+        )
+    }
+}
+
+enum CloudSelfTestStepID: String, CaseIterable, Sendable {
+    case configuration
+    case relayIdentity
+    case deviceRegistration
+    case agentHeartbeat
+}
+
+enum CloudSelfTestStepState: Equatable, Sendable {
+    case pending
+    case running
+    case passed
+    case failed
+}
+
+struct CloudSelfTestStep: Identifiable, Equatable, Sendable {
+    let id: CloudSelfTestStepID
+    let title: String
+    var state: CloudSelfTestStepState
+    var detail: String
+}
+
+struct CloudSelfTestReport: Equatable, Sendable {
+    var steps: [CloudSelfTestStep]
+    var completedAt: Date?
+
+    static let initial = CloudSelfTestReport(
+        steps: [
+            CloudSelfTestStep(id: .configuration, title: "本机配置", state: .pending, detail: "等待检查"),
+            CloudSelfTestStep(id: .relayIdentity, title: "Relay 身份", state: .pending, detail: "等待检查"),
+            CloudSelfTestStep(id: .deviceRegistration, title: "设备注册", state: .pending, detail: "等待检查"),
+            CloudSelfTestStep(id: .agentHeartbeat, title: "Agent 心跳", state: .pending, detail: "等待检查"),
+        ],
+        completedAt: nil
+    )
+
+    var allPassed: Bool {
+        completedAt != nil && steps.allSatisfy { $0.state == .passed }
+    }
+
+    mutating func update(_ id: CloudSelfTestStepID, state: CloudSelfTestStepState, detail: String) {
+        guard let index = steps.firstIndex(where: { $0.id == id }) else { return }
+        steps[index].state = state
+        steps[index].detail = detail
+    }
+
+    mutating func fail(_ id: CloudSelfTestStepID, detail: String) {
+        update(id, state: .failed, detail: detail)
+        for index in steps.indices where steps[index].state == .pending {
+            steps[index].detail = "未执行：前序检查未通过"
+        }
+        completedAt = Date()
+    }
+}
+
 struct CloudModeCapabilities: Equatable, Sendable {
     let usbCallingAndSMS = true
     let pushKitAndCallKit = true
@@ -638,6 +779,14 @@ final class VoIPPushController: NSObject {
         Task { await syncRegistration() }
     }
 
+    func configuredRelayURL() -> String {
+        RelayConfiguration.effectiveURL(
+            stored: UserDefaults.standard.string(forKey: Keys.relayURL),
+            buildSetting: Bundle.main.object(forInfoDictionaryKey: "AirSIMPushRelayURL") as? String,
+            bundleID: Bundle.main.bundleIdentifier
+        )
+    }
+
     func syncRegistration(with requestedAPI: AirSIMAPI? = nil) async {
         let api = requestedAPI ?? latestRegistrationAPI
         if PushRegistrationAttemptPolicy.shouldResetBackoff(
@@ -749,18 +898,92 @@ final class VoIPPushController: NSObject {
     }
 
     func registrationReadiness() -> PushRegistrationReadiness {
-        let registration = currentRegistration()
-        let hint = registration?.deviceID.suffix(8).uppercased()
+        let defaults = UserDefaults.standard
+        let secret = Self.loadOrCreateDeviceSecret()
+        let deviceID = secret.map(PushDeviceIdentity.deviceID(deviceSecret:))
+        let relayURL = configuredRelayURL()
+        let hint = deviceID?.suffix(8).uppercased()
         return PushRegistrationReadiness(
-            deviceIdentityReady: registration?.deviceID.isEmpty == false,
-            voIPTokenReady: registration?.token.isEmpty == false,
-            alertTokenReady: registration?.alertToken.isEmpty == false,
-            relayURLReady: registration.flatMap {
-                RelayEndpoint.url(base: $0.relayURL, path: "healthz")
-            } != nil,
+            deviceIdentityReady: deviceID?.isEmpty == false,
+            voIPTokenReady: defaults.string(forKey: Keys.token)?.isEmpty == false,
+            alertTokenReady: defaults.string(forKey: Keys.alertToken)?.isEmpty == false,
+            relayURLReady: RelayEndpoint.url(base: relayURL, path: "healthz") != nil,
             deviceIDHint: hint.map { "…\($0)" },
-            environment: registration?.environment ?? APNsEnvironment.current
+            environment: APNsEnvironment.current
         )
+    }
+
+    /// 只验证控制面，不发起电话或短信：本机凭据 → Relay 身份 → 注册鉴权 → Agent 心跳。
+    func runCloudSelfTest(
+        onUpdate: @MainActor @escaping (CloudSelfTestReport) -> Void = { _ in }
+    ) async -> CloudSelfTestReport {
+        var report = CloudSelfTestReport.initial
+
+        report.update(.configuration, state: .running, detail: "检查 Relay、PushKit 与通知凭据")
+        onUpdate(report)
+        let readiness = registrationReadiness()
+        var missing: [String] = []
+        if !CloudModePreference.isEnabled() { missing.append("云端模式未开启") }
+        if !readiness.relayURLReady { missing.append("Relay HTTPS 地址无效") }
+        if !readiness.deviceIdentityReady { missing.append("设备身份未生成") }
+        if !readiness.voIPTokenReady { missing.append("PushKit token 未就绪") }
+        if !readiness.alertTokenReady { missing.append("通知 token 未就绪") }
+        guard missing.isEmpty, let registration = currentRegistration() else {
+            report.fail(.configuration, detail: missing.isEmpty ? "设备注册信息不完整" : missing.joined(separator: "；"))
+            onUpdate(report)
+            return report
+        }
+        report.update(
+            .configuration,
+            state: .passed,
+            detail: "设备 \(readiness.deviceIDHint ?? "已生成") · APNs \(readiness.environment)"
+        )
+        onUpdate(report)
+
+        report.update(.relayIdentity, state: .running, detail: "验证 AirSIM Relay 服务身份")
+        onUpdate(report)
+        do {
+            let version = try await fetchRelayHealthVersion(registration: registration)
+            report.update(.relayIdentity, state: .passed, detail: "airsim-push-relay · v\(version)")
+            onUpdate(report)
+        } catch {
+            report.fail(.relayIdentity, detail: "Relay 不可达或服务身份不匹配：\(error.localizedDescription)")
+            onUpdate(report)
+            return report
+        }
+
+        report.update(.deviceRegistration, state: .running, detail: "验证设备密钥与注册接口")
+        onUpdate(report)
+        do {
+            try await registerDirectlyWithRelay(registration)
+            report.update(.deviceRegistration, state: .passed, detail: "Relay 已接受设备注册")
+            onUpdate(report)
+        } catch {
+            report.fail(.deviceRegistration, detail: "注册被拒绝：\(error.localizedDescription)")
+            onUpdate(report)
+            return report
+        }
+
+        report.update(.agentHeartbeat, state: .running, detail: "查询 AVF Agent 最近 90 秒心跳")
+        onUpdate(report)
+        do {
+            let status = try await fetchCloudAgentStatusForDiagnostics()
+            guard status.cloudOnline else {
+                report.fail(.agentHeartbeat, detail: "Relay 已连接，但 AVF Agent 90 秒内无心跳")
+                onUpdate(report)
+                return report
+            }
+            let version = status.agentVersion?.isEmpty == false ? status.agentVersion! : "未知版本"
+            let cellular = status.cellularState?.isEmpty == false ? " · 蜂窝 \(status.cellularState!)" : ""
+            report.update(.agentHeartbeat, state: .passed, detail: "Agent \(version) 在线\(cellular)")
+            report.completedAt = Date()
+            onUpdate(report)
+            return report
+        } catch {
+            report.fail(.agentHeartbeat, detail: "心跳查询失败：\(error.localizedDescription)")
+            onUpdate(report)
+            return report
+        }
     }
 
     private func scheduleRegistrationRetry() {
@@ -974,8 +1197,13 @@ final class VoIPPushController: NSObject {
     /// 验证当前 iPhone 到 Relay 的 HTTPS 控制面，不携带设备密钥。
     func relayHealthReachable() async -> Bool {
         guard let registration = currentRegistration(),
-              let url = RelayEndpoint.url(base: registration.relayURL, path: "healthz") else {
-            return false
+              (try? await fetchRelayHealthVersion(registration: registration)) != nil else { return false }
+        return true
+    }
+
+    private func fetchRelayHealthVersion(registration: AgentPushRegistration) async throws -> String {
+        guard let url = RelayEndpoint.url(base: registration.relayURL, path: "healthz") else {
+            throw CloudAgentStatusError.invalidRelayURL
         }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -984,9 +1212,12 @@ final class VoIPPushController: NSObject {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 5
         configuration.timeoutIntervalForResource = 6
-        guard let (_, response) = try? await URLSession(configuration: configuration).data(for: request),
-              let http = response as? HTTPURLResponse else { return false }
-        return http.statusCode == 200
+        let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              let version = RelayHealthValidation.version(statusCode: http.statusCode, data: data) else {
+            throw CloudAgentStatusError.invalidResponse
+        }
+        return version
     }
 
     private func registerDirectlyWithRelay(_ registration: AgentPushRegistration) async throws {
@@ -1013,6 +1244,9 @@ final class VoIPPushController: NSObject {
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw CloudAgentStatusError.invalidResponse
         }
+        struct ResponseBody: Decodable { let registered: Bool }
+        guard let result = try? JSONDecoder().decode(ResponseBody.self, from: data),
+              result.registered else { throw CloudAgentStatusError.invalidResponse }
     }
 
     private func store(token: String) {
@@ -1028,17 +1262,9 @@ final class VoIPPushController: NSObject {
     }
 
     func cloudCallControlCredentials() -> CloudCallControlCredentials? {
-        let defaults = UserDefaults.standard
         guard let secret = Self.loadOrCreateDeviceSecret() else { return nil }
         let deviceID = PushDeviceIdentity.deviceID(deviceSecret: secret)
-        let storedRelay = defaults.string(forKey: Keys.relayURL)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let configuredRelay = if let storedRelay, !storedRelay.isEmpty {
-            storedRelay
-        } else {
-            (Bundle.main.object(forInfoDictionaryKey: "AirSIMPushRelayURL") as? String) ?? ""
-        }
-        let relayURL = configuredRelay.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relayURL = configuredRelayURL()
         guard RelayEndpoint.url(base: relayURL, path: "/") != nil else { return nil }
         return CloudCallControlCredentials(
             relayURL: relayURL,
@@ -1069,14 +1295,7 @@ final class VoIPPushController: NSObject {
         }
         let deviceID = PushDeviceIdentity.deviceID(deviceSecret: secret)
         defaults.set(deviceID, forKey: Keys.deviceID)
-        let storedRelay = defaults.string(forKey: Keys.relayURL)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let configuredRelay = if let storedRelay, !storedRelay.isEmpty {
-            storedRelay
-        } else {
-            (Bundle.main.object(forInfoDictionaryKey: "AirSIMPushRelayURL") as? String) ?? ""
-        }
-        let relayURL = configuredRelay.trimmingCharacters(in: .whitespacesAndNewlines)
+        let relayURL = configuredRelayURL()
         let capabilities = CloudModeCapabilities(isEnabled: CloudModePreference.isEnabled())
         return AgentPushRegistration(
             cloudModeEnabled: capabilities.notificationRelay,

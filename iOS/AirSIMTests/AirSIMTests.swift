@@ -20,6 +20,65 @@ private actor OutgoingCallServiceProbe: OutgoingCallServicing {
 }
 
 final class AirSIMTests: XCTestCase {
+    func testCloudUplinkNeverBurstsAfterBlockedSend() {
+        var queue = CloudPCMUplinkSendQueue()
+        for index in 0..<20 {
+            queue.enqueue(Data(repeating: UInt8(index), count: 320), at: Double(index) * 0.02)
+        }
+        XCTAssertEqual(queue.next(at: 0.4)?.first, 0)
+        XCTAssertNil(queue.next(at: 0.6))
+        queue.complete()
+        XCTAssertEqual(queue.next(at: 0.61)?.first, 1)
+        queue.complete()
+        XCTAssertNil(queue.next(at: 0.611))
+        XCTAssertEqual(queue.next(at: 0.631)?.first, 2)
+    }
+
+    func testCloudUplinkDropsStaleBacklog() {
+        var queue = CloudPCMUplinkSendQueue()
+        for _ in 0..<200 { queue.enqueue(Data(repeating: 1, count: 320), at: 0) }
+        XCTAssertEqual(queue.pendingPackets, 50)
+        XCTAssertNil(queue.next(at: 2))
+        XCTAssertEqual(queue.pendingPackets, 0)
+        XCTAssertEqual(queue.droppedPackets, 200)
+    }
+
+    func testCloudDownlinkPrimesAndReordersBurst() {
+        var buffer = CloudPCMAdaptiveJitterBuffer()
+        let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+        for sequence in [0, 2, 1, 3, 4, 5, 6, 7, 8, 9] {
+            buffer.enqueue(sequence: UInt32(sequence),
+                           pcm: Data(repeating: UInt8(sequence), count: 320),
+                           arrivedAt: epoch.addingTimeInterval(Double(sequence) * 0.02))
+        }
+        XCTAssertEqual(buffer.dequeue(maxFrames: 10).map(\.sequence), Array(0..<10).map(UInt32.init))
+        buffer.notePlaybackUnderrun()
+        XCTAssertFalse(buffer.isPrimed)
+    }
+
+    func testCloudDownlinkLimitsLateBurstLatency() {
+        var buffer = CloudPCMAdaptiveJitterBuffer()
+        let epoch = Date(timeIntervalSince1970: 1_800_000_000)
+        for sequence in 0..<75 {
+            buffer.enqueue(sequence: UInt32(sequence),
+                           pcm: Data(repeating: 1, count: 320),
+                           arrivedAt: epoch.addingTimeInterval(Double(sequence) * 0.02))
+        }
+        XCTAssertEqual(buffer.bufferedFrameCount, 50)
+        XCTAssertEqual(buffer.droppedFrameCount, 25)
+        XCTAssertEqual(buffer.dequeue(maxFrames: 50).map(\.sequence), Array(25..<75).map(UInt32.init))
+    }
+
+    func testCloudPlaybackReserveRefillsOnRenderedFrames() {
+        var window = CloudPCMPlaybackWindow()
+        for _ in 0..<12 { window.schedulePacket() }
+        XCTAssertEqual(window.availablePackets, 0)
+        window.didRenderPacket()
+        XCTAssertEqual(window.availablePackets, 1)
+        window.schedulePacket()
+        XCTAssertEqual(window.scheduledPackets, 12)
+    }
+
     func testOnlySamsungPrivateEndpointsAreAccepted() throws {
         let endpoint = try VoWLANEndpoint(host: "192.168.43.1", controlPort: 7575, pcmPort: 7576)
         XCTAssertEqual(endpoint.controlBaseURL.absoluteString, "http://192.168.43.1:7575/")
@@ -116,5 +175,89 @@ final class AirSIMTests: XCTestCase {
 
     func testVoWLANDialWaitsPastSamsungTelecomAcknowledgementWindow() {
         XCTAssertGreaterThan(AirSIMAPI.voWLANDialTimeout, 12)
+    }
+
+    func testMaintainerBundleUsesDedicatedRelayFallback() {
+        XCTAssertEqual(
+            RelayConfiguration.effectiveURL(
+                stored: nil,
+                buildSetting: "",
+                bundleID: "com.eric3u.airsim"
+            ),
+            "https://airsim-push.remotepilot.site"
+        )
+        XCTAssertEqual(
+            RelayConfiguration.effectiveURL(
+                stored: nil,
+                buildSetting: "",
+                bundleID: "org.example.airsim"
+            ),
+            ""
+        )
+        XCTAssertEqual(
+            RelayConfiguration.effectiveURL(
+                stored: "https://push.remotepilot.site/",
+                buildSetting: "",
+                bundleID: "com.eric3u.airsim"
+            ),
+            "https://airsim-push.remotepilot.site"
+        )
+        XCTAssertEqual(
+            RelayConfiguration.effectiveURL(
+                stored: "https://push.remotepilot.site/",
+                buildSetting: "",
+                bundleID: "org.example.airsim"
+            ),
+            "https://push.remotepilot.site/"
+        )
+    }
+
+    func testRelayHealthRequiresAirSIMServiceIdentity() {
+        let airSIM = Data(#"{"ok":true,"service":"airsim-push-relay","version":"0.2.0"}"#.utf8)
+        let djonehub = Data(#"{"ok":true,"service":"djonehub-push-relay","version":"1.0.0"}"#.utf8)
+        XCTAssertTrue(RelayHealthValidation.accepts(statusCode: 200, data: airSIM))
+        XCTAssertFalse(RelayHealthValidation.accepts(statusCode: 200, data: djonehub))
+        XCTAssertFalse(RelayHealthValidation.accepts(statusCode: 503, data: airSIM))
+    }
+
+    func testCurrentModePrefersVoWLANAndReportsCloudFailure() {
+        XCTAssertEqual(
+            ConnectionModePresentation.make(
+                vowlanOnline: true,
+                cloudModeEnabled: true,
+                cloudOnline: true
+            ).mode,
+            .vowlan
+        )
+        let cloud = ConnectionModePresentation.make(
+            vowlanOnline: false,
+            cloudModeEnabled: true,
+            cloudOnline: true
+        )
+        XCTAssertEqual(cloud.mode, .cloud)
+        XCTAssertEqual(cloud.status, "已连接")
+
+        let unreachable = ConnectionModePresentation.make(
+            vowlanOnline: false,
+            cloudModeEnabled: true,
+            cloudOnline: false
+        )
+        XCTAssertEqual(unreachable.mode, .cloud)
+        XCTAssertEqual(unreachable.status, "不可达")
+    }
+
+    func testCloudSelfTestReportOnlyPassesWhenEveryStagePasses() {
+        var report = CloudSelfTestReport.initial
+        XCTAssertFalse(report.allPassed)
+        XCTAssertEqual(report.steps.map(\.id), CloudSelfTestStepID.allCases)
+
+        for id in CloudSelfTestStepID.allCases {
+            report.update(id, state: .passed, detail: "通过")
+        }
+        report.completedAt = Date()
+        XCTAssertTrue(report.allPassed)
+
+        report.update(.agentHeartbeat, state: .failed, detail: "无心跳")
+        XCTAssertFalse(report.allPassed)
     }
 }

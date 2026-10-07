@@ -2,7 +2,7 @@
 
 该 App 运行在三星 Android 手机上，是 AirSIM 的蜂窝通话与短信控制入口。Android Telecom 负责运营商通话状态和操作，App 负责将状态同步给 Android AVF Agent，并为 iPhone 与 Apple Watch 提供经过认证的 VoWLAN 服务。
 
-当前正式应用版本为 [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0)（Android `versionCode 72`）；配套 AVF Agent 当前为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
+当前正式应用版本为 [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1)（Android `versionCode 73`）；配套 AVF Agent 当前为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
 
 ## 主要职责
 
@@ -12,9 +12,11 @@
 - 执行 Agent 下发的拨号、接听、拒接、挂断和短信命令。
 - 提供限时配对窗口与六位确认码。
 - 在三星热点接口上发布经过认证的 VoWLAN 控制与 PCM 服务。
+- VoWLAN 优先使用 `7592/7593`，端口占用时自动选择可用端口并通过服务发现公布实际端口，避免与 DJOneHub 的 `7590/7591` 冲突。
 - 维护前台守护服务、Shizuku 状态和故障诊断。
 - 通过独立 AVF installerd 检查、安装和回滚签名 Debian 包。
 - 启动时检测 AVF、AOSP Linux Terminal 和 AVF 私网状态，并提供可复制的一键安装命令。
+- 状态首页明确显示当前使用 VoWLAN、云端模式、云端异常或离线；仅配置 Relay 不会被误报为已经在线。
 
 ## 运行要求
 

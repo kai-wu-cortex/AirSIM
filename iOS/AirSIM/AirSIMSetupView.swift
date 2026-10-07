@@ -65,15 +65,48 @@ struct AirSIMFirstConnectionView: View {
 }
 
 struct AirSIMSettingsView: View {
+    private enum SelfTestPhase {
+        case idle
+        case running
+        case completed
+    }
+
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @AppStorage(CloudModePreference.key) private var cloudModeEnabled = true
-    @State private var relayURL = UserDefaults.standard.string(forKey: "airsim.push-relay-url") ?? ""
+    @State private var relayURL = RelayConfiguration.effectiveURL(
+        stored: UserDefaults.standard.string(forKey: "airsim.push-relay-url"),
+        buildSetting: Bundle.main.object(forInfoDictionaryKey: "AirSIMPushRelayURL") as? String,
+        bundleID: Bundle.main.bundleIdentifier
+    )
     @State private var message: String?
+    @State private var selfTestPhase: SelfTestPhase = .idle
+    @State private var selfTestReport: CloudSelfTestReport?
+    @State private var selfTestTask: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("当前连接") {
+                    LabeledContent("当前模式", value: model.connectionModePresentation.title)
+                    LabeledContent("连接状态", value: model.connectionModePresentation.status)
+                    LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
+                    LabeledContent(
+                        "云端 Relay",
+                        value: !cloudModeEnabled
+                            ? "已关闭"
+                            : (model.cloudAgentStatus?.cloudOnline == true ? "Agent 在线" : "不可达")
+                    )
+                    Text(model.connectionModePresentation.detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let connectionMessage = model.connectionMessage, !connectionMessage.isEmpty {
+                        Text(connectionMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("三星连接") {
                     LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
                     NavigationLink {
@@ -92,10 +125,16 @@ struct AirSIMSettingsView: View {
                         Label("远程通话与短信", systemImage: "cloud")
                     }
                     .onChange(of: cloudModeEnabled) { enabled in
+                        selfTestTask?.cancel()
+                        selfTestPhase = .idle
+                        selfTestReport = nil
                         Task {
                             if let (api, _) = await model.readyVoWLANRoute() {
                                 await VoIPPushController.shared.setCloudModeEnabled(enabled, with: api)
+                            } else {
+                                await VoIPPushController.shared.setCloudModeEnabled(enabled)
                             }
+                            await model.refreshCloudStatusForDiagnostics()
                         }
                     }
 
@@ -105,10 +144,14 @@ struct AirSIMSettingsView: View {
                         .autocorrectionDisabled()
                     Button("保存 Relay 地址") {
                         VoIPPushController.shared.updateRelayURL(relayURL)
+                        selfTestTask?.cancel()
+                        selfTestPhase = .idle
+                        selfTestReport = nil
                         Task {
                             if let (api, _) = await model.readyVoWLANRoute() {
                                 await VoIPPushController.shared.syncRegistration(with: api)
                             }
+                            await model.refreshCloudStatusForDiagnostics()
                         }
                         message = "地址已保存；配对后自动注册。"
                     }
@@ -117,6 +160,46 @@ struct AirSIMSettingsView: View {
                     Text("云端 Relay")
                 } footer: {
                     Text("云端关闭后，局域网内的三星 VoWLAN 仍可使用；公网拨打、接听和短信需要云端 Relay 与有效设备注册。")
+                }
+
+                Section {
+                    Button {
+                        startCloudSelfTest()
+                    } label: {
+                        HStack {
+                            Label("运行云端模式自检", systemImage: "stethoscope")
+                            Spacer()
+                            if selfTestPhase == .running {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(selfTestPhase == .running)
+
+                    if let report = selfTestReport {
+                        ForEach(report.steps) { step in
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: selfTestSymbol(for: step.state))
+                                    .foregroundStyle(selfTestColor(for: step.state))
+                                    .frame(width: 20)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(step.title)
+                                    Text(step.detail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        if selfTestPhase == .completed {
+                            Text(report.allPassed ? "云端模式自检通过" : "自检未通过，请按失败步骤修复后重试")
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(report.allPassed ? .green : .orange)
+                        }
+                    }
+                } header: {
+                    Text("云端模式自检")
+                } footer: {
+                    Text("依次验证本机 Push 凭据、AirSIM Relay 身份、设备注册和 AVF Agent 最近 90 秒心跳；不会拨号或发送短信。")
                 }
 
                 Section("关于") {
@@ -129,6 +212,48 @@ struct AirSIMSettingsView: View {
                 }
             }
             .navigationTitle("设置")
+            .task {
+                await model.refreshCloudStatusForDiagnostics()
+            }
+            .onDisappear {
+                selfTestTask?.cancel()
+                selfTestTask = nil
+                if selfTestPhase == .running { selfTestPhase = .idle }
+            }
+        }
+    }
+
+    private func startCloudSelfTest() {
+        selfTestTask?.cancel()
+        selfTestPhase = .running
+        selfTestReport = .initial
+        selfTestTask = Task { @MainActor in
+            let report = await VoIPPushController.shared.runCloudSelfTest { update in
+                guard !Task.isCancelled else { return }
+                selfTestReport = update
+            }
+            guard !Task.isCancelled else { return }
+            selfTestReport = report
+            selfTestPhase = .completed
+            await model.refreshCloudStatusForDiagnostics()
+        }
+    }
+
+    private func selfTestSymbol(for state: CloudSelfTestStepState) -> String {
+        switch state {
+        case .pending: return "circle"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .passed: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        }
+    }
+
+    private func selfTestColor(for state: CloudSelfTestStepState) -> Color {
+        switch state {
+        case .pending: return .secondary
+        case .running: return .blue
+        case .passed: return .green
+        case .failed: return .red
         }
     }
 }

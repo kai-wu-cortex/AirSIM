@@ -36,14 +36,14 @@ public final class VoWLANControlGateway implements Closeable {
 
     public synchronized int start(Inet4Address address, int port) throws IOException {
         if (server != null) return server.getLocalPort();
-        ServerSocket created = new ServerSocket();
-        created.setReuseAddress(true);
-        created.bind(new InetSocketAddress(address, port), 8);
+        ServerSocket created = VoWLANPortBinder.bind(address, port, 8);
         server = created;
         acceptor.execute(() -> acceptLoop(created));
         BridgeLog.info("vowlan_control_listening port=" + created.getLocalPort());
         return created.getLocalPort();
     }
+
+    public int localPort() { return server == null ? -1 : server.getLocalPort(); }
 
     private void acceptLoop(ServerSocket active) {
         while (!active.isClosed()) {

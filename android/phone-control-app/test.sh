@@ -105,6 +105,7 @@ mkdir -p "$OUT"
 	"$ROOT"/src/com/airsim/phonecontrol/VoWLANPeerLifecycle.java \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANReplayCache.java \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANPCMProtocol.java \
+  "$ROOT"/src/com/airsim/phonecontrol/VoWLANPortBinder.java \
 	"$ROOT"/src/com/airsim/phonecontrol/VoWLANNetworkPolicy.java \
 	"$ROOT"/src/com/airsim/phonecontrol/MainScreenPresentation.java \
   "$ROOT"/test/com/airsim/phonecontrol/CoreTests.java
