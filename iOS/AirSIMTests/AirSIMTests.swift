@@ -1,6 +1,24 @@
 import XCTest
 @testable import AirSIM
 
+private actor OutgoingCallServiceProbe: OutgoingCallServicing {
+    private let dialError: Error?
+    private var actions: [String] = []
+
+    init(dialError: Error? = nil) {
+        self.dialError = dialError
+    }
+
+    func warmAudioHost() async throws { actions.append("warm") }
+    func setAudioHostEnabled(_ enabled: Bool) async throws { actions.append("enable:\(enabled)") }
+    func dial(number: String) async throws {
+        actions.append("dial:\(number)")
+        if let dialError { throw dialError }
+    }
+
+    func recordedActions() -> [String] { actions }
+}
+
 final class AirSIMTests: XCTestCase {
     func testOnlySamsungPrivateEndpointsAreAccepted() throws {
         let endpoint = try VoWLANEndpoint(host: "192.168.43.1", controlPort: 7575, pcmPort: 7576)
@@ -48,5 +66,55 @@ final class AirSIMTests: XCTestCase {
             cloudModeEnabled: false,
             cloudHeartbeatFresh: false
         ))
+    }
+
+    @MainActor
+    func testVoWLANTransportFailureFallsBackOnceToCloud() async throws {
+        let local = OutgoingCallServiceProbe(dialError: URLError(.timedOut))
+        var cloudAttempts = 0
+
+        let result = try await OutgoingCallRouteCoordinator.start(
+            number: "10086",
+            vowlanService: local,
+            cloudModeEnabled: true
+        ) {
+            cloudAttempts += 1
+            return "cloud-call"
+        }
+
+        XCTAssertEqual(result, .cloud("cloud-call"))
+        XCTAssertEqual(cloudAttempts, 1)
+        let localActions = await local.recordedActions()
+        XCTAssertEqual(localActions, ["warm", "dial:10086"])
+    }
+
+    @MainActor
+    func testVoWLANAgentRejectionDoesNotReplayDialThroughCloud() async {
+        let local = OutgoingCallServiceProbe(
+            dialError: APIError.http(502, "Android Telecom 拒绝拨号")
+        )
+        var cloudAttempts = 0
+
+        do {
+            _ = try await OutgoingCallRouteCoordinator.start(
+                number: "10086",
+                vowlanService: local,
+                cloudModeEnabled: true
+            ) {
+                cloudAttempts += 1
+                return "cloud-call"
+            }
+            XCTFail("Agent 已明确拒绝时不得通过云端重放非幂等拨号")
+        } catch APIError.http(let status, _) {
+            XCTAssertEqual(status, 502)
+        } catch {
+            XCTFail("预期保留 Agent HTTP 错误，实际为 \(error)")
+        }
+
+        XCTAssertEqual(cloudAttempts, 0)
+    }
+
+    func testVoWLANDialWaitsPastSamsungTelecomAcknowledgementWindow() {
+        XCTAssertGreaterThan(AirSIMAPI.voWLANDialTimeout, 12)
     }
 }

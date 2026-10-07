@@ -37,6 +37,10 @@ enum AirSIMRoutePolicy {
 
 /// 统一封装模块代理 HTTP API；接口路径与 AirSIM Mac 版保持一致。
 struct AirSIMAPI: Sendable {
+    /// Android Telecom 最长等待 12 秒确认；VoWLAN 必须晚于 Agent 的确认窗口超时，
+    /// 否则 iPhone 会把仍在执行的非幂等拨号误判为失败并可能触发重复呼叫。
+    static let voWLANDialTimeout: TimeInterval = 15
+
     let baseURL: URL
     let route: LocalAgentRoute
     private let transport: WiredHTTPTransport
@@ -142,7 +146,11 @@ struct AirSIMAPI: Sendable {
 
     func dial(number: String) async throws {
         do {
-            try await post("api/calls/dial", ["number": number])
+            try await post(
+                "api/calls/dial",
+                ["number": number],
+                timeout: Self.voWLANDialTimeout
+            )
         } catch {
             let originalError = error
             // ATD 是非幂等操作：响应连接被模块重置后只能查询状态确认，绝对不能自动重发。

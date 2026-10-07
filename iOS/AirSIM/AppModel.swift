@@ -1554,6 +1554,51 @@ enum OutgoingCallCoordinator {
     }
 }
 
+enum OutgoingCallRouteResult<CloudResult: Sendable>: Sendable {
+    case vowlan
+    case cloud(CloudResult)
+}
+
+extension OutgoingCallRouteResult: Equatable where CloudResult: Equatable {}
+
+enum OutgoingCallFallbackPolicy {
+    static func permitsCloudFallback(after error: Error, cloudModeEnabled: Bool) -> Bool {
+        guard cloudModeEnabled, !(error is CancellationError) else { return false }
+        // 收到 Agent HTTP 响应说明命令已到达执行边界。拨号是非幂等操作，
+        // 明确拒绝或返回业务错误时不能再经 Relay 重放。
+        if error is APIError { return false }
+        return true
+    }
+}
+
+@MainActor
+enum OutgoingCallRouteCoordinator {
+    static func start<CloudResult: Sendable>(
+        number: String,
+        vowlanService: (any OutgoingCallServicing)?,
+        cloudModeEnabled: Bool,
+        startCloud: () async throws -> CloudResult
+    ) async throws -> OutgoingCallRouteResult<CloudResult> {
+        if let vowlanService {
+            do {
+                try await OutgoingCallCoordinator.start(number: number, service: vowlanService)
+                return .vowlan
+            } catch {
+                guard OutgoingCallFallbackPolicy.permitsCloudFallback(
+                    after: error,
+                    cloudModeEnabled: cloudModeEnabled
+                ) else {
+                    throw error
+                }
+            }
+        } else if !cloudModeEnabled {
+            throw CloudCommandError.cloudModeDisabled
+        }
+
+        return .cloud(try await startCloud())
+    }
+}
+
 enum AgentPollingRouteSelector {
     static func select<Service>(
         primary: Service,
@@ -1596,10 +1641,13 @@ extension AppModel: CallKitActionHandling {
         audio.stopCallTone()
         backgroundStandby.suspendForCall()
         do {
-            if let (vowlanAPI, pcmRoute) = await readyVoWLANRoute() {
-                try await OutgoingCallCoordinator.start(number: number, service: vowlanAPI)
-                lockLocalTransport(.vowlan, api: vowlanAPI, pcmRoute: pcmRoute)
-            } else if CloudModePreference.isEnabled() {
+            let vowlanRoute = await readyVoWLANRoute()
+            let cloudModeEnabled = CloudModePreference.isEnabled()
+            let routeResult = try await OutgoingCallRouteCoordinator.start(
+                number: number,
+                vowlanService: vowlanRoute?.0,
+                cloudModeEnabled: cloudModeEnabled
+            ) {
                 let status: CloudAgentStatus
                 if let cloudAgentStatus {
                     status = cloudAgentStatus
@@ -1607,7 +1655,16 @@ extension AppModel: CallKitActionHandling {
                     status = try await VoIPPushController.shared.fetchCloudAgentStatus()
                 }
                 guard status.cloudOnline else { throw CloudCommandError.unavailable }
-                let outgoing = try await VoIPPushController.shared.startCloudOutgoingCall(number: number)
+                return try await VoIPPushController.shared.startCloudOutgoingCall(number: number)
+            }
+
+            switch routeResult {
+            case .vowlan:
+                guard let (vowlanAPI, pcmRoute) = vowlanRoute else {
+                    throw CloudCommandError.unavailable
+                }
+                lockLocalTransport(.vowlan, api: vowlanAPI, pcmRoute: pcmRoute)
+            case let .cloud(outgoing):
                 _ = applyCallLifecycle(CallLifecycleEvent(
                     callID: outgoing.callID, callUUID: outgoing.uuid,
                     generation: outgoing.generation, state: .connecting, source: .callKit,
@@ -1625,8 +1682,6 @@ extension AppModel: CallKitActionHandling {
                 )
                 pendingOutgoingCall = nil
                 await startCallAudioIfReady()
-            } else {
-                throw CloudCommandError.cloudModeDisabled
             }
         } catch {
             backgroundStandby.resumeAfterCall()
