@@ -325,6 +325,10 @@ public final class CoreTests {
 		assertEquals("xyJYZyGVDVSARzo3dd9vM_luQBhKeneDd6vk2VWmIkE", pcmPreface.signature());
 		assertEquals("PCM\n/v1/pcm\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1789090000\nnonce-1",
 				VoWLANPCMProtocol.canonical(pcmPreface));
+		assertTrue(invokePCMReadyHandshake(new java.io.ByteArrayInputStream(
+				"AIRSIMREADY".getBytes(java.nio.charset.StandardCharsets.US_ASCII))));
+		assertTrue(!invokePCMReadyHandshake(new java.io.ByteArrayInputStream(
+				"AIRSIMFAIL!".getBytes(java.nio.charset.StandardCharsets.US_ASCII))));
 		VoWLANPCMProtocol.SessionGate pcmGate = new VoWLANPCMProtocol.SessionGate();
 		assertTrue(pcmGate.tryAcquire("paired-peer"));
 		assertTrue(!pcmGate.tryAcquire("second-peer"));
@@ -391,6 +395,16 @@ public final class CoreTests {
 					.invoke(null, mode, state);
 		} catch (NoSuchMethodException error) {
 			throw new AssertionError("remote_silent local-output policy is missing", error);
+		}
+	}
+
+	private static boolean invokePCMReadyHandshake(java.io.InputStream input) throws Exception {
+		try {
+			return (boolean) VoWLANPCMProtocol.class
+					.getDeclaredMethod("acceptReady", java.io.InputStream.class)
+					.invoke(null, input);
+		} catch (NoSuchMethodException error) {
+			throw new AssertionError("PCM relay does not read the complete AIRSIMREADY frame", error);
 		}
 	}
 

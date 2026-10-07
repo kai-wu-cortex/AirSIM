@@ -1,5 +1,10 @@
 package com.airsim.phonecontrol;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+
 public final class VoWLANPCMProtocol {
     public static final String MAGIC = "AIRSIMVWL1";
     public static final String READY = "AIRSIMREADY";
@@ -23,6 +28,11 @@ public final class VoWLANPCMProtocol {
     public static String canonical(Preface preface) {
         return VoWLANAuth.canonicalRequest(
                 "PCM", "/v1/pcm", new byte[0], preface.timestamp(), preface.nonce());
+    }
+
+    static boolean acceptReady(InputStream input) throws IOException {
+        byte[] expected = READY.getBytes(StandardCharsets.US_ASCII);
+        return Arrays.equals(input.readNBytes(expected.length), expected);
     }
 
     public record Preface(long timestamp, String nonce, String signature) {}
