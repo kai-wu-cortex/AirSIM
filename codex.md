@@ -2,6 +2,8 @@
 
 本文为 AI 编码代理提供 AirSIM 全仓库的事实来源、构建顺序、部署边界和安全约束。开始任务前先阅读根目录 `README.md`，再阅读所修改组件的 README 和实际源码。涉及 AVF 安装、配对或恢复时，还要阅读 `docs/AVF_INSTALL_GUIDE.md` 和 `LLM.txt`。源码与测试是协议事实来源；本文不能替代它们。
 
+当前发布基线（2026-10-08）：Android/iOS Apps `v0.9.0`（build `72`），AVF Agent `v0.4.5`（Debian `0.4.5-1`），Relay 协议 `0.2.0`。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
+
 ## 1. 项目目标
 
 AirSIM 以三星 Android 手机作为蜂窝电话与短信终端：

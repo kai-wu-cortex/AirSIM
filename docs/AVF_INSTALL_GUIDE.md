@@ -2,6 +2,8 @@
 
 本指南适用于支持 Android AVF Linux Terminal 的三星手机。AirSIM Android App、AVF 中的 `airsim-agent`、独立的 `airsim-installerd` 是三个不同组件；App 能打开 Terminal，并不等于 Agent 已安装。`8575` Agent 健康端点可达，也不等于 `8576` 安装服务和控制令牌已就绪。
 
+当前应用发布是 [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0)，本指南安装的 AVF Agent 是独立版本 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)（Debian 包 `0.4.5-1`）。两条版本线用途不同，不应相互替换。
+
 若 AVF 内已有 DJOneHub，保留其服务和 `7575` 端口。AirSIM 使用独立的 `8575` / `8576`，健康响应还应包含 `"product":"airsim"`；`7575` 返回成功不能当成 AirSIM 已安装。首次安装固定到 v0.4.5。已有 `0.4.4-1` 的设备须按下文执行一次性签名密钥迁移，不能用首次安装命令或 App 的旧 installer 直接升级。
 
 ## 安全边界

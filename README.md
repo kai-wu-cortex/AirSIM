@@ -4,7 +4,9 @@
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
-[![Cloudflare Workers](https://img.shields.io/badge/Relay-Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](push-relay-worker/README.md)
+[![Apps release](https://img.shields.io/badge/Apps-v0.9.0-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0)
+[![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.5-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)
+[![Cloudflare Relay](https://img.shields.io/badge/Relay-airsim--push.remotepilot.site-F38020?logo=cloudflare&logoColor=white)](https://airsim-push.remotepilot.site/healthz)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-7c3aed)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/kai-wu-cortex/AirSIM?style=flat&logo=github&label=Stars)](https://github.com/kai-wu-cortex/AirSIM/stargazers)
@@ -68,6 +70,15 @@ iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Andro
 | [`docs`](docs) | 协议与设计文档 | VoWLAN 设计、三星热点配对协议与安全边界 |
 
 ## 快速开始
+
+### 当前发布基线
+
+| 组件 | 当前版本或地址 |
+| --- | --- |
+| 三星 Android App、iPhone / Apple Watch App | [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0) |
+| Android AVF Linux Agent | [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)（Debian 包版本 `0.4.5-1`） |
+| AirSIM Relay | `0.2.0` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
+| DJOneHub Relay | `https://push.remotepilot.site`（独立服务，AirSIM 不得使用） |
 
 ### 应用发布包
 

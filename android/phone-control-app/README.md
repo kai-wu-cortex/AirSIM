@@ -2,6 +2,8 @@
 
 该 App 运行在三星 Android 手机上，是 AirSIM 的蜂窝通话与短信控制入口。Android Telecom 负责运营商通话状态和操作，App 负责将状态同步给 Android AVF Agent，并为 iPhone 与 Apple Watch 提供经过认证的 VoWLAN 服务。
 
+当前正式应用版本为 [`v0.9.0`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0)（Android `versionCode 72`）；配套 AVF Agent 当前为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
+
 ## 主要职责
 
 - 申请并维护默认电话 App 角色。

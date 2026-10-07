@@ -2,6 +2,8 @@
 
 协助部署前，依次阅读 `README.md`、`wrangler.example.toml`、`package.json`、`src/index.mjs`、`src/status-store.mjs` 和 `src/dashboard.mjs`。源码是接口事实来源；不能用旧 DJOneHub 配置、其他 AirSIM 环境资源或记忆中的 Wrangler 行为代替核对。
 
+当前兼容基线（2026-10-08）为 Apps `v0.9.0`、AVF Agent `v0.4.5`（Debian `0.4.5-1`）与 Relay 协议 `0.2.0`。维护者地址是 `https://airsim-push.remotepilot.site`；`https://push.remotepilot.site` 仅属于 DJOneHub。
+
 AirSIM 必须使用独立于 DJOneHub 的 Worker、KV、Durable Objects、Dashboard token 和 hostname。本项目维护者使用 `https://airsim-push.remotepilot.site`；不得让 AirSIM 接管 DJOneHub 的 `https://push.remotepilot.site`。
 
 维护者部署截至 2026-10-08 已验证 `/healthz`、Dashboard 匿名 `401` 和正确 Bearer token `200`；检查时尚无 AirSIM 设备注册。不能据此宣称真实 APNs、Agent 心跳、命令或云端 PCM 已验收。
