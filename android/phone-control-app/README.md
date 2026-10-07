@@ -42,10 +42,10 @@ android/phone-control-app/build/android/AirSIM-Phone-Bridge-debug.apk
 
 1. 安装 APK 并启动 AirSIM。
 2. 如果启动提示显示 AVF Linux 尚未运行，点“启动 Linux Terminal”；若 Terminal 未启用，点“打开开发者选项”并启用 Linux 开发环境。
-3. Linux 首次启动后，复制并在 Terminal 中执行 v0.4.5 首次安装命令；已有 `0.4.4-1` 的设备请改用[一次性密钥迁移](../../docs/AVF_INSTALL_GUIDE.md)，不能通过 App 的旧 installer 直接升级：
+3. Linux 首次启动后，确认 v0.4.4 签名 Release 已发布，再复制并在 Terminal 中执行；未发布时不要改用占用 DJOneHub `7575` 的旧版安装脚本：
 
    ```sh
-   bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'
+   bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'
    ```
 
 4. 在系统设置中选择 AirSIM 作为默认电话 App。

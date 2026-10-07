@@ -104,8 +104,6 @@ APK 路径以组件 README 和构建脚本输出为准。真实通话验收还�
 
 正式构建需要仓库外的 Ed25519 私钥与对应公钥。无私钥构建只能视为开发产物，不能声称通过生产 installerd 验签。
 
-v0.4.5 启用新的发行公钥；旧 v0.4.4 私钥未留存。已安装 `0.4.4-1` 的设备不能通过旧 installerd 直接升级，须按 `docs/AVF_INSTALL_GUIDE.md` 在 AVF Terminal 执行一次性 `rotate-avf-key.sh`，验签、保留旧包并做健康检查。新私钥仅在仓库外保存，并备份为 GitHub Actions Secret `AIRSIM_RELEASE_PRIVATE_KEY_PEM`；发布包必须用本地受限私钥或经授权的 CI 签名，不能从 Secret 导出私钥。不得用旧签名配新包或跳过验签。
-
 ### iOS / watchOS
 
 ```sh

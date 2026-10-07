@@ -32,7 +32,7 @@ airsim-avf-agent_<version>-<release>_arm64.deb
 构建正式包时，将 Ed25519 私钥保存在仓库之外，并把对应的 32 字节原始公钥以 Base64 注入 installer：
 
 ```sh
-AIRSIM_PACKAGE_VERSION=0.4.5 \
+AIRSIM_PACKAGE_VERSION=0.4.4 \
 AIRSIM_PACKAGE_RELEASE=1 \
 AIRSIM_RELEASE_PUBLIC_KEY_BASE64='<base64-raw-public-key>' \
 AIRSIM_RELEASE_PRIVATE_KEY='/secure/path/release-ed25519.pem' \
@@ -41,23 +41,23 @@ AIRSIM_RELEASE_PRIVATE_KEY='/secure/path/release-ed25519.pem' \
 
 输出目录默认为 `dist/`，包含 `.deb`、`.sha256` 和 Base64 编码的 `.sig`。没有提供私钥时仅生成开发包与摘要，不能通过 installerd 的发布签名校验。
 
-v0.4.5 起使用的 Ed25519 发布公钥为：
+首个正式 Release 使用的 Ed25519 发布公钥为：
 
 ```text
-Base64 raw key: NOWWZOqcaetDikd9RM69+70tWdTYrfp6XLndcmyXyW0=
-DER SHA-256:    35208a1612e15b0a13cc2db2f49dd9e5b2bc31974666abe465d796c8be522137
+Base64 raw key: 7fGe7k6ZJ5xhU5Uljm97EPKRzfSJUULVnaHpUBT8Gho=
+DER SHA-256:    a7f6696ec806e5f7500b8526fe6a82f18931fd910ebad8124ee4ef1da823a2e6
 ```
 
-私钥保存在仓库外的本机受限目录，并备份为 GitHub Actions 仓库 Secret `AIRSIM_RELEASE_PRIVATE_KEY_PEM`；不得提交、打印或添加到 Release。旧 v0.4.4 公钥为 `7fGe7k6ZJ5xhU5Uljm97EPKRzfSJUULVnaHpUBT8Gho=`，其私钥已无法找到。旧 installerd 不能接受新签名，已安装 `0.4.4-1` 的设备须通过[一次性密钥迁移](../../docs/AVF_INSTALL_GUIDE.md)重建信任，不能只上传新签名包。
+私钥必须长期保存在仓库之外并单独备份。丢失私钥后不能为已安装的 installerd 生成可信升级；替换公钥属于密钥轮换，必须设计受信任的迁移流程，不能只上传一个使用新密钥签名的包。
 
 发布到 GitHub Release 时必须上传构建目录中的全部发布文件。Android App 的“一键更新/修复”使用版本化 `.deb` 与同名 `.sig`；首次安装命令使用稳定名称 `airsim-avf-agent_arm64.deb`、`airsim-avf-agent_arm64.deb.sig` 和 `install-avf.sh`。首次安装器由构建脚本写入同一个发行公钥，不从网络下载或信任替代公钥。
 
 ## 首次引导
 
-首次进入 AVF Linux Terminal 后，确认 Debian 提示符可用，再执行。此命令只用于首次安装或恢复已有包的服务，不负责旧签名根迁移：
+首次进入 AVF Linux Terminal 后，确认 Debian 提示符可用，再执行。v0.4.4 签名 Release 尚未发布时，此版本化链接不能使用，也不能在 DJOneHub 共存设备上改用旧版 v0.4.3 安装脚本：
 
 ```sh
-bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'
+bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'
 ```
 
 `pipefail` 确保 GitHub 下载失败不会被 `sudo sh` 的空输入掩盖。脚本检查 arm64、下载稳定名称包、用内置 Ed25519 公钥验签并核对 Debian 包身份。安装后保留首个回滚包，等待 `airsim-agent`、`airsim-installerd` 与 Agent 健康端点就绪；任一失败都以非零状态退出并打印无损排障命令，不再报告“安装完成”。成功后可运行 `sudo airsim-avf-pair` 查看配对信息，将当前动态 AVF 来宾地址和 token 保存到 Android App。完整步骤见[AVF 安装与无损排障指南](../../docs/AVF_INSTALL_GUIDE.md)。
@@ -69,8 +69,6 @@ bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --p
 与 DJOneHub 共存时，AirSIM Agent 独占 `8575`、installerd 独占 `8576`，不会接管原服务的 `7575`。首次安装器会在写入 Debian 包前检查这两个端口是否被其他进程占用；Agent `/api/health` 还必须返回 `product=airsim`。**旧 GitHub Release 不包含此迁移**，重新构建、签名并发布前，不要在已有 DJOneHub 的 AVF 内运行在线安装命令。
 
 如果需要离线安装，仍可使用 release 中的 `airsim-avf-bootstrap.sh`、版本化 `.deb`、`.sig` 和 `.public.pem` 三个参数模式。发布公钥指纹应通过独立可信渠道核对。
-
-`rotate-avf-key.sh` 是仅限旧 `0.4.4-1` 的一次性在线迁移资产，固定检查旧保留包摘要、新包签名与版本，并在安装失败时尝试恢复旧包。它不是普通更新器；旧私钥丢失意味着无法用旧密钥交叉签名迁移脚本。迁移细节和固定 SHA-256 见 [v0.4.5 发布说明](../../docs/releases/0.4.5.md)。
 
 ## Android 管理协议
 

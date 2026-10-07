@@ -38,8 +38,6 @@
 7. 普通 Android App 不能绕过 OEM 或系统签名限制强制开启被隐藏/删除的 AVF 功能。
 8. AVF 的 `/api/health` 只证明 Agent 可达；`8576` installerd、控制 token 与真实电话链路必须分别验证。不要硬编码唯一 AVF 网段，也不要用清除 Terminal 数据或删除 `current.deb` 作为常规修复。
 
-v0.4.5 是一次签名信任根迁移：v0.4.4 的私钥未留存，旧 installerd 会拒绝新签名。已有 `0.4.4-1` 的设备必须在 AVF Terminal 执行经核对的 `rotate-avf-key.sh`，保留旧包和状态，之后才恢复 App 内签名更新。新发行私钥只存在于仓库外的受限存储与 GitHub Actions Secret `AIRSIM_RELEASE_PRIVATE_KEY_PEM`；签名操作不得回显或提交私钥。具体步骤见 `docs/AVF_INSTALL_GUIDE.md`。
-
 严禁提交或回显：`APNS_P8`、`DASHBOARD_TOKEN`、Cloudflare API token、Apple `.p8`、设备 Secret、Agent token、HMAC、Debian 发布私钥、Android keystore、Apple 证书/profile、真实号码和短信内容。
 
 ## Apple 签名规则

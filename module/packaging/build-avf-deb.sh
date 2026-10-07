@@ -3,7 +3,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
-version=${AIRSIM_PACKAGE_VERSION:-0.4.5}
+version=${AIRSIM_PACKAGE_VERSION:-0.4.4}
 release=${AIRSIM_PACKAGE_RELEASE:-1}
 package_version="$version-$release"
 dist_dir=${AIRSIM_DIST_DIR:-"$repo_root/dist"}
@@ -108,15 +108,5 @@ sed -e "s|@AIRSIM_RELEASE_PUBLIC_KEY_BASE64@|$public_key|g" \
     -e "s|@AIRSIM_PACKAGE_VERSION@|$version|g" \
     "$script_dir/install-avf.sh.in" > "$dist_dir/install-avf.sh"
 chmod 0755 "$dist_dir/install-avf.sh"
-sed -e "s|@AIRSIM_RELEASE_PUBLIC_KEY_BASE64@|$public_key|g" \
-    -e "s|@AIRSIM_PACKAGE_VERSION@|$version|g" \
-    "$script_dir/rotate-avf-key.sh.in" > "$dist_dir/rotate-avf-key.sh"
-chmod 0755 "$dist_dir/rotate-avf-key.sh"
-if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$dist_dir" && sha256sum rotate-avf-key.sh) > "$dist_dir/rotate-avf-key.sh.sha256"
-else
-    digest=$(shasum -a 256 "$dist_dir/rotate-avf-key.sh" | awk '{print $1}')
-    printf '%s  rotate-avf-key.sh\n' "$digest" > "$dist_dir/rotate-avf-key.sh.sha256"
-fi
 
 printf 'Created %s\n' "$package"

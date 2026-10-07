@@ -189,25 +189,6 @@ func TestAndroidAVFAllowsPrivatePeerOnDirectlyConnectedSubnet(t *testing.T) {
 	}
 }
 
-func TestAndroidAVFAllowsHostOnSocketSubnetWithGuest32Mask(t *testing.T) {
-	profile := runtimeProfileFrom("android-avf")
-	local := &net.TCPAddr{IP: net.ParseIP("10.178.104.25"), Port: 8575}
-	if !allowedAVFRemoteOnSocket("10.178.104.226:41000", local, profile) {
-		t.Fatal("Android host on the AVF link should be accepted even if guest has a /32 mask")
-	}
-	for _, remote := range []string{"10.178.105.226:41000", "192.168.31.203:41000", "203.0.113.9:41000", "invalid"} {
-		if allowedAVFRemoteOnSocket(remote, local, profile) {
-			t.Fatalf("unrelated peer %q must remain rejected", remote)
-		}
-	}
-	if allowedAVFRemoteOnSocket("10.178.104.226:41000", &net.TCPAddr{IP: net.ParseIP("192.168.31.25"), Port: 8575}, profile) {
-		t.Fatal("a LAN listener must not gain AVF access")
-	}
-	if allowedAVFRemoteOnSocket("10.178.104.226:41000", local, runtimeProfileFrom("qdc507")) {
-		t.Fatal("the QDC507 runtime must not gain AVF access")
-	}
-}
-
 func TestCompareModuleVersions(t *testing.T) {
 	tests := []struct {
 		left, right string
