@@ -88,10 +88,17 @@ sh ./android/phone-control-app/verify-apk.sh
 
 ### 3. 首次安装 Android AVF Agent
 
-进入 Android AVF Linux Terminal，确认 Debian 提示符可用后执行（`pipefail` 会让下载失败明确报错，避免空脚本被误判为安装成功）。**只有 v0.4.4 签名 Release 正式发布后，此版本化链接才可使用**；在已有 DJOneHub 的 AVF 中不要回退到 v0.4.3 的旧安装链接：
+首次安装时进入 Android AVF Linux Terminal，确认 Debian 提示符可用后执行（`pipefail` 会让下载失败明确报错）。已有 `0.4.4-1` 的设备不能用首次安装命令升级，应使用下一段的一次性密钥迁移命令：
 
 ```sh
-bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.4/install-avf.sh | sudo sh'
+bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'
+```
+
+已安装 `0.4.4-1` 的设备必须在同一个 AVF Terminal 中执行一次签名密钥迁移；脚本先核对旧包摘要、验签新包、保留旧包，失败时尝试回滚。**不要在 App 中直接点“更新到最新版”：旧 installer 尚不信任新公钥。**
+
+```sh
+curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 -o /tmp/airsim-rotate-v0.4.5.sh https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/rotate-avf-key.sh
+printf '%s  %s\n' '9ae6b8c69d5d9877638a50240282a67d06b73d807dba444c816c5efb9c5ec04d' /tmp/airsim-rotate-v0.4.5.sh | sha256sum -c - && sudo sh /tmp/airsim-rotate-v0.4.5.sh
 ```
 
 App 仅复制命令，必须在 Debian Terminal 中粘贴执行。安装器只接受匹配的 `arm64` Debian 包和 Ed25519 签名。**只有 Agent 与 installerd 健康检查均通过才算安装完成。**修复版引导脚本遇到已有 `current.deb` 时优先恢复服务，必要时从保留包重装，不再把“已安装”变成无法修复的死路。随后在 Terminal 运行 `sudo airsim-avf-pair`，把控制 token 保存到三星 Android App；AVF 地址取当前设备动态分配的来宾私网地址，不能照抄示例网段。后续更新、修复和回滚由独立的 `airsim-installerd` 完成。若 App 显示“尚未配对”或 `8576` 不可用，见 [AVF 安装与无损排障指南](docs/AVF_INSTALL_GUIDE.md)；包细节见 [AVF Debian 发布文档](module/packaging/README.md)。仓库源码的修复须重新签名并发布 GitHub Release，才会进入上述在线安装命令。
@@ -100,7 +107,7 @@ App 仅复制命令，必须在 Debian Terminal 中粘贴执行。安装器只�
 
 同一 AVF 内可以保留 DJOneHub：AirSIM 专用 Agent / installer 端口为 `8575` / `8576`，不占用 DJOneHub 的 `7575`。安装前核对 GitHub Release 已包含这次端口迁移；旧版在线安装包仍会监听 `7575`，**不要在 DJOneHub 并存环境运行旧版命令**。
 
-0.4.4 的变更、签名发布要求和共存验收清单见 [Release Markdown](docs/releases/0.4.4.md)。
+0.4.5 的修复、密钥迁移和验收步骤见 [Release Markdown](docs/releases/0.4.5.md)。
 
 ### 4. 配置并签名 iPhone / Apple Watch App
 

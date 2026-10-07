@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +11,20 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAndroidAVFPairingEntryAllowsHostOnCurrentPrivateLink(t *testing.T) {
+	a := testAndroidAgent("secret-value")
+	handler := a.routes(testLogger())
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.RemoteAddr = "10.178.104.226:41000"
+	request = request.WithContext(context.WithValue(request.Context(), http.LocalAddrContextKey,
+		&net.TCPAddr{IP: net.ParseIP("10.178.104.25"), Port: 8575}))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("AVF private host status=%d body=%s", response.Code, response.Body.String())
+	}
+}
 
 func TestLoadAndroidControlTokenPrefersProtectedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
