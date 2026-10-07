@@ -354,8 +354,16 @@ public final class CoreTests {
 		assertTrue(VoWLANNetworkPolicy.isVoWLANInterface("swlan0", "10.172.46.225"));
 		assertTrue(!VoWLANNetworkPolicy.isVoWLANInterface("avf_tap_fixed", "10.177.99.12"));
 		assertTrue(!VoWLANNetworkPolicy.isVoWLANInterface("rmnet0", "10.20.30.40"));
-		assertTrue(VoWLANNetworkPolicy.shouldAdvertise(true, true, true, true));
-		assertTrue(!VoWLANNetworkPolicy.shouldAdvertise(true, true, false, true));
+		assertTrue(VoWLANNetworkPolicy.shouldAdvertise(true, true, true, true, true));
+		assertTrue(!VoWLANNetworkPolicy.shouldAdvertise(true, true, false, true, true));
+		assertTrue(!VoWLANNetworkPolicy.shouldAdvertise(true, true, true, true, false));
+		assertTrue(TelecomRolePolicy.canExecuteCallCommand(true, "dial"));
+		assertTrue(TelecomRolePolicy.canExecuteCallCommand(true, "end"));
+		assertTrue(!TelecomRolePolicy.canExecuteCallCommand(false, "dial"));
+		assertTrue(!TelecomRolePolicy.canExecuteCallCommand(false, "end"));
+		assertTrue(TelecomRolePolicy.requiresDialerRole("dial"));
+		assertTrue(TelecomRolePolicy.requiresDialerRole("end"));
+		assertTrue(!TelecomRolePolicy.requiresDialerRole("send_sms"));
 		assertEquals("266 145", MainScreenPresentation.formatPairingCode("266145"));
 		assertEquals(
 				"22:45 VoWLAN 健康检查通过\n22:43 VoWLAN 广播已发现",
@@ -363,7 +371,7 @@ public final class CoreTests {
 						"22:42 Agent 心跳正常\n22:43 VoWLAN 广播已发现\n22:44 PCM bridge ready\n22:45 VoWLAN 健康检查通过",
 						"VoWLAN",
 						2));
-		assertEquals("Linux Agent 健康检查通过",
+		assertEquals("Linux Agent 状态接口返回 HTTP 200",
 				MainScreenPresentation.activitySummary(
 						"2026-09-25T10:11:12Z http_request_finished method=GET path=/api/android/status status=200"));
 		assertEquals("VoWLAN 配对完成",
@@ -374,8 +382,26 @@ public final class CoreTests {
 				MainScreenPresentation.activitySummary("watchdog_created"));
 		assertEquals("VoWLAN 服务已启动",
 				MainScreenPresentation.activitySummary("vowlan_service_created"));
-		assertEquals("系统状态已更新",
+		assertEquals("vowlan_state", MainScreenPresentation.activitySummary(
+				"vowlan_state paired=true agent_ready=false pcm_ready=true"));
+		assertEquals("unrecognized",
 				MainScreenPresentation.activitySummary("unrecognized verbose internal entry"));
+		String detailed = "2026-10-07T10:11:12Z ERROR [pool-1] "
+				+ "http_request_failed method=GET path=/api/android/status duration_ms=3002 error=SocketTimeoutException";
+		assertEquals("2026-10-07T10:11:12Z · ERROR · [pool-1]",
+				MainScreenPresentation.logMetadata(detailed));
+		assertEquals("http_request_failed method=GET path=/api/android/status duration_ms=3002 error=SocketTimeoutException",
+				MainScreenPresentation.eventBody(detailed));
+		assertTrue(MainScreenPresentation.isErrorLog(detailed));
+		assertEquals("plain log entry", MainScreenPresentation.eventBody("plain log entry"));
+		assertEquals("vowlan_state paired=true pcm_ready=false",
+				MainScreenPresentation.latestContaining(
+						"push_status ok=true\nvowlan_state paired=true pcm_ready=false",
+						"vowlan_state"));
+		assertEquals("shizuku_binder_dead\npcm_probe_failed port=7580",
+				MainScreenPresentation.recentMatchingLogLines(
+						"push_status ok=true\npcm_probe_failed port=7580\nshizuku_binder_dead",
+						3, "pcm", "shizuku"));
         System.out.println("phone-control core tests passed");
     }
 

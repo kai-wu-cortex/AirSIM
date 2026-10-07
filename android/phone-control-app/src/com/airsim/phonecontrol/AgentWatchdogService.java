@@ -3,6 +3,7 @@ package com.airsim.phonecontrol;
 import android.app.Service;
 import android.app.ActivityOptions;
 import android.app.PendingIntent;
+import android.app.role.RoleManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
@@ -59,7 +60,16 @@ public final class AgentWatchdogService extends Service {
                     AgentCommand command = AgentCommand.parse(payload);
                     BridgeLog.info("command_received action=" + command.action + " command_id="
                             + DebugRedactor.safeIdentifier(command.id));
-                    CallRepository.ActionResult result = CallRepository.execute(command, getSystemService(TelecomManager.class));
+                    RoleManager roleManager = getSystemService(RoleManager.class);
+                    boolean dialerRoleHeld = roleManager != null
+                            && roleManager.isRoleHeld(RoleManager.ROLE_DIALER);
+                    CallRepository.ActionResult result;
+                    if (TelecomRolePolicy.requiresDialerRole(command.action) && !dialerRoleHeld) {
+                        result = CallRepository.ActionResult.failure(
+                                "AirSIM 不是默认电话应用；请在三星默认应用设置中选择 AirSIM");
+                    } else {
+                        result = CallRepository.execute(command, getSystemService(TelecomManager.class));
+                    }
                     new AgentClient(this).sendResult(command.id, result.success, result.error);
                     BridgeLog.info("command_result action=" + command.action + " success=" + result.success +
                             " command_id=" + DebugRedactor.safeIdentifier(command.id));

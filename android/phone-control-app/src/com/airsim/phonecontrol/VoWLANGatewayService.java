@@ -4,6 +4,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.app.role.RoleManager;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.os.IBinder;
@@ -27,6 +28,11 @@ public final class VoWLANGatewayService extends Service {
     private NsdManager.RegistrationListener advertisement;
     private String activeHotspot = "";
     private String lastDiagnosticState = "";
+    private static volatile String currentDiagnosticState = "尚未检查";
+
+    static String currentDiagnosticState() {
+        return currentDiagnosticState;
+    }
 
     public static void start(Context context) {
         BridgeLog.debug("vowlan_service_start_requested");
@@ -36,6 +42,7 @@ public final class VoWLANGatewayService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        currentDiagnosticState = "服务正在启动";
         BridgeLog.info("vowlan_service_created");
         startForeground(BridgeNotification.VOWLAN_ID, BridgeNotification.vowlan(this, "正在发现 VoWLAN 网络"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
@@ -56,6 +63,10 @@ public final class VoWLANGatewayService extends Service {
                     CallRepository.disconnectAll();
                 }
                 boolean paired = VoWLANPairingStore.configured(this);
+                RoleManager roleManager = getSystemService(RoleManager.class);
+                boolean dialerRoleHeld = roleManager != null
+                        && roleManager.isRoleAvailable(RoleManager.ROLE_DIALER)
+                        && roleManager.isRoleHeld(RoleManager.ROLE_DIALER);
                 boolean agentReady = false;
                 boolean pcmReady = false;
                 if (hotspot != null && avf != null && paired && AppConfig.configured(this)) {
@@ -76,13 +87,16 @@ public final class VoWLANGatewayService extends Service {
                         pcmReady = portOpen(avf, 7580);
                     }
                 }
-                diagnosticState(hotspot, avf, paired, agentReady, pcmReady);
-                if (VoWLANNetworkPolicy.shouldAdvertise(hotspot != null, paired, agentReady, pcmReady)) {
+                diagnosticState(hotspot, avf, paired, agentReady, pcmReady, dialerRoleHeld);
+                if (VoWLANNetworkPolicy.shouldAdvertise(
+                        hotspot != null, paired, agentReady, pcmReady, dialerRoleHeld)) {
                     ensureStarted(hotspot, avf);
                     update("VoWLAN 就绪 · " + hotspot.getHostAddress());
                 } else {
                     stopGateways();
-                    update(!paired ? "VoWLAN 未配对" : hotspot == null ? "正在等待同网 Wi-Fi 或三星热点"
+                    update(!dialerRoleHeld ? "请将 AirSIM 设为默认电话应用"
+                            : !paired ? "VoWLAN 未配对"
+                            : hotspot == null ? "正在等待同网 Wi-Fi 或三星热点"
                             : !agentReady ? "Linux Agent 尚未就绪" : "PCM 音频桥尚未就绪");
                 }
                 Thread.sleep(5_000);
@@ -90,6 +104,7 @@ public final class VoWLANGatewayService extends Service {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception error) {
+                currentDiagnosticState = "服务异常：" + error.getClass().getSimpleName();
                 BridgeLog.error("vowlan_lifecycle_failed", error);
                 stopGateways();
                 update("VoWLAN 正在恢复");
@@ -159,9 +174,11 @@ public final class VoWLANGatewayService extends Service {
     }
 
     private void diagnosticState(Inet4Address hotspot, Inet4Address avf, boolean paired,
-                                 boolean agentReady, boolean pcmReady) {
+                                 boolean agentReady, boolean pcmReady, boolean dialerRoleHeld) {
         String value = "hotspot=" + address(hotspot) + " avf=" + address(avf) + " paired=" + paired
-                + " agent_ready=" + agentReady + " pcm_ready=" + pcmReady;
+                + " agent_ready=" + agentReady + " pcm_ready=" + pcmReady
+                + " dialer_role=" + dialerRoleHeld;
+        currentDiagnosticState = value;
         if (!value.equals(lastDiagnosticState)) {
             lastDiagnosticState = value;
             BridgeLog.info("vowlan_state " + value);
@@ -211,6 +228,7 @@ public final class VoWLANGatewayService extends Service {
 
     @Override public void onDestroy() {
         BridgeLog.info("vowlan_service_destroyed");
+        currentDiagnosticState = "服务已停止";
         running = false;
         worker.shutdownNow();
         stopGateways();

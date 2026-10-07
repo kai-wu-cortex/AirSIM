@@ -75,6 +75,8 @@ Relay 地址通过 `AIRSIM_PUSH_RELAY_URL` 注入，APNs 环境通过 `AIRSIM_AP
 
 新安装需要重新完成三星配对、通知授权、CallKit/PushKit 注册和 Watch 配套安装。
 
+GitHub Release 中的 `AirSIM-iOS-<version>-unsigned.ipa` 是供重签的 arm64 构建产物，不包含 `_CodeSignature` 或 `embedded.mobileprovision`，不能直接安装。不能只签主 App：必须同步替换并签署 Watch App 与 Live Activity Extension 的 Bundle ID、entitlements 和 provisioning profile。公开 Release 不应上传包含开发设备 UDID 的 development/ad hoc IPA。
+
 ## 安全与隐私
 
 - VoWLAN Secret 保存在 Keychain，不写入 UserDefaults 或日志。

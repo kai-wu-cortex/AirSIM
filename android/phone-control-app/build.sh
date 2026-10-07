@@ -13,6 +13,12 @@ CLASSES="$OUT/classes"
 DEX="$OUT/dex"
 DEPS="$ROOT/build/dependencies"
 SHIZUKU_VERSION=13.1.5
+BUILD_VARIANT=${AIRSIM_ANDROID_BUILD_VARIANT:-debug}
+
+case "$BUILD_VARIANT" in
+  debug|release) ;;
+  *) echo "AIRSIM_ANDROID_BUILD_VARIANT must be debug or release" >&2; exit 1 ;;
+esac
 
 rm -rf "$OUT"
 mkdir -p "$CLASSES" "$DEX" "$DEPS"
@@ -60,17 +66,43 @@ while IFS= read -r -d '' class_file; do CLASSES_ARGS+=("$class_file"); done < <(
 "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 29 --output "$DEX" "${CLASSES_ARGS[@]}" "${SHIZUKU_JARS[@]}"
 COMPILED_RES="$OUT/compiled-res.zip"
 "$BUILD_TOOLS/aapt2" compile --dir "$ROOT/res" -o "$COMPILED_RES"
+MANIFEST="$OUT/AndroidManifest.xml"
+if [ "$BUILD_VARIANT" = release ]; then
+  sed 's/android:debuggable="true"/android:debuggable="false"/' \
+    "$ROOT/AndroidManifest.xml" > "$MANIFEST"
+else
+  cp "$ROOT/AndroidManifest.xml" "$MANIFEST"
+fi
 "$BUILD_TOOLS/aapt2" link -o "$OUT/unsigned.apk" -I "$ANDROID_JAR" \
-  --manifest "$ROOT/AndroidManifest.xml" "$COMPILED_RES"
+  --manifest "$MANIFEST" "$COMPILED_RES"
 (cd "$DEX" && zip -q -j "$OUT/unsigned.apk" classes.dex)
 "$BUILD_TOOLS/zipalign" -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
-KEYSTORE="$ROOT/build/debug.keystore"
-if [ ! -f "$KEYSTORE" ]; then
-  "$JAVA_HOME/bin/keytool" -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
-    -alias androiddebugkey -dname "CN=AirSIM Debug,O=AirSIM,C=CN" -keyalg RSA -keysize 2048 -validity 3650 >/dev/null 2>&1
+if [ "$BUILD_VARIANT" = debug ]; then
+  KEYSTORE="$ROOT/build/debug.keystore"
+  if [ ! -f "$KEYSTORE" ]; then
+    "$JAVA_HOME/bin/keytool" -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
+      -alias androiddebugkey -dname "CN=AirSIM Debug,O=AirSIM,C=CN" -keyalg RSA -keysize 2048 -validity 3650 >/dev/null 2>&1
+  fi
+  OUTPUT_APK="$OUT/AirSIM-Phone-Bridge-debug.apk"
+  "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
+    --out "$OUTPUT_APK" "$OUT/aligned.apk"
+else
+  : "${AIRSIM_ANDROID_KEYSTORE:?set AIRSIM_ANDROID_KEYSTORE for a release build}"
+  : "${AIRSIM_ANDROID_KEY_ALIAS:?set AIRSIM_ANDROID_KEY_ALIAS for a release build}"
+  : "${AIRSIM_ANDROID_KEYSTORE_PASSWORD:?set AIRSIM_ANDROID_KEYSTORE_PASSWORD for a release build}"
+  : "${AIRSIM_ANDROID_KEY_PASSWORD:?set AIRSIM_ANDROID_KEY_PASSWORD for a release build}"
+  if [ ! -f "$AIRSIM_ANDROID_KEYSTORE" ]; then
+    echo "release keystore not found: $AIRSIM_ANDROID_KEYSTORE" >&2
+    exit 1
+  fi
+  OUTPUT_APK="$OUT/AirSIM-Phone-Bridge-release.apk"
+  "$BUILD_TOOLS/apksigner" sign \
+    --ks "$AIRSIM_ANDROID_KEYSTORE" \
+    --ks-key-alias "$AIRSIM_ANDROID_KEY_ALIAS" \
+    --ks-pass env:AIRSIM_ANDROID_KEYSTORE_PASSWORD \
+    --key-pass env:AIRSIM_ANDROID_KEY_PASSWORD \
+    --out "$OUTPUT_APK" "$OUT/aligned.apk"
 fi
-"$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
-  --out "$OUT/AirSIM-Phone-Bridge-debug.apk" "$OUT/aligned.apk"
-"$BUILD_TOOLS/apksigner" verify --verbose "$OUT/AirSIM-Phone-Bridge-debug.apk"
-echo "$OUT/AirSIM-Phone-Bridge-debug.apk"
+"$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$OUTPUT_APK"
+echo "$OUTPUT_APK"

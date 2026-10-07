@@ -38,6 +38,19 @@ sh ./android/phone-control-app/verify-apk.sh
 android/phone-control-app/build/android/AirSIM-Phone-Bridge-debug.apk
 ```
 
+正式发布使用仓库外的长期签名库；不要用 debug keystore 发布，否则后续版本无法安全升级：
+
+```sh
+AIRSIM_ANDROID_BUILD_VARIANT=release \
+AIRSIM_ANDROID_KEYSTORE=/absolute/path/to/airsim-android-release.jks \
+AIRSIM_ANDROID_KEY_ALIAS=airsim-release \
+AIRSIM_ANDROID_KEYSTORE_PASSWORD='从 Secret Store 注入' \
+AIRSIM_ANDROID_KEY_PASSWORD='从 Secret Store 注入' \
+./android/phone-control-app/build.sh
+```
+
+Release APK 输出到 `android/phone-control-app/build/android/AirSIM-Phone-Bridge-release.apk`。签名库和密码不得提交到 Git；公开 Release 必须复用同一签名证书，才能覆盖升级已安装版本。
+
 ## 三星手机配置
 
 1. 安装 APK 并启动 AirSIM。

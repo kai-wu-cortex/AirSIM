@@ -43,7 +43,8 @@ public final class VoWLANNetworkPolicy {
     }
 
     public static boolean shouldAdvertise(
-            boolean hotspotReady, boolean paired, boolean agentReady, boolean pcmReady) {
-        return hotspotReady && paired && agentReady && pcmReady;
+            boolean hotspotReady, boolean paired, boolean agentReady, boolean pcmReady,
+            boolean dialerRoleHeld) {
+        return hotspotReady && paired && agentReady && pcmReady && dialerRoleHeld;
     }
 }

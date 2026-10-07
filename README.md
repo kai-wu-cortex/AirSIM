@@ -69,6 +69,10 @@ iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Andro
 
 ## 快速开始
 
+### 应用发布包
+
+[AirSIM Apps v0.9.0](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.0) 提供正式签名的 Android APK 与可自行重签的 unsigned iOS IPA。Android v0.9.0 首次使用长期发布证书，不能覆盖旧 debug 签名包；iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.0 发布说明](docs/releases/0.9.0.md)。
+
 ### 1. 准备开发环境
 
 - 三星 Android 测试手机，支持 Android Telecom、Shizuku、无线调试和可用的 Android AVF Linux 环境。

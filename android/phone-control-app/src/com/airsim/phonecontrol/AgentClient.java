@@ -39,6 +39,14 @@ public final class AgentClient {
         return payload;
     }
 
+    public String pushStatus() throws Exception {
+        return request("GET", "/api/push/status", null, 5_000);
+    }
+
+    public String debugSnapshot() throws Exception {
+        return request("GET", "/api/debug?limit=100", null, 8_000);
+    }
+
     public String nextCommand() throws Exception {
         return request("GET", "/api/android/commands/next?wait=25", null, 32_000);
     }
