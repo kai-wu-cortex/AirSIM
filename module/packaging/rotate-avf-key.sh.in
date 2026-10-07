@@ -1,0 +1,146 @@
+#!/bin/sh
+set -eu
+
+# One-time trust-root migration for the published 0.4.4-1 package only.
+# Existing Agent data, control token, DJOneHub services and ports are untouched.
+release_base=${AIRSIM_RELEASE_BASE_URL:-https://github.com/kai-wu-cortex/AirSIM/releases/download/v@AIRSIM_PACKAGE_VERSION@}
+release_public_key='@AIRSIM_RELEASE_PUBLIC_KEY_BASE64@'
+old_package_sha256='4ccebc89b0d46e43e191d811d0523c54de27d3bacc5a5d83e886fdd243fcebdd'
+target_version='@AIRSIM_PACKAGE_VERSION@-1'
+state_directory=/var/lib/airsim-installerd/packages
+current_package="$state_directory/current.deb"
+previous_package="$state_directory/previous.deb"
+
+if [ "$(id -u)" -ne 0 ]; then
+    printf 'Run this script as root inside the AVF Linux Terminal.\n' >&2
+    exit 1
+fi
+case "$release_base" in
+    https://github.com/kai-wu-cortex/AirSIM/releases/download/v@AIRSIM_PACKAGE_VERSION@) ;;
+    *) printf 'Unexpected release origin; key rotation stopped.\n' >&2; exit 2 ;;
+esac
+case "$(uname -m)" in
+    arm64|aarch64) ;;
+    *) printf 'Only arm64 AVF Linux is supported.\n' >&2; exit 2 ;;
+esac
+for command_name in curl openssl base64 dpkg-deb dpkg-query dpkg sha256sum \
+    apt-get systemctl install mktemp grep mv; do
+    command -v "$command_name" >/dev/null 2>&1 || {
+        printf 'Missing prerequisite: %s\n' "$command_name" >&2
+        exit 2
+    }
+done
+
+installed_version=$(dpkg-query -W -f='${Version}' airsim-avf-agent)
+if [ "$installed_version" = "$target_version" ]; then
+    printf 'AirSIM Agent %s is already installed; no migration needed.\n' "$target_version"
+    exit 0
+fi
+if [ "$installed_version" != 0.4.4-1 ]; then
+    printf 'Expected AirSIM 0.4.4-1, found %s; leaving installation unchanged.\n' "$installed_version" >&2
+    exit 3
+fi
+if [ ! -f "$current_package" ] || [ -e "$previous_package" ]; then
+    printf 'Missing current package or an existing rollback package; leaving both unchanged.\n' >&2
+    exit 3
+fi
+if [ "$(dpkg-deb --field "$current_package" Package)" != airsim-avf-agent ] ||
+   [ "$(dpkg-deb --field "$current_package" Architecture)" != arm64 ] ||
+   [ "$(dpkg-deb --field "$current_package" Version)" != 0.4.4-1 ] ||
+   [ "$(sha256sum "$current_package" | awk '{print $1}')" != "$old_package_sha256" ]; then
+    printf 'Retained 0.4.4-1 package does not match the published release; stopping.\n' >&2
+    exit 3
+fi
+if ! curl -fsS --max-time 3 http://127.0.0.1:8575/api/health |
+    grep -Eq '"product"[[:space:]]*:[[:space:]]*"airsim"'; then
+    printf 'The local service is not the AirSIM Agent; stopping.\n' >&2
+    exit 3
+fi
+if ! apt-get check >/dev/null 2>&1; then
+    printf 'AVF Debian has broken dependencies; do not rotate signing keys yet.\n' >&2
+    exit 4
+fi
+
+work_dir=$(mktemp -d /tmp/airsim-key-rotation.XXXXXX)
+install_started=0
+wait_healthy() {
+    expected_version=$1
+    attempt=0
+    while [ "$attempt" -lt 12 ]; do
+        if systemctl is-active --quiet airsim-agent.service &&
+           systemctl is-active --quiet airsim-installerd.service; then
+            health=$(curl -fsS --max-time 2 http://127.0.0.1:8575/api/health 2>/dev/null || true)
+            installer_code=$(curl -sS --max-time 2 -o /dev/null -w '%{http_code}' \
+                http://127.0.0.1:8576/v1/status 2>/dev/null || true)
+            if printf '%s' "$health" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"airsim"' &&
+               printf '%s' "$health" | grep -Eq '"version"[[:space:]]*:[[:space:]]*"'"$expected_version"'"' &&
+               [ "$installer_code" = 401 ]; then
+                return 0
+            fi
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    return 1
+}
+on_exit() {
+    exit_status=$?
+    trap - EXIT
+    if [ "$exit_status" -ne 0 ] && [ "$install_started" -eq 1 ]; then
+        printf 'Migration failed; restoring the retained AirSIM 0.4.4-1 package...\n' >&2
+        if dpkg --install "$previous_package" &&
+           systemctl restart airsim-installerd.service airsim-agent.service &&
+           wait_healthy 0.4.4; then
+            install -m 0600 "$previous_package" "$current_package"
+            printf 'Previous AirSIM Agent restored. The rollback copy remains for inspection.\n' >&2
+        else
+            printf 'Automatic rollback failed. Keep both package files; inspect systemd and dpkg logs.\n' >&2
+        fi
+    fi
+    rm -rf "$work_dir"
+    exit "$exit_status"
+}
+trap on_exit EXIT
+trap 'exit 130' HUP INT TERM
+
+package="$work_dir/airsim-avf-agent_arm64.deb"
+signature="$work_dir/airsim-avf-agent_arm64.deb.sig"
+curl -fsSL --connect-timeout 10 --max-time 180 --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    "$release_base/airsim-avf-agent_arm64.deb" -o "$package"
+curl -fsSL --connect-timeout 10 --max-time 30 --retry 3 --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    "$release_base/airsim-avf-agent_arm64.deb.sig" -o "$signature"
+
+printf '%s' "$release_public_key" | base64 -d > "$work_dir/public.raw"
+if [ "$(wc -c < "$work_dir/public.raw" | tr -d ' ')" -ne 32 ]; then
+    printf 'Release public key is invalid.\n' >&2
+    exit 5
+fi
+printf '\060\052\060\005\006\003\053\145\160\003\041\000' > "$work_dir/public.der"
+cat "$work_dir/public.raw" >> "$work_dir/public.der"
+openssl pkey -pubin -inform DER -in "$work_dir/public.der" -out "$work_dir/public.pem" >/dev/null
+base64 -d < "$signature" > "$work_dir/signature.bin"
+openssl pkeyutl -verify -pubin -inkey "$work_dir/public.pem" -rawin \
+    -in "$package" -sigfile "$work_dir/signature.bin" >/dev/null
+if [ "$(dpkg-deb --field "$package" Package)" != airsim-avf-agent ] ||
+   [ "$(dpkg-deb --field "$package" Architecture)" != arm64 ] ||
+   [ "$(dpkg-deb --field "$package" Version)" != "$target_version" ]; then
+    printf 'Signed package identity or version is not AirSIM %s arm64.\n' "$target_version" >&2
+    exit 5
+fi
+
+install -m 0600 "$current_package" "$work_dir/previous.deb"
+install -m 0600 "$work_dir/previous.deb" "$state_directory/previous.deb.pending"
+mv "$state_directory/previous.deb.pending" "$previous_package"
+install_started=1
+dpkg --install "$package"
+systemctl restart airsim-installerd.service airsim-agent.service
+
+if wait_healthy '@AIRSIM_PACKAGE_VERSION@'; then
+    install -m 0600 "$package" "$state_directory/current.deb.pending"
+    mv "$state_directory/current.deb.pending" "$current_package"
+    install_started=0
+    printf 'AirSIM %s is healthy. Old package retained for rollback.\n' "$target_version"
+    exit 0
+fi
+printf 'New AirSIM Agent did not pass health checks.\n' >&2
+exit 6

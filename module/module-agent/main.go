@@ -381,8 +381,9 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 		} else {
 			func() {
 				defer release()
-				if !allowedRemoteWithNetworks(request.RemoteAddr, a.profile, localIPv4Networks()) {
-					writeError(capturedResponse, http.StatusForbidden, "只允许 USB 本地网络访问")
+				if !allowedRemoteWithNetworks(request.RemoteAddr, a.profile, localIPv4Networks()) &&
+					!allowedAVFRemoteOnSocket(request.RemoteAddr, request.Context().Value(http.LocalAddrContextKey), a.profile) {
+					writeError(capturedResponse, http.StatusForbidden, "只允许 AVF 私网访问")
 					return
 				}
 				mux.ServeHTTP(capturedResponse, request)
@@ -457,6 +458,32 @@ func allowedRemoteWithNetworks(remote string, profile runtimeProfile, networks [
 		}
 	}
 	return false
+}
+
+// Android AVF may assign the guest its .25 address with a /32 mask. In that
+// case InterfaceAddrs cannot prove that the Android host is on the same link.
+// The server-provided local socket address is trusted (unlike Host/X-Forwarded
+// headers), so accept only a private peer on that AVF /24, never a LAN peer.
+func allowedAVFRemoteOnSocket(remote string, localAddr any, profile runtimeProfile) bool {
+	if !profile.AndroidTelecom {
+		return false
+	}
+	local, ok := localAddr.(*net.TCPAddr)
+	if !ok {
+		return false
+	}
+	localIP := local.IP.To4()
+	if localIP == nil || localIP[3] != 25 ||
+		!(localIP[0] == 10 || localIP[0] == 172 && localIP[1] >= 16 && localIP[1] <= 31) {
+		return false
+	}
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		return false
+	}
+	peerIP := net.ParseIP(host).To4()
+	return peerIP != nil && peerIP.IsPrivate() &&
+		peerIP[0] == localIP[0] && peerIP[1] == localIP[1] && peerIP[2] == localIP[2]
 }
 
 func localIPv4Networks() []*net.IPNet {
