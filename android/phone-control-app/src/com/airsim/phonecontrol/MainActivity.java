@@ -130,6 +130,7 @@ public final class MainActivity extends Activity {
 		String[] missingPermissions = RuntimePermissionPolicy.missingPermissions(
 				Build.VERSION.SDK_INT,
 				checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED,
+				checkSelfPermission(Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED,
 				Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
 						== PackageManager.PERMISSION_GRANTED);
 		if (missingPermissions.length > 0) {

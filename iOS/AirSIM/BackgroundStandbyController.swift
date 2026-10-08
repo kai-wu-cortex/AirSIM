@@ -70,6 +70,21 @@ enum IncomingCallPresentationRequest {
     }
 }
 
+/// 通知点开后 SwiftUI 首屏可能尚未订阅事件；只保存发件人，不持久化短信正文。
+enum IncomingSMSPresentationRequest {
+    static let key = "airsim.pending-sms-sender"
+
+    static func markPending(sender: String, defaults: UserDefaults = .standard) {
+        defaults.set(sender, forKey: key)
+    }
+
+    static func consume(defaults: UserDefaults = .standard) -> String? {
+        let sender = defaults.string(forKey: key)
+        defaults.removeObject(forKey: key)
+        return sender
+    }
+}
+
 /// 接收锁屏通知动作，并在系统授予的后台执行时间内直接控制模块通话。
 @MainActor
 final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUserNotificationCenterDelegate {
@@ -179,7 +194,12 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
     ) {
         let actionIdentifier = response.actionIdentifier
         if response.notification.request.content.userInfo["event"] as? String == "incoming_sms" {
-            let sender = response.notification.request.content.userInfo["sender"] as? String
+            let userInfo = response.notification.request.content.userInfo
+            if let pushed = try? IncomingRemoteSMS(userInfo: userInfo), persistRemoteSMS(pushed) {
+                NotificationCenter.default.post(name: .airsimRemoteSMSReceived, object: nil)
+            }
+            let sender = userInfo["sender"] as? String
+            if let sender { IncomingSMSPresentationRequest.markPending(sender: sender) }
             NotificationCenter.default.post(
                 name: .airsimOpenSMSConversation,
                 object: nil,

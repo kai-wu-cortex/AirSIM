@@ -591,7 +591,7 @@ struct IncomingRemoteSMS: Equatable, Sendable {
             throw RemoteSMSPushError.incomplete
         }
         guard let rawTimestamp = userInfo["timestamp"] as? String,
-              let timestamp = ISO8601DateFormatter().date(from: rawTimestamp) else {
+              let timestamp = Self.parseTimestamp(rawTimestamp) else {
             throw RemoteSMSPushError.invalidTimestamp
         }
         self.deliveryID = deliveryID
@@ -600,6 +600,16 @@ struct IncomingRemoteSMS: Equatable, Sendable {
         code = Self.nonEmpty(userInfo["code"] as? String)
         self.timestamp = timestamp
         contentTruncated = userInfo["content_truncated"] as? Bool ?? false
+    }
+
+    private static func parseTimestamp(_ value: String) -> Date? {
+        // Agent 使用 RFC3339Nano；Foundation 的默认 ISO8601 格式不接受小数秒。
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: value)
     }
 
     var message: SMSMessage {

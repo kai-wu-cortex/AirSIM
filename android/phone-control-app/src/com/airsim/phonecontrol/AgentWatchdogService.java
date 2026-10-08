@@ -55,7 +55,7 @@ public final class AgentWatchdogService extends Service {
                 waitingForConfiguration = false;
                 String payload = new AgentClient(this).nextCommand();
                 failures = 0;
-                update(payload.isEmpty() ? "Linux Agent 在线" : "正在执行通话命令");
+                update(payload.isEmpty() ? "Linux Agent 在线" : "正在执行设备命令");
                 if (!payload.isEmpty()) {
                     AgentCommand command = AgentCommand.parse(payload);
                     BridgeLog.info("command_received action=" + command.action + " command_id="
@@ -63,15 +63,22 @@ public final class AgentWatchdogService extends Service {
                     RoleManager roleManager = getSystemService(RoleManager.class);
                     boolean dialerRoleHeld = roleManager != null
                             && roleManager.isRoleHeld(RoleManager.ROLE_DIALER);
-                    CallRepository.ActionResult result;
-                    if (TelecomRolePolicy.requiresDialerRole(command.action) && !dialerRoleHeld) {
-                        result = CallRepository.ActionResult.failure(
-                                "AirSIM 不是默认电话应用；请在三星默认应用设置中选择 AirSIM");
+                    AgentCommandDispatcher.Result result = AgentCommandDispatcher.execute(
+                            command, dialerRoleHeld,
+                            call -> {
+                                CallRepository.ActionResult telecom = CallRepository.execute(
+                                        call, getSystemService(TelecomManager.class));
+                                return new AgentCommandDispatcher.Result(
+                                        telecom.success, telecom.error, 0);
+                            },
+                            sms -> SMSCommandExecutor.execute(this, sms));
+                    if ("send_sms".equals(command.action)) {
+                        new AgentClient(this).sendResult(command.id, result.success(),
+                                result.error(), result.segments());
                     } else {
-                        result = CallRepository.execute(command, getSystemService(TelecomManager.class));
+                        new AgentClient(this).sendResult(command.id, result.success(), result.error());
                     }
-                    new AgentClient(this).sendResult(command.id, result.success, result.error);
-                    BridgeLog.info("command_result action=" + command.action + " success=" + result.success +
+                    BridgeLog.info("command_result action=" + command.action + " success=" + result.success() +
                             " command_id=" + DebugRedactor.safeIdentifier(command.id));
                 }
             } catch (InterruptedException interrupted) {

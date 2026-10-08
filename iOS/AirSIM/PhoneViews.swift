@@ -752,6 +752,8 @@ struct RecentsView: View {
 struct MessagesView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var pendingRecipient: String?
+    @Binding var pendingConversation: String?
+    @State private var conversationPath: [String] = []
     @State private var showingComposer = false
     @State private var showingClearConfirmation = false
 
@@ -762,16 +764,14 @@ struct MessagesView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $conversationPath) {
             List {
                 if conversations.isEmpty {
                     EmptyStateView(title: L10n.t("暂无短信"), systemImage: "message")
                         .listRowBackground(Color.clear)
                 } else {
                     ForEach(conversations, id: \.sender) { conversation in
-                        NavigationLink {
-                            MessageThreadView(sender: conversation.sender)
-                        } label: {
+                        NavigationLink(value: conversation.sender) {
                             MessageConversationRow(sender: conversation.sender, messages: conversation.messages)
                                 .contentShape(Rectangle())
                         }
@@ -794,6 +794,9 @@ struct MessagesView: View {
             .phoneReportsTabBarCompactState()
             .background(PhoneBackdrop())
             .navigationTitle(L10n.t("短信"))
+            .navigationDestination(for: String.self) { sender in
+                MessageThreadView(sender: sender)
+            }
             .toolbar {
                 phoneMorphingToolbarItem(placement: .topBarLeading, id: "top-action-leading-more") {
                     Menu {
@@ -819,9 +822,11 @@ struct MessagesView: View {
             .task {
                 await model.loadMessagesFromAgent(silently: true)
             }
+            .onAppear { showPendingConversation() }
             .onChange(of: pendingRecipient) { recipient in
                 if recipient != nil { showingComposer = true }
             }
+            .onChange(of: pendingConversation) { _ in showPendingConversation() }
             .sheet(isPresented: $showingComposer, onDismiss: { pendingRecipient = nil }) {
                 MessageComposer(initialRecipient: pendingRecipient ?? "")
                     .presentationDetents([.medium, .large])
@@ -839,6 +844,12 @@ struct MessagesView: View {
                 Text("这会删除本机短信以及尚未交付的模块短信，无法恢复。")
             }
         }
+    }
+
+    private func showPendingConversation() {
+        guard let sender = pendingConversation else { return }
+        conversationPath = [sender]
+        pendingConversation = nil
     }
 
     private struct MessageConversationRow: View {

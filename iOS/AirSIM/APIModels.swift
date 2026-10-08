@@ -126,16 +126,17 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
     let content: String
     let code: String?
     let timestamp: Date
-    /// 模块交付队列的确认标识；仅用于清理模块副本，不影响本地短信去重。
+    /// 模块交付队列的稳定标识；也用于推送与本地同步之间的去重。
     var deliveryID: String?
     /// 旧模块没有方向字段，缺省按收到的短信展示；发送成功后由 App 标记为 outgoing。
     var direction: SMSDirection? = nil
 
     var isOutgoing: Bool { direction == .outgoing }
 
-    /// 后端短信没有独立 ID，以稳定字段组合生成列表标识。
+    /// 新版 Agent 用 delivery_id 对齐 APNs 与本地同步；旧版仍回退到内容指纹。
     var id: String {
-        "\(sender)\u{0}\(timestamp.timeIntervalSince1970)\u{0}\(content)\u{0}\(direction?.rawValue ?? SMSDirection.incoming.rawValue)"
+        if let deliveryID, !deliveryID.isEmpty { return "delivery:\(deliveryID)" }
+        return "\(sender)\u{0}\(timestamp.timeIntervalSince1970)\u{0}\(content)\u{0}\(direction?.rawValue ?? SMSDirection.incoming.rawValue)"
     }
 
     enum CodingKeys: String, CodingKey {

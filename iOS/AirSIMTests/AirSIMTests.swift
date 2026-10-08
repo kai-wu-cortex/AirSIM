@@ -20,6 +20,53 @@ private actor OutgoingCallServiceProbe: OutgoingCallServicing {
 }
 
 final class AirSIMTests: XCTestCase {
+    func testIncomingSMSPushAcceptsAgentNanosecondTimestamp() throws {
+        let pushed = try IncomingRemoteSMS(userInfo: [
+            "event": "incoming_sms",
+            "delivery_id": "sms-nano-1",
+            "sender": "10086",
+            "content": "短信正文",
+            "timestamp": "2026-10-08T08:30:12.123456789Z",
+        ])
+        XCTAssertEqual(pushed.deliveryID, "sms-nano-1")
+        XCTAssertEqual(pushed.message.content, "短信正文")
+        XCTAssertEqual(pushed.timestamp.timeIntervalSince1970, 1_791_448_212.123456789, accuracy: 0.001)
+    }
+
+    func testIncomingSMSPushAcceptsWholeSecondTimestamp() throws {
+        let pushed = try IncomingRemoteSMS(userInfo: [
+            "event": "incoming_sms",
+            "delivery_id": "sms-second-1",
+            "sender": "10086",
+            "content": "短信正文",
+            "timestamp": "2026-10-08T08:30:12Z",
+        ])
+        XCTAssertEqual(pushed.deliveryID, "sms-second-1")
+    }
+
+    func testColdLaunchSMSNavigationRequestIsConsumedOnce() {
+        let suite = "airsim-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        IncomingSMSPresentationRequest.markPending(sender: "10086", defaults: defaults)
+        XCTAssertEqual(IncomingSMSPresentationRequest.consume(defaults: defaults), "10086")
+        XCTAssertNil(IncomingSMSPresentationRequest.consume(defaults: defaults))
+    }
+
+    func testSMSDeliveryIDDeduplicatesPushAndAgentCopies() {
+        let pushed = SMSMessage(
+            sender: "10086", content: "短信正文", code: nil,
+            timestamp: Date(timeIntervalSince1970: 1_791_448_212),
+            deliveryID: "sms-stable-1", direction: .incoming
+        )
+        let synchronized = SMSMessage(
+            sender: "10086", content: "短信正文", code: nil,
+            timestamp: Date(timeIntervalSince1970: 1_791_448_212.123456789),
+            deliveryID: "sms-stable-1", direction: .incoming
+        )
+        XCTAssertEqual(pushed.id, synchronized.id)
+    }
+
     func testCloudUplinkNeverBurstsAfterBlockedSend() {
         var queue = CloudPCMUplinkSendQueue()
         for index in 0..<20 {

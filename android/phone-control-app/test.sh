@@ -92,7 +92,9 @@ mkdir -p "$OUT"
   "$ROOT"/src/com/airsim/phonecontrol/WireJson.java \
   "$ROOT"/src/com/airsim/phonecontrol/DebugRedactor.java \
   "$ROOT"/src/com/airsim/phonecontrol/AgentCommand.java \
+  "$ROOT"/src/com/airsim/phonecontrol/AgentCommandDispatcher.java \
   "$ROOT"/src/com/airsim/phonecontrol/SMSPayloadPolicy.java \
+  "$ROOT"/src/com/airsim/phonecontrol/SMSConfirmation.java \
   "$ROOT"/src/com/airsim/phonecontrol/RetryPolicy.java \
   "$ROOT"/src/com/airsim/phonecontrol/RecoveryPolicy.java \
 	"$ROOT"/src/com/airsim/phonecontrol/RecoveryLaunchPolicy.java \

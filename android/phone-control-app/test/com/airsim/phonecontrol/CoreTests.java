@@ -34,11 +34,14 @@ public final class CoreTests {
 				"bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'",
 				AVFStartupPolicy.installCommand());
 		assertArrayEquals(new String[]{
-				"android.permission.CALL_PHONE", "android.permission.POST_NOTIFICATIONS"},
-				invokeMissingRuntimePermissions(36, false, false));
-		assertArrayEquals(new String[]{"android.permission.CALL_PHONE"},
-				invokeMissingRuntimePermissions(32, false, false));
-		assertArrayEquals(new String[0], invokeMissingRuntimePermissions(36, true, true));
+				"android.permission.CALL_PHONE", "android.permission.SEND_SMS",
+				"android.permission.POST_NOTIFICATIONS"},
+				invokeMissingRuntimePermissions(36, false, false, false));
+		assertArrayEquals(new String[]{"android.permission.CALL_PHONE", "android.permission.SEND_SMS"},
+				invokeMissingRuntimePermissions(32, false, false, false));
+		assertArrayEquals(new String[]{"android.permission.SEND_SMS"},
+				invokeMissingRuntimePermissions(36, true, false, true));
+		assertArrayEquals(new String[0], invokeMissingRuntimePermissions(36, true, true, true));
 
 		java.util.Map<String, String> releaseAssets = new java.util.LinkedHashMap<>();
 		releaseAssets.put("notes.txt", "https://example.test/notes.txt");
@@ -225,10 +228,35 @@ public final class CoreTests {
 		assertTrue(smsCommand.isSupported());
 		assertEquals("+8613800138000", smsCommand.number);
 		assertEquals("你好\n世界", smsCommand.message);
+		java.util.concurrent.atomic.AtomicInteger telecomRuns = new java.util.concurrent.atomic.AtomicInteger();
+		java.util.concurrent.atomic.AtomicInteger smsRuns = new java.util.concurrent.atomic.AtomicInteger();
+		AgentCommandDispatcher.Result smsResult = AgentCommandDispatcher.execute(
+				smsCommand, false,
+				ignored -> {
+					telecomRuns.incrementAndGet();
+					return AgentCommandDispatcher.Result.success(0);
+				},
+				ignored -> {
+					smsRuns.incrementAndGet();
+					return AgentCommandDispatcher.Result.success(2);
+				});
+		assertTrue(smsResult.success());
+		assertEquals(2, smsResult.segments());
+		assertEquals(0, telecomRuns.get());
+		assertEquals(1, smsRuns.get());
 		assertTrue(SMSPayloadPolicy.validDestination("+86 13800138000"));
 		assertTrue(!SMSPayloadPolicy.validDestination("tel:13800138000"));
 		assertTrue(SMSPayloadPolicy.validBody("测试短信"));
 		assertTrue(!SMSPayloadPolicy.validBody("   \n"));
+		SMSConfirmation confirmation = new SMSConfirmation(2);
+		confirmation.record(0, -1);
+		confirmation.record(0, -1);
+		assertTrue(!confirmation.await(1).complete());
+		confirmation.record(1, -1);
+		assertTrue(confirmation.await(1).success());
+		SMSConfirmation failedConfirmation = new SMSConfirmation(1);
+		failedConfirmation.record(0, 2);
+		assertEquals(2, failedConfirmation.await(1).errorCode());
 		String smsEvent = WireJson.smsEvent(
 				"event-7", "android-sms-7", "10010", "验证码 \"246810\"", "2026-09-23T10:20:30Z");
 		assertContains(smsEvent, "\"delivery_id\":\"android-sms-7\"");
@@ -463,12 +491,13 @@ public final class CoreTests {
 	}
 
 	private static String[] invokeMissingRuntimePermissions(
-			int sdk, boolean callPhoneGranted, boolean notificationsGranted) throws Exception {
+			int sdk, boolean callPhoneGranted, boolean sendSMSGranted,
+			boolean notificationsGranted) throws Exception {
 		try {
 			Class<?> policy = Class.forName("com.airsim.phonecontrol.RuntimePermissionPolicy");
 			return (String[]) policy.getDeclaredMethod(
-					"missingPermissions", int.class, boolean.class, boolean.class)
-					.invoke(null, sdk, callPhoneGranted, notificationsGranted);
+					"missingPermissions", int.class, boolean.class, boolean.class, boolean.class)
+					.invoke(null, sdk, callPhoneGranted, sendSMSGranted, notificationsGranted);
 		} catch (ClassNotFoundException error) {
 			throw new AssertionError("CALL_PHONE runtime permission policy is missing", error);
 		}

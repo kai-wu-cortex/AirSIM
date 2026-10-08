@@ -57,6 +57,7 @@ struct RootView: View {
     @EnvironmentObject private var settings: AppSettings
     @AppStorage("airsim.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
     @State private var pendingSMSRecipient: String?
+    @State private var pendingSMSConversation: String?
     @AppStorage("airsim.first-connection-complete") private var firstConnectionComplete = false
 
     var body: some View {
@@ -70,7 +71,10 @@ struct RootView: View {
                     .tag(PhoneTab.recents)
                     .tabItem { Label(L10n.t(PhoneTab.recents.tabTitle), systemImage: PhoneTab.recents.icon) }
 
-                MessagesView(pendingRecipient: $pendingSMSRecipient)
+                MessagesView(
+                    pendingRecipient: $pendingSMSRecipient,
+                    pendingConversation: $pendingSMSConversation
+                )
                     .tag(PhoneTab.messages)
                     .tabItem { Label(L10n.t(PhoneTab.messages.tabTitle), systemImage: PhoneTab.messages.icon) }
 
@@ -102,15 +106,22 @@ struct RootView: View {
                 .environmentObject(model)
         }
         .onOpenURL(perform: handleSystemCommunicationURL)
+        .onAppear {
+            if let sender = IncomingSMSPresentationRequest.consume() {
+                openSMSConversation(sender)
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .airsimRemoteSMSReceived)) { _ in
             model.reloadMessagesFromLocalStore()
         }
         .onReceive(NotificationCenter.default.publisher(for: .airsimOpenSMSConversation)) { notification in
-            guard let sender = notification.userInfo?["sender"] as? String else {
+            let sender = IncomingSMSPresentationRequest.consume()
+                ?? notification.userInfo?["sender"] as? String
+            guard let sender else {
                 selectedTab = .messages
                 return
             }
-            composeMessage(sender)
+            openSMSConversation(sender)
         }
         .onReceive(NotificationCenter.default.publisher(for: .airsimOpenIncomingCall)) { _ in
             model.presentCurrentCallInApp()
@@ -152,6 +163,12 @@ struct RootView: View {
 
     private func composeMessage(_ number: String) {
         pendingSMSRecipient = number
+        selectedTab = .messages
+    }
+
+    private func openSMSConversation(_ sender: String) {
+        model.reloadMessagesFromLocalStore()
+        pendingSMSConversation = sender
         selectedTab = .messages
     }
 
