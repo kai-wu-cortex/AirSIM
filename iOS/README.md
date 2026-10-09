@@ -2,7 +2,7 @@
 
 该目录包含面向三星 Android 电话端的 iPhone、Apple Watch、Live Activity 与共享模型。客户端通过 VoWLAN 直连三星手机，或通过独立 Cloudflare Relay 使用远程通话与短信。
 
-当前正式应用版本为 [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)（iOS build `74`），配套 AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者 `com.eric3u.airsim` 构建使用 `https://airsim-push.remotepilot.site`；自行更换 Bundle ID 后必须使用自己的 Relay 和 APNs 凭据。
+当前 TestFlight 构建为 `v0.9.2 (75)`；[`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2) 中公开的 unsigned IPA 保留为 build `74`。配套 AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者 `com.eric3u.airsim` 构建使用 `https://airsim-push.remotepilot.site`；自行更换 Bundle ID 后必须使用自己的 Relay 和 APNs 凭据。
 
 ## Xcode 工程
 
