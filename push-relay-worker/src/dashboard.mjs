@@ -79,7 +79,7 @@ export async function dashboardSummary(env, now = Date.now()) {
   const online = devices.filter((device) => device.online).length;
   return {
     generated_at: new Date(now).toISOString(),
-    service: { ok: true, name: "AirSIM Push Relay", version: "0.2.0" },
+    service: { ok: true, name: "AirSIM Push Relay", version: "0.2.1" },
     metrics: {
       devices: devices.length,
       online,

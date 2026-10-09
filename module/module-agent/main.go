@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-var agentVersion = "0.4.4"
+var agentVersion = "0.4.6"
 
 const (
 	// 监听所有本机接口以容忍 ECM 地址晚于 init 服务出现；请求层仍只放行 USB 私网与环回。

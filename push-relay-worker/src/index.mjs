@@ -8,6 +8,7 @@ import {
 import {
   deleteRelayState,
   readAgentHeartbeat,
+  readAgentHeartbeats,
   readDeviceRecord,
   readRelayState,
   writeAgentHeartbeat,
@@ -66,7 +67,7 @@ export async function handleRequest(request, env) {
     }
   }
   if (request.method === "GET" && url.pathname === "/healthz") {
-    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.0" });
+    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.1" });
   }
   const callConnect = url.pathname.match(/^\/v1\/calls\/([0-9a-f-]+)\/connect$/i);
   if (request.method === "GET" && callConnect) {
@@ -1296,8 +1297,15 @@ async function receiveAgentHeartbeat(request, env) {
       typeof heartbeat.at_ok !== "boolean") {
     return jsonResponse(400, { error: "invalid agent heartbeat" });
   }
+  const agentID = stringValue(heartbeat.agent_id) || "legacy";
   const record = {
     received_at_ms: Date.now(),
+    agent_id: agentID,
+    ...(nonEmpty(heartbeat.agent_kind) ? { agent_kind: heartbeat.agent_kind.trim() } : {}),
+    ...(nonEmpty(heartbeat.device_name) ? { device_name: heartbeat.device_name.trim() } : {}),
+    ...(nonEmpty(heartbeat.manufacturer) ? { manufacturer: heartbeat.manufacturer.trim() } : {}),
+    ...(nonEmpty(heartbeat.model) ? { model: heartbeat.model.trim() } : {}),
+    ...(nonEmpty(heartbeat.phone_number) ? { phone_number: heartbeat.phone_number.trim() } : {}),
     agent_version: stringValue(heartbeat.agent_version),
     at_ok: heartbeat.at_ok,
     cellular_state: heartbeat.cellular_state,
@@ -1306,7 +1314,7 @@ async function receiveAgentHeartbeat(request, env) {
     ecm_carrier: stringValue(heartbeat.ecm_carrier),
     ...(Number.isFinite(heartbeat.signal_dbm) ? { signal_dbm: heartbeat.signal_dbm } : {}),
   };
-  await writeAgentHeartbeat(env, authenticated.device.device_id, record);
+  await writeAgentHeartbeat(env, authenticated.device.device_id, agentID, record);
   return jsonResponse(202, { received: true });
 }
 
@@ -1314,13 +1322,28 @@ async function receiveDeviceStatus(request, env) {
   const query = await readJSON(request);
   const authenticated = await authenticate(query, env);
   if (authenticated.response) return authenticated.response;
-  const heartbeat = await readAgentHeartbeat(env, authenticated.device.device_id);
-  if (!heartbeat || !Number.isFinite(heartbeat.received_at_ms) ||
-      Date.now() - heartbeat.received_at_ms > 90_000) {
-    return jsonResponse(200, { cloud_online: false });
+  const now = Date.now();
+  const heartbeats = await readAgentHeartbeats(env, authenticated.device.device_id);
+  const agents = heartbeats
+    .filter((item) => item && Number.isFinite(item.received_at_ms))
+    .sort((left, right) => right.received_at_ms - left.received_at_ms)
+    .map((item) => {
+      const { received_at_ms: receivedAtMS, ...status } = item;
+      return { ...status, cloud_online: now - receivedAtMS <= 90_000 };
+    });
+  const heartbeat = heartbeats
+    .filter((item) => item && Number.isFinite(item.received_at_ms) && now - item.received_at_ms <= 90_000)
+    .sort((left, right) => right.received_at_ms - left.received_at_ms)[0];
+  if (!heartbeat) {
+    return jsonResponse(200, { cloud_online: false, agents });
   }
   const { received_at_ms: _, ...publicStatus } = heartbeat;
-  return jsonResponse(200, { cloud_online: true, ...publicStatus });
+  return jsonResponse(200, {
+    cloud_online: true,
+    ...publicStatus,
+    active_agent_id: publicStatus.agent_id || "legacy",
+    agents,
+  });
 }
 
 async function receiveCallOwner(request, env) {

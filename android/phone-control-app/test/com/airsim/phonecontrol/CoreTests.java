@@ -51,7 +51,7 @@ public final class CoreTests {
 		assertTrue(AVFStartupPolicy.isRestrictedChinaOEM("HONOR"));
 		assertTrue(!AVFStartupPolicy.isRestrictedChinaOEM("samsung"));
 		assertEquals(
-				"bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'",
+				"bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.6/install-avf.sh | sudo sh'",
 				AVFStartupPolicy.installCommand());
 		assertArrayEquals(new String[]{
 				"android.permission.CALL_PHONE", "android.permission.SEND_SMS",

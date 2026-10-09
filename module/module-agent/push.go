@@ -38,6 +38,12 @@ type pushRegistration struct {
 	AppMediaCapabilities         []string `json:"app_media_capabilities,omitempty"`
 	AgentMediaCapabilities       []string `json:"agent_media_capabilities,omitempty"`
 	ForceLegacyPCM               bool     `json:"force_legacy_pcm,omitempty"`
+	AndroidAgentID               string   `json:"android_agent_id,omitempty"`
+	AndroidAgentKind             string   `json:"android_agent_kind,omitempty"`
+	AndroidDeviceName            string   `json:"android_device_name,omitempty"`
+	AndroidManufacturer          string   `json:"android_manufacturer,omitempty"`
+	AndroidModel                 string   `json:"android_model,omitempty"`
+	AndroidPhoneNumber           string   `json:"android_phone_number,omitempty"`
 }
 
 type pushStatus struct {
@@ -118,6 +124,12 @@ type agentHeartbeatEvent struct {
 	DeviceID             string `json:"device_id"`
 	DeviceSecret         string `json:"device_secret"`
 	AgentVersion         string `json:"agent_version"`
+	AgentID              string `json:"agent_id,omitempty"`
+	AgentKind            string `json:"agent_kind,omitempty"`
+	DeviceName           string `json:"device_name,omitempty"`
+	Manufacturer         string `json:"manufacturer,omitempty"`
+	Model                string `json:"model,omitempty"`
+	PhoneNumber          string `json:"phone_number,omitempty"`
 	ATOK                 bool   `json:"at_ok"`
 	CellularState        string `json:"cellular_state"`
 	CellularRegistration string `json:"cellular_registration,omitempty"`
@@ -650,6 +662,9 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
 	return p.postJSON(client, registration.RelayURL+"/v1/events/heartbeat", agentHeartbeatEvent{
 		Event: "agent_heartbeat", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, AgentVersion: agentVersion,
+		AgentID: registration.AndroidAgentID, AgentKind: registration.AndroidAgentKind,
+		DeviceName: registration.AndroidDeviceName, Manufacturer: registration.AndroidManufacturer,
+		Model: registration.AndroidModel, PhoneNumber: registration.AndroidPhoneNumber,
 		ATOK: snapshot.ATOK, CellularState: snapshot.CellularState,
 		CellularRegistration: snapshot.CellularRegistration,
 		CellularRecovery:     snapshot.CellularRecovery, ECMCarrier: snapshot.ECMCarrier,

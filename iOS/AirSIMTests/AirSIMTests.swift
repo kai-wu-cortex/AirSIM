@@ -173,6 +173,38 @@ final class AirSIMTests: XCTestCase {
         XCTAssertEqual(route?.transport, .vowlan)
     }
 
+    func testCloudStatusDecodesMultipleAndroidAgentsAndCurrentRoute() throws {
+        let data = Data(#"""
+        {
+            "cloud_online": true,
+            "active_agent_id": "samsung-standalone",
+            "agents": [
+                {
+                    "agent_id": "xiaomi-standalone",
+                    "agent_kind": "standalone",
+                    "device_name": "Xiaomi 15",
+                    "phone_number": "+8613800000001",
+                    "agent_version": "standalone-0.1.0",
+                    "cloud_online": false
+                },
+                {
+                    "agent_id": "samsung-standalone",
+                    "agent_kind": "standalone",
+                    "device_name": "Samsung Flip7",
+                    "phone_number": "+8613800000002",
+                    "agent_version": "standalone-0.1.0",
+                    "cloud_online": true
+                }
+            ]
+        }
+        """#.utf8)
+        let status = try JSONDecoder().decode(CloudAgentStatus.self, from: data)
+        XCTAssertEqual(status.activeAgentID, "samsung-standalone")
+        XCTAssertEqual(status.agents.count, 2)
+        XCTAssertEqual(status.agents.last?.deviceName, "Samsung Flip7")
+        XCTAssertEqual(status.agents.last?.phoneNumber, "+8613800000002")
+    }
+
     func testCloudModeCanBeDisabledWithoutDisablingLocalCalls() {
         let suite = "airsim-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -272,7 +304,7 @@ final class AirSIMTests: XCTestCase {
     }
 
     func testRelayHealthRequiresAirSIMServiceIdentity() {
-        let airSIM = Data(#"{"ok":true,"service":"airsim-push-relay","version":"0.2.0"}"#.utf8)
+        let airSIM = Data(#"{"ok":true,"service":"airsim-push-relay","version":"0.2.1"}"#.utf8)
         let djonehub = Data(#"{"ok":true,"service":"djonehub-push-relay","version":"1.0.0"}"#.utf8)
         XCTAssertTrue(RelayHealthValidation.accepts(statusCode: 200, data: airSIM))
         XCTAssertFalse(RelayHealthValidation.accepts(statusCode: 200, data: djonehub))

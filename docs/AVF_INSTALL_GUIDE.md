@@ -2,9 +2,9 @@
 
 本指南适用于支持 Android AVF Linux Terminal 的三星手机。AirSIM Android App、AVF 中的 `airsim-agent`、独立的 `airsim-installerd` 是三个不同组件；App 能打开 Terminal，并不等于 Agent 已安装。`8575` Agent 健康端点可达，也不等于 `8576` 安装服务和控制令牌已就绪。
 
-当前应用发布是 [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)，本指南安装的 AVF Agent 是独立版本 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)（Debian 包 `0.4.5-1`）。两条版本线用途不同，不应相互替换。
+当前应用发布是 [`v0.9.3`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3)，本指南安装的 AVF Agent 是独立版本 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包 `0.4.6-1`）。两条版本线用途不同，不应相互替换。
 
-若 AVF 内已有 DJOneHub，保留其服务和 `7575` 端口。AirSIM 使用独立的 `8575` / `8576`，健康响应还应包含 `"product":"airsim"`；`7575` 返回成功不能当成 AirSIM 已安装。首次安装固定到 v0.4.5。已有 `0.4.4-1` 的设备须按下文执行一次性签名密钥迁移，不能用首次安装命令或 App 的旧 installer 直接升级。
+若 AVF 内已有 DJOneHub，保留其服务和 `7575` 端口。AirSIM 使用独立的 `8575` / `8576`，健康响应还应包含 `"product":"airsim"`；`7575` 返回成功不能当成 AirSIM 已安装。首次安装固定到 v0.4.6。已有 `0.4.4-1` 的设备须先按下文执行一次性签名密钥迁移到 v0.4.5，再通过安装器升级，不能用首次安装命令或 App 的旧 installer 直接跳过迁移。
 
 ## 安全边界
 
@@ -24,12 +24,12 @@
 在 Debian 提示符中执行以下一行；`pipefail` 让下载错误以非零退出码传递，而不是让空输入的 `sudo sh` 假装成功：
 
 ```sh
-bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'
+bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.6/install-avf.sh | sudo sh'
 ```
 
 App 的按钮**只复制命令**，不能直接在 Android 宿主执行 Linux 命令；请在 Debian Terminal 提示符中粘贴并按回车。安装脚本先校验 Ed25519 签名、Debian 包名与 `arm64` 架构，再安装并保留 `current.deb`。修复版脚本要求 `airsim-agent`、`airsim-installerd` 和 Agent 健康端点均就绪；任何一项失败都不能算安装成功。若已有 `current.deb`，它会优先恢复现有服务；必要时用保留包重装服务文件，不删除回滚包，也不重新下载或擅自升级 Agent。
 
-如果命令长时间没有输出，先单独执行 `curl -I --connect-timeout 10 --max-time 20 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh`，检查 AVF Debian 自身是否能连接 GitHub。Android 宿主联网不代表 Linux 来宾联网。`curl` 超时、`sudo` 缺失、Debian 提示符未出现和已有安装拒绝重跑是四类不同故障，需记录终端原文与退出码，不能统称“安装失败”。
+如果命令长时间没有输出，先单独执行 `curl -I --connect-timeout 10 --max-time 20 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.6/install-avf.sh`，检查 AVF Debian 自身是否能连接 GitHub。Android 宿主联网不代表 Linux 来宾联网。`curl` 超时、`sudo` 缺失、Debian 提示符未出现和已有安装拒绝重跑是四类不同故障，需记录终端原文与退出码，不能统称“安装失败”。
 
 安装脚本属于 GitHub Release 资产。修改仓库中的 `install-avf.sh.in` 不会自动改变已发布的 Release；需要新的签名包与 Release 才能让其他用户获得修复。若当前线上版本仍提示“首次安装已完成；后续更新请使用 AirSIM Android App”，说明使用的是旧安装脚本；请按第 4 节恢复服务，**不要删除 `current.deb` 来绕过它**。
 

@@ -144,11 +144,17 @@ public final class VoWLANGatewayService extends Service {
 
     private void advertise() {
         NsdServiceInfo info = new NsdServiceInfo();
-        info.setServiceName("AirSIM-Samsung-VoWLAN");
+        String agentID = AndroidAgentIdentity.agentID(this);
+        String kind = RuntimeMode.isStandalone(this) ? "standalone" : "avf";
+        info.setServiceName("AirSIM-" + kind + "-" + agentID.substring(Math.max(0, agentID.length() - 8)));
         info.setServiceType("_airsim-vowlan._tcp.");
         info.setPort(control.localPort());
         info.setAttribute("v", "1");
-        info.setAttribute("device", "samsung-phone");
+        info.setAttribute("agent_id", agentID);
+        info.setAttribute("agent_kind", kind);
+        info.setAttribute("device_name", AndroidAgentIdentity.deviceName());
+        info.setAttribute("manufacturer", android.os.Build.MANUFACTURER);
+        info.setAttribute("model", android.os.Build.MODEL);
         info.setAttribute("host", activeHotspot);
         info.setAttribute("control_port", Integer.toString(control.localPort()));
         info.setAttribute("pcm_port", Integer.toString(pcm.localPort()));

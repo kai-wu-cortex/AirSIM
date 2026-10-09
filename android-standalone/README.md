@@ -60,6 +60,7 @@ AIRSIM_ANDROID_KEY_PASSWORD='从 Secret Store 注入' \
 
 1. 安装 APK，并启动 Shizuku；无线调试重启后通常需要重新启动 Shizuku。
 2. 打开 AirSIM Standalone，授予电话、短信和通知权限，并按页面提示设为默认电话 App。
+   `读取手机状态/号码` 权限用于把 SIM 号码显示在 iPhone 的已配对 Agent 列表；运营商未写入本机号码或拒绝权限时，iPhone 会显示“号码未提供”，不影响拨号。
 3. 小米 HyperOS 无法弹出默认电话选择页时，先在 Shizuku 中授权 AirSIM，再让 App 自动执行系统角色设置；无需手动运行 ADB 命令。
 4. 在 Android 页面填写自己的 Relay 地址、设备标识与配对资料；使用自己的 Apple Bundle ID 时，Relay 的 `ALLOWED_BUNDLE_ID` 和 APNs topic 必须一致。
 5. iPhone 与 Android 在同一热点或局域网时优先验证 VoWLAN；随后再验证 Relay 远程模式。

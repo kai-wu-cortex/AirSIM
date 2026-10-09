@@ -11,6 +11,8 @@ export class AgentStatusRegistry {
   async fetch(request) {
     const url = new URL(request.url);
     const match = url.pathname.match(/^\/heartbeat\/([^/]+)$/);
+    const agentMatch = url.pathname.match(/^\/heartbeat\/([^/]+)\/([^/]+)$/);
+    const rosterMatch = url.pathname.match(/^\/heartbeats\/([^/]+)$/);
     const rateMatch = url.pathname.match(/^\/rate\/([^/]+)$/);
     const deviceMatch = url.pathname.match(/^\/device\/([^/]+)$/);
     const stateMatch = url.pathname.match(/^\/state\/([^/]+)$/);
@@ -115,6 +117,29 @@ export class AgentStatusRegistry {
       return new Response("method not allowed", { status: 405 });
     }
 
+    if (rosterMatch && request.method === "GET") {
+      const deviceID = decodeURIComponent(rosterMatch[1]);
+      const prefix = `${HEARTBEAT_PREFIX}${deviceID}:agent:`;
+      const entries = await this.storage.list({ prefix });
+      return Response.json([...entries.values()]);
+    }
+
+    if (agentMatch) {
+      const deviceID = decodeURIComponent(agentMatch[1]);
+      const agentID = decodeURIComponent(agentMatch[2]);
+      const key = `${HEARTBEAT_PREFIX}${deviceID}:agent:${agentID}`;
+      if (request.method === "PUT") {
+        const record = await request.json();
+        await this.storage.put(key, record);
+        return Response.json({ stored: true }, { status: 202 });
+      }
+      if (request.method === "GET") {
+        const record = await this.storage.get(key);
+        return record ? Response.json(record) : Response.json({ error: "not found" }, { status: 404 });
+      }
+      return new Response("method not allowed", { status: 405 });
+    }
+
     if (!match) return new Response("not found", { status: 404 });
     const deviceID = decodeURIComponent(match[1]);
     const key = `${HEARTBEAT_PREFIX}${deviceID}`;
@@ -139,21 +164,63 @@ function registryStub(env) {
   return env.STATUS.get(env.STATUS.idFromName(REGISTRY_NAME));
 }
 
-export async function writeAgentHeartbeat(env, deviceID, record) {
+export async function writeAgentHeartbeat(env, deviceID, agentID, record) {
+  const normalizedAgentID = agentID || "legacy";
   const stub = registryStub(env);
   if (!stub) {
     // Keep local tests and an intentionally old deployment configuration working.
     await env.DEVICES.put(`${HEARTBEAT_PREFIX}${deviceID}`, JSON.stringify(record), {
       expirationTtl: 300,
     });
+    await env.DEVICES.put(
+      `${HEARTBEAT_PREFIX}${deviceID}:agent:${normalizedAgentID}`,
+      JSON.stringify(record),
+      { expirationTtl: 30 * 24 * 60 * 60 },
+    );
     return;
   }
-  const response = await stub.fetch(`https://status.internal/heartbeat/${encodeURIComponent(deviceID)}`, {
+  const options = {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(record),
-  });
+  };
+  const [response, legacyResponse] = await Promise.all([
+    stub.fetch(
+      `https://status.internal/heartbeat/${encodeURIComponent(deviceID)}/${encodeURIComponent(normalizedAgentID)}`,
+      options,
+    ),
+    stub.fetch(`https://status.internal/heartbeat/${encodeURIComponent(deviceID)}`, options),
+  ]);
   if (!response.ok) throw new Error(`status registry returned HTTP ${response.status}`);
+  if (!legacyResponse.ok) throw new Error(`status registry returned HTTP ${legacyResponse.status}`);
+}
+
+export async function readAgentHeartbeats(env, deviceID) {
+  const stub = registryStub(env);
+  if (stub) {
+    try {
+      const response = await stub.fetch(
+        `https://status.internal/heartbeats/${encodeURIComponent(deviceID)}`,
+      );
+      if (response.ok) {
+        const records = await response.json();
+        if (Array.isArray(records) && records.length > 0) return records;
+      }
+    } catch (error) {
+      console.warn("status registry roster read failed; using KV mirrors", safeError(error));
+    }
+  }
+  try {
+    const prefix = `${HEARTBEAT_PREFIX}${deviceID}:agent:`;
+    const listing = await env.DEVICES.list({ prefix, limit: 100 });
+    const records = await Promise.all((listing.keys || []).map((item) => readKVRecord(env.DEVICES, item.name)));
+    const available = records.filter(Boolean);
+    if (available.length > 0) return available;
+  } catch (error) {
+    console.warn("KV heartbeat roster read failed; using latest heartbeat", safeError(error));
+  }
+  const latest = await readAgentHeartbeat(env, deviceID);
+  return latest ? [latest] : [];
 }
 
 export async function readAgentHeartbeat(env, deviceID) {

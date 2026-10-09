@@ -4,16 +4,16 @@
 
 > 本文中的域名、Cloudflare 资源、Apple Team ID 和密钥都必须替换成部署者自己的值。不要复用其他 AirSIM 环境的 KV、Durable Objects、Dashboard token、设备 Secret 或 APNs 私钥。
 
-## 维护者部署状态（2026-10-08）
+## 维护者部署状态（2026-10-09）
 
 | 项目 | 状态 |
 | --- | --- |
 | Worker | `airsim-push-relay` |
 | Custom Domain | `https://airsim-push.remotepilot.site` |
 | `ALLOWED_BUNDLE_ID` | `com.eric3u.airsim` |
-| Worker 协议版本 | `/healthz` 报告 `0.2.0` |
-| 配套应用发布 | [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2) |
-| 配套 AVF Agent | [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)，Debian 包 `0.4.5-1` |
+| Worker 协议版本 | `/healthz` 报告 `0.2.1` |
+| 配套应用发布 | [`v0.9.3`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3) |
+| 配套 AVF Agent | [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)，Debian 包 `0.4.6-1` |
 | 存储 | AirSIM 专用 `DEVICES` KV 与 `MEDIA`、`STATUS`、`COMMANDS` Durable Objects |
 | Secret | `APNS_P8`、`DASHBOARD_TOKEN` 名称已配置；值不在仓库中 |
 | DJOneHub 隔离 | `https://push.remotepilot.site` 继续返回 `djonehub-push-relay` |
@@ -277,7 +277,7 @@ curl --fail --show-error https://airsim-push.remotepilot.site/healthz
 预期响应类似：
 
 ```json
-{"ok":true,"service":"airsim-push-relay","version":"0.2.0"}
+{"ok":true,"service":"airsim-push-relay","version":"0.2.1"}
 ```
 
 Dashboard 页面位于 `/dashboard`。其 API 使用 Bearer token：

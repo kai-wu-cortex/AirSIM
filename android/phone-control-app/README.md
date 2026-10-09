@@ -2,7 +2,7 @@
 
 该目录包含 AirSIM Android 端的共享实现以及旧 AVF 兼容 Manifest。新安装推荐使用根目录的 [Android Standalone APK](../../android-standalone/README.md)，由同一 APK 内置 Agent；只有兼容旧部署时才使用这里的 AVF 版构建入口。
 
-当前正式应用版本为 [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)（Android `versionCode 74`）；配套 AVF Agent 当前为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
+当前正式应用版本为 [`v0.9.3`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3)（Android `versionCode 76`）；配套 AVF Agent 当前为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
 
 ## 主要职责
 
@@ -60,10 +60,10 @@ Release APK 输出到 `android/phone-control-app/build/android/AirSIM-Phone-Brid
 
 1. 安装 APK 并启动 AirSIM。
 2. 如果启动提示显示 AVF Linux 尚未运行，点“启动 Linux Terminal”；若 Terminal 未启用，点“打开开发者选项”并启用 Linux 开发环境。
-3. Linux 首次启动后，复制并在 Terminal 中执行 v0.4.5 首次安装命令；已有 `0.4.4-1` 的设备请改用[一次性密钥迁移](../../docs/AVF_INSTALL_GUIDE.md)，不能通过 App 的旧 installer 直接升级：
+3. Linux 首次启动后，复制并在 Terminal 中执行 v0.4.6 首次安装命令；已有 `0.4.4-1` 的设备请先按[一次性密钥迁移](../../docs/AVF_INSTALL_GUIDE.md)升级到 v0.4.5，再通过安装器升级，不能通过旧 installer 直接跳过密钥迁移：
 
    ```sh
-   bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'
+   bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.6/install-avf.sh | sudo sh'
    ```
 
 4. 在系统设置中选择 AirSIM 作为默认电话 App。

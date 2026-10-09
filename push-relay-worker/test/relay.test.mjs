@@ -160,7 +160,7 @@ test("health and registration persist without returning credentials", async () =
   const env = testEnvironment();
   const health = await worker.fetch(new Request("https://push.airsim.example/healthz"), env);
   assert.equal(health.status, 200);
-  assert.equal((await health.json()).version, "0.2.0");
+  assert.equal((await health.json()).version, "0.2.1");
   const response = await worker.fetch(post("/v1/devices/register", registration), env);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { registered: true });
@@ -688,7 +688,7 @@ test("dashboard falls back to KV mirrors when status registry is unavailable", a
 
   assert.equal(response.status, 200);
   const summary = await response.json();
-  assert.equal(summary.service.version, "0.2.0");
+  assert.equal(summary.service.version, "0.2.1");
   assert.equal(summary.metrics.devices, 1);
   assert.equal(summary.metrics.online, 1);
   assert.equal(summary.devices[0].agent_version, "0.3.43");
@@ -1208,13 +1208,56 @@ test("agent heartbeat lets iPhone distinguish cloud-only from fully offline", as
   assert.equal(status.status, 200);
   assert.deepEqual(await status.json(), {
     cloud_online: true,
+    agent_id: "legacy",
     agent_version: "0.3.35",
     at_ok: true,
     cellular_state: "searching",
     cellular_registration: "搜索中",
     cellular_recovery: "正在自动选网",
     ecm_carrier: "1",
+    active_agent_id: "legacy",
+    agents: [{
+      agent_id: "legacy",
+      agent_version: "0.3.35",
+      at_ok: true,
+      cellular_state: "searching",
+      cellular_registration: "搜索中",
+      cellular_recovery: "正在自动选网",
+      ecm_carrier: "1",
+      cloud_online: true,
+    }],
   });
+});
+
+test("device status keeps standalone and AVF agents as separate routes", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const heartbeat = (agentID, kind, name, number) => post("/v1/events/heartbeat", {
+    event: "agent_heartbeat",
+    device_id: registration.device_id,
+    device_secret: registration.device_secret,
+    agent_id: agentID,
+    agent_kind: kind,
+    device_name: name,
+    phone_number: number,
+    agent_version: kind === "standalone" ? "standalone-0.1.0" : "0.4.4",
+    at_ok: true,
+    cellular_state: "registered",
+  });
+
+  assert.equal((await worker.fetch(heartbeat("xiaomi-standalone", "standalone", "Xiaomi 15", "+8613800000001"), env)).status, 202);
+  await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.equal((await worker.fetch(heartbeat("samsung-avf", "avf", "Samsung Flip7", "+8613800000002"), env)).status, 202);
+
+  const response = await worker.fetch(post("/v1/devices/status", {
+    device_id: registration.device_id,
+    device_secret: registration.device_secret,
+  }), env);
+  const status = await response.json();
+  assert.equal(status.active_agent_id, "samsung-avf");
+  assert.equal(status.agents.length, 2);
+  assert.deepEqual(status.agents.map((agent) => agent.agent_id).sort(), ["samsung-avf", "xiaomi-standalone"]);
+  assert.equal(status.agents.find((agent) => agent.agent_id === "xiaomi-standalone").phone_number, "+8613800000001");
 });
 
 test("wrong device secret is rejected before APNs", async () => {

@@ -2,7 +2,7 @@
 
 AirSIM 对 Android AVF Linux 来宾只发布一个 `arm64` Debian 包：
 
-当前 Agent 发布为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)（包版本 `0.4.5-1`）；Android/iOS 应用的独立发布版本是 [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)。不要用应用版本号覆盖 Debian 包版本。
+当前 Agent 发布为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（包版本 `0.4.6-1`）；Android/iOS 应用的独立发布版本是 [`v0.9.3`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3)。不要用应用版本号覆盖 Debian 包版本。
 
 ```text
 airsim-avf-agent_<version>-<release>_arm64.deb
@@ -34,7 +34,7 @@ airsim-avf-agent_<version>-<release>_arm64.deb
 构建正式包时，将 Ed25519 私钥保存在仓库之外，并把对应的 32 字节原始公钥以 Base64 注入 installer：
 
 ```sh
-AIRSIM_PACKAGE_VERSION=0.4.5 \
+AIRSIM_PACKAGE_VERSION=0.4.6 \
 AIRSIM_PACKAGE_RELEASE=1 \
 AIRSIM_RELEASE_PUBLIC_KEY_BASE64='<base64-raw-public-key>' \
 AIRSIM_RELEASE_PRIVATE_KEY='/secure/path/release-ed25519.pem' \
@@ -59,7 +59,7 @@ DER SHA-256:    4c39d5afdca2dddd8d22c0a5e02da18e7f07db789baac04bce4cfcd57491b3f4
 首次进入 AVF Linux Terminal 后，确认 Debian 提示符可用，再执行。此命令只用于首次安装或恢复已有包的服务，不负责旧签名根迁移：
 
 ```sh
-bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'
+bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.6/install-avf.sh | sudo sh'
 ```
 
 `pipefail` 确保 GitHub 下载失败不会被 `sudo sh` 的空输入掩盖。脚本检查 arm64、下载稳定名称包、用内置 Ed25519 公钥验签并核对 Debian 包身份。安装后保留首个回滚包，等待 `airsim-agent`、`airsim-installerd` 与 Agent 健康端点就绪；任一失败都以非零状态退出并打印无损排障命令，不再报告“安装完成”。成功后可运行 `sudo airsim-avf-pair` 查看配对信息，将当前动态 AVF 来宾地址和 token 保存到 Android App。完整步骤见[AVF 安装与无损排障指南](../../docs/AVF_INSTALL_GUIDE.md)。

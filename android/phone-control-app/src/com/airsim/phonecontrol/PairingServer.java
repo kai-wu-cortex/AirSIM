@@ -121,6 +121,12 @@ public final class PairingServer implements Closeable {
             JSONObject registration = new JSONObject(registrationJSON);
             String vowlanSecret = registration.optString("vowlan_secret", "");
             if (vowlanSecret.isEmpty()) throw new GeneralSecurityException("VoWLAN secret missing");
+            registration.put("android_agent_id", AndroidAgentIdentity.agentID(context));
+            registration.put("android_device_name", AndroidAgentIdentity.deviceName());
+            registration.put("android_manufacturer", android.os.Build.MANUFACTURER);
+            registration.put("android_model", android.os.Build.MODEL);
+            registration.put("android_phone_number", AndroidAgentIdentity.phoneNumber(context));
+            registration.put("android_agent_kind", RuntimeMode.isStandalone(context) ? "standalone" : "avf");
             // VoWLAN HMAC 密钥只属于 Android 热点网关。Linux Agent 的 Push
             // 注册结构使用严格 JSON 解码，且无须接触该密钥，因此转发前必须移除。
             registration.remove("vowlan_secret");

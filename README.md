@@ -4,8 +4,8 @@
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
-[![Apps release](https://img.shields.io/badge/Apps-v0.9.2-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)
-[![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.5-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)
+[![Apps release](https://img.shields.io/badge/Apps-v0.9.3-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3)
+[![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.6-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)
 [![Cloudflare Relay](https://img.shields.io/badge/Relay-airsim--push.remotepilot.site-F38020?logo=cloudflare&logoColor=white)](https://airsim-push.remotepilot.site/healthz)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-7c3aed)](LICENSE)
@@ -74,14 +74,14 @@ Android AirSIM Standalone APK
 
 | 组件 | 当前版本或地址 |
 | --- | --- |
-| Android Standalone APK、iPhone / Apple Watch App | [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2) |
-| Android AVF Linux Agent | [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)（Debian 包版本 `0.4.5-1`） |
-| AirSIM Relay | `0.2.0` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
+| Android Standalone APK、iPhone / Apple Watch App | [`v0.9.3`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3) |
+| Android AVF Linux Agent | [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包版本 `0.4.6-1`） |
+| AirSIM Relay | `0.2.1` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
 | DJOneHub Relay | `https://push.remotepilot.site`（独立服务，AirSIM 不得使用） |
 
 ### 应用发布包
 
-[AirSIM Apps v0.9.2](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2) 首次提供 Android Standalone APK，并继续提供可自行重签的 unsigned iOS IPA。Standalone 把 AVF Agent 合并到 APK，修复小米 HyperOS 默认电话角色设置与通话音频路由，同时包含短信命令分流和 iOS PCM 重连修复。它使用独立包名，可与旧 AVF 版并存，但不会继承旧包的本地配对数据。iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.2 发布说明](docs/releases/0.9.2.md)。
+[AirSIM Apps v0.9.3](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3) 在 iOS 拨号页显示当前 Android 路由的设备名称、号码、Standalone/AVF 类型，以及 VoWLAN 与云端状态；配对多个 Android Agent 时可查看完整列表，当前设备离线后由 Relay 自动选择最近在线的云端 Agent。iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.3 发布说明](docs/releases/0.9.3.md)。
 
 ### 1. 准备开发环境
 
@@ -107,7 +107,7 @@ Android AirSIM Standalone APK
 首次安装时进入 Android AVF Linux Terminal，确认 Debian 提示符可用后执行（`pipefail` 会让下载失败明确报错）。已有 `0.4.4-1` 的设备不能用首次安装命令升级，应使用下一段的一次性密钥迁移命令：
 
 ```sh
-bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.5/install-avf.sh | sudo sh'
+bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.6/install-avf.sh | sudo sh'
 ```
 
 已安装 `0.4.4-1` 的设备必须在同一个 AVF Terminal 中执行一次签名密钥迁移；脚本先核对旧包摘要、验签新包、保留旧包，失败时尝试回滚。**不要在 App 中直接点“更新到最新版”：旧 installer 尚不信任新公钥。**

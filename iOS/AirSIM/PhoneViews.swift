@@ -99,6 +99,7 @@ struct DialPadView: View {
     @State private var moduleStatusDotPressed = false
     @State private var moduleStatusLongPressTriggered = false
     @State private var dialKeyFeedback = DialKeyFeedback()
+    @State private var pairedAgentListPresentation: PairedAgentListPresentation?
 
     private let rows = [
         [("1", ""), ("2", "ABC"), ("3", "DEF")],
@@ -136,6 +137,40 @@ struct DialPadView: View {
                             .frame(height: 22)
                     }
                     .padding(.horizontal, 12)
+
+                    if let currentAgent = model.currentAndroidAgent {
+                        DialPadCurrentAgentCard(
+                            agent: currentAgent,
+                            agentCount: model.pairedAndroidAgents.count,
+                            cloudModeEnabled: CloudModePreference.isEnabled()
+                        ) {
+                            pairedAgentListPresentation = PairedAgentListPresentation()
+                        }
+                    } else if !model.pairedAndroidAgents.isEmpty {
+                        Button {
+                            pairedAgentListPresentation = PairedAgentListPresentation()
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "smartphone.slash")
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("已配对 Android Agent · \(model.pairedAndroidAgents.count)")
+                                        .font(.subheadline.weight(.semibold))
+                                    Text("当前没有可用的拨号路由")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     if let route = model.dialPadTransportPresentation {
                         DialPadTransportBadge(route: route)
@@ -190,6 +225,18 @@ struct DialPadView: View {
             .navigationTitle(L10n.t("拨号"))
             .navigationBarTitleDisplayMode(.large)
             .toolbar { dialStatusToolbar }
+            .sheet(item: $pairedAgentListPresentation) { _ in
+                PairedAndroidAgentsView(
+                    agents: model.pairedAndroidAgents,
+                    cloudModeEnabled: CloudModePreference.isEnabled()
+                )
+            }
+            .task {
+                while !Task.isCancelled {
+                    await model.refreshPairedAndroidAgents()
+                    try? await Task.sleep(for: .seconds(15))
+                }
+            }
             .onDisappear(perform: stopRepeatingDelete)
         }
     }
@@ -344,13 +391,15 @@ struct DialPadView: View {
 
     private var moduleStatusTitle: String {
         if model.vowlan.availability.isOnlineForDisplay { return "VoWLAN 在线" }
-        return CloudModePreference.isEnabled() && model.cloudAgentStatus?.cloudOnline == true
+        return CloudModePreference.isEnabled()
+            && (model.cloudAgentDirectory ?? model.cloudAgentStatus)?.cloudOnline == true
             ? "云端在线" : "AirSIM 未连接"
     }
 
     private var moduleStatusTint: Color {
         if model.vowlan.availability.isOnlineForDisplay { return .green }
-        return CloudModePreference.isEnabled() && model.cloudAgentStatus?.cloudOnline == true
+        return CloudModePreference.isEnabled()
+            && (model.cloudAgentDirectory ?? model.cloudAgentStatus)?.cloudOnline == true
             ? .blue : .red
     }
 
@@ -384,6 +433,150 @@ struct DialPadView: View {
             }
         )
         .accessibilityLabel(letters.isEmpty ? digit : "\(digit) \(letters)")
+    }
+}
+
+private struct PairedAgentListPresentation: Identifiable {
+    let id = "paired-android-agents"
+}
+
+private struct DialPadCurrentAgentCard: View {
+    let agent: AndroidAgentPresentation
+    let agentCount: Int
+    let cloudModeEnabled: Bool
+    let showAll: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "smartphone")
+                    .font(.headline)
+                    .foregroundStyle(.green)
+                    .frame(width: 34, height: 34)
+                    .background(Color.green.opacity(0.12), in: Circle())
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(agent.deviceName)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        Text("当前")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.green.opacity(0.12), in: Capsule())
+                    }
+                    Text(agent.phoneNumber ?? "号码未提供")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                if agentCount > 1 {
+                    Button("全部 \(agentCount)", action: showAll)
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.blue)
+                }
+            }
+
+            HStack(spacing: 8) {
+                AgentTransportPill(title: "VoWLAN", online: agent.vowlanOnline, enabled: true)
+                AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled)
+                Spacer(minLength: 0)
+                Text(agent.agentKindTitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 0.5)
+        }
+    }
+}
+
+private struct AgentTransportPill: View {
+    let title: String
+    let online: Bool
+    let enabled: Bool
+
+    private var color: Color { !enabled ? .secondary : (online ? .green : .secondary) }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 6, height: 6)
+            Text("\(title) \(!enabled ? "关闭" : (online ? "在线" : "离线"))")
+                .font(.caption2.weight(.medium))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(color.opacity(0.1), in: Capsule())
+    }
+}
+
+private struct PairedAndroidAgentsView: View {
+    @Environment(\.dismiss) private var dismiss
+    let agents: [AndroidAgentPresentation]
+    let cloudModeEnabled: Bool
+
+    var body: some View {
+        NavigationStack {
+            List(agents) { agent in
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(agent.deviceName)
+                                .font(.headline)
+                            Text(agent.phoneNumber ?? "号码未提供")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if agent.isCurrent {
+                            Label("当前", systemImage: "checkmark.circle.fill")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    HStack(spacing: 8) {
+                        AgentTransportPill(title: "VoWLAN", online: agent.vowlanOnline, enabled: true)
+                        AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled)
+                        Spacer()
+                        Text(agent.agentKindTitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 5)
+            }
+            .overlay {
+                if agents.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "smartphone.slash")
+                            .font(.system(size: 34))
+                            .foregroundStyle(.secondary)
+                        Text("暂无已配对 Android Agent")
+                            .font(.headline)
+                    }
+                }
+            }
+            .navigationTitle("已配对 Android Agent")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.t("完成")) { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -426,7 +619,8 @@ private struct ModuleStatusPopover: View {
 
     private var vowlanOnline: Bool { model.vowlan.availability.isOnlineForDisplay }
     private var cloudOnline: Bool {
-        CloudModePreference.isEnabled() && model.cloudAgentStatus?.cloudOnline == true
+        CloudModePreference.isEnabled()
+            && (model.cloudAgentDirectory ?? model.cloudAgentStatus)?.cloudOnline == true
     }
 
     var body: some View {
@@ -452,15 +646,25 @@ private struct ModuleStatusPopover: View {
                 closeButton
             }
 
-            Text(vowlanOnline ? "三星局域网控制与音频已就绪" : "请在设置中配对三星手机；如已启用云端，请检查 Relay 心跳。")
+            Text(connectionDescription)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             statusGroup("AirSIM") {
-                statusRow("三星 VoWLAN", vowlanOnline ? "已连接" : "未连接")
+                if let current = model.currentAndroidAgent {
+                    statusRow("当前手机", current.deviceName)
+                    Divider()
+                    statusRow("电话号码", current.phoneNumber ?? "未提供")
+                    Divider()
+                }
+                statusRow("VoWLAN", vowlanOnline ? "已连接" : "未连接")
                 Divider()
                 statusRow("云端 Relay", cloudOnline ? "在线" : "未连接")
+                if model.pairedAndroidAgents.count > 1 {
+                    Divider()
+                    statusRow("已配对 Agent", "\(model.pairedAndroidAgents.count) 个")
+                }
             }
         }
         .padding(18)
@@ -495,7 +699,14 @@ private struct ModuleStatusPopover: View {
     }
 
     private var connectionRouteTitle: String {
-        vowlanOnline ? "同一 Wi-Fi / 三星热点" : "独立 Relay"
+        vowlanOnline ? "同一 Wi-Fi / Android 热点" : "独立 Relay"
+    }
+
+    private var connectionDescription: String {
+        if let current = model.currentAndroidAgent {
+            return "当前通过 \(current.deviceName) 提供通话；VoWLAN 与云端状态分别显示。"
+        }
+        return "请在 Android 端完成配对；如已启用云端，请检查 Relay 心跳。"
     }
 
     private var statusTint: Color {

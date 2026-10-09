@@ -73,7 +73,30 @@ struct AgentHealth: Codable, Sendable {
 }
 
 /// Relay 最近一次收到的 Agent 心跳。该对象只包含可展示状态，不包含设备密钥。
-struct CloudAgentStatus: Codable, Equatable, Sendable {
+struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
+    let agentID: String
+    let agentKind: String?
+    let deviceName: String?
+    let manufacturer: String?
+    let model: String?
+    let phoneNumber: String?
+    let agentVersion: String?
+    let cloudOnline: Bool
+
+    var id: String { agentID }
+
+    enum CodingKeys: String, CodingKey {
+        case agentID = "agent_id"
+        case agentKind = "agent_kind"
+        case deviceName = "device_name"
+        case manufacturer, model
+        case phoneNumber = "phone_number"
+        case agentVersion = "agent_version"
+        case cloudOnline = "cloud_online"
+    }
+}
+
+struct CloudAgentStatus: Decodable, Equatable, Sendable {
     let cloudOnline: Bool
     let agentVersion: String?
     let atOK: Bool?
@@ -82,6 +105,8 @@ struct CloudAgentStatus: Codable, Equatable, Sendable {
     let cellularRecovery: String?
     let ecmCarrier: String?
     let signalDBM: Int?
+    let activeAgentID: String?
+    let agents: [CloudAndroidAgent]
 
     enum CodingKeys: String, CodingKey {
         case cloudOnline = "cloud_online"
@@ -92,6 +117,40 @@ struct CloudAgentStatus: Codable, Equatable, Sendable {
         case cellularRecovery = "cellular_recovery"
         case ecmCarrier = "ecm_carrier"
         case signalDBM = "signal_dbm"
+        case activeAgentID = "active_agent_id"
+        case agents
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        cloudOnline = try values.decode(Bool.self, forKey: .cloudOnline)
+        agentVersion = try values.decodeIfPresent(String.self, forKey: .agentVersion)
+        atOK = try values.decodeIfPresent(Bool.self, forKey: .atOK)
+        cellularState = try values.decodeIfPresent(String.self, forKey: .cellularState)
+        cellularRegistration = try values.decodeIfPresent(String.self, forKey: .cellularRegistration)
+        cellularRecovery = try values.decodeIfPresent(String.self, forKey: .cellularRecovery)
+        ecmCarrier = try values.decodeIfPresent(String.self, forKey: .ecmCarrier)
+        signalDBM = try values.decodeIfPresent(Int.self, forKey: .signalDBM)
+        activeAgentID = try values.decodeIfPresent(String.self, forKey: .activeAgentID)
+        agents = try values.decodeIfPresent([CloudAndroidAgent].self, forKey: .agents) ?? []
+    }
+}
+
+struct AndroidAgentPresentation: Equatable, Identifiable, Sendable {
+    let id: String
+    let deviceName: String
+    let phoneNumber: String?
+    let agentKind: String?
+    let cloudOnline: Bool
+    let vowlanOnline: Bool
+    let isCurrent: Bool
+
+    var agentKindTitle: String {
+        switch agentKind {
+        case "standalone": return "Standalone"
+        case "avf": return "AVF Agent"
+        default: return "Android Agent"
+        }
     }
 }
 

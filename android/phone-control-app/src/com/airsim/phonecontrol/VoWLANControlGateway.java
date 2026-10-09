@@ -93,7 +93,15 @@ public final class VoWLANControlGateway implements Closeable {
             int responseStatus = 200;
             String output;
             if ("/v1/health".equals(request.path)) {
-                output = "{\"ok\":true,\"transport\":\"vowlan\",\"version\":1}";
+                output = new org.json.JSONObject()
+                        .put("ok", true).put("transport", "vowlan").put("version", 1)
+                        .put("agent_id", AndroidAgentIdentity.agentID(context))
+                        .put("agent_kind", RuntimeMode.isStandalone(context) ? "standalone" : "avf")
+                        .put("device_name", AndroidAgentIdentity.deviceName())
+                        .put("manufacturer", android.os.Build.MANUFACTURER)
+                        .put("model", android.os.Build.MODEL)
+                        .put("phone_number", AndroidAgentIdentity.phoneNumber(context))
+                        .toString();
             } else {
                 String body = request.body.length == 0 ? null : new String(request.body, StandardCharsets.UTF_8);
                 AgentClient.ForwardResponse forwarded =

@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-struct VoWLANEndpoint: Equatable, Sendable {
+struct VoWLANEndpoint: Equatable, Hashable, Sendable {
     let host: String
     let controlPort: UInt16
     let pcmPort: UInt16
@@ -22,6 +22,35 @@ struct VoWLANEndpoint: Equatable, Sendable {
         guard fields.count == 4 else { return false }
         return fields[0] == 10 || (fields[0] == 172 && (16...31).contains(fields[1]))
             || (fields[0] == 192 && fields[1] == 168)
+    }
+}
+
+struct VoWLANDiscoveredAgent: Equatable, Identifiable, Sendable {
+    let id: String
+    let endpoint: VoWLANEndpoint
+    let deviceName: String
+    let manufacturer: String?
+    let model: String?
+    let phoneNumber: String?
+    let agentKind: String?
+}
+
+private struct VoWLANHealthIdentity: Decodable {
+    let ok: Bool
+    let agentID: String?
+    let agentKind: String?
+    let deviceName: String?
+    let manufacturer: String?
+    let model: String?
+    let phoneNumber: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case agentID = "agent_id"
+        case agentKind = "agent_kind"
+        case deviceName = "device_name"
+        case manufacturer, model
+        case phoneNumber = "phone_number"
     }
 }
 
@@ -231,6 +260,11 @@ final class VoWLANController: ObservableObject {
 
     var onAvailabilityChange: ((VoWLANAvailability) -> Void)?
 
+    @Published private(set) var discoveredAgents: [VoWLANDiscoveredAgent] = [] {
+        didSet { onDiscoveredAgentsChange?() }
+    }
+    var onDiscoveredAgentsChange: (() -> Void)?
+
     private let queue = DispatchQueue(label: "com.example.airsim.vowlan.discovery")
     private var browser: NWBrowser?
     private var browserLifecycle = VoWLANBrowserLifecycle()
@@ -255,6 +289,7 @@ final class VoWLANController: ObservableObject {
         let generation = browserLifecycle.restart()
         stopCurrentBrowser()
         discoveredEndpoint = nil
+        discoveredAgents = []
         beginBrowsing(generation: generation)
         Task {
             await AgentVerboseTraceRecorder.shared.recordEvent(
@@ -274,10 +309,17 @@ final class VoWLANController: ObservableObject {
             using: parameters
         )
         active.browseResultsChangedHandler = { [weak self] results, _ in
-            let endpoint = results.lazy.compactMap(Self.parse).first
+            let agents = results.compactMap(Self.parseAgent)
+            let endpoints = Set(agents.map(\.endpoint))
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.browserLifecycle.accepts(generation) else { return }
+                self.discoveredAgents = agents.sorted {
+                    if $0.deviceName == $1.deviceName { return $0.id < $1.id }
+                    return $0.deviceName.localizedCaseInsensitiveCompare($1.deviceName) == .orderedAscending
+                }
+                let endpoint = self.discoveredEndpoint.flatMap { endpoints.contains($0) ? $0 : nil }
+                    ?? agents.first?.endpoint
                 if let endpoint {
                     self.discoveredEndpoint = endpoint
                     if self.availability.endpoint == endpoint, self.availability.isReady() { return }
@@ -326,6 +368,7 @@ final class VoWLANController: ObservableObject {
         browserLifecycle.stop()
         stopCurrentBrowser()
         discoveredEndpoint = nil
+        discoveredAgents = []
     }
 
     private func stopCurrentBrowser() {
@@ -363,8 +406,21 @@ final class VoWLANController: ObservableObject {
                 return try await session.data(for: request)
             }
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["ok"] as? Bool == true else {
+                  let identity = try? JSONDecoder().decode(VoWLANHealthIdentity.self, from: data),
+                  identity.ok else {
                 throw VoWLANControllerError.authenticationFailed
+            }
+            if let index = discoveredAgents.firstIndex(where: { $0.endpoint == endpoint }) {
+                let previous = discoveredAgents[index]
+                discoveredAgents[index] = VoWLANDiscoveredAgent(
+                    id: identity.agentID?.isEmpty == false ? identity.agentID! : previous.id,
+                    endpoint: endpoint,
+                    deviceName: identity.deviceName?.isEmpty == false ? identity.deviceName! : previous.deviceName,
+                    manufacturer: identity.manufacturer ?? previous.manufacturer,
+                    model: identity.model ?? previous.model,
+                    phoneNumber: identity.phoneNumber?.isEmpty == false ? identity.phoneNumber : previous.phoneNumber,
+                    agentKind: identity.agentKind ?? previous.agentKind
+                )
             }
             availability = .verified(endpoint, at: Date())
             await AgentVerboseTraceRecorder.shared.recordEvent(
@@ -389,11 +445,24 @@ final class VoWLANController: ObservableObject {
         request.setValue(signed.signature, forHTTPHeaderField: "X-AirSIM-VoWLAN-Signature")
     }
 
-    private nonisolated static func parse(_ result: NWBrowser.Result) -> VoWLANEndpoint? {
+    private nonisolated static func parseAgent(_ result: NWBrowser.Result) -> VoWLANDiscoveredAgent? {
         guard case let .bonjour(record) = result.metadata,
               record["v"] == "1", let host = record["host"],
               let controlText = record["control_port"], let control = UInt16(controlText),
               let pcmText = record["pcm_port"], let pcm = UInt16(pcmText) else { return nil }
-        return try? VoWLANEndpoint(host: host, controlPort: control, pcmPort: pcm)
+        guard let endpoint = try? VoWLANEndpoint(host: host, controlPort: control, pcmPort: pcm) else {
+            return nil
+        }
+        let fallbackID = "vowlan-\(host)-\(control)"
+        let deviceName = record["device_name"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return VoWLANDiscoveredAgent(
+            id: record["agent_id"]?.isEmpty == false ? record["agent_id"]! : fallbackID,
+            endpoint: endpoint,
+            deviceName: deviceName?.isEmpty == false ? deviceName! : "Android 手机",
+            manufacturer: record["manufacturer"],
+            model: record["model"],
+            phoneNumber: nil,
+            agentKind: record["agent_kind"]
+        )
     }
 }

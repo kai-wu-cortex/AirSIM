@@ -122,6 +122,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var agentVersion: String?
     @Published private(set) var connectionSummary: ModuleConnectionSummary = .offline
     @Published private(set) var cloudAgentStatus: CloudAgentStatus?
+    @Published private(set) var cloudAgentDirectory: CloudAgentStatus?
     @Published private(set) var remoteCall: CallRecord?
     @Published private(set) var pendingOutgoingCall: CallRecord?
     @Published private(set) var callPresentationSurface: CallPresentationSurface?
@@ -186,6 +187,91 @@ final class AppModel: ObservableObject {
             cloudModeEnabled: CloudModePreference.isEnabled(),
             cloudOnline: cloudAgentStatus?.cloudOnline == true
         )
+    }
+
+    var pairedAndroidAgents: [AndroidAgentPresentation] {
+        let cloudStatus = cloudAgentDirectory ?? cloudAgentStatus
+        var values: [String: AndroidAgentPresentation] = [:]
+
+        for agent in cloudStatus?.agents ?? [] {
+            let name = agent.deviceName?.isEmpty == false
+                ? agent.deviceName!
+                : [agent.manufacturer, agent.model].compactMap { $0 }.joined(separator: " ")
+            values[agent.id] = AndroidAgentPresentation(
+                id: agent.id,
+                deviceName: name.isEmpty ? "Android 手机" : name,
+                phoneNumber: agent.phoneNumber?.isEmpty == false ? agent.phoneNumber : nil,
+                agentKind: agent.agentKind,
+                cloudOnline: agent.cloudOnline,
+                vowlanOnline: false,
+                isCurrent: false
+            )
+        }
+
+        for local in vowlan.discoveredAgents {
+            let previous = values[local.id]
+            values[local.id] = AndroidAgentPresentation(
+                id: local.id,
+                deviceName: local.deviceName,
+                phoneNumber: local.phoneNumber?.isEmpty == false ? local.phoneNumber : previous?.phoneNumber,
+                agentKind: local.agentKind ?? previous?.agentKind,
+                cloudOnline: previous?.cloudOnline ?? false,
+                vowlanOnline: true,
+                isCurrent: false
+            )
+        }
+
+        if values.isEmpty, let cloudStatus, cloudStatus.cloudOnline {
+            let fallbackID = cloudStatus.activeAgentID ?? "cloud-agent"
+            values[fallbackID] = AndroidAgentPresentation(
+                id: fallbackID,
+                deviceName: "Android 手机",
+                phoneNumber: nil,
+                agentKind: nil,
+                cloudOnline: true,
+                vowlanOnline: false,
+                isCurrent: false
+            )
+        }
+
+        let currentID: String? = {
+            if vowlan.availability.isOnlineForDisplay, let endpoint = vowlan.availability.endpoint {
+                return vowlan.discoveredAgents.first(where: { $0.endpoint == endpoint })?.id
+            }
+            guard CloudModePreference.isEnabled(), cloudStatus?.cloudOnline == true else { return nil }
+            return cloudStatus?.activeAgentID
+                ?? cloudStatus?.agents.first(where: \.cloudOnline)?.id
+        }()
+
+        return values.values.map { item in
+            AndroidAgentPresentation(
+                id: item.id,
+                deviceName: item.deviceName,
+                phoneNumber: item.phoneNumber,
+                agentKind: item.agentKind,
+                cloudOnline: item.cloudOnline,
+                vowlanOnline: item.vowlanOnline,
+                isCurrent: item.id == currentID
+            )
+        }.sorted {
+            if $0.isCurrent != $1.isCurrent { return $0.isCurrent }
+            let leftOnline = $0.vowlanOnline || $0.cloudOnline
+            let rightOnline = $1.vowlanOnline || $1.cloudOnline
+            if leftOnline != rightOnline { return leftOnline }
+            return $0.deviceName.localizedCaseInsensitiveCompare($1.deviceName) == .orderedAscending
+        }
+    }
+
+    var currentAndroidAgent: AndroidAgentPresentation? {
+        pairedAndroidAgents.first(where: \.isCurrent)
+    }
+
+    func refreshPairedAndroidAgents() async {
+        do {
+            cloudAgentDirectory = try await VoIPPushController.shared.fetchCloudAgentStatusForDiagnostics()
+        } catch {
+            cloudAgentDirectory = nil
+        }
     }
 
     @discardableResult
@@ -271,6 +357,7 @@ final class AppModel: ObservableObject {
         }
         vowlan.onAvailabilityChange = { [weak self] availability in
             guard let self else { return }
+            self.objectWillChange.send()
             if case let .verified(endpoint, _) = availability,
                let credential = VoWLANCredentialStore.load() {
                 let vowlanAPI = AirSIMAPI(route: .vowlan(
@@ -285,6 +372,9 @@ final class AppModel: ObservableObject {
                   case .unavailable = availability,
                   self.callLifecycleSnapshot.state.representsCall else { return }
             Task { @MainActor [weak self] in await self?.endVoWLANCallAfterPathLoss() }
+        }
+        vowlan.onDiscoveredAgentsChange = { [weak self] in
+            self?.objectWillChange.send()
         }
     }
 

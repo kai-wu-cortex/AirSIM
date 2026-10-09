@@ -111,6 +111,12 @@ public final class StandaloneAgentService extends Service {
     private void sendHeartbeat(JSONObject registration) throws Exception {
         JSONObject heartbeat = identity(registration)
                 .put("event", "agent_heartbeat").put("agent_version", "standalone-0.1.0")
+                .put("agent_id", registration.optString("android_agent_id", AndroidAgentIdentity.agentID(this)))
+                .put("agent_kind", "standalone")
+                .put("device_name", registration.optString("android_device_name", AndroidAgentIdentity.deviceName()))
+                .put("manufacturer", registration.optString("android_manufacturer", android.os.Build.MANUFACTURER))
+                .put("model", registration.optString("android_model", android.os.Build.MODEL))
+                .put("phone_number", registration.optString("android_phone_number", AndroidAgentIdentity.phoneNumber(this)))
                 .put("at_ok", true).put("cellular_state", "registered")
                 .put("cellular_registration", "Android Telecom")
                 .put("cellular_recovery", "not_required").put("ecm_carrier", "android-default");

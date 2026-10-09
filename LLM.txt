@@ -5,7 +5,7 @@ PURPOSE
 AirSIM is a cross-device calling and messaging project. An Android phone owns the carrier call and SMS capabilities. iPhone and Apple Watch clients use those capabilities over authenticated VoWLAN or an independently deployed Cloudflare Relay. The recommended Android Standalone APK embeds the Agent and does not require AVF Linux.
 
 CURRENT RELEASE BASELINE (2026-10-09)
-Android Standalone/iOS Apps v0.9.2 (build 74); legacy AVF Agent v0.4.5 (Debian 0.4.5-1); Relay protocol 0.2.0.
+Android Standalone/iOS Apps v0.9.3 (build 76); legacy AVF Agent v0.4.6 (Debian 0.4.6-1); Relay protocol 0.2.1.
 
 PRIMARY SEARCH / PRODUCT TERMS
 Samsung Android, iPhone, Apple Watch, cross-device calling, cross-device SMS, CallKit, PushKit, ActivityKit, VoWLAN, Android AVF Linux, Cloudflare Workers, APNs, Shizuku, Android Telecom.
