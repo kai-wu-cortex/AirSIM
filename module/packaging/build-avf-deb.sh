@@ -68,10 +68,17 @@ for maintainer_script in postinst prerm postrm; do
 done
 
 printf '2.0\n' > "$build_root/debian-binary"
-COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
-    -C "$control_root" -czf "$build_root/control.tar.gz" .
-COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
-    -C "$package_root" -czf "$build_root/data.tar.gz" .
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+    COPYFILE_DISABLE=1 tar --format ustar --owner=0 --group=0 \
+        -C "$control_root" -czf "$build_root/control.tar.gz" .
+    COPYFILE_DISABLE=1 tar --format ustar --owner=0 --group=0 \
+        -C "$package_root" -czf "$build_root/data.tar.gz" .
+else
+    COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
+        -C "$control_root" -czf "$build_root/control.tar.gz" .
+    COPYFILE_DISABLE=1 tar --format ustar --uid 0 --gid 0 --uname root --gname root \
+        -C "$package_root" -czf "$build_root/data.tar.gz" .
+fi
 
 package="$dist_dir/airsim-avf-agent_${package_version}_arm64.deb"
 (cd "$build_root" && ar -rcS "$package" debian-binary control.tar.gz data.tar.gz)
