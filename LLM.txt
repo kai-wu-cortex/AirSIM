@@ -2,10 +2,10 @@ AIRSIM PROJECT CONTEXT
 ======================
 
 PURPOSE
-AirSIM is a cross-device calling and messaging project. A Samsung Android phone owns the carrier call and SMS capabilities. iPhone and Apple Watch clients use those capabilities over authenticated VoWLAN or an independently deployed Cloudflare Relay.
+AirSIM is a cross-device calling and messaging project. An Android phone owns the carrier call and SMS capabilities. iPhone and Apple Watch clients use those capabilities over authenticated VoWLAN or an independently deployed Cloudflare Relay. The recommended Android Standalone APK embeds the Agent and does not require AVF Linux.
 
-CURRENT RELEASE BASELINE (2026-10-08)
-Android/iOS Apps v0.9.1 (build 73); AVF Agent v0.4.5 (Debian 0.4.5-1); Relay protocol 0.2.0.
+CURRENT RELEASE BASELINE (2026-10-09)
+Android Standalone/iOS Apps v0.9.2 (build 74); legacy AVF Agent v0.4.5 (Debian 0.4.5-1); Relay protocol 0.2.0.
 
 PRIMARY SEARCH / PRODUCT TERMS
 Samsung Android, iPhone, Apple Watch, cross-device calling, cross-device SMS, CallKit, PushKit, ActivityKit, VoWLAN, Android AVF Linux, Cloudflare Workers, APNs, Shizuku, Android Telecom.
@@ -17,8 +17,11 @@ AUTHORITATIVE SOURCES
 4. Search all protocol consumers before changing shared fields, ports, routes, environment variables, Bundle IDs, or persistence formats.
 
 COMPONENTS
+android-standalone
+  Recommended single-APK entry point. It selects the Standalone manifest and reuses the Android Telecom, SMS, VoWLAN, Shizuku PCM, embedded Agent, Relay, and media implementation under android/.
+
 android/phone-control-app
-  Samsung Android default-phone integration, Android Telecom, SMS, pairing, VoWLAN, AVF detection, bootstrap prompt, Agent update/repair/rollback UI.
+  Shared Android implementation plus the legacy AVF manifest: default-phone integration, Android Telecom, SMS, pairing, VoWLAN, Shizuku, embedded Agent, and AVF compatibility UI.
 
 android/phone-audio-bridge
   Shizuku UserService for in-memory bidirectional call PCM. It must bind only to the AVF private interface.
@@ -48,14 +51,13 @@ MAINTAINER RELAY STATUS (2026-10-08)
 - Health and Dashboard authentication are verified. No AirSIM device was registered at the recorded check, so real APNs, Agent heartbeat, and cloud PCM remain unverified for this environment.
 
 NON-NEGOTIABLE ARCHITECTURE CONTRACTS
-- The Samsung Android phone remains the carrier endpoint.
+- The Android phone remains the carrier endpoint.
 - Emergency calls must remain with the system phone capability.
-- AVF services and PCM must listen only on the internal private network or loopback.
+- Standalone does not use AVF, Linux Terminal, Debian, ports 8575/8576, or airsim-installerd. Legacy AVF services and PCM must listen only on the internal private network or loopback.
 - VoWLAN control requires route allowlists, timestamp, nonce, HMAC, and size checks.
 - A call chooses VoWLAN or Relay at setup and does not silently switch transport during that call.
 - PCM stays in memory and on the network; never store it on disk or in logs.
-- The main Agent does not self-update. Android manages updates through airsim-installerd.
-- The installer accepts only the expected signed arm64 Debian package and cannot run arbitrary shell commands.
+- In legacy AVF mode, the main Agent does not self-update. Android manages updates through airsim-installerd, which accepts only the expected signed arm64 Debian package and cannot run arbitrary shell commands.
 - Android application code cannot force-enable AVF functionality removed or hidden by OEM firmware or system-signature restrictions.
 
 APPLE SELF-SIGNING CONTRACT
@@ -83,6 +85,7 @@ OTHER PROHIBITED DATA
 Cloudflare API tokens, device secrets, Agent tokens, pairing keys, HMACs, Debian release private keys, Android keystores, Apple signing identities, provisioning profiles, real phone numbers, full SMS bodies, push tokens, and PCM data.
 
 STANDARD VALIDATION
+./android-standalone/test.sh
 ./android/phone-control-app/test.sh
 ./android/phone-audio-bridge/build.sh
 ./android/phone-control-app/build.sh

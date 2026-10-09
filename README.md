@@ -1,17 +1,17 @@
-# AirSIM — 三星 Android 与 iPhone / Apple Watch 跨设备通话、短信和 VoWLAN
+# AirSIM — Android 与 iPhone / Apple Watch 跨设备通话、短信和 VoWLAN
 
-[![Samsung Android](https://img.shields.io/badge/Samsung%20Android-Phone%20Bridge-3DDC84?logo=android&logoColor=white)](android/phone-control-app/README.md)
+[![Android Standalone](https://img.shields.io/badge/Android-Standalone%20APK-3DDC84?logo=android&logoColor=white)](android-standalone/README.md)
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
-[![Apps release](https://img.shields.io/badge/Apps-v0.9.1-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1)
+[![Apps release](https://img.shields.io/badge/Apps-v0.9.2-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)
 [![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.5-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)
 [![Cloudflare Relay](https://img.shields.io/badge/Relay-airsim--push.remotepilot.site-F38020?logo=cloudflare&logoColor=white)](https://airsim-push.remotepilot.site/healthz)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-7c3aed)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/kai-wu-cortex/AirSIM?style=flat&logo=github&label=Stars)](https://github.com/kai-wu-cortex/AirSIM/stargazers)
 
-**AirSIM 是一个以三星 Android 手机为蜂窝通信终端，让 iPhone 和 Apple Watch 远程拨打、接听电话与收发短信的源码可见跨设备通信项目。** 三星端负责 Android Telecom、短信和系统通话音频；Android AVF Linux Agent 负责设备状态与命令编排；Apple 客户端使用 CallKit、PushKit、ActivityKit 和 VoWLAN；可选的 Cloudflare Workers Relay 提供公网事件、APNs 推送、命令队列与媒体中继。
+**AirSIM 是一个以 Android 手机为蜂窝通信终端，让 iPhone 和 Apple Watch 远程拨打、接听电话与收发短信的源码可见跨设备通信项目。** 推荐的 Android Standalone APK 在同一前台服务中完成 Android Telecom、短信、设备身份、Relay 心跳、云端命令和媒体编排，不需要 AVF Linux、Terminal、Debian、`8575/8576` 或 `airsim-installerd`；Apple 客户端使用 CallKit、PushKit、ActivityKit 和 VoWLAN，可选的 Cloudflare Workers Relay 提供公网事件、APNs 推送、命令队列与媒体中继。
 
 AirSIM is a source-available, noncommercial cross-device calling and messaging project that connects Samsung Android, iPhone, Apple Watch, Android AVF Linux, CallKit, PushKit, VoWLAN, APNs, and Cloudflare Workers.
 
@@ -28,30 +28,27 @@ AirSIM is a source-available, noncommercial cross-device calling and messaging p
 - **跨设备短信**：同步短信状态、发送短信并通过 APNs 通知 Apple 客户端。
 - **CallKit 与 PushKit**：在 iPhone 上呈现系统来电界面，并支持 VoIP push 唤醒与来电上报。
 - **VoWLAN 本地直连**：iPhone 与三星手机处于同一局域网或三星热点时，使用经过 HMAC 认证的控制与 PCM 链路。
-- **云端 Relay**：通过独立部署的 Cloudflare Worker、KV 与 Durable Objects 连接 Android AVF Agent 和 Apple 客户端。
+- **单 APK Android 端**：内置 Agent 与 Bridge，安装后不再依赖 AVF Linux、Terminal、Debian 或 installer。
+- **云端 Relay**：通过独立部署的 Cloudflare Worker、KV 与 Durable Objects 连接 Android 内置 Agent 和 Apple 客户端。
 - **可观察的模式与自检**：Android 首页和 iOS 设置页显示当前 VoWLAN / 云端状态；iOS 可依次验证 Push 凭据、AirSIM Relay 身份、设备注册和 AVF Agent 90 秒心跳。
-- **AVF 一键安装与救援**：首次在 Android AVF Linux Terminal 执行单行命令；后续由 Android App 管理签名 Debian 包的更新、修复和回滚。
-- **三星通话音频桥**：通过 Shizuku `UserService` 在内存中转发双向 PCM，不保存通话音频。
+- **HyperOS 自动配置**：默认电话角色界面不可用时，可通过已授权 Shizuku 让 APK 自动完成系统角色设置。
+- **Android 通话音频桥**：通过 Shizuku `UserService` 和系统 `TYPE_TELEPHONY` 路由在内存中转发双向 PCM，不保存通话音频。
 
 ## 系统架构
 
-局域网模式优先使用 VoWLAN：
+推荐的 Standalone 架构在同一个 APK 中运行 Bridge 与 Agent：
 
 ```text
 iPhone / Apple Watch
-        │  VoWLAN 控制、通话状态与 PCM
+        │  VoWLAN 或 Cloudflare Relay
         ▼
-三星 Android AirSIM App ── Android Telecom / 短信 / Shizuku 音频桥
-        │  AVF 私网
-        ▼
-Android AVF Linux Agent
+Android AirSIM Standalone APK
+        ├─ 内置 Agent：身份、心跳、命令和媒体编排
+        ├─ Android Telecom / 短信
+        └─ Shizuku 通话 PCM 桥
 ```
 
-远程模式通过与签名身份配套的独立 Relay：
-
-```text
-iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Android
-```
+旧 AVF 架构继续保留用于兼容和回退，但不再是新安装的推荐路径。
 
 维护者当前使用 `https://airsim-push.remotepilot.site`，只允许 `com.eric3u.airsim`。DJOneHub 继续使用 `https://push.remotepilot.site`；两个域名背后是相互独立的 Worker、KV、Durable Objects 和 Dashboard token，禁止交叉复用。其他签名身份必须使用自己的域名、Cloudflare 资源和 APNs 凭据。
 
@@ -61,6 +58,7 @@ iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Andro
 
 | 目录 | 组件 | 主要职责 |
 | --- | --- | --- |
+| [`android-standalone`](android-standalone/README.md) | Android Standalone APK | 推荐入口；把 Agent、Telecom、短信、VoWLAN、Relay 和媒体编排合并为单一 APK |
 | [`android/phone-control-app`](android/phone-control-app/README.md) | 三星 Android 控制 App | 默认电话角色、Android Telecom、配对、短信、VoWLAN 与守护服务 |
 | [`android/phone-audio-bridge`](android/phone-audio-bridge/README.md) | 三星通话音频桥 | 通过 Shizuku 提供双向 PCM，并限制在 AVF 私网接口 |
 | [`module/module-agent`](module/module-agent/README.md) | Android AVF Agent | 控制 API、设备状态、Relay 心跳、命令与媒体编排 |
@@ -76,35 +74,35 @@ iPhone / Apple Watch ⇄ Cloudflare Relay ⇄ Android AVF Agent ⇄ 三星 Andro
 
 | 组件 | 当前版本或地址 |
 | --- | --- |
-| 三星 Android App、iPhone / Apple Watch App | [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1) |
+| Android Standalone APK、iPhone / Apple Watch App | [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2) |
 | Android AVF Linux Agent | [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)（Debian 包版本 `0.4.5-1`） |
 | AirSIM Relay | `0.2.0` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
 | DJOneHub Relay | `https://push.remotepilot.site`（独立服务，AirSIM 不得使用） |
 
 ### 应用发布包
 
-[AirSIM Apps v0.9.1](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1) 提供正式签名的 Android APK 与可自行重签的 unsigned iOS IPA。本版修复与 DJOneHub 共存时的 VoWLAN 端口冲突，并改善云端通话音频缓冲。正式签名 APK 可覆盖使用同一发布证书的 v0.9.0；旧 debug 签名包仍需先卸载。iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.1 发布说明](docs/releases/0.9.1.md)。
+[AirSIM Apps v0.9.2](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2) 首次提供 Android Standalone APK，并继续提供可自行重签的 unsigned iOS IPA。Standalone 把 AVF Agent 合并到 APK，修复小米 HyperOS 默认电话角色设置与通话音频路由，同时包含短信命令分流和 iOS PCM 重连修复。它使用独立包名，可与旧 AVF 版并存，但不会继承旧包的本地配对数据。iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.2 发布说明](docs/releases/0.9.2.md)。
 
 ### 1. 准备开发环境
 
-- 三星 Android 测试手机，支持 Android Telecom、Shizuku、无线调试和可用的 Android AVF Linux 环境。
+- Android 测试手机，支持 Android Telecom、Shizuku 和无线调试；Standalone 不要求 Android AVF Linux 环境。
 - Android 构建：JDK 17、Android SDK Platform 35 与 Build Tools 35。
 - Apple 构建：Xcode；工程最低目标为 iOS 16.3 和 watchOS 10。
 - Agent 构建：Go 1.24。
 - Relay 部署：Node.js 20 或更新版本、Cloudflare Wrangler，以及部署者自己的 Cloudflare 和 Apple Developer 资源。
 
-### 2. 构建三星 Android App
+### 2. 构建 Android Standalone APK
 
 ```sh
-./android/phone-control-app/test.sh
-./android/phone-audio-bridge/build.sh
-./android/phone-control-app/build.sh
-sh ./android/phone-control-app/verify-apk.sh
+./android-standalone/test.sh
+./android-standalone/build.sh
 ```
 
-安装 APK 后，将 AirSIM 设为默认电话 App，启动 Shizuku 并向 AirSIM 授权。完整步骤见[三星 Android 控制 App 文档](android/phone-control-app/README.md)。
+安装 APK 后，将 AirSIM Standalone 设为默认电话 App，启动 Shizuku 并向 AirSIM 授权。小米 HyperOS 无法显示系统角色选择页时，App 会在 Shizuku 授权后自动设置。完整步骤见 [Android Standalone 文档](android-standalone/README.md)。
 
-### 3. 首次安装 Android AVF Agent
+### 3. 可选：安装旧 Android AVF Agent
+
+新设备请优先使用上一节的 Standalone APK。只有需要兼容旧部署或回退时，才使用以下 AVF 流程。
 
 首次安装时进入 Android AVF Linux Terminal，确认 Debian 提示符可用后执行（`pipefail` 会让下载失败明确报错）。已有 `0.4.4-1` 的设备不能用首次安装命令升级，应使用下一段的一次性密钥迁移命令：
 
@@ -178,7 +176,8 @@ AirSIM 不附带原作者的 Apple Developer Team、App ID、证书或 provision
 
 | 文档 | 适用场景 |
 | --- | --- |
-| [三星 Android 控制 App](android/phone-control-app/README.md) | 安装、默认电话角色、AVF 引导、配对与厂商兼容性 |
+| [Android Standalone APK](android-standalone/README.md) | 推荐安装、构建、签名、HyperOS 权限、迁移与真机验收 |
+| [旧三星 Android 控制 App](android/phone-control-app/README.md) | AVF 兼容模式、默认电话角色、配对与厂商兼容性 |
 | [三星通话音频桥](android/phone-audio-bridge/README.md) | Shizuku 音频桥构建、运行和 PCM 边界 |
 | [Android AVF Agent](module/module-agent/README.md) | Agent 配置、API、安全与启动探针 |
 | [AVF Debian 发布](module/packaging/README.md) | `.deb` 构建、签名、首次安装、升级与回滚 |
@@ -194,6 +193,7 @@ AirSIM 不附带原作者的 Apple Developer Team、App ID、证书或 provision
 ## 全项目验证
 
 ```sh
+./android-standalone/test.sh
 ./android/phone-control-app/test.sh
 ./android/phone-audio-bridge/build.sh
 ./android/phone-control-app/build.sh
@@ -219,7 +219,7 @@ xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
 
 ## 项目状态
 
-AirSIM 当前处于主动开发阶段。仓库已整合 Android、AVF Agent / Installer、iOS / watchOS 与 Cloudflare Relay 源码，并提供本地自动化验证。维护者 AirSIM Relay 已通过独立域名上线并完成健康检查与 Dashboard 鉴权，但尚未完成该新环境的设备注册、真实 PushKit/APNs 和云端 PCM 验收；Apple 正式签名、目标三星机型兼容性、真实双向通话、后台推送与长期稳定性仍需各部署者在自己的环境中验证。
+AirSIM 当前处于主动开发阶段。仓库已整合 Android Standalone、旧 AVF Agent / Installer、iOS / watchOS 与 Cloudflare Relay 源码，并提供本地自动化验证。Android Standalone 已在小米 HyperOS 真机完成默认电话角色、VoWLAN 配对和双向通话音频验证；Apple 正式签名、更多 Android 厂商兼容性、后台推送与长期稳定性仍需各部署者在自己的环境中验证。
 
 ## 项目趋势
 

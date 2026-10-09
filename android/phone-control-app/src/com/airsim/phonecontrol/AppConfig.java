@@ -17,6 +17,7 @@ public final class AppConfig {
     private AppConfig() {}
 
     public static String endpoint(Context context) {
+		if (RuntimeMode.isStandalone(context)) return "embedded://agent";
 		String discovered = discoverAVFEndpoint();
 		if (!discovered.isEmpty()) {
             BridgeLog.debug("agent_endpoint_discovered source=avf endpoint=" + discovered);
@@ -31,6 +32,7 @@ public final class AppConfig {
     }
 
     public static String token(Context context) {
+        if (RuntimeMode.isStandalone(context)) return "standalone-in-process";
         return preferences(context).getString("token", "");
     }
 
@@ -43,6 +45,7 @@ public final class AppConfig {
     }
 
     public static boolean configured(Context context) {
+        if (RuntimeMode.isStandalone(context)) return true;
         return !token(context).isEmpty();
     }
 
@@ -55,6 +58,12 @@ public final class AppConfig {
     }
 
     public static void save(Context context, String endpoint, String token, String mode) {
+        if (RuntimeMode.isStandalone(context)) {
+            String normalizedMode = MODE_LOCAL_AND_PUSH.equals(mode) ? MODE_LOCAL_AND_PUSH : MODE_REMOTE_SILENT;
+            preferences(context).edit().putString("mode", normalizedMode).apply();
+            StandaloneAgentService.start(context);
+            return;
+        }
         String normalizedEndpoint = endpoint == null ? "" : endpoint.trim();
         if (!AVFNetworkPolicy.isAgentEndpoint(normalizedEndpoint)) {
             throw new IllegalArgumentException("Agent 必须使用 AVF 私网 HTTP 地址");

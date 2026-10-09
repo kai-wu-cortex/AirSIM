@@ -20,6 +20,10 @@ public final class AgentWatchdogService extends Service {
 	private long lastRecoveryAttempt;
 
     public static void start(Context context) {
+        if (RuntimeMode.isStandalone(context)) {
+            StandaloneAgentService.start(context);
+            return;
+        }
         BridgeLog.debug("watchdog_start_requested");
         try { context.startForegroundService(new Intent(context, AgentWatchdogService.class)); }
         catch (RuntimeException error) { BridgeLog.error("watchdog_start_failed", error); }

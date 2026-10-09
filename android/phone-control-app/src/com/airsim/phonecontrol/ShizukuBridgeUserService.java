@@ -9,9 +9,11 @@ import android.os.RemoteException;
 import android.util.Log;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -23,6 +25,8 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private final Object lock = new Object();
     private String sourceApk = "";
+    private String packageName = "";
+    private boolean standalonePCM;
     private java.lang.Process bridgeProcess;
     private boolean bridgeDesired;
     private boolean muteCycleStarted;
@@ -34,6 +38,8 @@ public final class ShizukuBridgeUserService extends Binder {
 
     public ShizukuBridgeUserService(Context context) {
         sourceApk = context.getApplicationInfo().sourceDir;
+        packageName = context.getPackageName();
+        standalonePCM = RuntimeMode.isStandalone(context);
         Log.i(TAG, "created uid=" + Process.myUid());
     }
 
@@ -54,6 +60,7 @@ public final class ShizukuBridgeUserService extends Binder {
                 case PrivilegedBridgeProtocol.TRANSACTION_STATUS -> status();
                 case PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_MUTED ->
                         setLocalOutputMuted(data.readInt() != 0);
+                case PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE -> ensureDialerRole();
                 default -> null;
             };
             if (result == null) return super.onTransact(code, data, reply, flags);
@@ -73,12 +80,13 @@ public final class ShizukuBridgeUserService extends Binder {
             bridgeDesired = true;
             if (bridgeProcess != null && bridgeProcess.isAlive()) return statusLocked();
             if (sourceApk.isEmpty()) throw new IOException("application source path unavailable");
+            stopStaleAudioBridges();
             List<String> command = new ArrayList<>();
             command.add("/system/bin/app_process");
             command.add("/system/bin");
             command.add("com.airsim.bridge.PhoneAudioBridge");
-            command.add("--listen-interface");
-            command.add("avf_tap_fixed");
+            command.add(standalonePCM ? "--listen-host" : "--listen-interface");
+            command.add(standalonePCM ? "127.0.0.1" : "avf_tap_fixed");
             command.add("--listen-port");
             command.add("7580");
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
@@ -91,6 +99,52 @@ public final class ShizukuBridgeUserService extends Binder {
             Log.i(TAG, "PCM bridge process started");
             return statusLocked();
         }
+    }
+
+    private void stopStaleAudioBridges() throws IOException {
+        List<Integer> stalePids = findStaleAudioBridgePids();
+        for (int pid : stalePids) {
+            Log.w(TAG, "stopping stale PCM bridge pid=" + pid);
+            Process.killProcess(pid);
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!stalePids.isEmpty() && System.nanoTime() < deadline) {
+            stalePids.removeIf(pid -> !new File("/proc/" + pid).exists());
+            if (!stalePids.isEmpty()) {
+                try { Thread.sleep(50); }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted while stopping stale PCM bridge", interrupted);
+                }
+            }
+        }
+        if (!stalePids.isEmpty()) {
+            throw new IOException("stale PCM bridge did not exit pid=" + stalePids.get(0));
+        }
+    }
+
+    private List<Integer> findStaleAudioBridgePids() {
+        List<Integer> result = new ArrayList<>();
+        File[] entries = new File("/proc").listFiles();
+        if (entries == null) return result;
+        int ownerPid = Process.myPid();
+        for (File entry : entries) {
+            int candidatePid;
+            try { candidatePid = Integer.parseInt(entry.getName()); }
+            catch (NumberFormatException ignored) { continue; }
+            try {
+                String commandLine = new String(
+                        Files.readAllBytes(new File(entry, "cmdline").toPath()),
+                        StandardCharsets.UTF_8);
+                if (PhoneAudioBridgeProcessPolicy.isStaleBridge(
+                        candidatePid, ownerPid, commandLine)) {
+                    result.add(candidatePid);
+                }
+            } catch (IOException | SecurityException ignored) {
+                // Android hides most unrelated /proc entries. Same-UID bridge processes remain readable.
+            }
+        }
+        return result;
     }
 
     private void monitorBridge(java.lang.Process launched) {
@@ -147,6 +201,20 @@ public final class ShizukuBridgeUserService extends Binder {
     private boolean queryVoiceCallMuted() throws Exception {
         return PrivilegedBridgeProtocol.isStreamMuted(runCommand(
                 new String[]{"cmd", "audio", "get-stream-volume", "0"}));
+    }
+
+    private String ensureDialerRole() throws Exception {
+        verifyIdentity();
+        if (packageName.isEmpty()) throw new IOException("application package unavailable");
+        String holders = runCommand(PrivilegedBridgeProtocol.dialerRoleQueryCommand());
+        if (!PrivilegedBridgeProtocol.isDialerRoleHolder(holders, packageName)) {
+            runCommand(PrivilegedBridgeProtocol.dialerRoleGrantCommand(packageName));
+            holders = runCommand(PrivilegedBridgeProtocol.dialerRoleQueryCommand());
+        }
+        if (!PrivilegedBridgeProtocol.isDialerRoleHolder(holders, packageName)) {
+            throw new IOException("dialer role was not applied by the system");
+        }
+        return "dialer_role=granted verified=true";
     }
 
     private String runCommand(String[] command) throws Exception {

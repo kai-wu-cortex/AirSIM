@@ -79,6 +79,8 @@ mkdir -p "$OUT"
   "$ROOT"/test/android/content/Context.java \
   "$ROOT"/test/com/airsim/phonecontrol/AppConfig.java \
   "$ROOT"/test/com/airsim/phonecontrol/BridgeLog.java \
+	"$ROOT"/test/com/airsim/phonecontrol/RuntimeMode.java \
+	"$ROOT"/test/com/airsim/phonecontrol/StandaloneAgentGateway.java \
   "$ROOT"/src/com/airsim/phonecontrol/AgentClient.java \
   "$ROOT"/src/com/airsim/phonecontrol/InstallerClient.java \
   "$ROOT"/src/com/airsim/phonecontrol/ReleaseAssetSelector.java \
@@ -86,9 +88,11 @@ mkdir -p "$OUT"
 	"$ROOT"/src/com/airsim/phonecontrol/RuntimePermissionPolicy.java \
   "$ROOT"/src/com/airsim/phonecontrol/TelecomStateMapper.java \
 	"$ROOT"/src/com/airsim/phonecontrol/TelecomRolePolicy.java \
+	"$ROOT"/src/com/airsim/phonecontrol/DialerRoleSetupPolicy.java \
 	"$ROOT"/src/com/airsim/phonecontrol/TelecomInvocation.java \
 	"$ROOT"/src/com/airsim/phonecontrol/PrivilegedBridgeProtocol.java \
 	"$ROOT"/src/com/airsim/phonecontrol/PrivilegedBridgeCoordinator.java \
+	"$ROOT"/src/com/airsim/phonecontrol/PhoneAudioBridgeProcessPolicy.java \
   "$ROOT"/src/com/airsim/phonecontrol/WireJson.java \
   "$ROOT"/src/com/airsim/phonecontrol/DebugRedactor.java \
   "$ROOT"/src/com/airsim/phonecontrol/AgentCommand.java \
@@ -109,6 +113,7 @@ mkdir -p "$OUT"
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANPCMProtocol.java \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANPortBinder.java \
 	"$ROOT"/src/com/airsim/phonecontrol/VoWLANNetworkPolicy.java \
+	"$ROOT"/src/com/airsim/phonecontrol/StandaloneLongPoll.java \
 	"$ROOT"/src/com/airsim/phonecontrol/MainScreenPresentation.java \
   "$ROOT"/test/com/airsim/phonecontrol/CoreTests.java
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.CoreTests

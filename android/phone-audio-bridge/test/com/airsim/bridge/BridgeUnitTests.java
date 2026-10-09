@@ -118,6 +118,15 @@ public final class BridgeUnitTests {
             "VOICE_TX uses voice communication usage");
         String[] tags = PhoneAudioBridge.playbackTags();
         check(tags.length == 1 && tags[0].equals("VOICE_TX"), "Samsung VOICE_TX tag");
+        check(PhoneAudioBridge.playbackRoute(true, true)
+                == PhoneAudioBridge.PlaybackRoute.SAMSUNG_TAG,
+            "Samsung tag remains preferred when available");
+        check(PhoneAudioBridge.playbackRoute(false, true)
+                == PhoneAudioBridge.PlaybackRoute.TELEPHONY_DEVICE,
+            "non-Samsung devices select the Android Telephony Tx output");
+        check(PhoneAudioBridge.playbackRoute(false, false)
+                == PhoneAudioBridge.PlaybackRoute.UNSUPPORTED,
+            "missing Samsung tag and Telephony Tx is rejected");
     }
 
     private static void testListenerRecoveryPolicy() {

@@ -24,6 +24,10 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
         return transact(PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_MUTED, true, muted);
     }
 
+    String ensureDialerRole() throws RemoteException {
+        return transact(PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE, false, false);
+    }
+
     private String transact(int code, boolean hasBoolean, boolean value) throws RemoteException {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();

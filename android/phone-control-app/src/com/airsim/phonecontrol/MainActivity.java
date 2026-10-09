@@ -19,6 +19,7 @@ import android.os.Bundle;
 import android.os.CountDownTimer;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.telecom.TelecomManager;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -51,6 +52,7 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int ROLE_REQUEST = 100;
+    private static final int DEFAULT_APPS_REQUEST = 102;
 
     private static final int BG = Color.rgb(8, 14, 20);
     private static final int SURFACE = Color.rgb(17, 28, 39);
@@ -277,7 +279,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout firstHealthRow = row();
         LinearLayout agentTile = healthTile(
-                "Linux Agent", agentOnline ? "在线" : agentDetail,
+                RuntimeMode.agentLabel(this), agentOnline ? "在线" : agentDetail,
                 android.R.drawable.ic_menu_manage, agentOnline);
         agentTile.setOnClickListener(ignored -> showFeatureDetails(Feature.AGENT));
         firstHealthRow.addView(agentTile, weightedWithEnd(5));
@@ -428,23 +430,30 @@ public final class MainActivity extends Activity {
         LinearLayout root = pageRoot();
         root.addView(pageTitle("设置", null));
 
-        root.addView(sectionTitle("Linux Agent"), matchWithTop(18));
+        boolean standaloneRuntime = RuntimeMode.isStandalone(this);
+        root.addView(sectionTitle(RuntimeMode.agentLabel(this)), matchWithTop(18));
         LinearLayout agentCard = card(SURFACE, 22);
         agentCard.setOrientation(LinearLayout.VERTICAL);
         agentCard.setPadding(dp(16), dp(16), dp(16), dp(16));
-        endpoint = input("Agent 地址", InputType.TYPE_CLASS_TEXT);
-        endpoint.setText(AppConfig.endpoint(this));
-        agentCard.addView(endpoint);
-        token = input("控制令牌", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        token.setText(AppConfig.token(this));
-        agentCard.addView(token, matchWithTop(10));
+        if (standaloneRuntime) {
+            agentCard.addView(label("Agent 运行在本 APK 的前台服务中，不使用 AVF、Linux Terminal、8575 或 8576。",
+                    14, TEXT, Gravity.START));
+        } else {
+            endpoint = input("Agent 地址", InputType.TYPE_CLASS_TEXT);
+            endpoint.setText(AppConfig.endpoint(this));
+            agentCard.addView(endpoint);
+            token = input("控制令牌", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            token.setText(AppConfig.token(this));
+            agentCard.addView(token, matchWithTop(10));
+        }
         selectedMode = AppConfig.mode(this);
         agentCard.addView(modeSelector(), matchWithTop(12));
-        TextView save = primaryButton("保存配置并启动守护", BLUE);
+        TextView save = primaryButton(standaloneRuntime ? "保存模式并启动内置 Agent" : "保存配置并启动守护", BLUE);
         save.setOnClickListener(ignored -> saveConfiguration());
         agentCard.addView(save, matchWithTop(12));
         root.addView(agentCard, matchWithTop(10));
 
+		if (!standaloneRuntime) {
 		root.addView(sectionTitle("AVF Linux 首次安装"), matchWithTop(22));
 		LinearLayout bootstrapCard = card(SURFACE, 22);
 		bootstrapCard.setOrientation(LinearLayout.VERTICAL);
@@ -489,6 +498,7 @@ public final class MainActivity extends Activity {
 		installerCard.addView(installerActions, matchWithTop(10));
 		root.addView(installerCard, matchWithTop(10));
 		refreshInstallerStatus();
+		}
 
         root.addView(sectionTitle("Shizuku 权限与 PCM 桥"), matchWithTop(22));
         LinearLayout shizukuCard = card(SURFACE, 22);
@@ -709,20 +719,68 @@ public final class MainActivity extends Activity {
     }
 
     private void continueStartupSetup() {
-        if (!dialerRoleHeld()) {
-            requestDialerRole();
-            return;
+        ShizukuBridgeManager shizuku = ShizukuBridgeManager.get(this);
+        switch (DialerRoleSetupPolicy.initial(
+                dialerRoleHeld(), shizuku.dialerRoleAutomationAuthorized())) {
+            case COMPLETE -> checkAVFEnvironmentAtStartup();
+            case SHIZUKU -> attemptPrivilegedDialerRole(false);
+            case SYSTEM_ROLE -> requestDialerRole();
+            case SETTINGS -> openDefaultAppsSettings();
         }
-        checkAVFEnvironmentAtStartup();
     }
 
     private void requestDialerRole() {
         RoleManager manager = getSystemService(RoleManager.class);
-        if (!manager.isRoleAvailable(RoleManager.ROLE_DIALER)) {
+        if (manager == null || !manager.isRoleAvailable(RoleManager.ROLE_DIALER)) {
             toast("设备不支持默认拨号器角色");
+            continueAfterSystemRoleRequest();
             return;
         }
-        startActivityForResult(manager.createRequestRoleIntent(RoleManager.ROLE_DIALER), ROLE_REQUEST);
+        try {
+            startActivityForResult(manager.createRequestRoleIntent(RoleManager.ROLE_DIALER), ROLE_REQUEST);
+        } catch (RuntimeException error) {
+            BridgeLog.error("dialer_role_system_request_failed", error);
+            continueAfterSystemRoleRequest();
+        }
+    }
+
+    private void continueAfterSystemRoleRequest() {
+        ShizukuBridgeManager shizuku = ShizukuBridgeManager.get(this);
+        switch (DialerRoleSetupPolicy.afterSystemRequest(
+                dialerRoleHeld(), shizuku.dialerRoleAutomationAvailable())) {
+            case COMPLETE -> checkAVFEnvironmentAtStartup();
+            case SHIZUKU -> attemptPrivilegedDialerRole(true);
+            case SETTINGS -> openDefaultAppsSettings();
+            case SYSTEM_ROLE -> requestDialerRole();
+        }
+    }
+
+    private void attemptPrivilegedDialerRole(boolean requestPermission) {
+        ShizukuBridgeManager.get(this).ensureDialerRole(requestPermission, (success, detail) -> {
+            if (isFinishing() || isDestroyed()) return;
+            refreshStatus();
+            DialerRoleSetupPolicy.Action next = DialerRoleSetupPolicy.afterPrivilegedAttempt(
+                    success && dialerRoleHeld());
+            if (next == DialerRoleSetupPolicy.Action.COMPLETE) {
+                toast("默认电话角色已由系统启用");
+                checkAVFEnvironmentAtStartup();
+            } else {
+                toast(detail + "，请在默认应用中选择 AirSIM");
+                openDefaultAppsSettings();
+            }
+        });
+    }
+
+    private void openDefaultAppsSettings() {
+        Intent settings = new Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS);
+        try {
+            startActivityForResult(settings, DEFAULT_APPS_REQUEST);
+        } catch (RuntimeException error) {
+            BridgeLog.error("default_apps_settings_open_failed", error);
+            Intent details = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName()));
+            startActivityForResult(details, DEFAULT_APPS_REQUEST);
+        }
     }
 
     private void localCall(String action) {
@@ -813,8 +871,9 @@ public final class MainActivity extends Activity {
                     pushConfigured = false;
                     pushDetail = "Agent 不可达";
                     cloudRelayConfigured = false;
-                    cloudLastError = "Linux Agent 不可达";
-                    pushDiagnostic = "先恢复 Linux Agent；当前无法查询 /api/push/status。";
+                    cloudLastError = RuntimeMode.agentLabel(this) + "不可达";
+                    pushDiagnostic = "先恢复" + RuntimeMode.agentLabel(this)
+                            + "；当前无法查询 /api/push/status。";
                     if (showResult) setAgentRefreshMessage("刷新失败 · GET " + path
                             + "\nAgent：" + address + "\n原因："
                             + DebugRedactor.sanitize(error.getClass().getSimpleName() + " · "
@@ -933,7 +992,7 @@ public final class MainActivity extends Activity {
     private String featureTitle(Feature feature) {
         return switch (feature) {
             case VOWLAN -> "VoWLAN 连接详情";
-            case AGENT -> "Linux Agent 详情";
+            case AGENT -> RuntimeMode.agentLabel(this) + " 详情";
             case PCM -> "PCM 音频桥详情";
             case PUSH -> "Push / Relay 详情";
             case SHIZUKU -> "Shizuku 详情";
@@ -950,11 +1009,12 @@ public final class MainActivity extends Activity {
             case VOWLAN -> {
                 boolean paired = VoWLANPairingStore.configured(this);
                 String address = localVoWLANAddress();
+                String pcmBackend = RuntimeMode.isStandalone(this) ? "本机 PCM 端口 7580" : "AVF PCM 端口 7580";
                 String reason = !paired ? "尚未与 iPhone 配对"
                         : address.isEmpty() ? "没有可用的同网 Wi-Fi 或三星热点地址"
                         : currentVoWLAN.contains("avf=missing") ? "AVF 虚拟网卡未出现"
                         : currentVoWLAN.contains("agent_ready=false") ? "Agent 未通过 VoWLAN 就绪检查"
-                        : currentVoWLAN.contains("pcm_ready=false") ? "AVF PCM 端口 7580 未就绪"
+                        : currentVoWLAN.contains("pcm_ready=false") ? pcmBackend + "未就绪"
                         : !vowlanReady() ? "VoWLAN 服务尚未完成当前检查：" + currentVoWLAN
                         : "当前检查项满足；仍需实际通话验证";
                 details = "配对：" + (paired ? "已保存密钥" : "未配对")
@@ -965,17 +1025,22 @@ public final class MainActivity extends Activity {
                 keywords = new String[]{"vowlan", "pairing"};
             }
             case AGENT -> {
-                details = "状态：" + agentDetail + "\n地址：" + AppConfig.endpoint(this)
-                        + "\n控制令牌：" + (AppConfig.configured(this) ? "已配置" : "未配置")
+                boolean standalone = RuntimeMode.isStandalone(this);
+                details = "状态：" + agentDetail
+                        + (standalone ? "\n运行位置：本 APK 前台服务"
+                                : "\n地址：" + AppConfig.endpoint(this)
+                                + "\n控制令牌：" + (AppConfig.configured(this) ? "已配置" : "未配置"))
                         + "\n原因：" + (agentOnline ? "最近一次状态检查通过"
+                            : standalone ? "检查前台服务、通知权限与系统省电限制"
                             : "检查 AVF Linux 是否运行、地址是否为 :8575，以及控制令牌是否匹配")
                         + "\n" + agentRefreshMessage;
                 keywords = new String[]{"agent", "watchdog", "http_request", "avf"};
             }
             case PCM -> {
                 String shizuku = ShizukuBridgeManager.get(this).status();
+                String pcmBackend = RuntimeMode.isStandalone(this) ? "本机 PCM 端口 7580" : "AVF PCM 端口 7580";
                 String reason = !shizukuReady() ? "Shizuku 未连接或未授权，PCM 用户服务不可用"
-                        : currentVoWLAN.contains("pcm_ready=false") ? "AVF PCM 端口 7580 未响应"
+                        : currentVoWLAN.contains("pcm_ready=false") ? pcmBackend + "未响应"
                         : !pcmReady() ? "VoWLAN PCM 服务尚未完成当前检查：" + currentVoWLAN
                         : "当前检查项满足；仍需实际通话验证双向音频";
                 details = "Shizuku：" + shizuku + "\n桥状态：" + (pcmReady() ? "就绪" : "待启动")
@@ -1005,6 +1070,10 @@ public final class MainActivity extends Activity {
     }
 
 	private void checkAVFEnvironmentAtStartup() {
+		if (RuntimeMode.isStandalone(this)) {
+			StandaloneAgentService.start(this);
+			return;
+		}
 		if (avfStartupPromptShown) return;
 		AVFEnvironmentDetector.Snapshot snapshot = AVFEnvironmentDetector.inspect(this);
 		boolean agentConfigured = AppConfig.configured(this);
@@ -1279,9 +1348,14 @@ public final class MainActivity extends Activity {
 
     private void saveConfiguration() {
         try {
-            AppConfig.save(this, endpoint.getText().toString(), token.getText().toString(), selectedMode);
+            if (RuntimeMode.isStandalone(this)) {
+                AppConfig.save(this, "", "", selectedMode);
+            } else {
+                AppConfig.save(this, endpoint.getText().toString(), token.getText().toString(), selectedMode);
+            }
             AgentWatchdogService.start(this);
-            toast("配置已保存，守护服务正在启动");
+            toast(RuntimeMode.isStandalone(this)
+                    ? "模式已保存，内置 Agent 正在启动" : "配置已保存，守护服务正在启动");
             refreshAgent();
         } catch (IllegalArgumentException error) {
             toast(error.getMessage());
@@ -1500,7 +1574,12 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         refreshStatus();
-        if (request == ROLE_REQUEST) checkAVFEnvironmentAtStartup();
+        if (request == ROLE_REQUEST) {
+            continueAfterSystemRoleRequest();
+        } else if (request == DEFAULT_APPS_REQUEST) {
+            if (dialerRoleHeld()) checkAVFEnvironmentAtStartup();
+            else toast("AirSIM 仍未获得默认电话角色");
+        }
     }
 
     @Override protected void onResume() {

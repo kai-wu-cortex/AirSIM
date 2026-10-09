@@ -3,6 +3,7 @@ package com.airsim.bridge;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.os.Build;
@@ -28,6 +29,12 @@ import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class PhoneAudioBridge {
+    enum PlaybackRoute {
+        SAMSUNG_TAG,
+        TELEPHONY_DEVICE,
+        UNSUPPORTED
+    }
+
     private static final int SAMPLE_RATE = 8000;
     private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO;
     private static final int CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO;
@@ -62,6 +69,13 @@ public final class PhoneAudioBridge {
 
     static String[] playbackTags() {
         return new String[] {"VOICE_TX"};
+    }
+
+    static PlaybackRoute playbackRoute(
+            boolean samsungTagAvailable, boolean telephonyDeviceAvailable) {
+        if (samsungTagAvailable) return PlaybackRoute.SAMSUNG_TAG;
+        if (telephonyDeviceAvailable) return PlaybackRoute.TELEPHONY_DEVICE;
+        return PlaybackRoute.UNSUPPORTED;
     }
 
     static long listenerRetryDelayMillis(int consecutiveFailures) {
@@ -168,8 +182,20 @@ public final class PhoneAudioBridge {
         AudioRecord recorder = new AudioRecord(
             captureSource(), SAMPLE_RATE, CHANNEL_IN, ENCODING,
             Math.max(recordBufferSize, BridgeProtocol.FRAME_BYTES * 10));
+        AudioAttributes.Builder attributeBuilder = new AudioAttributes.Builder()
+            .setUsage(playbackUsage())
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH);
+        boolean samsungTagAvailable = tryAddSamsungVoiceTxTag(attributeBuilder);
+        AudioDeviceInfo telephonyTx = samsungTagAvailable ? null : findTelephonyTxDevice();
+        PlaybackRoute playbackRoute = playbackRoute(
+            samsungTagAvailable, telephonyTx != null);
+        if (playbackRoute == PlaybackRoute.UNSUPPORTED) {
+            recorder.release();
+            throw new IllegalStateException(
+                "neither Samsung VOICE_TX nor Android Telephony Tx is available");
+        }
         AudioTrack track = new AudioTrack.Builder()
-            .setAudioAttributes(samsungVoiceTxAttributes())
+            .setAudioAttributes(attributeBuilder.build())
             .setAudioFormat(new AudioFormat.Builder()
                 .setEncoding(ENCODING)
                 .setSampleRate(SAMPLE_RATE)
@@ -179,6 +205,10 @@ public final class PhoneAudioBridge {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build();
         try {
+            if (playbackRoute == PlaybackRoute.TELEPHONY_DEVICE
+                    && !track.setPreferredDevice(telephonyTx)) {
+                throw new IllegalStateException("Android Telephony Tx route was rejected");
+            }
             if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
                 throw new IllegalStateException("VOICE_DOWNLINK AudioRecord initialization failed");
             }
@@ -188,7 +218,7 @@ public final class PhoneAudioBridge {
             emit(started, "audio_initialized", Map.of(
                 "audio_session_id", recorder.getAudioSessionId(),
                 "capture_source", "voice_downlink",
-                "playback_tag", "VOICE_TX",
+                "playback_route", playbackRoute.name().toLowerCase(),
                 "record_buffer_bytes", recordBufferSize,
                 "track_buffer_bytes", trackBufferSize,
                 "result", "ok"));
@@ -357,22 +387,35 @@ public final class PhoneAudioBridge {
         }
     }
 
-    private static AudioAttributes samsungVoiceTxAttributes() {
-        AudioAttributes.Builder builder = new AudioAttributes.Builder()
-            .setUsage(playbackUsage())
-            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH);
+    private static boolean tryAddSamsungVoiceTxTag(AudioAttributes.Builder builder) {
         try {
             Method addTag = AudioAttributes.Builder.class.getMethod(
                 "semAddAudioTag", String.class);
             for (String tag : playbackTags()) {
                 addTag.invoke(builder, tag);
             }
-            return builder.build();
-        } catch (NoSuchMethodException | IllegalAccessException error) {
-            throw new IllegalStateException("Samsung VOICE_TX API unavailable", error);
-        } catch (InvocationTargetException error) {
-            throw new IllegalStateException("Samsung VOICE_TX tag rejected", error.getCause());
+            return true;
+        } catch (NoSuchMethodException | IllegalAccessException
+                | InvocationTargetException error) {
+            return false;
         }
+    }
+
+    private static AudioDeviceInfo findTelephonyTxDevice() {
+        try {
+            Method getDevices = AudioManager.class.getMethod("getDevicesStatic", int.class);
+            AudioDeviceInfo[] devices = (AudioDeviceInfo[]) getDevices.invoke(
+                null, AudioManager.GET_DEVICES_OUTPUTS);
+            for (AudioDeviceInfo device : devices) {
+                if (device.isSink() && device.getType() == AudioDeviceInfo.TYPE_TELEPHONY) {
+                    return device;
+                }
+            }
+        } catch (NoSuchMethodException | IllegalAccessException
+                | InvocationTargetException | ClassCastException error) {
+            return null;
+        }
+        return null;
     }
 
     private static void reportStats(long started, BridgeStats stats, AtomicBoolean running) {

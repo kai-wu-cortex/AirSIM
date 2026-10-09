@@ -1,10 +1,10 @@
 # AirSIM 三星通话音频桥
 
-若 AVF Linux Terminal、Agent 或 installerd 尚未就绪，先按[AVF 安装与无损排障指南](../../docs/AVF_INSTALL_GUIDE.md)分别验证 `8575`、`8576` 和控制令牌。PCM 桥待启动不等于 Debian 包损坏，也不应通过清除 AVF 数据处理。
+推荐的 [Android Standalone APK](../../android-standalone/README.md) 不依赖 AVF。只有使用旧 AVF 兼容模式时，才按[AVF 安装与无损排障指南](../../docs/AVF_INSTALL_GUIDE.md)分别验证 `8575`、`8576` 和控制令牌；PCM 桥待启动不等于 Debian 包损坏，也不应通过清除 AVF 数据处理。
 
-该组件运行在三星 Android 的 Shizuku `UserService` 中，以 shell UID 访问系统通话音频，并向 AirSIM 控制 App 与 AVF Agent 提供双向 PCM。
+该组件运行在 Android 的 Shizuku `UserService` 中，以 shell UID 访问系统通话音频，并向 AirSIM 控制 App 的内置 Agent 或旧 AVF Agent 提供双向 PCM。
 
-当前应用发布基线为 [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1)，AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。云端媒体只连接与当前 AirSIM 签名身份匹配的 Relay；维护者地址是 `https://airsim-push.remotepilot.site`，不是 DJOneHub 的 `https://push.remotepilot.site`。
+当前应用发布基线为 [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)，AVF Agent 为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。云端媒体只连接与当前 AirSIM 签名身份匹配的 Relay；维护者地址是 `https://airsim-push.remotepilot.site`，不是 DJOneHub 的 `https://push.remotepilot.site`。
 
 ## 音频方向
 

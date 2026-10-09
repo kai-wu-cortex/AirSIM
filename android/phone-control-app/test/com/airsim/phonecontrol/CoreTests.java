@@ -2,6 +2,26 @@ package com.airsim.phonecontrol;
 
 public final class CoreTests {
     public static void main(String[] args) throws Exception {
+		assertTrue(invokeIsStaleAudioBridge(
+				11_414, 27_671,
+				String.join("\0", "/system/bin/app_process", "/system/bin",
+						"com.airsim.bridge.PhoneAudioBridge", "--listen-host", "127.0.0.1",
+						"--listen-port", "7580", "")));
+		assertTrue(!invokeIsStaleAudioBridge(
+				27_671, 27_671,
+				String.join("\0", "/system/bin/app_process", "/system/bin",
+						"com.airsim.bridge.PhoneAudioBridge", "--listen-host", "127.0.0.1",
+						"--listen-port", "7580", "")));
+		assertTrue(!invokeIsStaleAudioBridge(
+				11_415, 27_671,
+				String.join("\0", "/system/bin/app_process", "/system/bin",
+						"com.example.UnrelatedService", "--listen-host", "127.0.0.1",
+						"--listen-port", "7580", "")));
+		assertTrue(!invokeIsStaleAudioBridge(
+				11_416, 27_671,
+				String.join("\0", "/system/bin/app_process", "/system/bin",
+						"com.airsim.bridge.PhoneAudioBridge", "--listen-host", "127.0.0.1",
+						"--listen-port", "7581", "")));
 		java.net.Inet4Address loopback = (java.net.Inet4Address) java.net.InetAddress.getByName("127.0.0.1");
 		try (java.net.ServerSocket occupied = new java.net.ServerSocket(0, 1, loopback);
 				java.net.ServerSocket fallback = VoWLANPortBinder.bind(loopback, occupied.getLocalPort(), 2)) {
@@ -395,6 +415,32 @@ public final class CoreTests {
 		assertTrue(VoWLANNetworkPolicy.shouldAdvertise(true, true, true, true, true));
 		assertTrue(!VoWLANNetworkPolicy.shouldAdvertise(true, true, false, true, true));
 		assertTrue(!VoWLANNetworkPolicy.shouldAdvertise(true, true, true, true, false));
+		StandaloneLongPoll.Request eventWait = StandaloneLongPoll.parse(
+				"/api/events?after=7&timeout_ms=15000", 15_000);
+		assertEquals(7L, eventWait.after());
+		assertEquals(15_000, eventWait.timeoutMillis());
+		assertEquals(25_000, StandaloneLongPoll.parse(
+				"/api/calls/events?after=0", 25_000).timeoutMillis());
+		try {
+			StandaloneLongPoll.parse("/api/events?after=0&timeout_ms=99", 15_000);
+			throw new AssertionError("too-short event timeout must fail");
+		} catch (IllegalArgumentException expected) {
+			assertContains(expected.getMessage(), "timeout_ms");
+		}
+		StandaloneLongPoll cursor = new StandaloneLongPoll();
+		java.util.concurrent.ExecutorService eventExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+		try {
+			java.util.concurrent.Future<Long> waiting = eventExecutor.submit(() -> cursor.awaitChange(0, 2_000));
+			long waitDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
+			while (!waiting.isDone() && cursor.waiterCount() == 0 && System.nanoTime() < waitDeadline) {
+				Thread.onSpinWait();
+			}
+			assertEquals(1, cursor.waiterCount());
+			assertEquals(1L, cursor.advance());
+			assertEquals(1L, waiting.get(1, java.util.concurrent.TimeUnit.SECONDS));
+		} finally {
+			eventExecutor.shutdownNow();
+		}
 		assertTrue(TelecomRolePolicy.canExecuteCallCommand(true, "dial"));
 		assertTrue(TelecomRolePolicy.canExecuteCallCommand(true, "end"));
 		assertTrue(!TelecomRolePolicy.canExecuteCallCommand(false, "dial"));
@@ -402,6 +448,40 @@ public final class CoreTests {
 		assertTrue(TelecomRolePolicy.requiresDialerRole("dial"));
 		assertTrue(TelecomRolePolicy.requiresDialerRole("end"));
 		assertTrue(!TelecomRolePolicy.requiresDialerRole("send_sms"));
+		assertEquals(DialerRoleSetupPolicy.Action.COMPLETE,
+				DialerRoleSetupPolicy.initial(true, false));
+		assertEquals(DialerRoleSetupPolicy.Action.SHIZUKU,
+				DialerRoleSetupPolicy.initial(false, true));
+		assertEquals(DialerRoleSetupPolicy.Action.SYSTEM_ROLE,
+				DialerRoleSetupPolicy.initial(false, false));
+		assertEquals(DialerRoleSetupPolicy.Action.COMPLETE,
+				DialerRoleSetupPolicy.afterSystemRequest(true, false));
+		assertEquals(DialerRoleSetupPolicy.Action.SHIZUKU,
+				DialerRoleSetupPolicy.afterSystemRequest(false, true));
+		assertEquals(DialerRoleSetupPolicy.Action.SETTINGS,
+				DialerRoleSetupPolicy.afterSystemRequest(false, false));
+		assertEquals(DialerRoleSetupPolicy.Action.COMPLETE,
+				DialerRoleSetupPolicy.afterPrivilegedAttempt(true));
+		assertEquals(DialerRoleSetupPolicy.Action.SETTINGS,
+				DialerRoleSetupPolicy.afterPrivilegedAttempt(false));
+		assertArrayEquals(new String[]{"cmd", "role", "add-role-holder",
+				"android.app.role.DIALER", "com.airsim.phonecontrol.standalone"},
+				PrivilegedBridgeProtocol.dialerRoleGrantCommand(
+						"com.airsim.phonecontrol.standalone"));
+		assertArrayEquals(new String[]{"cmd", "role", "get-role-holders",
+				"android.app.role.DIALER"}, PrivilegedBridgeProtocol.dialerRoleQueryCommand());
+		assertTrue(PrivilegedBridgeProtocol.isDialerRoleHolder(
+				"com.android.contacts\ncom.airsim.phonecontrol.standalone\n",
+				"com.airsim.phonecontrol.standalone"));
+		assertTrue(!PrivilegedBridgeProtocol.isDialerRoleHolder(
+				"com.airsim.phonecontrol.standalone.debug\n",
+				"com.airsim.phonecontrol.standalone"));
+		try {
+			PrivilegedBridgeProtocol.dialerRoleGrantCommand("com.airsim;id");
+			throw new AssertionError("unsafe package name must fail");
+		} catch (IllegalArgumentException expected) {
+			assertContains(expected.getMessage(), "package");
+		}
 		assertEquals("266 145", MainScreenPresentation.formatPairingCode("266145"));
 		assertEquals(
 				"22:45 VoWLAN 健康检查通过\n22:43 VoWLAN 广播已发现",
@@ -512,6 +592,19 @@ public final class CoreTests {
 					.invoke(null, direct, action, 1_000L);
 		} catch (ClassNotFoundException error) {
 			throw new AssertionError("Telecom runtime failures are not captured", error);
+		}
+	}
+
+	private static boolean invokeIsStaleAudioBridge(
+			int candidatePid, int ownerPid, String commandLine) throws Exception {
+		try {
+			Class<?> policy = Class.forName(
+					"com.airsim.phonecontrol.PhoneAudioBridgeProcessPolicy");
+			return (boolean) policy.getDeclaredMethod(
+					"isStaleBridge", int.class, int.class, String.class)
+					.invoke(null, candidatePid, ownerPid, commandLine);
+		} catch (ClassNotFoundException error) {
+			throw new AssertionError("stale PhoneAudioBridge process policy is missing", error);
 		}
 	}
 

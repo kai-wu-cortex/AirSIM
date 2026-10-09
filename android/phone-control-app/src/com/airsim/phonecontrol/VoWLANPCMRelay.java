@@ -37,8 +37,8 @@ public final class VoWLANPCMRelay implements Closeable {
     public synchronized int start(Inet4Address hotspot, int port, InetSocketAddress internal) throws IOException {
         if (server != null) return server.getLocalPort();
         if (internal.getPort() != 7580 || internal.getAddress() == null
-                || !internal.getAddress().isSiteLocalAddress()) {
-            throw new IllegalArgumentException("shell PCM must be AVF-private port 7580");
+                || !(internal.getAddress().isSiteLocalAddress() || internal.getAddress().isLoopbackAddress())) {
+            throw new IllegalArgumentException("shell PCM must be loopback or AVF-private port 7580");
         }
         ServerSocket created = VoWLANPortBinder.bind(hotspot, port, 2);
         shellPCM = internal;

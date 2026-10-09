@@ -14,24 +14,29 @@ public final class AgentClient {
 
     private final String endpoint;
     private final String token;
+    private final StandaloneAgentGateway standalone;
 
     public AgentClient(Context context) {
         Context appContext = context.getApplicationContext();
         endpoint = AppConfig.endpoint(appContext);
         token = AppConfig.token(appContext);
+        standalone = RuntimeMode.isStandalone(appContext) ? StandaloneAgentGateway.get(appContext) : null;
         BridgeLog.debug("agent_endpoint_selected endpoint=" + endpoint);
     }
 
     AgentClient(String endpoint, String token) {
         this.endpoint = endpoint;
         this.token = token;
+        this.standalone = null;
     }
 
     public String status() throws Exception {
+        if (standalone != null) return standalone.status();
         return request("GET", "/api/android/status", null, 5_000);
     }
 
     public String health() throws Exception {
+        if (standalone != null) return standalone.health();
         String payload = request("GET", "/api/health", null, 5_000);
         if (!payload.matches("(?s).*\\\"product\\\"\\s*:\\s*\\\"airsim\\\".*")) {
             throw new IllegalStateException("目标不是 AirSIM Agent");
@@ -40,34 +45,42 @@ public final class AgentClient {
     }
 
     public String pushStatus() throws Exception {
+        if (standalone != null) return standalone.pushStatus();
         return request("GET", "/api/push/status", null, 5_000);
     }
 
     public String debugSnapshot() throws Exception {
+        if (standalone != null) return standalone.debugSnapshot();
         return request("GET", "/api/debug?limit=100", null, 8_000);
     }
 
     public String nextCommand() throws Exception {
+        if (standalone != null) return "";
         return request("GET", "/api/android/commands/next?wait=25", null, 32_000);
     }
 
     public void sendEvent(String json) throws Exception {
+        if (standalone != null) { standalone.sendCallEvent(json); return; }
         request("POST", "/api/android/calls/event", json, 8_000);
     }
 
 	public void sendSMSEvent(String json) throws Exception {
+		if (standalone != null) { standalone.sendSMSEvent(json); return; }
 		request("POST", "/api/android/sms/event", json, 8_000);
 	}
 
     public void sendResult(String id, boolean success, String error) throws Exception {
+        if (standalone != null) return;
         request("POST", "/api/android/commands/result", WireJson.commandResult(id, success, error), 8_000);
     }
 
 	public void sendResult(String id, boolean success, String error, int segments) throws Exception {
+		if (standalone != null) return;
 		request("POST", "/api/android/commands/result", WireJson.commandResult(id, success, error, segments), 8_000);
 	}
 
     public String registerPairing(String registrationJSON) throws Exception {
+        if (standalone != null) return standalone.registerPairing(registrationJSON);
         return request("POST", "/api/android/pair/register", registrationJSON, 8_000);
     }
 
@@ -75,6 +88,7 @@ public final class AgentClient {
         if (!VoWLANControlPolicy.allowed(method, path) || "/v1/health".equals(path)) {
             throw new IllegalArgumentException("VoWLAN route not allowed");
         }
+        if (standalone != null) return standalone.forward(method, path, body);
         return requestRaw(method, path, body, path.startsWith("/api/events") || path.startsWith("/api/calls/events")
                 ? 35_000 : 8_000);
     }

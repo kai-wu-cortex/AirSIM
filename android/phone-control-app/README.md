@@ -1,8 +1,8 @@
 # AirSIM 三星 Android 控制 App
 
-该 App 运行在三星 Android 手机上，是 AirSIM 的蜂窝通话与短信控制入口。Android Telecom 负责运营商通话状态和操作，App 负责将状态同步给 Android AVF Agent，并为 iPhone 与 Apple Watch 提供经过认证的 VoWLAN 服务。
+该目录包含 AirSIM Android 端的共享实现以及旧 AVF 兼容 Manifest。新安装推荐使用根目录的 [Android Standalone APK](../../android-standalone/README.md)，由同一 APK 内置 Agent；只有兼容旧部署时才使用这里的 AVF 版构建入口。
 
-当前正式应用版本为 [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1)（Android `versionCode 73`）；配套 AVF Agent 当前为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
+当前正式应用版本为 [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2)（Android `versionCode 74`）；配套 AVF Agent 当前为 [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
 
 ## 主要职责
 
@@ -22,6 +22,7 @@
 
 - 三星 Android 测试手机，目标 SDK 35。
 - 用户将 AirSIM 设置为默认电话 App。
+- 用户确认 AirSIM 已获得「发送短信」权限，并在双 SIM 设备上指定默认短信 SIM；不同 Android 系统可能随电话角色授予该权限，也可能要求单独授权。
 - 官方 Shizuku 管理器已启动，并向 AirSIM 授权。
 - Android AVF Agent 可通过设备内部私网访问。
 - Agent 控制 token 已写入 App 私有存储。
@@ -66,6 +67,7 @@ Release APK 输出到 `android/phone-control-app/build/android/AirSIM-Phone-Brid
    ```
 
 4. 在系统设置中选择 AirSIM 作为默认电话 App。
+   首次启动还应允许「发送短信」权限；若有两张 SIM，请在系统 SIM 卡设置中指定默认短信 SIM。缺少权限或默认短信 SIM 时，Agent 会返回明确错误，不会把短信命令当作通话命令执行。
 5. 启动 Shizuku，并在 AirSIM 的 Shizuku 区域完成授权。
 6. 在 Terminal 运行 `sudo airsim-avf-pair`，从当前 AVF 私网确定 Agent 地址，把输出的控制 token 保存到 App。不要把 token 粘贴到日志、截图或仓库。
 7. 确认 Agent、音频桥和 VoWLAN 状态均为就绪。
@@ -82,6 +84,10 @@ AirSIM 会识别小米、Redmi、OPPO、OnePlus、realme、vivo、iQOO 和荣耀
 ## 通话与音频策略
 
 普通来电默认使用 `remote_silent`：三星端保持受控静音，由 iPhone 或 Apple Watch 呈现来电并承载音频。紧急通话始终交回系统预装电话 App。Shizuku 服务以 shell UID 运行音频桥，并在通话结束时恢复先前的系统音量状态。
+
+## 短信发送
+
+iPhone 经 VoWLAN 或云端 Relay 提交发信请求后，AVF Agent 把 `send_sms` 命令交给 Android Bridge。Android Bridge 使用系统短信服务和默认短信 SIM 分段发送；每一段都收到系统「已发送」回执后，才向 Agent 回报成功。这个回执表示手机已把短信交给运营商网络，不代表收件人已收到。超时或失败时，请先在手机短信记录中核对，避免重复发送。短信命令与 Telecom 通话 ID 控制相互独立。
 
 ## 网络与安全
 

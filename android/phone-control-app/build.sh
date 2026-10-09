@@ -2,13 +2,15 @@
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MANIFEST_SOURCE=${AIRSIM_ANDROID_MANIFEST:-"$ROOT/AndroidManifest.xml"}
+OUTPUT_BASENAME=${AIRSIM_ANDROID_OUTPUT_BASENAME:-AirSIM-Phone-Bridge}
 SDK=${ANDROID_SDK_ROOT:-/opt/homebrew/share/android-commandlinetools}
 BUILD_TOOLS="$SDK/build-tools/35.0.0"
 ANDROID_JAR="$SDK/platforms/android-35/android.jar"
 JAVA_HOME=${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}
 export JAVA_HOME
 export PATH="$JAVA_HOME/bin:$PATH"
-OUT="$ROOT/build/android"
+OUT=${AIRSIM_ANDROID_OUTPUT_DIR:-"$ROOT/build/android"}
 CLASSES="$OUT/classes"
 DEX="$OUT/dex"
 DEPS="$ROOT/build/dependencies"
@@ -69,9 +71,9 @@ COMPILED_RES="$OUT/compiled-res.zip"
 MANIFEST="$OUT/AndroidManifest.xml"
 if [ "$BUILD_VARIANT" = release ]; then
   sed 's/android:debuggable="true"/android:debuggable="false"/' \
-    "$ROOT/AndroidManifest.xml" > "$MANIFEST"
+    "$MANIFEST_SOURCE" > "$MANIFEST"
 else
-  cp "$ROOT/AndroidManifest.xml" "$MANIFEST"
+  cp "$MANIFEST_SOURCE" "$MANIFEST"
 fi
 "$BUILD_TOOLS/aapt2" link -o "$OUT/unsigned.apk" -I "$ANDROID_JAR" \
   --manifest "$MANIFEST" "$COMPILED_RES"
@@ -84,7 +86,7 @@ if [ "$BUILD_VARIANT" = debug ]; then
     "$JAVA_HOME/bin/keytool" -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
       -alias androiddebugkey -dname "CN=AirSIM Debug,O=AirSIM,C=CN" -keyalg RSA -keysize 2048 -validity 3650 >/dev/null 2>&1
   fi
-  OUTPUT_APK="$OUT/AirSIM-Phone-Bridge-debug.apk"
+  OUTPUT_APK="$OUT/$OUTPUT_BASENAME-debug.apk"
   "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
     --out "$OUTPUT_APK" "$OUT/aligned.apk"
 else
@@ -96,7 +98,7 @@ else
     echo "release keystore not found: $AIRSIM_ANDROID_KEYSTORE" >&2
     exit 1
   fi
-  OUTPUT_APK="$OUT/AirSIM-Phone-Bridge-release.apk"
+  OUTPUT_APK="$OUT/$OUTPUT_BASENAME-release.apk"
   "$BUILD_TOOLS/apksigner" sign \
     --ks "$AIRSIM_ANDROID_KEYSTORE" \
     --ks-key-alias "$AIRSIM_ANDROID_KEY_ALIAS" \

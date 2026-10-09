@@ -45,6 +45,18 @@ enum VoWLANPCMHandshake {
     }
 }
 
+final class PCMHandshakeSequence {
+    private let makeHandshake: () throws -> Data
+
+    init(makeHandshake: @escaping () throws -> Data) {
+        self.makeHandshake = makeHandshake
+    }
+
+    func next() throws -> Data {
+        try makeHandshake()
+    }
+}
+
 enum SpeakerRoutePolicy {
     static let retryDelays: [TimeInterval] = [0, 0.15, 0.35, 0.7, 1.2]
     static let routeVerificationDelay: TimeInterval = 0.08
@@ -154,10 +166,18 @@ final class AudioSessionController: ObservableObject {
             let encoder = VoicePCMEncoder()
             // 用户可能在权限弹窗或音频启动期间切换静音，新编码器必须继承期望状态。
             encoder.setMuted(muted)
+            let handshakeSequence: PCMHandshakeSequence
+            switch route {
+            case .moduleLocal:
+                _ = try route.handshake()
+                throw APIError.disabledLegacyRoute
+            case .vowlan:
+                handshakeSequence = PCMHandshakeSequence { try route.handshake() }
+            }
             let transport = NetworkPCMTransport(
                 host: NWEndpoint.Host(route.host),
                 port: NWEndpoint.Port(rawValue: route.port)!,
-                handshake: try route.handshake(),
+                handshakeSequence: handshakeSequence,
                 requiresWiFi: route.requiresWiFi,
                 onPCM: { [weak self] pcm in
                     Task { @MainActor [weak self] in self?.schedulePlayback(pcm) }
@@ -710,7 +730,7 @@ private enum SynthesizedCallTone {
     }
 }
 
-/// 维护一个带固定握手的低延迟 TCP 字节流；连接仅指向模块 ECM 私网地址。
+/// 维护低延迟 TCP 字节流；每次连接尝试都生成新的认证握手。
 private final class NetworkPCMTransport: @unchecked Sendable {
     enum Event: Sendable {
         case connected
@@ -722,7 +742,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
 
     private let host: NWEndpoint.Host
     private let port: NWEndpoint.Port
-    private let handshake: Data
+    private let handshakeSequence: PCMHandshakeSequence
     private let requiresWiFi: Bool
     private let queue = DispatchQueue(label: "com.jieden.airsim.network-pcm")
     private let onPCM: @Sendable (Data) -> Void
@@ -748,14 +768,14 @@ private final class NetworkPCMTransport: @unchecked Sendable {
     init(
         host: NWEndpoint.Host,
         port: NWEndpoint.Port,
-        handshake: Data,
+        handshakeSequence: PCMHandshakeSequence,
         requiresWiFi: Bool,
         onPCM: @escaping @Sendable (Data) -> Void,
         onEvent: @escaping @Sendable (Event) -> Void
     ) {
         self.host = host
         self.port = port
-        self.handshake = handshake
+        self.handshakeSequence = handshakeSequence
         self.requiresWiFi = requiresWiFi
         self.onPCM = onPCM
         self.onEvent = onEvent
@@ -858,6 +878,13 @@ private final class NetworkPCMTransport: @unchecked Sendable {
     }
 
     private func sendHandshake(_ connection: NWConnection, attempt: Int) {
+        let handshake: Data
+        do {
+            handshake = try handshakeSequence.next()
+        } catch {
+            retryOrFail("PCM 认证握手生成失败：\(error.localizedDescription)", attempt: attempt)
+            return
+        }
         connection.send(content: handshake, completion: .contentProcessed {
             [weak self, weak connection] error in
             guard let self, let connection else { return }

@@ -1,6 +1,6 @@
 # AirSIM Cloudflare Relay 部署手册
 
-`push-relay-worker/` 中已经包含可部署的 Relay 后端，而不是域名占位文件。它负责 AirSIM iPhone、Apple Watch、Live Activity 与 Android AVF Agent 之间的公网控制、APNs 推送、状态同步、命令队列和通话媒体中继。AirSIM 与 DJOneHub 应使用相互隔离的 Worker、KV、Durable Objects 和域名；本项目维护者的 AirSIM 生产域名是 `https://airsim-push.remotepilot.site`，其他部署者应换成自己控制的 Cloudflare 自定义域名。
+`push-relay-worker/` 中已经包含可部署的 Relay 后端，而不是域名占位文件。它负责 AirSIM iPhone、Apple Watch、Live Activity 与 Android Standalone 内置 Agent（或旧 AVF Agent）之间的公网控制、APNs 推送、状态同步、命令队列和通话媒体中继。AirSIM 与 DJOneHub 应使用相互隔离的 Worker、KV、Durable Objects 和域名；本项目维护者的 AirSIM 生产域名是 `https://airsim-push.remotepilot.site`，其他部署者应换成自己控制的 Cloudflare 自定义域名。
 
 > 本文中的域名、Cloudflare 资源、Apple Team ID 和密钥都必须替换成部署者自己的值。不要复用其他 AirSIM 环境的 KV、Durable Objects、Dashboard token、设备 Secret 或 APNs 私钥。
 
@@ -12,7 +12,7 @@
 | Custom Domain | `https://airsim-push.remotepilot.site` |
 | `ALLOWED_BUNDLE_ID` | `com.eric3u.airsim` |
 | Worker 协议版本 | `/healthz` 报告 `0.2.0` |
-| 配套应用发布 | [`v0.9.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.1) |
+| 配套应用发布 | [`v0.9.2`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.2) |
 | 配套 AVF Agent | [`v0.4.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.5)，Debian 包 `0.4.5-1` |
 | 存储 | AirSIM 专用 `DEVICES` KV 与 `MEDIA`、`STATUS`、`COMMANDS` Durable Objects |
 | Secret | `APNS_P8`、`DASHBOARD_TOKEN` 名称已配置；值不在仓库中 |

@@ -20,6 +20,18 @@ private actor OutgoingCallServiceProbe: OutgoingCallServicing {
 }
 
 final class AirSIMTests: XCTestCase {
+    func testPCMReconnectCreatesFreshHandshakeForEveryAttempt() throws {
+        var generated = 0
+        let handshakes = PCMHandshakeSequence {
+            generated += 1
+            return Data("handshake-\(generated)".utf8)
+        }
+
+        XCTAssertEqual(try handshakes.next(), Data("handshake-1".utf8))
+        XCTAssertEqual(try handshakes.next(), Data("handshake-2".utf8))
+        XCTAssertEqual(generated, 2)
+    }
+
     func testIncomingSMSPushAcceptsAgentNanosecondTimestamp() throws {
         let pushed = try IncomingRemoteSMS(userInfo: [
             "event": "incoming_sms",

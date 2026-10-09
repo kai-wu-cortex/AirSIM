@@ -2,7 +2,7 @@
 
 你正在处理 AirSIM：一个用三星 Android 手机承载蜂窝通话与短信，并让 iPhone / Apple Watch 通过 VoWLAN 或 Cloudflare Relay 使用这些能力的多端项目。
 
-当前发布基线（2026-10-08）：Android/iOS Apps `v0.9.1`（build `73`），AVF Agent `v0.4.5`（Debian `0.4.5-1`），Relay 协议 `0.2.0`。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
+当前发布基线（2026-10-09）：Android Standalone/iOS Apps `v0.9.2`（build `74`），兼容用 AVF Agent `v0.4.5`（Debian `0.4.5-1`），Relay 协议 `0.2.0`。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
 
 ## 开始前
 
@@ -19,6 +19,7 @@
 
 ## 系统边界
 
+- `android-standalone`：推荐的单 APK 构建入口；复用 Android 实现并启用内置 Agent，不依赖 AVF Linux。
 - `android/phone-control-app`：三星默认电话角色、Android Telecom、短信、VoWLAN、配对、AVF 启动引导和安装管理。
 - `android/phone-audio-bridge`：Shizuku `UserService`，负责双向通话 PCM。
 - `module/module-agent`：AVF Linux 中的设备状态、控制 API、Relay 与媒体编排。

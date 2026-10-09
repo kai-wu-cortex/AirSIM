@@ -3,6 +3,7 @@
 .vscode/
 android/phone-control-app/build/
 android/phone-audio-bridge/build/
+android-standalone/build/
 *.log
 *.xcuserstate
 **/xcuserdata/

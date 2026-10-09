@@ -2,15 +2,15 @@
 
 本文为 AI 编码代理提供 AirSIM 全仓库的事实来源、构建顺序、部署边界和安全约束。开始任务前先阅读根目录 `README.md`，再阅读所修改组件的 README 和实际源码。涉及 AVF 安装、配对或恢复时，还要阅读 `docs/AVF_INSTALL_GUIDE.md` 和 `LLM.txt`。源码与测试是协议事实来源；本文不能替代它们。
 
-当前发布基线（2026-10-08）：Android/iOS Apps `v0.9.1`（build `73`），AVF Agent `v0.4.5`（Debian `0.4.5-1`），Relay 协议 `0.2.0`。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
+当前发布基线（2026-10-09）：Android Standalone/iOS Apps `v0.9.2`（build `74`），兼容用 AVF Agent `v0.4.5`（Debian `0.4.5-1`），Relay 协议 `0.2.0`。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
 
 ## 1. 项目目标
 
-AirSIM 以三星 Android 手机作为蜂窝电话与短信终端：
+AirSIM 以 Android 手机作为蜂窝电话与短信终端：
 
-- 三星 Android App 对接 Android Telecom、短信、Shizuku 音频桥与 AVF Linux。
-- Android AVF Agent 维护设备状态、命令编排、Relay 会话与媒体状态。
-- `airsim-installerd` 独立于主 Agent，负责签名 Debian 包的安装、健康检查和回滚。
+- 推荐的 Android Standalone APK 对接 Android Telecom、短信、Shizuku 音频桥，并在前台服务中内置 Agent。
+- 内置 Agent 维护设备状态、命令编排、Relay 会话与媒体状态，不使用 AVF、Terminal、Debian、`8575/8576` 或 `airsim-installerd`。
+- 旧 Android AVF Agent 与 `airsim-installerd` 仅用于兼容和回退。
 - iPhone 与 Apple Watch 通过 VoWLAN 或 Cloudflare Relay 使用通话和短信能力。
 - Cloudflare Relay 负责公网事件、APNs、命令队列、Dashboard 与媒体中继。
 
@@ -22,6 +22,7 @@ AirSIM 使用 `PolyForm-Noncommercial-1.0.0`，属于源码可见项目而不是
 
 | 范围 | 先读 | 核心入口 | 验证命令 |
 | --- | --- | --- | --- |
+| Android Standalone | `android-standalone/README.md` | `android-standalone/`、`android/phone-control-app/src/` | `./android-standalone/test.sh` |
 | 三星控制 App | `android/phone-control-app/README.md` | `android/phone-control-app/src/`、`build.sh` | `./android/phone-control-app/test.sh` |
 | 三星音频桥 | `android/phone-audio-bridge/README.md` | `android/phone-audio-bridge/src/`、`run-device-bridge.sh` | `./android/phone-audio-bridge/build.sh` |
 | AVF Agent | `module/module-agent/README.md` | `module/module-agent/main.go`、`router.go` | `(cd module/module-agent && go test ./...)` |
