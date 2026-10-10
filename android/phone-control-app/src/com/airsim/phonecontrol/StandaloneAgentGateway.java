@@ -66,6 +66,10 @@ final class StandaloneAgentGateway {
     String registerPairing(String registrationJSON) throws Exception {
         JSONObject registration = store.saveRegistration(registrationJSON);
         StandaloneAgentService.start(context);
+        if (registration.optBoolean("local_mode", false)) {
+            BridgeLog.info("standalone_local_pairing_saved");
+            return new JSONObject().put("configured", true).put("local_mode", true).toString();
+        }
         String deviceID = registration.getString("device_id");
         String hint = deviceID.length() <= 8 ? deviceID : "…" + deviceID.substring(deviceID.length() - 8);
         BridgeLog.info("standalone_pairing_saved device_id_hint=" + DebugRedactor.safeIdentifier(hint));
@@ -112,6 +116,8 @@ final class StandaloneAgentGateway {
         JSONObject input = body == null || body.isBlank() ? new JSONObject() : new JSONObject(body);
         return switch (path) {
             case "/api/push/register" -> ok(registerPairing(input.toString()));
+            case "/api/push/mode" -> ok(store.setCloudEnabled(
+                    input.optBoolean("enabled", false)).toString());
             case "/api/calls/dial" -> command("dial", "", input.optString("number", ""), "");
             case "/api/calls/answer" -> command("answer", CallRepository.firstId(), "", "");
             case "/api/calls/reject" -> command("reject", CallRepository.firstId(), "", "");

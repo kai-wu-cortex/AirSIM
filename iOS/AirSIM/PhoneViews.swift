@@ -87,6 +87,45 @@ private enum PhoneListMetrics {
     static let separatorLeading: CGFloat = horizontalInset + avatarSize + avatarSpacing
 }
 
+private struct DialPadLayoutMetrics {
+    let keySize: CGFloat
+    let keySpacing: CGFloat
+    let rowSpacing: CGFloat
+    let sectionSpacing: CGFloat
+    let verticalPadding: CGFloat
+    let numberFontSize: CGFloat
+    let numberHeight: CGFloat
+    let contactHeight: CGFloat
+
+    var keypadWidth: CGFloat { keySize * 3 + keySpacing * 2 }
+    var digitFontSize: CGFloat { min(31, max(23, keySize * 0.34)) }
+    var letterFontSize: CGFloat { min(10, max(8, keySize * 0.115)) }
+    var callIconSize: CGFloat { min(30, max(23, keySize * 0.33)) }
+    var deleteIconSize: CGFloat { min(24, max(19, keySize * 0.27)) }
+
+    init(availableHeight: CGFloat, availableWidth: CGFloat, compactWidth: Bool) {
+        let compactHeight = availableHeight < 700
+        let desiredKeySize: CGFloat = compactWidth ? 84 : 90
+        let desiredKeySpacing: CGFloat = compactWidth ? 28 : 34
+        let reservedHeight: CGFloat = compactHeight ? 205 : 220
+        let verticalKeySize = (availableHeight - reservedHeight) / 5
+        let contentWidth = min(520, max(0, availableWidth - 32))
+        let horizontalKeySize = (contentWidth - desiredKeySpacing * 2) / 3
+
+        keySize = min(desiredKeySize, max(56, min(verticalKeySize, horizontalKeySize)))
+        keySpacing = min(
+            desiredKeySpacing,
+            max(14, (contentWidth - keySize * 3) / 2)
+        )
+        rowSpacing = compactHeight ? 8 : (compactWidth ? 12 : 16)
+        sectionSpacing = compactHeight ? 8 : (compactWidth ? 12 : 16)
+        verticalPadding = compactHeight ? 6 : 10
+        numberFontSize = compactHeight ? 32 : (compactWidth ? 36 : 42)
+        numberHeight = compactHeight ? 40 : 46
+        contactHeight = compactHeight ? 18 : 20
+    }
+}
+
 // MARK: - 拨号
 
 struct DialPadView: View {
@@ -94,10 +133,6 @@ struct DialPadView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var deleteRepeatTask: Task<Void, Never>?
     @State private var zeroWasLongPressed = false
-    @State private var showingModuleStatus = false
-    @State private var moduleStatusFeedback = UIImpactFeedbackGenerator(style: .medium)
-    @State private var moduleStatusDotPressed = false
-    @State private var moduleStatusLongPressTriggered = false
     @State private var dialKeyFeedback = DialKeyFeedback()
     @State private var pairedAgentListPresentation: PairedAgentListPresentation?
 
@@ -113,28 +148,34 @@ struct DialPadView: View {
     }
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
-    private var keySize: CGFloat { isCompact ? 84 : 90 }
-    private var keySpacing: CGFloat { isCompact ? 28 : 34 }
-    private var rowSpacing: CGFloat { isCompact ? 12 : 16 }
-    private var keypadWidth: CGFloat { keySize * 3 + keySpacing * 2 }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: isCompact ? 16 : 22) {
+            GeometryReader { proxy in
+                let metrics = DialPadLayoutMetrics(
+                    availableHeight: proxy.size.height,
+                    availableWidth: proxy.size.width,
+                    compactWidth: isCompact
+                )
+
+                VStack(spacing: metrics.sectionSpacing) {
                     VStack(spacing: 2) {
                         Text(model.numberInput.isEmpty ? L10n.t("输入号码") : model.numberInput)
-                            .font(.system(size: isCompact ? 36 : 42, weight: .light, design: .rounded))
+                            .font(.system(
+                                size: metrics.numberFontSize,
+                                weight: .light,
+                                design: .rounded
+                            ))
                             .monospacedDigit()
                             .foregroundStyle(model.numberInput.isEmpty ? .secondary : .primary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.45)
-                            .frame(height: 50)
+                            .frame(height: metrics.numberHeight)
 
                         Text(matchedName ?? " ")
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(.green)
-                            .frame(height: 22)
+                            .frame(height: metrics.contactHeight)
                     }
                     .padding(.horizontal, 12)
 
@@ -172,59 +213,17 @@ struct DialPadView: View {
                         .buttonStyle(.plain)
                     }
 
-                    if let route = model.dialPadTransportPresentation {
-                        DialPadTransportBadge(route: route)
-                    }
-
-                    dialKeyGrid
-
-                    HStack(spacing: keySpacing) {
-                        Color.clear.frame(width: keySize, height: keySize)
-                        Button {
-                            Task { await model.dial() }
-                        } label: {
-                            Circle()
-                                .fill(.green)
-                                .frame(width: keySize, height: keySize)
-                                .overlay {
-                                    Image(systemName: "phone.fill")
-                                        .font(.system(size: isCompact ? 27 : 30, weight: .semibold))
-                                        .foregroundStyle(.white)
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(
-                            model.numberInput.isEmpty
-                                || model.isBusy
-                                || !model.canStartOutgoingCommand
-                        )
-                        .opacity(
-                            model.numberInput.isEmpty || !model.canStartOutgoingCommand ? 0.4 : 1
-                        )
-
-                        Image(systemName: "delete.left")
-                            .font(.system(size: isCompact ? 22 : 24))
-                            .foregroundStyle(.secondary)
-                            .frame(width: keySize, height: keySize)
-                            .contentShape(Rectangle())
-                            .gesture(deleteGesture)
-                            .allowsHitTesting(!model.numberInput.isEmpty)
-                            .opacity(model.numberInput.isEmpty ? 0.4 : 1)
-                            .accessibilityLabel(L10n.t("删除"))
-                            .accessibilityHint(L10n.t("轻点删除一位，长按连续删除"))
-                            .accessibilityAddTraits(.isButton)
-                    }
-                    .frame(width: keypadWidth)
+                    dialKeyGrid(metrics: metrics)
+                    dialActions(metrics: metrics)
                 }
                 .frame(maxWidth: 520)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .padding(.horizontal, 16)
-                .padding(.bottom, 12)
+                .padding(.vertical, metrics.verticalPadding)
             }
             .phoneReportsTabBarCompactState()
             .background(PhoneBackdrop())
-            .navigationTitle(L10n.t("拨号"))
-            .navigationBarTitleDisplayMode(.large)
-            .toolbar { dialStatusToolbar }
+            .toolbar(.hidden, for: .navigationBar)
             .sheet(item: $pairedAgentListPresentation) { _ in
                 PairedAndroidAgentsView(
                     agents: model.pairedAndroidAgents,
@@ -242,28 +241,66 @@ struct DialPadView: View {
     }
 
     @ViewBuilder
-    private var dialKeyGrid: some View {
+    private func dialKeyGrid(metrics: DialPadLayoutMetrics) -> some View {
         if #available(iOS 26.0, *) {
             // 融合距离必须明显小于按键的真实间距，否则 Liquid Glass 会把相邻圆键吸成一体。
             GlassEffectContainer(spacing: 6) {
-                dialKeyRows
+                dialKeyRows(metrics: metrics)
             }
         } else {
-            dialKeyRows
+            dialKeyRows(metrics: metrics)
         }
     }
 
-    private var dialKeyRows: some View {
-        VStack(spacing: rowSpacing) {
+    private func dialKeyRows(metrics: DialPadLayoutMetrics) -> some View {
+        VStack(spacing: metrics.rowSpacing) {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: keySpacing) {
+                HStack(spacing: metrics.keySpacing) {
                     ForEach(row, id: \.0) { digit, letters in
-                        DialKey(digit: digit, letters: letters)
+                        dialKey(digit: digit, letters: letters, metrics: metrics)
                     }
                 }
             }
         }
-        .frame(width: keypadWidth)
+        .frame(width: metrics.keypadWidth)
+    }
+
+    private func dialActions(metrics: DialPadLayoutMetrics) -> some View {
+        HStack(spacing: metrics.keySpacing) {
+            Color.clear.frame(width: metrics.keySize, height: metrics.keySize)
+            Button {
+                Task { await model.dial() }
+            } label: {
+                Circle()
+                    .fill(.green)
+                    .frame(width: metrics.keySize, height: metrics.keySize)
+                    .overlay {
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: metrics.callIconSize, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+            }
+            .buttonStyle(.plain)
+            .disabled(
+                model.numberInput.isEmpty
+                    || model.isBusy
+                    || !model.canStartOutgoingCommand
+            )
+            .opacity(model.numberInput.isEmpty || !model.canStartOutgoingCommand ? 0.4 : 1)
+
+            Image(systemName: "delete.left")
+                .font(.system(size: metrics.deleteIconSize))
+                .foregroundStyle(.secondary)
+                .frame(width: metrics.keySize, height: metrics.keySize)
+                .contentShape(Rectangle())
+                .gesture(deleteGesture)
+                .allowsHitTesting(!model.numberInput.isEmpty)
+                .opacity(model.numberInput.isEmpty ? 0.4 : 1)
+                .accessibilityLabel(L10n.t("删除"))
+                .accessibilityHint(L10n.t("轻点删除一位，长按连续删除"))
+                .accessibilityAddTraits(.isButton)
+        }
+        .frame(width: metrics.keypadWidth)
     }
 
     private func deleteLastDigit() {
@@ -304,107 +341,12 @@ struct DialPadView: View {
             .onEnded { _ in stopRepeatingDelete() }
     }
 
-    private func dismissModuleStatusPopover() {
-        showingModuleStatus = false
-    }
-
-    @ToolbarContentBuilder
-    private var dialStatusToolbar: some ToolbarContent {
-        if #available(iOS 26.0, *) {
-            ToolbarItem(placement: .topBarTrailing) { dialStatusDot }
-                .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .topBarTrailing) { dialStatusDot }
-        }
-    }
-
-    private var dialStatusDot: some View {
-        Button {
-            guard !moduleStatusLongPressTriggered else {
-                moduleStatusLongPressTriggered = false
-                return
-            }
-            toggleModuleStatus()
-        } label: {
-            ZStack {
-                Circle()
-                    .fill(moduleStatusTint)
-                    .frame(width: 9, height: 9)
-                    .shadow(color: moduleStatusTint.opacity(0.38), radius: 3)
-            }
-            .frame(width: 44, height: 44)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .scaleEffect(moduleStatusDotPressed ? 0.72 : 1)
-        .animation(.easeOut(duration: 0.12), value: moduleStatusDotPressed)
-        .simultaneousGesture(LongPressGesture(
-            minimumDuration: 0.18,
-            maximumDistance: 36,
-        ).onChanged { _ in
-            moduleStatusDotPressed = true
-            moduleStatusFeedback.prepare()
-        }.onEnded { _ in
-            moduleStatusDotPressed = false
-            moduleStatusLongPressTriggered = true
-            presentModuleStatus()
-        })
-        .onChange(of: showingModuleStatus) { isShowing in
-            if !isShowing {
-                moduleStatusLongPressTriggered = false
-            }
-        }
-        .popover(isPresented: $showingModuleStatus, arrowEdge: .top) {
-            moduleStatusDetails
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(moduleStatusTitle)
-        .accessibilityHint("轻点或按住查看模块状态")
-    }
-
-    private func toggleModuleStatus() {
-        if showingModuleStatus {
-            dismissModuleStatusPopover()
-        } else {
-            presentModuleStatus()
-        }
-    }
-
-    private func presentModuleStatus() {
-        guard !showingModuleStatus else { return }
-        moduleStatusFeedback.impactOccurred()
-        moduleStatusFeedback.prepare()
-        showingModuleStatus = true
-    }
-
     @ViewBuilder
-    private var moduleStatusDetails: some View {
-        if #available(iOS 16.4, *) {
-            ModuleStatusPopover(onDismiss: dismissModuleStatusPopover)
-                .environmentObject(model)
-                .presentationCompactAdaptation(.popover)
-        } else {
-            ModuleStatusPopover(onDismiss: dismissModuleStatusPopover)
-                .environmentObject(model)
-        }
-    }
-
-    private var moduleStatusTitle: String {
-        if model.vowlan.availability.isOnlineForDisplay { return "VoWLAN 在线" }
-        return CloudModePreference.isEnabled()
-            && (model.cloudAgentDirectory ?? model.cloudAgentStatus)?.cloudOnline == true
-            ? "云端在线" : "AirSIM 未连接"
-    }
-
-    private var moduleStatusTint: Color {
-        if model.vowlan.availability.isOnlineForDisplay { return .green }
-        return CloudModePreference.isEnabled()
-            && (model.cloudAgentDirectory ?? model.cloudAgentStatus)?.cloudOnline == true
-            ? .blue : .red
-    }
-
-    @ViewBuilder
-    private func DialKey(digit: String, letters: String) -> some View {
+    private func dialKey(
+        digit: String,
+        letters: String,
+        metrics: DialPadLayoutMetrics
+    ) -> some View {
         Button {
             guard !(digit == "0" && zeroWasLongPressed) else {
                 zeroWasLongPressed = false
@@ -414,11 +356,14 @@ struct DialPadView: View {
             playDialKeySound()
         } label: {
             VStack(spacing: 0) {
-                Text(digit).font(.system(size: isCompact ? 28 : 31, weight: .regular, design: .rounded))
-                Text(letters).font(.system(size: isCompact ? 9 : 10, weight: .semibold)).tracking(1.4)
+                Text(digit)
+                    .font(.system(size: metrics.digitFontSize, weight: .regular, design: .rounded))
+                Text(letters)
+                    .font(.system(size: metrics.letterFontSize, weight: .semibold))
+                    .tracking(1.4)
             }
             .foregroundStyle(.primary)
-            .frame(width: keySize, height: keySize)
+            .frame(width: metrics.keySize, height: metrics.keySize)
             .dialKeySurface()
             .contentShape(Circle())
         }
@@ -580,174 +525,10 @@ private struct PairedAndroidAgentsView: View {
     }
 }
 
-private struct DialPadTransportBadge: View {
-    let route: DialPadTransportPresentation
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: route.systemImage)
-                .font(.subheadline.weight(.semibold))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(route.title)
-                    .font(.subheadline.weight(.semibold))
-                Text(route.detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .foregroundStyle(route.transport == .cloud ? Color.blue : Color.green)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.thinMaterial, in: Capsule())
-        .accessibilityElement(children: .combine)
-    }
-}
-
 /// 使用系统输入点击音，不启动新的音频会话，避免干扰 CallKit 路由。
 private final class DialKeyFeedback {
     func play() {
         UIDevice.current.playInputClick()
-    }
-}
-
-// MARK: - AirSIM 连接状态
-
-private struct ModuleStatusPopover: View {
-    @EnvironmentObject private var model: AppModel
-    let onDismiss: () -> Void
-
-    private var vowlanOnline: Bool { model.vowlan.availability.isOnlineForDisplay }
-    private var cloudOnline: Bool {
-        CloudModePreference.isEnabled()
-            && (model.cloudAgentDirectory ?? model.cloudAgentStatus)?.cloudOnline == true
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                Image(systemName: statusIcon)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(statusTint)
-                    .frame(width: 40, height: 40)
-                    .background(statusTint.opacity(0.14), in: Circle())
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(moduleStatusTitle)
-                        .font(.headline)
-                        .lineLimit(1)
-                    Text(connectionRouteTitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 8)
-                closeButton
-            }
-
-            Text(connectionDescription)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            statusGroup("AirSIM") {
-                if let current = model.currentAndroidAgent {
-                    statusRow("当前手机", current.deviceName)
-                    Divider()
-                    statusRow("电话号码", current.phoneNumber ?? "未提供")
-                    Divider()
-                }
-                statusRow("VoWLAN", vowlanOnline ? "已连接" : "未连接")
-                Divider()
-                statusRow("云端 Relay", cloudOnline ? "在线" : "未连接")
-                if model.pairedAndroidAgents.count > 1 {
-                    Divider()
-                    statusRow("已配对 Agent", "\(model.pairedAndroidAgents.count) 个")
-                }
-            }
-        }
-        .padding(18)
-        .frame(width: 300, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private var closeButton: some View {
-        if #available(iOS 26.0, *) {
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.caption.weight(.bold))
-            }
-            .buttonStyle(.glass)
-            .frame(width: 44, height: 44)
-            .accessibilityLabel(L10n.t("关闭"))
-        } else {
-            Button(action: onDismiss) {
-                Image(systemName: "xmark")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .frame(width: 44, height: 44)
-            .background(Color(uiColor: .secondarySystemFill), in: Circle())
-            .accessibilityLabel(L10n.t("关闭"))
-        }
-    }
-
-    private var moduleStatusTitle: String {
-        vowlanOnline ? "VoWLAN 在线" : (cloudOnline ? "云端在线" : "AirSIM 未连接")
-    }
-
-    private var connectionRouteTitle: String {
-        vowlanOnline ? "同一 Wi-Fi / Android 热点" : "独立 Relay"
-    }
-
-    private var connectionDescription: String {
-        if let current = model.currentAndroidAgent {
-            return "当前通过 \(current.deviceName) 提供通话；VoWLAN 与云端状态分别显示。"
-        }
-        return "请在 Android 端完成配对；如已启用云端，请检查 Relay 心跳。"
-    }
-
-    private var statusTint: Color {
-        vowlanOnline ? .green : (cloudOnline ? .blue : .red)
-    }
-
-    private var statusIcon: String {
-        vowlanOnline ? "wifi" : (cloudOnline ? "cloud.fill" : "exclamationmark.triangle.fill")
-    }
-
-    private func statusRow(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 16) {
-            Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 12)
-            Text(value)
-                .font(.subheadline.weight(.medium))
-                .multilineTextAlignment(.trailing)
-                .lineLimit(1)
-        }
-        .frame(minHeight: 34)
-    }
-
-    private func statusGroup<Content: View>(
-        _ title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-
-            VStack(spacing: 0) {
-                content()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
     }
 }
 

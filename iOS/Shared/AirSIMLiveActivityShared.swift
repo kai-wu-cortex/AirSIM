@@ -40,6 +40,14 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         let radioBand: String?
         let downloadBytesPerSecond: Double?
         let uploadBytesPerSecond: Double?
+        /// 当前用于拨号和媒体路由的 Android Agent。字段保持可选，以兼容旧版 Relay
+        /// 推送的 ContentState，并避免升级时让已存在的 Live Activity 解码失败。
+        let agentDeviceName: String?
+        let agentPhoneNumber: String?
+        let agentKind: String?
+        let pairedAgentCount: Int?
+        let vowlanOnline: Bool?
+        let cloudOnline: Bool?
 
         init(
             callID: String,
@@ -53,7 +61,13 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             networkMode: String? = nil,
             radioBand: String? = nil,
             downloadBytesPerSecond: Double? = nil,
-            uploadBytesPerSecond: Double? = nil
+            uploadBytesPerSecond: Double? = nil,
+            agentDeviceName: String? = nil,
+            agentPhoneNumber: String? = nil,
+            agentKind: String? = nil,
+            pairedAgentCount: Int? = nil,
+            vowlanOnline: Bool? = nil,
+            cloudOnline: Bool? = nil
         ) {
             self.callID = callID
             self.number = number
@@ -67,6 +81,12 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             self.radioBand = radioBand
             self.downloadBytesPerSecond = downloadBytesPerSecond
             self.uploadBytesPerSecond = uploadBytesPerSecond
+            self.agentDeviceName = agentDeviceName
+            self.agentPhoneNumber = agentPhoneNumber
+            self.agentKind = agentKind
+            self.pairedAgentCount = pairedAgentCount
+            self.vowlanOnline = vowlanOnline
+            self.cloudOnline = cloudOnline
         }
 
         enum Phase: String, Codable, Hashable {
@@ -188,7 +208,13 @@ private enum LiveActivityCallClient {
                     displayName: previous.displayName,
                     phase: .active,
                     startedAt: Date(),
-                    transport: previous.transport
+                    transport: previous.transport,
+                    agentDeviceName: previous.agentDeviceName,
+                    agentPhoneNumber: previous.agentPhoneNumber,
+                    agentKind: previous.agentKind,
+                    pairedAgentCount: previous.pairedAgentCount,
+                    vowlanOnline: previous.vowlanOnline,
+                    cloudOnline: previous.cloudOnline
                 )
                 await activity.update(ActivityContent(state: state, staleDate: nil))
             case .reject, .hangup:

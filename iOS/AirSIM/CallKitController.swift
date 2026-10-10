@@ -87,7 +87,8 @@ final class CallKitController: NSObject {
     private let provider: CXProvider
     private let callController = CXCallController()
     private(set) var audioSessionIsActive = false
-    private(set) var isAvailable = true
+    private var entitlementAvailable = true
+    private var featureEnabled = !LocalModePreference.isEnabled()
     weak var handler: (any CallKitActionHandling)?
 
     private var currentUUID: UUID?
@@ -122,6 +123,22 @@ final class CallKitController: NSObject {
 
     deinit {
         provider.invalidate()
+    }
+
+    var isAvailable: Bool { entitlementAvailable && featureEnabled }
+
+    func setEnabled(_ enabled: Bool) {
+        guard featureEnabled != enabled else { return }
+        featureEnabled = enabled
+        guard !enabled else { return }
+        if let uuid = currentUUID, systemCallReported {
+            provider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+        }
+        audioSessionIsActive = false
+        resetCurrentCall()
+#if DEBUG
+        debugLog("本地模式已关闭 CallKit")
+#endif
     }
 
     var managesCurrentCall: Bool {
@@ -449,7 +466,7 @@ final class CallKitController: NSObject {
               error.code == CXErrorCodeRequestTransactionError.Code.unentitled.rawValue else {
             return false
         }
-        isAvailable = false
+        entitlementAvailable = false
         audioSessionIsActive = false
         debugLog("CallKit 被系统判定为无权限，已降级到 App 内通话")
         return true

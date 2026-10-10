@@ -88,15 +88,9 @@ struct AirSIMLiveActivityWidget: Widget {
     ) -> some View {
         switch state.phase {
         case .standby:
-            if state.transport == .vowlan {
-                Text("VoWLAN")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.green)
-            }
+            pairedAgentCountView(state)
         case .cloudStandby:
-            Text("在线")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.cyan)
+            pairedAgentCountView(state)
         case .active:
             Text(state.startedAt, style: .timer)
                 .font(.caption.weight(.semibold).monospacedDigit())
@@ -133,7 +127,7 @@ struct AirSIMLiveActivityWidget: Widget {
                     if state.phase == .standby {
                         HStack(spacing: 5) {
                             Circle().fill(Color.green).frame(width: 7, height: 7)
-                            Text(state.transport == .vowlan ? "VoWLAN 在线" : "模块在线")
+                            Text(connectionStatusLine(state) ?? "模块在线")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.green)
                         }
@@ -160,6 +154,10 @@ struct AirSIMLiveActivityWidget: Widget {
                 }
                 Spacer(minLength: 8)
                 lockScreenMetric(state)
+            }
+
+            if hasAgentMetadata(state) {
+                agentSummaryRow(state)
             }
 
             if state.phase != .standby && state.phase != .cloudStandby && state.phase != .offline {
@@ -210,20 +208,121 @@ struct AirSIMLiveActivityWidget: Widget {
     ) -> some View {
         switch state.phase {
         case .standby:
-            standbyDashboard(state)
+            VStack(spacing: 8) {
+                if hasAgentMetadata(state) {
+                    agentSummaryRow(state)
+                }
+                standbyDashboard(state)
+            }
         case .cloudStandby:
-            Label("Agent 已连接安全公网中继", systemImage: "lock.icloud.fill")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.white.opacity(0.76))
-                .padding(.top, 4)
+            VStack(spacing: 8) {
+                if hasAgentMetadata(state) {
+                    agentSummaryRow(state)
+                }
+                Label("Agent 已连接安全公网中继", systemImage: "lock.icloud.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.76))
+            }
+            .padding(.top, 4)
         case .offline:
-            Label("等待三星网络恢复", systemImage: "wifi.exclamationmark")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.58))
-                .padding(.top, 4)
+            VStack(spacing: 8) {
+                if hasAgentMetadata(state) {
+                    agentSummaryRow(state)
+                }
+                Label("等待 Android Agent 恢复", systemImage: "wifi.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+            .padding(.top, 4)
         case .incoming, .active, .held:
-            actionButtons(state)
+            VStack(spacing: 8) {
+                if hasAgentMetadata(state) {
+                    agentSummaryRow(state)
+                }
+                actionButtons(state)
+            }
         }
+    }
+
+    private func pairedAgentCountView(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> some View {
+        Group {
+            if let count = state.pairedAgentCount, count > 1 {
+                Text("\(count) 台")
+            } else {
+                Image(systemName: state.phase == .cloudStandby ? "icloud.fill" : "smartphone")
+            }
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(tint(for: state.phase))
+    }
+
+    private func agentSummaryRow(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: "smartphone")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.green)
+                .frame(width: 24, height: 24)
+                .background(Color.green.opacity(0.16), in: Circle())
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(nonEmpty(state.agentDeviceName) ?? "Android Agent")
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                    if let count = state.pairedAgentCount, count > 1 {
+                        Text("共 \(count) 台")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.52))
+                    }
+                }
+                Text(agentDetailLine(state))
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+
+            Spacer(minLength: 4)
+            connectionBadges(state)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+        }
+    }
+
+    private func connectionBadges(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> some View {
+        HStack(spacing: 5) {
+            if vowlanIsOnline(state) {
+                connectionBadge("VoWLAN", systemImage: "wifi", color: .green)
+            }
+            if cloudIsOnline(state) {
+                connectionBadge("云端", systemImage: "icloud.fill", color: .cyan)
+            }
+        }
+    }
+
+    private func connectionBadge(
+        _ title: String,
+        systemImage: String,
+        color: Color
+    ) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.15), in: Capsule())
+            .labelStyle(.titleAndIcon)
     }
 
     @ViewBuilder
@@ -386,6 +485,54 @@ struct AirSIMLiveActivityWidget: Widget {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private func hasAgentMetadata(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> Bool {
+        nonEmpty(state.agentDeviceName) != nil
+            || nonEmpty(state.agentPhoneNumber) != nil
+            || (state.pairedAgentCount ?? 0) > 0
+    }
+
+    private func agentDetailLine(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> String {
+        var parts: [String] = []
+        if let number = nonEmpty(state.agentPhoneNumber) {
+            parts.append("SIM \(number)")
+        }
+        parts.append(agentKindTitle(state.agentKind))
+        return parts.joined(separator: " · ")
+    }
+
+    private func agentKindTitle(_ kind: String?) -> String {
+        switch kind {
+        case "standalone": return "Standalone"
+        case "avf": return "AVF Agent"
+        default: return "Android Agent"
+        }
+    }
+
+    private func vowlanIsOnline(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> Bool {
+        state.vowlanOnline == true || state.transport == .vowlan
+    }
+
+    private func cloudIsOnline(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> Bool {
+        state.cloudOnline == true || state.transport == .cloud
+    }
+
+    private func connectionStatusLine(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> String? {
+        var values: [String] = []
+        if vowlanIsOnline(state) { values.append("VoWLAN 在线") }
+        if cloudIsOnline(state) { values.append("云端在线") }
+        return values.isEmpty ? nil : values.joined(separator: " · ")
+    }
+
     private func standbyNetworkLine(
         _ state: AirSIMCallActivityAttributes.ContentState
     ) -> String {
@@ -406,9 +553,9 @@ struct AirSIMLiveActivityWidget: Widget {
     ) -> String {
         switch state.phase {
         case .standby:
-            return standbyCarrierName(state)
+            return nonEmpty(state.agentDeviceName) ?? standbyCarrierName(state)
         case .cloudStandby:
-            return "云端在线"
+            return nonEmpty(state.agentDeviceName) ?? "云端在线"
         case .incoming, .active, .held, .offline:
             return state.displayName
         }
@@ -472,13 +619,17 @@ struct AirSIMLiveActivityWidget: Widget {
     private func activityStatusLine(
         _ state: AirSIMCallActivityAttributes.ContentState
     ) -> String {
-        guard let transport = state.transport else { return state.phase.title }
         switch state.phase {
         case .incoming, .active, .held:
+            guard let transport = state.transport else { return state.phase.title }
             return "\(state.phase.title) · \(transport.title)"
         case .standby:
-            return "\(transport.title) 在线"
-        case .cloudStandby, .offline:
+            if let status = connectionStatusLine(state) { return status }
+            if let transport = state.transport { return "\(transport.title) 在线" }
+            return state.phase.title
+        case .cloudStandby:
+            return connectionStatusLine(state) ?? state.phase.title
+        case .offline:
             return state.phase.title
         }
     }

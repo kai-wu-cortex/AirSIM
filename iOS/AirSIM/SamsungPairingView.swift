@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SamsungPairingView: View {
     @EnvironmentObject private var model: AppModel
+    @AppStorage(LocalModePreference.key) private var localModeEnabled = false
     @StateObject private var browser = SamsungPairingBrowser()
     @State private var code = ""
     @State private var pairingServiceID: String?
@@ -9,6 +10,16 @@ struct SamsungPairingView: View {
 
     var body: some View {
         Form {
+            if localModeEnabled {
+                Section {
+                    Label("本地模式配对", systemImage: "wifi")
+                        .foregroundStyle(.green)
+                    Text("配对包只包含 VoWLAN 密钥，不检查或写入 Relay、APNs、PushKit 和 CallKit 参数。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("连接步骤") {
                 Label("让三星与本机连接同一 Wi-Fi", systemImage: "wifi")
                 Label("也可让本机连接三星移动热点", systemImage: "personalhotspot")
@@ -55,7 +66,9 @@ struct SamsungPairingView: View {
     @MainActor
     private func pair(_ service: SamsungPairingService) async {
         pairingServiceID = service.id
-        message = "正在加密并写入 Linux Agent…"
+        message = localModeEnabled
+            ? "正在加密并写入 VoWLAN 本地密钥…"
+            : "正在加密并写入 Android Agent…"
 #if DEBUG
         print("[AirSIM Pair] claim_started session=\(service.sessionID)")
 #endif

@@ -3,6 +3,7 @@ import CryptoKit
 import Foundation
 import PushKit
 import Security
+import UIKit
 
 enum VoIPPushPayloadError: LocalizedError {
     case unsupportedEvent
@@ -177,8 +178,17 @@ enum CloudModePreference {
     static let key = "airsim.cloud-audio-relay-enabled"
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard !LocalModePreference.isEnabled(defaults: defaults) else { return false }
         guard defaults.object(forKey: key) != nil else { return true }
         return defaults.bool(forKey: key)
+    }
+}
+
+enum LocalModePreference {
+    static let key = "airsim.local-only-mode-enabled"
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: key)
     }
 }
 
@@ -493,8 +503,9 @@ enum APNsEnvironment {
     }
 }
 
-struct AgentPushRegistration: Codable, Equatable, Sendable {
+struct AgentPushRegistration: Encodable, Equatable, Sendable {
     let cloudModeEnabled: Bool
+    var localMode: Bool = false
     let deviceID: String
     let deviceSecret: String
     let token: String
@@ -512,6 +523,7 @@ struct AgentPushRegistration: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case cloudModeEnabled = "cloud_enabled"
+        case localMode = "local_mode"
         case deviceID = "device_id"
         case deviceSecret = "device_secret"
         case token = "voip_token"
@@ -526,6 +538,46 @@ struct AgentPushRegistration: Codable, Equatable, Sendable {
         case appMediaCapabilities = "app_media_capabilities"
         case forceLegacyPCM = "force_legacy_pcm"
         case vowlanSecret = "vowlan_secret"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(cloudModeEnabled, forKey: .cloudModeEnabled)
+        try values.encode(localMode, forKey: .localMode)
+        try values.encodeIfPresent(vowlanSecret, forKey: .vowlanSecret)
+        guard !localMode else { return }
+
+        try values.encode(deviceID, forKey: .deviceID)
+        try values.encode(deviceSecret, forKey: .deviceSecret)
+        try values.encode(token, forKey: .token)
+        try values.encode(alertToken, forKey: .alertToken)
+        try values.encode(watchVoIPToken, forKey: .watchVoIPToken)
+        try values.encode(watchBundleID, forKey: .watchBundleID)
+        try values.encode(liveActivityPushToStartToken, forKey: .liveActivityPushToStartToken)
+        try values.encode(bundleID, forKey: .bundleID)
+        try values.encode(environment, forKey: .environment)
+        try values.encode(relayURL, forKey: .relayURL)
+        try values.encode(mediaTransport, forKey: .mediaTransport)
+        try values.encode(appMediaCapabilities, forKey: .appMediaCapabilities)
+        try values.encode(forceLegacyPCM, forKey: .forceLegacyPCM)
+    }
+
+    static func local(vowlanSecret: String) -> Self {
+        .init(
+            cloudModeEnabled: false,
+            localMode: true,
+            deviceID: "",
+            deviceSecret: "",
+            token: "",
+            alertToken: "",
+            watchVoIPToken: "",
+            watchBundleID: "",
+            liveActivityPushToStartToken: "",
+            bundleID: "",
+            environment: "",
+            relayURL: "",
+            vowlanSecret: vowlanSecret
+        )
     }
 }
 
@@ -656,9 +708,11 @@ final class VoIPPushController: NSObject {
     private var registrationRetryTask: Task<Void, Never>?
     private var latestRegistrationAPI = AirSIMAPI()
     private var activityKitRegistrationStarted = false
+    private var activityKitRegistrationTasks: [Task<Void, Never>] = []
     private var observedActivityIDs = Set<String>()
 
     func start() {
+        guard !LocalModePreference.isEnabled() else { return }
         startActivityKitRegistration()
         if let registry {
             // 重新赋值会让系统在授权或网络状态变化后再次核对现有凭据。
@@ -677,13 +731,39 @@ final class VoIPPushController: NSObject {
 #endif
     }
 
+    func setLocalModeEnabled(_ enabled: Bool) {
+        resetRegistrationBackoff()
+        registrationRetryTask?.cancel()
+        registrationRetryTask = nil
+        registrationPending = false
+
+        if enabled {
+            registry?.desiredPushTypes = []
+            registry?.delegate = nil
+            registry = nil
+            activityKitRegistrationTasks.forEach { $0.cancel() }
+            activityKitRegistrationTasks.removeAll()
+            activityKitRegistrationStarted = false
+            observedActivityIDs.removeAll()
+            UIApplication.shared.unregisterForRemoteNotifications()
+            Task { await IPhoneCloudCallSession.shared.end() }
+#if DEBUG
+            print("[AirSIM Local] 已停用 PushKit、APNs 与 Relay 注册")
+#endif
+        } else {
+            start()
+            UIApplication.shared.registerForRemoteNotifications()
+        }
+    }
+
     private func startActivityKitRegistration() {
-        guard !activityKitRegistrationStarted else { return }
+        guard !LocalModePreference.isEnabled(), !activityKitRegistrationStarted else { return }
         if #available(iOS 17.2, *) {
             activityKitRegistrationStarted = true
-            Task { @MainActor [weak self] in
+            let pushToStartTask = Task { @MainActor [weak self] in
                 for await token in Activity<AirSIMCallActivityAttributes>.pushToStartTokenUpdates {
-                    guard let self else { return }
+                    guard let self, !Task.isCancelled else { return }
+                    guard !LocalModePreference.isEnabled() else { continue }
                     UserDefaults.standard.set(
                         VoIPPushToken.hex(token),
                         forKey: Keys.liveActivityPushToStartToken
@@ -692,19 +772,22 @@ final class VoIPPushController: NSObject {
                     await syncRegistration()
                 }
             }
-            Task { @MainActor [weak self] in
+            let activityUpdateTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 for activity in Activity<AirSIMCallActivityAttributes>.activities {
                     observeLiveActivity(activity)
                 }
                 for await activity in Activity<AirSIMCallActivityAttributes>.activityUpdates {
+                    guard !Task.isCancelled else { return }
                     observeLiveActivity(activity)
                 }
             }
+            activityKitRegistrationTasks = [pushToStartTask, activityUpdateTask]
         }
     }
 
     func observeLiveActivity(_ activity: Activity<AirSIMCallActivityAttributes>) {
+        guard !LocalModePreference.isEnabled() else { return }
         guard observedActivityIDs.insert(activity.id).inserted else { return }
         Task { @MainActor [weak self] in
             for await token in activity.pushTokenUpdates {
@@ -723,6 +806,7 @@ final class VoIPPushController: NSObject {
         activityID: String,
         callID: String
     ) async {
+        guard !LocalModePreference.isEnabled() else { return }
         guard let registration = currentRegistration(),
               let url = RelayEndpoint.url(
                 base: registration.relayURL,
@@ -798,6 +882,7 @@ final class VoIPPushController: NSObject {
     }
 
     func syncRegistration(with requestedAPI: AirSIMAPI? = nil) async {
+        guard !LocalModePreference.isEnabled() else { return }
         let api = requestedAPI ?? latestRegistrationAPI
         if PushRegistrationAttemptPolicy.shouldResetBackoff(
             previousRoute: latestRegistrationAPI.route,
@@ -997,7 +1082,7 @@ final class VoIPPushController: NSObject {
     }
 
     private func scheduleRegistrationRetry() {
-        guard registrationRetryTask == nil else { return }
+        guard !LocalModePreference.isEnabled(), registrationRetryTask == nil else { return }
         registrationRetryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(30))
             guard !Task.isCancelled, let self else { return }
@@ -1007,6 +1092,7 @@ final class VoIPPushController: NSObject {
     }
 
     func setCloudModeEnabled(_ enabled: Bool, with api: AirSIMAPI = AirSIMAPI()) async {
+        guard !LocalModePreference.isEnabled() else { return }
         resetRegistrationBackoff()
         WatchCallCoordinator.shared.refreshMediaPolicy()
         // PushKit、CallKit 与 APNs 是本地 USB 模式的通知控制面，不能跟随
@@ -1284,12 +1370,17 @@ final class VoIPPushController: NSObject {
     }
 
     func pairingRegistration() -> AgentPushRegistration? {
+        if LocalModePreference.isEnabled() {
+            guard let secret = try? VoWLANCredentialStore.loadOrCreate().encodedSecret else { return nil }
+            return .local(vowlanSecret: secret)
+        }
         guard var registration = currentRegistration() else { return nil }
         registration.vowlanSecret = (try? VoWLANCredentialStore.loadOrCreate().encodedSecret)
         return registration
     }
 
     private func currentRegistration() -> AgentPushRegistration? {
+        guard !LocalModePreference.isEnabled() else { return nil }
         guard let token = UserDefaults.standard.string(forKey: Keys.token), !token.isEmpty else {
 #if DEBUG
             print("[AirSIM PushKit] 暂无 VoIP token，跳过同步")
@@ -1309,6 +1400,7 @@ final class VoIPPushController: NSObject {
         let capabilities = CloudModeCapabilities(isEnabled: CloudModePreference.isEnabled())
         return AgentPushRegistration(
             cloudModeEnabled: capabilities.notificationRelay,
+            localMode: false,
             deviceID: deviceID,
             deviceSecret: secret,
             token: token,
@@ -1395,6 +1487,10 @@ extension VoIPPushController: PKPushRegistryDelegate {
         completion: @escaping () -> Void
     ) {
         guard type == .voIP else {
+            completion()
+            return
+        }
+        guard !LocalModePreference.isEnabled() else {
             completion()
             return
         }

@@ -4,6 +4,8 @@ import SwiftUI
 struct AirSIMFirstConnectionView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("airsim.first-connection-complete") private var completed = false
+    @AppStorage(LocalModePreference.key) private var localModeEnabled = false
+    @AppStorage(CloudModePreference.key) private var cloudModeEnabled = true
     @State private var showingPairing = false
 
     var body: some View {
@@ -31,6 +33,20 @@ struct AirSIMFirstConnectionView: View {
                 .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+
+                Toggle(isOn: $localModeEnabled) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label("仅本地模式", systemImage: "wifi")
+                            .font(.headline)
+                        Text("只使用 VoWLAN，不需要 Relay、PushKit 或 CallKit")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: localModeEnabled) { enabled in
+                    if enabled { cloudModeEnabled = false }
+                    model.setLocalModeEnabled(enabled)
+                }
 
                 Spacer()
 
@@ -73,6 +89,7 @@ struct AirSIMSettingsView: View {
 
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
+    @AppStorage(LocalModePreference.key) private var localModeEnabled = false
     @AppStorage(CloudModePreference.key) private var cloudModeEnabled = true
     @State private var relayURL = RelayConfiguration.effectiveURL(
         stored: UserDefaults.standard.string(forKey: "airsim.push-relay-url"),
@@ -87,15 +104,36 @@ struct AirSIMSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Toggle(isOn: $localModeEnabled) {
+                        Label("仅本地模式", systemImage: "wifi")
+                    }
+                    .onChange(of: localModeEnabled) { enabled in
+                        selfTestTask?.cancel()
+                        selfTestPhase = .idle
+                        selfTestReport = nil
+                        if enabled { cloudModeEnabled = false }
+                        model.setLocalModeEnabled(enabled)
+                    }
+                } header: {
+                    Text("运行模式")
+                } footer: {
+                    Text(localModeEnabled
+                        ? "仅使用同一 Wi-Fi 或手机热点下的 VoWLAN。不会注册 Relay、APNs、PushKit 或 CallKit。"
+                        : "关闭后可按需启用云端 Relay、PushKit 和 CallKit。")
+                }
+
                 Section("当前连接") {
                     LabeledContent("当前模式", value: model.connectionModePresentation.title)
                     LabeledContent("连接状态", value: model.connectionModePresentation.status)
                     LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
                     LabeledContent(
                         "云端 Relay",
-                        value: !cloudModeEnabled
+                        value: localModeEnabled
+                            ? "本地模式已关闭"
+                            : (!cloudModeEnabled
                             ? "已关闭"
-                            : (model.cloudAgentStatus?.cloudOnline == true ? "Agent 在线" : "不可达")
+                            : (model.cloudAgentStatus?.cloudOnline == true ? "Agent 在线" : "不可达"))
                     )
                     Text(model.connectionModePresentation.detail)
                         .font(.footnote)
@@ -124,6 +162,7 @@ struct AirSIMSettingsView: View {
                     Toggle(isOn: $cloudModeEnabled) {
                         Label("远程通话与短信", systemImage: "cloud")
                     }
+                    .disabled(localModeEnabled)
                     .onChange(of: cloudModeEnabled) { enabled in
                         selfTestTask?.cancel()
                         selfTestPhase = .idle
@@ -142,6 +181,7 @@ struct AirSIMSettingsView: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .disabled(localModeEnabled)
                     Button("保存 Relay 地址") {
                         VoIPPushController.shared.updateRelayURL(relayURL)
                         selfTestTask?.cancel()
@@ -155,6 +195,7 @@ struct AirSIMSettingsView: View {
                         }
                         message = "地址已保存；配对后自动注册。"
                     }
+                    .disabled(localModeEnabled)
                     if let message { Text(message).foregroundStyle(.secondary) }
                 } header: {
                     Text("云端 Relay")
@@ -174,7 +215,7 @@ struct AirSIMSettingsView: View {
                             }
                         }
                     }
-                    .disabled(selfTestPhase == .running)
+                    .disabled(localModeEnabled || selfTestPhase == .running)
 
                     if let report = selfTestReport {
                         ForEach(report.steps) { step in
@@ -199,7 +240,9 @@ struct AirSIMSettingsView: View {
                 } header: {
                     Text("云端模式自检")
                 } footer: {
-                    Text("依次验证本机 Push 凭据、AirSIM Relay 身份、设备注册和 AVF Agent 最近 90 秒心跳；不会拨号或发送短信。")
+                    Text(localModeEnabled
+                        ? "本地模式不运行云端自检。"
+                        : "依次验证本机 Push 凭据、AirSIM Relay 身份、设备注册和 Agent 最近 90 秒心跳；不会拨号或发送短信。")
                 }
 
                 Section("关于") {
@@ -213,7 +256,9 @@ struct AirSIMSettingsView: View {
             }
             .navigationTitle("设置")
             .task {
-                await model.refreshCloudStatusForDiagnostics()
+                if !localModeEnabled {
+                    await model.refreshCloudStatusForDiagnostics()
+                }
             }
             .onDisappear {
                 selfTestTask?.cancel()

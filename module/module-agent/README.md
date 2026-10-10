@@ -2,7 +2,7 @@
 
 Agent 运行在三星 Android 的 AVF Linux 环境中，连接三星控制 App、通话音频桥、Cloudflare Relay 与 iPhone/Apple Watch 客户端。
 
-当前 Agent 发布为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包 `0.4.6-1`），配套 Android/iOS 应用发布为 [`v0.9.3`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.3)。维护者 Relay 是 `https://airsim-push.remotepilot.site`；`https://push.remotepilot.site` 仅属于 DJOneHub。
+当前 Agent 发布为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包 `0.4.6-1`），配套 Android/iOS 应用发布为 [`v0.9.4`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.4)。维护者 Relay 是 `https://airsim-push.remotepilot.site`；`https://push.remotepilot.site` 仅属于 DJOneHub。
 
 首次安装、控制令牌配对、`8575` Agent 可达但 `8576` installerd 不可用、以及 Terminal 启动冲突的无损排障步骤，统一见 [AVF 安装指南](../../docs/AVF_INSTALL_GUIDE.md)。`/api/health` 成功不代表安装服务或配对已经就绪。
 

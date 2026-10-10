@@ -11,6 +11,24 @@ enum LiveActivityCreationPolicy {
     }
 }
 
+struct LiveActivityAgentSnapshot: Equatable {
+    let deviceName: String?
+    let phoneNumber: String?
+    let agentKind: String?
+    let pairedAgentCount: Int
+    let vowlanOnline: Bool
+    let cloudOnline: Bool
+
+    init(agent: AndroidAgentPresentation?, pairedAgentCount: Int) {
+        deviceName = agent?.deviceName
+        phoneNumber = agent?.phoneNumber
+        agentKind = agent?.agentKind
+        self.pairedAgentCount = pairedAgentCount
+        vowlanOnline = agent?.vowlanOnline == true
+        cloudOnline = agent?.cloudOnline == true
+    }
+}
+
 enum LiveActivityStateBuilder {
     static func make(
         call: CallRecord?,
@@ -19,6 +37,7 @@ enum LiveActivityStateBuilder {
         cloudOnline: Bool = false,
         transport: AirSIMCallActivityAttributes.ContentState.Transport? = nil,
         radio: ModemStatus?,
+        agent: LiveActivityAgentSnapshot? = nil,
         idleStartedAt: Date,
         downloadBytesPerSecond: Double? = nil,
         uploadBytesPerSecond: Double? = nil
@@ -31,7 +50,13 @@ enum LiveActivityStateBuilder {
                 number: "",
                 displayName: "模块离线",
                 phase: .offline,
-                startedAt: idleStartedAt
+                startedAt: idleStartedAt,
+                agentDeviceName: agent?.deviceName,
+                agentPhoneNumber: agent?.phoneNumber,
+                agentKind: agent?.agentKind,
+                pairedAgentCount: agent?.pairedAgentCount,
+                vowlanOnline: agent?.vowlanOnline,
+                cloudOnline: agent?.cloudOnline
             )
         }
         guard let call else {
@@ -48,7 +73,13 @@ enum LiveActivityStateBuilder {
                 networkMode: radio?.networkMode,
                 radioBand: radio?.radioBand,
                 downloadBytesPerSecond: nil,
-                uploadBytesPerSecond: nil
+                uploadBytesPerSecond: nil,
+                agentDeviceName: agent?.deviceName,
+                agentPhoneNumber: agent?.phoneNumber,
+                agentKind: agent?.agentKind,
+                pairedAgentCount: agent?.pairedAgentCount,
+                vowlanOnline: agent?.vowlanOnline,
+                cloudOnline: agent?.cloudOnline
             )
         }
 
@@ -67,7 +98,13 @@ enum LiveActivityStateBuilder {
             displayName: callerName?.isEmpty == false ? callerName! : number,
             phase: phase,
             startedAt: call.startedAt,
-            transport: transport
+            transport: transport,
+            agentDeviceName: agent?.deviceName,
+            agentPhoneNumber: agent?.phoneNumber,
+            agentKind: agent?.agentKind,
+            pairedAgentCount: agent?.pairedAgentCount,
+            vowlanOnline: agent?.vowlanOnline,
+            cloudOnline: agent?.cloudOnline
         )
     }
 }
@@ -95,6 +132,7 @@ final class LiveActivityController {
         cloudOnline: Bool = false,
         transport: AirSIMCallActivityAttributes.ContentState.Transport? = nil,
         radio: ModemStatus?,
+        agent: LiveActivityAgentSnapshot? = nil,
         appIsActive: Bool,
         downloadBytesPerSecond: Double? = nil,
         uploadBytesPerSecond: Double? = nil
@@ -123,6 +161,7 @@ final class LiveActivityController {
                     cloudOnline: cloudOnline,
                     transport: transport,
                     radio: radio,
+                    agent: agent,
                     idleStartedAt: idleStartedAt,
                     downloadBytesPerSecond: downloadBytesPerSecond,
                     uploadBytesPerSecond: uploadBytesPerSecond
@@ -153,6 +192,7 @@ final class LiveActivityController {
                 cloudOnline: cloudOnline,
                 transport: transport,
                 radio: radio,
+                agent: agent,
                 idleStartedAt: idleStartedAt,
                 downloadBytesPerSecond: downloadBytesPerSecond,
                 uploadBytesPerSecond: uploadBytesPerSecond
@@ -172,8 +212,15 @@ final class LiveActivityController {
         }
     }
 
-    func markOffline(appIsActive: Bool) async {
-        await update(call: nil, callerName: nil, moduleOnline: false, radio: nil, appIsActive: appIsActive)
+    func markOffline(agent: LiveActivityAgentSnapshot? = nil, appIsActive: Bool) async {
+        await update(
+            call: nil,
+            callerName: nil,
+            moduleOnline: false,
+            radio: nil,
+            agent: agent,
+            appIsActive: appIsActive
+        )
     }
 
     func stop() async {

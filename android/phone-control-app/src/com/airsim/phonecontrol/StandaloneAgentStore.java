@@ -36,7 +36,9 @@ final class StandaloneAgentStore {
     synchronized JSONObject saveRegistration(String encoded) throws Exception {
         JSONObject value = new JSONObject(encoded);
         validateRegistration(value);
-        value.put("device_id", value.getString("device_id").trim());
+        boolean localMode = value.optBoolean("local_mode", false);
+        if (localMode) value.put("cloud_enabled", false);
+        if (value.has("device_id")) value.put("device_id", value.optString("device_id", "").trim());
         value.put("relay_url", trimTrailingSlash(value.optString("relay_url", "").trim()));
         for (String key : new String[]{"voip_token", "alert_token", "watch_voip_token",
                 "live_activity_push_to_start_token"}) {
@@ -48,6 +50,7 @@ final class StandaloneAgentStore {
 
     boolean configured() {
         JSONObject value = registration();
+        if (value != null && value.optBoolean("local_mode", false)) return true;
         return value != null && !value.optString("device_id", "").isBlank()
                 && !value.optString("device_secret", "").isBlank()
                 && !value.optString("relay_url", "").isBlank();
@@ -55,7 +58,18 @@ final class StandaloneAgentStore {
 
     boolean cloudEnabled() {
         JSONObject value = registration();
-        return value != null && value.optBoolean("cloud_enabled", true);
+        return value != null && !value.optBoolean("local_mode", false)
+                && value.optBoolean("cloud_enabled", true);
+    }
+
+    synchronized JSONObject setCloudEnabled(boolean enabled) throws Exception {
+        JSONObject value = registration();
+        if (value == null) throw new IllegalStateException("尚未完成配对");
+        if (enabled && value.optBoolean("local_mode", false)) {
+            throw new IllegalArgumentException("本地模式不能启用云端模式");
+        }
+        value.put("cloud_enabled", enabled);
+        return saveRegistration(value.toString());
     }
 
     void recordSuccess() {
@@ -78,8 +92,11 @@ final class StandaloneAgentStore {
     JSONObject pushStatus() throws Exception {
         JSONObject registration = registration();
         boolean configured = registration != null;
+        boolean localMode = configured && registration.optBoolean("local_mode", false);
         JSONObject result = new JSONObject()
-                .put("cloud_enabled", configured && registration.optBoolean("cloud_enabled", true))
+                .put("local_mode", localMode)
+                .put("cloud_enabled", configured && !localMode
+                        && registration.optBoolean("cloud_enabled", true))
                 .put("configured", configured)
                 .put("call_push_ready", configured && (!registration.optString("voip_token", "").isEmpty()
                         || !registration.optString("watch_voip_token", "").isEmpty()))
@@ -95,6 +112,12 @@ final class StandaloneAgentStore {
     }
 
     static void validateRegistration(JSONObject value) throws Exception {
+        if (value.optBoolean("local_mode", false)) {
+            if (value.optBoolean("cloud_enabled", false)) {
+                throw new IllegalArgumentException("本地模式不能启用云端模式");
+            }
+            return;
+        }
         String deviceID = value.optString("device_id", "").trim();
         String secret = value.optString("device_secret", "");
         String bundleID = value.optString("bundle_id", "").trim();

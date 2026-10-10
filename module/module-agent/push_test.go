@@ -81,6 +81,33 @@ func TestPushRegistrationAcceptsEitherTokenButNotNeither(t *testing.T) {
 	}
 }
 
+func TestLocalModeRegistrationNeedsNoRelayOrAPNsToken(t *testing.T) {
+	disabled := false
+	registration := pushRegistration{LocalMode: true, CloudEnabled: &disabled}
+	if err := validatePushRegistration(registration); err != nil {
+		t.Fatalf("本地模式注册不应依赖云端参数: %v", err)
+	}
+
+	enabled := true
+	registration.CloudEnabled = &enabled
+	if err := validatePushRegistration(registration); err == nil {
+		t.Fatal("本地模式不能同时启用云端模式")
+	}
+}
+
+func TestLocalModeStatusIsConfiguredButCloudDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "push.json")
+	manager := newPushManager(path)
+	disabled := false
+	if err := manager.store(pushRegistration{LocalMode: true, CloudEnabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
+	status := manager.status()
+	if !status.Configured || status.CloudEnabled || status.CallPushReady || status.MessagePushReady {
+		t.Fatalf("本地模式状态不匹配: %#v", status)
+	}
+}
+
 func TestPushRegistrationPersistsWithoutLeakingTokensOrSecretInStatus(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "push.json")
 	manager := newPushManager(path)

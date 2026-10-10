@@ -24,6 +24,7 @@ import (
 // relay is the only component that owns the Apple .p8 key.
 type pushRegistration struct {
 	CloudEnabled                 *bool    `json:"cloud_enabled,omitempty"`
+	LocalMode                    bool     `json:"local_mode,omitempty"`
 	DeviceID                     string   `json:"device_id"`
 	DeviceSecret                 string   `json:"device_secret"`
 	VoIPToken                    string   `json:"voip_token,omitempty"`
@@ -284,6 +285,12 @@ func validatePushRegistration(registration pushRegistration) error {
 	registration.DeviceID = strings.TrimSpace(registration.DeviceID)
 	registration.BundleID = strings.TrimSpace(registration.BundleID)
 	registration.RelayURL = strings.TrimSpace(registration.RelayURL)
+	if registration.LocalMode {
+		if registration.CloudEnabled != nil && *registration.CloudEnabled {
+			return errors.New("本地模式不能启用云端模式")
+		}
+		return nil
+	}
 	if registration.DeviceID == "" || len(registration.DeviceID) > 128 {
 		return errors.New("device_id 无效")
 	}
@@ -331,6 +338,10 @@ func (p *pushManager) store(registration pushRegistration) error {
 	registration.AlertToken = strings.ToLower(registration.AlertToken)
 	registration.WatchVoIPToken = strings.ToLower(registration.WatchVoIPToken)
 	registration.LiveActivityPushToStartToken = strings.ToLower(registration.LiveActivityPushToStartToken)
+	if registration.LocalMode {
+		disabled := false
+		registration.CloudEnabled = &disabled
+	}
 	if err := validatePushRegistration(registration); err != nil {
 		return err
 	}
@@ -410,6 +421,9 @@ func syncPushConfigDirectory(path string) error {
 }
 
 func (p *pushManager) cloudEnabledLocked() bool {
+	if p.config.LocalMode {
+		return false
+	}
 	return p.config.CloudEnabled == nil || *p.config.CloudEnabled
 }
 
@@ -417,6 +431,9 @@ func (p *pushManager) setCloudEnabled(enabled bool) error {
 	p.mu.Lock()
 	registration := p.config
 	p.mu.Unlock()
+	if registration.LocalMode && enabled {
+		return errors.New("本地模式不能启用云端模式")
+	}
 	registration.CloudEnabled = &enabled
 	return p.store(registration)
 }
@@ -428,7 +445,7 @@ func (p *pushManager) status() pushStatus {
 	baseReady := cloudEnabled && p.config.DeviceID != "" && p.config.RelayURL != ""
 	return pushStatus{
 		CloudEnabled:     cloudEnabled,
-		Configured:       baseReady && (p.config.VoIPToken != "" || p.config.AlertToken != "" || p.config.WatchVoIPToken != ""),
+		Configured:       p.config.LocalMode || baseReady && (p.config.VoIPToken != "" || p.config.AlertToken != "" || p.config.WatchVoIPToken != ""),
 		CallPushReady:    baseReady && (p.config.VoIPToken != "" || p.config.WatchVoIPToken != ""),
 		MessagePushReady: baseReady && p.config.AlertToken != "",
 		DeviceID:         p.config.DeviceID,

@@ -351,4 +351,78 @@ final class AirSIMTests: XCTestCase {
         report.update(.agentHeartbeat, state: .failed, detail: "无心跳")
         XCTAssertFalse(report.allPassed)
     }
+
+    func testLiveActivityIncludesCurrentAndroidAgentIdentity() {
+        let agent = AndroidAgentPresentation(
+            id: "samsung-1",
+            deviceName: "samsung SM-F766U",
+            phoneNumber: "+8615502030017",
+            agentKind: "standalone",
+            cloudOnline: true,
+            vowlanOnline: true,
+            isCurrent: true
+        )
+        let state = LiveActivityStateBuilder.make(
+            call: nil,
+            callerName: nil,
+            moduleOnline: true,
+            transport: .vowlan,
+            radio: nil,
+            agent: LiveActivityAgentSnapshot(agent: agent, pairedAgentCount: 2),
+            idleStartedAt: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(state.agentDeviceName, "samsung SM-F766U")
+        XCTAssertEqual(state.agentPhoneNumber, "+8615502030017")
+        XCTAssertEqual(state.agentKind, "standalone")
+        XCTAssertEqual(state.pairedAgentCount, 2)
+        XCTAssertEqual(state.vowlanOnline, true)
+        XCTAssertEqual(state.cloudOnline, true)
+    }
+
+    func testLiveActivityStateDecodesLegacyPayloadWithoutAgentFields() throws {
+        let state = AirSIMCallActivityAttributes.ContentState(
+            callID: "",
+            number: "",
+            displayName: "等待模块来电",
+            phase: .standby,
+            startedAt: Date(timeIntervalSince1970: 1),
+            transport: .vowlan
+        )
+        let encoded = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(
+            AirSIMCallActivityAttributes.ContentState.self,
+            from: encoded
+        )
+
+        XCTAssertNil(decoded.agentDeviceName)
+        XCTAssertNil(decoded.agentPhoneNumber)
+        XCTAssertNil(decoded.pairedAgentCount)
+    }
+
+    func testLocalModeForcesEffectiveCloudModeOff() {
+        let suiteName = "AirSIMTests.local-mode.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: LocalModePreference.key)
+        defaults.set(true, forKey: CloudModePreference.key)
+
+        XCTAssertTrue(LocalModePreference.isEnabled(defaults: defaults))
+        XCTAssertFalse(CloudModePreference.isEnabled(defaults: defaults))
+    }
+
+    func testLocalPairingPayloadOmitsRelayAndPushCredentials() throws {
+        let registration = AgentPushRegistration.local(vowlanSecret: "local-vowlan-secret")
+        let data = try JSONEncoder().encode(registration)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(payload["local_mode"] as? Bool, true)
+        XCTAssertEqual(payload["cloud_enabled"] as? Bool, false)
+        XCTAssertEqual(payload["vowlan_secret"] as? String, "local-vowlan-secret")
+        XCTAssertNil(payload["relay_url"])
+        XCTAssertNil(payload["device_id"])
+        XCTAssertNil(payload["device_secret"])
+        XCTAssertNil(payload["voip_token"])
+        XCTAssertNil(payload["alert_token"])
+    }
 }

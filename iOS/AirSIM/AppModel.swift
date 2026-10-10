@@ -337,7 +337,11 @@ final class AppModel: ObservableObject {
 
     init(api: AirSIMAPI = AirSIMAPI()) {
         self.api = api
+        if LocalModePreference.isEnabled() {
+            UserDefaults.standard.set(false, forKey: CloudModePreference.key)
+        }
         callKit.handler = self
+        callKit.setEnabled(!LocalModePreference.isEnabled())
         WatchCallCoordinator.shared.configure(model: self)
         WatchCallCoordinator.shared.start()
         IPhoneCloudCallSession.shared.onAudioStateChange = { [weak self] state in
@@ -446,6 +450,26 @@ final class AppModel: ObservableObject {
     func setLiveActivityEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: liveActivityKey)
         liveActivity.setEnabled(enabled)
+    }
+
+    func setLocalModeEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: LocalModePreference.key)
+        if enabled {
+            UserDefaults.standard.set(false, forKey: CloudModePreference.key)
+            cloudAgentStatus = nil
+            cloudAgentDirectory = nil
+        }
+        callKit.setEnabled(!enabled)
+        VoIPPushController.shared.setLocalModeEnabled(enabled)
+        WatchCallCoordinator.shared.refreshMediaPolicy()
+        if enabled {
+            Task { [weak self] in
+                guard let self, let (api, _) = await self.readyVoWLANRoute() else { return }
+                try? await api.setPushCloudEnabled(false)
+            }
+        }
+        objectWillChange.send()
+        if hasStarted { restartPolling() }
     }
 
     private func restartPolling() {
@@ -586,6 +610,7 @@ final class AppModel: ObservableObject {
                 moduleOnline: true,
                 transport: liveActivityTransport,
                 radio: modemStatus,
+                agent: liveActivityAgentSnapshot,
                 appIsActive: appIsActive
             )
             // CallKit 成功后由系统负责锁屏来电界面；仅在 CallKit 不可用或上报失败时发普通通知兜底。
@@ -708,6 +733,7 @@ final class AppModel: ObservableObject {
                     cloudOnline: true,
                     transport: .cloud,
                     radio: modemStatus,
+                    agent: liveActivityAgentSnapshot,
                     appIsActive: appIsActive
                 )
                 return
@@ -739,12 +765,16 @@ final class AppModel: ObservableObject {
                     cloudOnline: true,
                     transport: .cloud,
                     radio: modemStatus,
+                    agent: liveActivityAgentSnapshot,
                     appIsActive: appIsActive
                 )
             } else {
                 isReconnecting = false
                 connectionMessage = "模块本地与云端均不可达：\(error.localizedDescription)"
-                await liveActivity.markOffline(appIsActive: appIsActive)
+                await liveActivity.markOffline(
+                    agent: liveActivityAgentSnapshot,
+                    appIsActive: appIsActive
+                )
             }
         }
 
@@ -831,6 +861,15 @@ final class AppModel: ObservableObject {
         return connectionSummary == .cloudOnly ? .cloud : nil
     }
 
+    private var liveActivityAgentSnapshot: LiveActivityAgentSnapshot? {
+        let agents = pairedAndroidAgents
+        guard !agents.isEmpty else { return nil }
+        return LiveActivityAgentSnapshot(
+            agent: agents.first(where: \.isCurrent),
+            pairedAgentCount: agents.count
+        )
+    }
+
     private static func pcmRoute(for route: LocalAgentRoute) -> PCMRoute {
         switch route {
         case .moduleLocal:
@@ -863,6 +902,7 @@ final class AppModel: ObservableObject {
             moduleOnline: true,
             transport: liveActivityTransport,
             radio: modemStatus,
+            agent: liveActivityAgentSnapshot,
             appIsActive: appIsActive
         )
     }
@@ -913,8 +953,12 @@ final class AppModel: ObservableObject {
             endedAt: nil,
             missed: false
         )
-        debugDialLog("开始提交 CallKit 系统呼出")
+        debugDialLog(LocalModePreference.isEnabled() ? "本地模式直接呼出" : "开始提交 CallKit 系统呼出")
         await perform {
+            if LocalModePreference.isEnabled() {
+                try await self.callKitStart(number: number)
+                return
+            }
             do {
                 try await self.callKit.startOutgoingCall(number: number)
                 debugDialLog("CallKit 呼出事务已提交")

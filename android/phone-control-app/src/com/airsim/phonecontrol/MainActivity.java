@@ -1214,6 +1214,13 @@ public final class MainActivity extends Activity {
 
             @Override public void onSucceeded(String agentResponse) {
                 BridgeLog.info("pairing_completed");
+                boolean localMode = false;
+                try {
+                    localMode = new JSONObject(agentResponse).optBoolean("local_mode", false);
+                } catch (Exception ignored) {
+                    // Older Agent responses do not carry a mode marker.
+                }
+                boolean pairedLocally = localMode;
                 runOnUiThread(() -> {
                     cancelPairingCountdown();
                     if (pairingCodeView != null) {
@@ -1221,7 +1228,9 @@ public final class MainActivity extends Activity {
                         pairingCodeView.setTextSize(28);
                     }
                     if (pairingCountdownView != null) pairingCountdownView.setText("VoWLAN 密钥已安全保存");
-                    if (pairingStatus != null) pairingStatus.setText("iOS Push 身份已写入 Linux Agent");
+                    if (pairingStatus != null) pairingStatus.setText(pairedLocally
+                            ? "本地模式已启用，不使用 Relay 或 Push"
+                            : "iOS Push 身份已写入 Android Agent");
                     refreshAgent();
                 });
             }
