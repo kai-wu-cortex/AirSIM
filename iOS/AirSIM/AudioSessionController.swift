@@ -813,10 +813,20 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         guard !pcm.isEmpty else { return }
         queue.async { [self] in
             guard readyForPCM, let connection else { return }
-            uplinkBytes += UInt64(pcm.count)
-            uplinkPeak = max(uplinkPeak, Self.peak(of: pcm))
-            emitStatisticsIfNeeded()
-            connection.send(content: pcm, completion: .contentProcessed { _ in })
+            let attempt = generation
+            connection.send(content: pcm, completion: .contentProcessed { [weak self] error in
+                guard let self else { return }
+                self.queue.async {
+                    guard !self.stopped, self.generation == attempt else { return }
+                    if let error {
+                        self.retryOrFail("麦克风上行发送失败：\(error.localizedDescription)", attempt: attempt)
+                        return
+                    }
+                    self.uplinkBytes += UInt64(pcm.count)
+                    self.uplinkPeak = max(self.uplinkPeak, Self.peak(of: pcm))
+                    self.emitStatisticsIfNeeded()
+                }
+            })
         }
     }
 

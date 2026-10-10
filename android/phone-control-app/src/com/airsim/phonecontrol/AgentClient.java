@@ -89,8 +89,8 @@ public final class AgentClient {
             throw new IllegalArgumentException("VoWLAN route not allowed");
         }
         if (standalone != null) return standalone.forward(method, path, body);
-        return requestRaw(method, path, body, path.startsWith("/api/events") || path.startsWith("/api/calls/events")
-                ? 35_000 : 8_000);
+        return requestRaw(method, path, body, "/api/sms/send".equals(path) ? 70_000
+                : path.startsWith("/api/events") || path.startsWith("/api/calls/events") ? 35_000 : 8_000);
     }
 
     private String request(String method, String path, String body, int readTimeout) throws Exception {

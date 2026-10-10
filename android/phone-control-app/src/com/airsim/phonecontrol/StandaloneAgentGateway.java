@@ -30,6 +30,7 @@ final class StandaloneAgentGateway {
 
     private final Context context;
     private final StandaloneAgentStore store;
+    private final StandaloneSMSStore smsStore;
     private final Object callsLock = new Object();
     private final Object commandsLock = new Object();
     private final StandaloneLongPoll callEvents = new StandaloneLongPoll();
@@ -41,6 +42,7 @@ final class StandaloneAgentGateway {
     private StandaloneAgentGateway(Context context) {
         this.context = context.getApplicationContext();
         store = new StandaloneAgentStore(context);
+        smsStore = new StandaloneSMSStore(context);
     }
 
     String health() throws Exception {
@@ -86,8 +88,9 @@ final class StandaloneAgentGateway {
 
     void sendSMSEvent(String json) throws Exception {
         JSONObject event = new JSONObject(json);
-        if (store.configured() && store.cloudEnabled()) {
-            StandaloneAgentService.enqueueSMSEvent(context, event.toString());
+        if (smsStore.add(event, store.configured() && store.cloudEnabled())) {
+            agentEvents.advance();
+            if (store.configured() && store.cloudEnabled()) StandaloneAgentService.start(context);
         }
     }
 
@@ -103,8 +106,9 @@ final class StandaloneAgentGateway {
                 case "/api/calls/status" -> ok(callSnapshot().toString());
                 case "/api/calls/events" -> waitForCallEvent(pathAndQuery);
                 case "/api/events" -> waitForAgentEvent(pathAndQuery);
-                case "/api/sms" -> ok("[]");
-                case "/api/sms/status" -> ok("{\"auto_cleanup_me\":true,\"count\":0,\"last_poll_error\":\"\"}");
+                case "/api/sms" -> ok(smsStore.localMessages().toString());
+                case "/api/sms/status" -> ok(new JSONObject().put("auto_cleanup_me", true)
+                        .put("count", smsStore.pendingCount()).put("last_poll_error", "").toString());
                 case "/api/calls/audio/host/config" -> ok(new JSONObject()
                         .put("transport", "tcp_pcm_s16le").put("host", "127.0.0.1")
                         .put("port", 7580).put("sample_rate", 8000).put("channels", 1)
@@ -119,10 +123,10 @@ final class StandaloneAgentGateway {
             case "/api/push/mode" -> ok(store.setCloudEnabled(
                     input.optBoolean("enabled", false)).toString());
             case "/api/calls/dial" -> command("dial", "", input.optString("number", ""), "");
-            case "/api/calls/answer" -> command("answer", CallRepository.firstId(), "", "");
-            case "/api/calls/reject" -> command("reject", CallRepository.firstId(), "", "");
-            case "/api/calls/hangup" -> command("end", CallRepository.firstId(), "", "");
-            case "/api/calls/dtmf" -> command("dtmf", CallRepository.firstId(), input.optString("digit", ""), "");
+            case "/api/calls/answer" -> command("answer", CallRepository.idForAction("answer"), "", "");
+            case "/api/calls/reject" -> command("reject", CallRepository.idForAction("reject"), "", "");
+            case "/api/calls/hangup" -> command("end", CallRepository.idForAction("end"), "", "");
+            case "/api/calls/dtmf" -> command("dtmf", CallRepository.idForAction("dtmf"), input.optString("digit", ""), "");
             case "/api/sms/send" -> command("send_sms", "", input.optString("phone", ""),
                     input.optString("message", ""));
             case "/api/calls/audio/host/warmup" -> ok("{\"warming\":true}");
@@ -130,7 +134,11 @@ final class StandaloneAgentGateway {
                     .put("enabled", input.optBoolean("enabled", false)).toString());
             case "/api/calls/audio/mute" -> ok(new JSONObject()
                     .put("muted", input.optBoolean("muted", false)).toString());
-            case "/api/sms/ack", "/api/sms/refresh" -> ok("{\"accepted\":true}");
+            case "/api/sms/ack" -> {
+                smsStore.acknowledge(input.optJSONArray("ids") == null ? new JSONArray() : input.getJSONArray("ids"));
+                yield ok("{\"accepted\":true}");
+            }
+            case "/api/sms/refresh" -> ok("{\"accepted\":true}");
             default -> error(404, "not_found");
         };
     }
@@ -169,7 +177,7 @@ final class StandaloneAgentGateway {
                     ? "end" : command.optString("action", "");
             default -> "";
         };
-        String callID = "dial".equals(action) || "send_sms".equals(action) ? "" : CallRepository.firstId();
+        String callID = "dial".equals(action) || "send_sms".equals(action) ? "" : CallRepository.idForAction(action);
         AgentCommand local = new AgentCommand(commandID, action, callID,
                 command.optString("number", ""), command.optString("message", ""));
         AgentCommandDispatcher.Result result = execute(local);
@@ -273,7 +281,7 @@ final class StandaloneAgentGateway {
         StandaloneLongPoll.Request request = StandaloneLongPoll.parse(pathAndQuery, 15_000);
         agentEvents.awaitChange(request.after(), request.timeoutMillis());
         return ok(new JSONObject().put("revision", agentEvents.revision())
-                .put("sms_revision", 0).put("sms_pending", 0)
+                .put("sms_revision", smsStore.revision()).put("sms_pending", smsStore.pendingCount())
                 .put("call", callSnapshot()).toString());
     }
 

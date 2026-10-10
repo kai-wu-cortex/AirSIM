@@ -4,7 +4,7 @@
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
-[![Apps release](https://img.shields.io/badge/Apps-v0.9.4-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.4)
+[![Apps release](https://img.shields.io/badge/Apps-v0.9.5-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.5)
 [![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.6-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)
 [![Cloudflare Relay](https://img.shields.io/badge/Relay-airsim--push.remotepilot.site-F38020?logo=cloudflare&logoColor=white)](https://airsim-push.remotepilot.site/healthz)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
@@ -74,14 +74,14 @@ Android AirSIM Standalone APK
 
 | 组件 | 当前版本或地址 |
 | --- | --- |
-| Android Standalone APK、iPhone / Apple Watch App | [`v0.9.4`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.4) |
+| Android Standalone APK、iPhone / Apple Watch App | [`v0.9.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.5) |
 | Android AVF Linux Agent | [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包版本 `0.4.6-1`） |
 | AirSIM Relay | `0.2.1` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
 | DJOneHub Relay | `https://push.remotepilot.site`（独立服务，AirSIM 不得使用） |
 
 ### 应用发布包
 
-[AirSIM Apps v0.9.4](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.4) 新增“仅本地模式”：配对不依赖 Relay、云端身份或 APNs token，并在本地模式停用 PushKit 与 CallKit；云端模式与相关参数会被锁定。iOS 拨号页和灵动岛也完成紧凑化设计，并继续显示当前 Android 手机、号码、Agent 类型及 VoWLAN/云端状态。iOS IPA 不包含原作者 Apple 签名，必须为主 App、Watch App 和 Live Activity Extension 配置自己的 Bundle ID、Team 与 provisioning profile。摘要、安装和重签步骤见 [v0.9.4 发布说明](docs/releases/0.9.4.md)。
+[AirSIM Apps v0.9.5](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.5) 修复 Standalone 短信接收与本地交付、短信发送超时预算、前台麦克风授权和拒接目标选择；通话 DTMF 键盘使用 Liquid Glass 并提供按压反馈，本地 PCM 上行发送失败会触发重连。公开 iOS IPA 不含 Apple 签名，必须自行配置主 App、Watch App 与 Live Activity Extension 的签名。摘要、安装和重签步骤见 [v0.9.5 发布说明](docs/releases/0.9.5.md)。
 
 ### 1. 准备开发环境
 

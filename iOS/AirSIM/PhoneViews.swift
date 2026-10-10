@@ -1985,34 +1985,73 @@ private struct DTMFKeypadView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var model: AppModel
+    @State private var enteredDigits = ""
     private let rows = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["*", "0", "#"]]
 
     private var keySize: CGFloat { horizontalSizeClass == .compact ? 62 : 70 }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 14) {
-                ForEach(rows, id: \.description) { row in
-                    HStack(spacing: 24) {
-                        ForEach(row, id: \.self) { digit in
-                            Button {
-                                Task { await model.sendDTMF(digit) }
-                            } label: {
-                                Text(digit)
-                                    .font(.title)
-                                    .frame(width: keySize, height: keySize)
-                                    .background(Color(uiColor: .tertiarySystemFill), in: Circle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
+            VStack(spacing: 20) {
+                Text(enteredDigits.isEmpty ? "按键发送双音多频" : enteredDigits)
+                    .font(.system(.title3, design: .rounded).monospacedDigit())
+                    .foregroundStyle(enteredDigits.isEmpty ? .secondary : .primary)
+                    .lineLimit(1)
+                    .contentTransition(.numericText())
+                    .accessibilityLabel(enteredDigits.isEmpty ? "尚未输入按键" : enteredDigits)
+                if #available(iOS 26.0, *) {
+                    GlassEffectContainer(spacing: 16) { keypad }
+                } else {
+                    keypad
                 }
             }
-            .padding()
-            .navigationTitle("DTMF")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+            .navigationTitle("通话键盘")
             .toolbar { Button(L10n.t("取消")) { dismiss() } }
         }
         .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
+        .presentationDragIndicator(.hidden)
+    }
+
+    private var keypad: some View {
+        VStack(spacing: 16) {
+            ForEach(rows, id: \.description) { row in
+                HStack(spacing: 24) {
+                    ForEach(row, id: \.self) { digit in
+                        Button {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            enteredDigits = String((enteredDigits + digit).suffix(18))
+                            Task { await model.sendDTMF(digit) }
+                        } label: {
+                            Text(digit)
+                                .font(.system(size: 29, weight: .medium, design: .rounded))
+                                .frame(width: keySize, height: keySize)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(DTMFGlassButtonStyle())
+                        .accessibilityLabel("发送 DTMF \(digit)")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct DTMFGlassButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Group {
+            if #available(iOS 26.0, *) {
+                configuration.label
+                    .glassEffect(.regular.tint(configuration.isPressed ? .cyan : .clear).interactive(), in: Circle())
+            } else {
+                configuration.label
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().fill(Color.cyan.opacity(configuration.isPressed ? 0.28 : 0)))
+            }
+        }
+        .foregroundStyle(configuration.isPressed ? Color.cyan : Color.primary)
+        .scaleEffect(configuration.isPressed ? 0.91 : 1)
+        .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
     }
 }

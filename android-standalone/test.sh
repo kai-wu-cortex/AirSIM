@@ -20,14 +20,18 @@ assert_not_contains() {
 
 assert_contains "$MANIFEST" 'package="com.airsim.phonecontrol.standalone"' \
   'standalone package id is missing'
-assert_contains "$MANIFEST" 'android:versionCode="77"' \
+assert_contains "$MANIFEST" 'android:versionCode="78"' \
   'standalone version code does not match the Apps release'
-assert_contains "$MANIFEST" 'android:versionName="0.9.4"' \
+assert_contains "$MANIFEST" 'android:versionName="0.9.5"' \
   'standalone version name does not match the Apps release'
 assert_contains "$MANIFEST" 'com.airsim.phonecontrol.STANDALONE_AGENT' \
   'standalone runtime flag is missing'
 assert_contains "$MANIFEST" 'com.airsim.phonecontrol.StandaloneAgentService' \
   'embedded Agent foreground service is missing'
+assert_contains "$MANIFEST" 'android.permission.RECEIVE_SMS' \
+  'standalone cannot receive carrier SMS'
+assert_contains "$MANIFEST" 'com.airsim.phonecontrol.IncomingSMSReceiver' \
+  'standalone carrier SMS receiver is missing'
 assert_not_contains "$MANIFEST" 'com.android.virtualization.terminal' \
   'standalone APK must not query or depend on Linux Terminal'
 assert_not_contains "$MANIFEST" 'AgentWatchdogService' \

@@ -181,7 +181,7 @@ struct AirSIMAPI: Sendable {
     func audioHostConfig() async throws -> MaVoAudioHostConfig { try await get("api/calls/audio/host/config") }
 
     func sendSMS(to phone: String, message: String) async throws -> SMSSendResult {
-        try await postDecoded("api/sms/send", ["phone": phone, "message": message], timeout: 12)
+        try await postDecoded("api/sms/send", ["phone": phone, "message": message], timeout: 80)
     }
     func refreshSMS() async throws { try await post("api/sms/refresh", EmptyBody()) }
     func clearModuleSMS() async throws { try await post("api/sms/clear-module", EmptyBody()) }

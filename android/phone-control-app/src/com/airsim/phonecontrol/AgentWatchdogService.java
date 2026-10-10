@@ -11,6 +11,9 @@ import android.os.Build;
 import android.os.IBinder;
 import android.telecom.TelecomManager;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -57,6 +60,7 @@ public final class AgentWatchdogService extends Service {
                 }
                 if (waitingForConfiguration) BridgeLog.info("watchdog_configuration_available");
                 waitingForConfiguration = false;
+                flushIncomingSMS();
                 String payload = new AgentClient(this).nextCommand();
                 failures = 0;
                 update(payload.isEmpty() ? "Linux Agent 在线" : "正在执行设备命令");
@@ -101,6 +105,20 @@ public final class AgentWatchdogService extends Service {
                 try { Thread.sleep(RetryPolicy.delayMillis(failures - 1)); }
                 catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
             }
+        }
+    }
+
+    private void flushIncomingSMS() throws Exception {
+        StandaloneSMSStore smsStore = new StandaloneSMSStore(this);
+        JSONArray pending = smsStore.cloudPending();
+        for (int index = 0; index < pending.length(); index++) {
+            JSONObject message = pending.getJSONObject(index);
+            String id = message.getString("delivery_id");
+            new AgentClient(this).sendSMSEvent(WireJson.smsEvent(id, id,
+                    message.optString("sender"), message.optString("content"),
+                    message.optString("timestamp")));
+            smsStore.markCloudSent(id);
+            smsStore.acknowledge(new JSONArray().put(id));
         }
     }
 

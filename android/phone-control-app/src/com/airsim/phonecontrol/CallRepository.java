@@ -37,7 +37,19 @@ public final class CallRepository {
     }
 
     public static String firstId() {
-        for (String id : CALLS.keySet()) return id;
+        return idForAction("end");
+    }
+
+    public static String idForAction(String action) {
+        int preferred = ("answer".equals(action) || "reject".equals(action))
+                ? Call.STATE_RINGING : Call.STATE_ACTIVE;
+        for (Map.Entry<String, Call> entry : CALLS.entrySet()) {
+            if (entry.getValue().getState() == preferred) return entry.getKey();
+        }
+        for (Map.Entry<String, Call> entry : CALLS.entrySet()) {
+            int state = entry.getValue().getState();
+            if (state != Call.STATE_DISCONNECTED && state != Call.STATE_DISCONNECTING) return entry.getKey();
+        }
         return "";
     }
 
@@ -68,7 +80,10 @@ public final class CallRepository {
             try {
                 switch (command.action) {
                     case "answer" -> call.answer(VideoProfile.STATE_AUDIO_ONLY);
-                    case "reject" -> call.reject(false, null);
+                    case "reject" -> {
+                        if (call.getState() == Call.STATE_RINGING) call.reject(false, null);
+                        else call.disconnect();
+                    }
                     case "end" -> call.disconnect();
                     case "dtmf" -> {
                         if (command.number.length() != 1) throw new IllegalArgumentException("DTMF digit missing");
@@ -93,7 +108,9 @@ public final class CallRepository {
             int expected = "answer".equals(command.action) ? Call.STATE_ACTIVE : Call.STATE_DISCONNECTED;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (System.nanoTime() < deadline) {
-                if (call.getState() == expected) return ActionResult.success();
+                if (call.getState() == expected || (expected == Call.STATE_DISCONNECTED && !IDS.containsKey(call))) {
+                    return ActionResult.success();
+                }
                 Thread.sleep(50);
             }
             return ActionResult.failure("Telecom state confirmation timeout");

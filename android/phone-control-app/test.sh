@@ -60,6 +60,12 @@ assert_not_contains "$ROOT/src/com/airsim/phonecontrol/AgentWatchdogService.java
 assert_contains "$ROOT/AndroidManifest.xml" \
   'android:name=".BridgeApplication"' \
   'persistent diagnostics are not initialized at process start'
+assert_contains "$ROOT/AndroidManifest.xml" 'android.permission.RECEIVE_SMS' \
+  'incoming SMS permission is missing'
+assert_contains "$ROOT/AndroidManifest.xml" 'android:name=".IncomingSMSReceiver"' \
+  'carrier SMS receiver is missing'
+assert_contains "$ROOT/src/com/airsim/phonecontrol/StandaloneAgentGateway.java" \
+  'smsStore.localMessages().toString()' 'standalone SMS inbox is not exposed to iPhone'
 assert_contains "$ROOT/src/com/airsim/phonecontrol/AgentClient.java" \
   'http_request_started' \
   'Agent HTTP connection attempts are missing from debug diagnostics'

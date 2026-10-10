@@ -23,7 +23,6 @@ import java.util.concurrent.Executors;
 /** AVF-free foreground Agent: Relay registration, heartbeat and command execution. */
 public final class StandaloneAgentService extends Service {
     private static final ConcurrentLinkedQueue<String> CALL_EVENTS = new ConcurrentLinkedQueue<>();
-    private static final ConcurrentLinkedQueue<String> SMS_EVENTS = new ConcurrentLinkedQueue<>();
     private final ExecutorService worker = Executors.newFixedThreadPool(2);
     private final Set<String> completedCommands = new LinkedHashSet<>();
     private volatile boolean running;
@@ -41,11 +40,6 @@ public final class StandaloneAgentService extends Service {
 
     static void enqueueCallEvent(Context context, String json) {
         CALL_EVENTS.add(json);
-        start(context);
-    }
-
-    static void enqueueSMSEvent(Context context, String json) {
-        SMS_EVENTS.add(json);
         start(context);
     }
 
@@ -219,14 +213,16 @@ public final class StandaloneAgentService extends Service {
             StandaloneCloudMediaManager.get(this).handleCallEvent(registration, event, relay);
             CALL_EVENTS.poll();
         }
-        while ((encoded = SMS_EVENTS.peek()) != null) {
-            JSONObject source = new JSONObject(encoded);
+        StandaloneSMSStore smsStore = new StandaloneSMSStore(this);
+        JSONArray smsPending = smsStore.cloudPending();
+        for (int index = 0; index < smsPending.length(); index++) {
+            JSONObject source = smsPending.getJSONObject(index);
             JSONObject event = identity(registration).put("event", "incoming_sms")
                     .put("delivery_id", source.optString("delivery_id"))
                     .put("sender", source.optString("sender")).put("content", source.optString("content"))
                     .put("timestamp", source.optString("timestamp", Instant.now().toString()));
             relay.postJSON(registration, "/v1/events/sms", event, 12_000);
-            SMS_EVENTS.poll();
+            smsStore.markCloudSent(source.getString("delivery_id"));
         }
     }
 

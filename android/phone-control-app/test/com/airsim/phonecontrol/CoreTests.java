@@ -54,14 +54,16 @@ public final class CoreTests {
 				"bash -o pipefail -c 'curl -fsSL --connect-timeout 10 --max-time 90 --retry 2 --proto =https --proto-redir =https --tlsv1.2 https://github.com/kai-wu-cortex/AirSIM/releases/download/v0.4.6/install-avf.sh | sudo sh'",
 				AVFStartupPolicy.installCommand());
 		assertArrayEquals(new String[]{
-				"android.permission.CALL_PHONE", "android.permission.SEND_SMS",
+				"android.permission.CALL_PHONE", "android.permission.SEND_SMS", "android.permission.RECEIVE_SMS",
 				"android.permission.POST_NOTIFICATIONS"},
 				invokeMissingRuntimePermissions(36, false, false, false));
-		assertArrayEquals(new String[]{"android.permission.CALL_PHONE", "android.permission.SEND_SMS"},
+		assertArrayEquals(new String[]{"android.permission.CALL_PHONE", "android.permission.SEND_SMS", "android.permission.RECEIVE_SMS"},
 				invokeMissingRuntimePermissions(32, false, false, false));
-		assertArrayEquals(new String[]{"android.permission.SEND_SMS"},
+		assertArrayEquals(new String[]{"android.permission.SEND_SMS", "android.permission.RECEIVE_SMS"},
 				invokeMissingRuntimePermissions(36, true, false, true));
 		assertArrayEquals(new String[0], invokeMissingRuntimePermissions(36, true, true, true));
+		assertArrayEquals(new String[]{"android.permission.RECEIVE_SMS"},
+				RuntimePermissionPolicy.missingPermissions(36, true, true, false, true, true, true));
 
 		java.util.Map<String, String> releaseAssets = new java.util.LinkedHashMap<>();
 		releaseAssets.put("notes.txt", "https://example.test/notes.txt");

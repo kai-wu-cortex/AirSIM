@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 enum AppRefreshPolicy {
     static func shouldRefreshSupplementalState(appIsActive: Bool) -> Bool { appIsActive }
@@ -151,6 +152,7 @@ final class AppModel: ObservableObject {
     private var lastSuccessfulLocalAPI: AirSIMAPI?
     private var callLifecycleStore = CallLifecycleStore()
     private var appIsActive = true
+    private var didRequestMicrophoneOnForeground = false
     private var eventRevision: UInt64 = AgentEventCursor.initial
     private var smsRevision: UInt64 = 0
     private var eventStreamSupported: Bool?
@@ -385,6 +387,7 @@ final class AppModel: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        requestMicrophoneOnForegroundIfNeeded()
         vowlan.startBrowsing()
         incomingNotifier.requestAuthorization()
         let storedValue = UserDefaults.standard.object(forKey: backgroundStandbyKey) as? Bool
@@ -404,6 +407,7 @@ final class AppModel: ObservableObject {
     /// 每次从锁屏或后台回来都舍弃旧连接，避免休眠前的超时结果覆盖新状态。
     func didBecomeActive() {
         appIsActive = true
+        requestMicrophoneOnForegroundIfNeeded()
         vowlan.restartBrowsing()
         Task { await vowlan.probeNow() }
         eventStreamSupported = nil
@@ -433,6 +437,13 @@ final class AppModel: ObservableObject {
         moduleMetadataTask?.cancel()
         moduleMetadataTask = nil
         restartPolling()
+    }
+
+    private func requestMicrophoneOnForegroundIfNeeded() {
+        guard !didRequestMicrophoneOnForeground,
+              UIApplication.shared.applicationState == .active else { return }
+        didRequestMicrophoneOnForeground = true
+        Task { _ = await audio.requestMicrophonePermission() }
     }
 
     func setBackgroundStandbyEnabled(_ enabled: Bool) {

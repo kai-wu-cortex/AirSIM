@@ -2,7 +2,7 @@
 
 AirSIM 对 Android AVF Linux 来宾只发布一个 `arm64` Debian 包：
 
-当前 Agent 发布为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（包版本 `0.4.6-1`）；Android/iOS 应用的独立发布版本是 [`v0.9.4`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.4)。不要用应用版本号覆盖 Debian 包版本。
+当前 Agent 发布为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（包版本 `0.4.6-1`）；Android/iOS 应用的独立发布版本是 [`v0.9.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.5)。不要用应用版本号覆盖 Debian 包版本。
 
 ```text
 airsim-avf-agent_<version>-<release>_arm64.deb

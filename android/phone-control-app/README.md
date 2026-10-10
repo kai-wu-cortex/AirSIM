@@ -2,7 +2,7 @@
 
 该目录包含 AirSIM Android 端的共享实现以及旧 AVF 兼容 Manifest。新安装推荐使用根目录的 [Android Standalone APK](../../android-standalone/README.md)，由同一 APK 内置 Agent；只有兼容旧部署时才使用这里的 AVF 版构建入口。
 
-当前正式应用版本为 [`v0.9.4`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.4)（Android `versionCode 77`）；配套 AVF Agent 当前为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
+当前正式应用版本为 [`v0.9.5`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.5)（Android `versionCode 78`）；配套 AVF Agent 当前为 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)。维护者云端模式使用 `https://airsim-push.remotepilot.site`，不得改用 DJOneHub 的 `https://push.remotepilot.site`。自行签名的 Apple 客户端需要部署与其 Bundle ID、APNs 凭据匹配的独立 Relay。
 
 ## 主要职责
 
