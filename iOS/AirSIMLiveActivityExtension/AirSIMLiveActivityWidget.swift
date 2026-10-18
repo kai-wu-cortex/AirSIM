@@ -310,6 +310,9 @@ struct AirSIMLiveActivityWidget: Widget {
             if vowlanIsOnline(state) {
                 connectionBadge("VoWLAN", systemImage: "wifi", color: .green)
             }
+            if bluetoothIsOnline(state) {
+                connectionBadge("VoBLE", systemImage: "wave.3.right", color: .blue)
+            }
             if cloudIsOnline(state) {
                 connectionBadge("云端", systemImage: "icloud.fill", color: .cyan)
             }
@@ -343,26 +346,55 @@ struct AirSIMLiveActivityWidget: Widget {
                         .lineLimit(1)
                     Spacer(minLength: 8)
                     HStack(spacing: IslandActionLayout.buttonSpacing) {
-                        Button(intent: RejectAirSIMCallIntent(callID: state.callID)) {
-                            Image(systemName: "phone.down.fill")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(width: IslandActionLayout.buttonSide,
-                                       height: IslandActionLayout.buttonSide)
+                        if AirSIMLiveActivityActionRouting.opensApp(for: state.transport),
+                           let url = AirSIMLiveActivityActionURL.make(
+                            action: .reject, callID: state.callID) {
+                            Link(destination: url) {
+                                Image(systemName: "phone.down.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(width: IslandActionLayout.buttonSide,
+                                           height: IslandActionLayout.buttonSide)
+                            }
+                            .accessibilityLabel("拒绝来电")
+                            .modifier(LiveActivityGlassButtonStyle(
+                                prominent: false,
+                                tint: Color.white.opacity(0.17)
+                            ))
+                        } else {
+                            Button(intent: RejectAirSIMCallIntent(callID: state.callID)) {
+                                Image(systemName: "phone.down.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(width: IslandActionLayout.buttonSide,
+                                           height: IslandActionLayout.buttonSide)
+                            }
+                            .accessibilityLabel("拒绝来电")
+                            .modifier(LiveActivityGlassButtonStyle(
+                                prominent: false,
+                                tint: Color.white.opacity(0.17)
+                            ))
                         }
-                        .accessibilityLabel("拒绝来电")
-                        .modifier(LiveActivityGlassButtonStyle(
-                            prominent: false,
-                            tint: Color.white.opacity(0.17)
-                        ))
 
-                        Button(intent: AnswerAirSIMCallIntent(callID: state.callID)) {
-                            Image(systemName: "phone.fill")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(width: IslandActionLayout.buttonSide,
-                                       height: IslandActionLayout.buttonSide)
+                        if AirSIMLiveActivityActionRouting.opensApp(for: state.transport),
+                           let url = AirSIMLiveActivityActionURL.make(
+                            action: .answer, callID: state.callID) {
+                            Link(destination: url) {
+                                Image(systemName: "phone.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(width: IslandActionLayout.buttonSide,
+                                           height: IslandActionLayout.buttonSide)
+                            }
+                            .accessibilityLabel("接听来电")
+                            .modifier(LiveActivityGlassButtonStyle(prominent: true, tint: .green))
+                        } else {
+                            Button(intent: AnswerAirSIMCallIntent(callID: state.callID)) {
+                                Image(systemName: "phone.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(width: IslandActionLayout.buttonSide,
+                                           height: IslandActionLayout.buttonSide)
+                            }
+                            .accessibilityLabel("接听来电")
+                            .modifier(LiveActivityGlassButtonStyle(prominent: true, tint: .green))
                         }
-                        .accessibilityLabel("接听来电")
-                        .modifier(LiveActivityGlassButtonStyle(prominent: true, tint: .green))
                     }
                     .frame(width: IslandActionLayout.reservedWidth(for: state.phase),
                            alignment: .trailing)
@@ -375,16 +407,31 @@ struct AirSIMLiveActivityWidget: Widget {
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    Button(intent: HangUpAirSIMCallIntent(callID: state.callID)) {
-                        Image(systemName: "phone.down.fill")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(width: IslandActionLayout.buttonSide,
-                                   height: IslandActionLayout.buttonSide)
+                    if AirSIMLiveActivityActionRouting.opensApp(for: state.transport),
+                       let url = AirSIMLiveActivityActionURL.make(
+                        action: .hangup, callID: state.callID) {
+                        Link(destination: url) {
+                            Image(systemName: "phone.down.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(width: IslandActionLayout.buttonSide,
+                                       height: IslandActionLayout.buttonSide)
+                        }
+                        .accessibilityLabel("挂断通话")
+                        .modifier(LiveActivityGlassButtonStyle(prominent: true, tint: .red))
+                        .frame(width: IslandActionLayout.reservedWidth(for: state.phase),
+                               alignment: .trailing)
+                    } else {
+                        Button(intent: HangUpAirSIMCallIntent(callID: state.callID)) {
+                            Image(systemName: "phone.down.fill")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(width: IslandActionLayout.buttonSide,
+                                       height: IslandActionLayout.buttonSide)
+                        }
+                        .accessibilityLabel("挂断通话")
+                        .modifier(LiveActivityGlassButtonStyle(prominent: true, tint: .red))
+                        .frame(width: IslandActionLayout.reservedWidth(for: state.phase),
+                               alignment: .trailing)
                     }
-                    .accessibilityLabel("挂断通话")
-                    .modifier(LiveActivityGlassButtonStyle(prominent: true, tint: .red))
-                    .frame(width: IslandActionLayout.reservedWidth(for: state.phase),
-                           alignment: .trailing)
                 }
             case .standby, .cloudStandby, .offline:
                 EmptyView()
@@ -497,11 +544,18 @@ struct AirSIMLiveActivityWidget: Widget {
         state.cloudOnline == true || state.transport == .cloud
     }
 
+    private func bluetoothIsOnline(
+        _ state: AirSIMCallActivityAttributes.ContentState
+    ) -> Bool {
+        state.bluetoothOnline == true || state.transport == .bluetooth
+    }
+
     private func connectionStatusLine(
         _ state: AirSIMCallActivityAttributes.ContentState
     ) -> String? {
         var values: [String] = []
         if vowlanIsOnline(state) { values.append("VoWLAN 在线") }
+        if bluetoothIsOnline(state) { values.append("VoBLE 在线") }
         if cloudIsOnline(state) { values.append("云端在线") }
         return values.isEmpty ? nil : values.joined(separator: " · ")
     }
@@ -581,7 +635,7 @@ struct AirSIMLiveActivityWidget: Widget {
     private func compactSymbolName(
         for state: AirSIMCallActivityAttributes.ContentState
     ) -> String {
-        if state.transport == .vowlan,
+        if state.transport == .vowlan || state.transport == .bluetooth,
            state.phase != .offline,
            state.phase != .cloudStandby {
             return state.transport?.systemImage ?? "wifi"

@@ -44,11 +44,19 @@ struct DialPadTransportPresentation: Equatable {
     let transport: CallTransport
 
     static func make(
+        mode: AirSIMConnectionMode = .automatic,
         vowlanOnline: Bool,
         moduleLocalReachable: Bool,
-        cloudOnline: Bool
+        cloudOnline: Bool,
+        bluetoothReady: Bool = false
     ) -> DialPadTransportPresentation? {
-        if vowlanOnline {
+        let selected = DialRouteSelector.preferred(
+            mode: mode,
+            vowlanReady: vowlanOnline,
+            bluetoothReady: bluetoothReady,
+            cloudReady: cloudOnline
+        )
+        if selected == .vowlan {
             return DialPadTransportPresentation(
                 title: "VoWLAN",
                 detail: "拨号及通话音频将通过同一 Wi-Fi 或三星热点",
@@ -56,15 +64,15 @@ struct DialPadTransportPresentation: Equatable {
                 transport: .vowlan
             )
         }
-        if moduleLocalReachable {
+        if selected == .bluetooth {
             return DialPadTransportPresentation(
-                title: "模块本地",
-                detail: "拨号及通话音频将通过模块本地链路",
-                systemImage: "cable.connector",
-                transport: .moduleLocal
+                title: "蓝牙",
+                detail: "拨号及通话音频将通过 VoBLE，不使用 Relay",
+                systemImage: "wave.3.right",
+                transport: .bluetooth
             )
         }
-        if cloudOnline {
+        if selected == .cloud {
             return DialPadTransportPresentation(
                 title: "云端",
                 detail: "拨号及通话音频将通过云端 Relay",
@@ -187,6 +195,27 @@ struct DialPadView: View {
                         ) {
                             pairedAgentListPresentation = PairedAgentListPresentation()
                         }
+                    } else if ConnectionModePreference.selected() == .bluetooth {
+                        HStack(spacing: 10) {
+                            Image(systemName: "wave.3.right")
+                                .foregroundStyle(model.voble.state == .ready ? .green : .orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("VoBLE 蓝牙模式")
+                                    .font(.subheadline.weight(.semibold))
+                                Text(model.voble.state == .ready
+                                     ? "已认证 · 通话不经过 Relay"
+                                     : "等待 Android 蓝牙 Agent")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(model.voble.state == .ready ? "在线" : "连接中")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(model.voble.state == .ready ? .green : .orange)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     } else if !model.pairedAndroidAgents.isEmpty {
                         Button {
                             pairedAgentListPresentation = PairedAgentListPresentation()
@@ -227,7 +256,10 @@ struct DialPadView: View {
             .sheet(item: $pairedAgentListPresentation) { _ in
                 PairedAndroidAgentsView(
                     agents: model.pairedAndroidAgents,
-                    cloudModeEnabled: CloudModePreference.isEnabled()
+                    cloudModeEnabled: CloudModePreference.isEnabled(),
+                    selectAgent: { agentID in
+                        model.bindAndroidAgent(agentID)
+                    }
                 )
             }
             .onDisappear(perform: stopRepeatingDelete)
@@ -424,6 +456,7 @@ private struct DialPadCurrentAgentCard: View {
 
             HStack(spacing: 8) {
                 AgentTransportPill(title: "VoWLAN", online: agent.vowlanOnline, enabled: true)
+                AgentTransportPill(title: "VoBLE", online: agent.bluetoothOnline, enabled: true)
                 AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled)
                 Spacer(minLength: 0)
                 Text(agent.agentKindTitle)
@@ -465,11 +498,15 @@ private struct PairedAndroidAgentsView: View {
     @Environment(\.dismiss) private var dismiss
     let agents: [AndroidAgentPresentation]
     let cloudModeEnabled: Bool
+    let selectAgent: (String) -> Void
 
     var body: some View {
         NavigationStack {
             List(agents) { agent in
-                VStack(alignment: .leading, spacing: 9) {
+                Button {
+                    selectAgent(agent.id)
+                } label: {
+                    VStack(alignment: .leading, spacing: 9) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(agent.deviceName)
@@ -479,22 +516,23 @@ private struct PairedAndroidAgentsView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if agent.isCurrent {
-                            Label("当前", systemImage: "checkmark.circle.fill")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.green)
-                        }
+                            Image(systemName: agent.isCurrent ? "checkmark.circle.fill" : "circle")
+                                .font(.title3)
+                                .foregroundStyle(agent.isCurrent ? .green : .secondary)
                     }
                     HStack(spacing: 8) {
                         AgentTransportPill(title: "VoWLAN", online: agent.vowlanOnline, enabled: true)
+                        AgentTransportPill(title: "VoBLE", online: agent.bluetoothOnline, enabled: true)
                         AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled)
                         Spacer()
                         Text(agent.agentKindTitle)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    }
+                    .padding(.vertical, 5)
                 }
-                .padding(.vertical, 5)
+                .buttonStyle(.plain)
             }
             .overlay {
                 if agents.isEmpty {
@@ -588,6 +626,11 @@ struct RecentsView: View {
                                 PhoneListMetrics.separatorLeading
                             }
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                Button(role: .destructive) {
+                                    model.deleteCallHistory(ids: [call.id])
+                                } label: {
+                                    Label(L10n.t("删除"), systemImage: "trash")
+                                }
                                 if let number = call.number {
                                     Button { onMessage(number) } label: {
                                         Label(L10n.t("短信"), systemImage: "message.fill")
@@ -670,6 +713,16 @@ struct RecentsView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
 
+            Button(role: .destructive) {
+                dismissCallDetails()
+                model.deleteCallHistory(ids: [call.id])
+            } label: {
+                Label(L10n.t("删除通话记录"), systemImage: "trash")
+                    .frame(maxWidth: .infinity, minHeight: 32)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
             Button(L10n.t("取消"), action: dismissCallDetails)
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -742,6 +795,10 @@ struct MessagesView: View {
     @State private var conversationPath: [String] = []
     @State private var showingComposer = false
     @State private var showingClearConfirmation = false
+    @State private var editMode: EditMode = .inactive
+    @State private var selectedConversations: Set<String> = []
+    @State private var pendingDeletion: Set<String> = []
+    @State private var showingDeleteConfirmation = false
 
     private var conversations: [(sender: String, messages: [SMSMessage])] {
         Dictionary(grouping: model.messages, by: \.sender)
@@ -751,7 +808,7 @@ struct MessagesView: View {
 
     var body: some View {
         NavigationStack(path: $conversationPath) {
-            List {
+            List(selection: $selectedConversations) {
                 if conversations.isEmpty {
                     EmptyStateView(title: L10n.t("暂无短信"), systemImage: "message")
                         .listRowBackground(Color.clear)
@@ -771,10 +828,17 @@ struct MessagesView: View {
                         .alignmentGuide(.listRowSeparatorLeading) { _ in
                             PhoneListMetrics.separatorLeading
                         }
+                        .tag(conversation.sender)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                requestDelete(Set(conversation.messages.map(\.id)))
+                            } label: { Label("删除会话", systemImage: "trash") }
+                        }
                     }
                 }
             }
             .listStyle(.plain)
+            .environment(\.editMode, $editMode)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, PhoneListMetrics.rowHeight)
             .phoneReportsTabBarCompactState()
@@ -786,10 +850,25 @@ struct MessagesView: View {
             .toolbar {
                 phoneMorphingToolbarItem(placement: .topBarLeading, id: "top-action-leading-more") {
                     Menu {
+                        Button(editMode.isEditing ? "完成选择" : "选择会话") {
+                            editMode = editMode.isEditing ? .inactive : .active
+                            selectedConversations = []
+                        }
+                        if editMode.isEditing {
+                            Button("删除所选会话", role: .destructive) {
+                                requestDelete(Set(model.messages.filter {
+                                    selectedConversations.contains($0.sender)
+                                }.map(\.id)))
+                            }
+                            .disabled(selectedConversations.isEmpty)
+                        }
                         Button { Task { await model.refreshMessages() } } label: {
                             Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
                         }
-                        Button(role: .destructive) { showingClearConfirmation = true } label: {
+                        Button(role: .destructive) {
+                            pendingDeletion = Set(model.messages.map(\.id))
+                            showingClearConfirmation = true
+                        } label: {
                             Label(L10n.t("清空全部短信"), systemImage: "trash")
                         }
                     } label: {
@@ -820,14 +899,22 @@ struct MessagesView: View {
             }
             .confirmationDialog(L10n.t("清空全部短信"), isPresented: $showingClearConfirmation, titleVisibility: .visible) {
                 Button(L10n.t("删除"), role: .destructive) {
-                    Task {
-                        try? await model.api.clearModuleSMS()
-                        model.clearLocalMessages()
-                    }
+                    model.deleteMessages(ids: pendingDeletion)
+                    pendingDeletion = []
                 }
                 Button(L10n.t("取消"), role: .cancel) {}
             } message: {
-                Text("这会删除本机短信以及尚未交付的模块短信，无法恢复。")
+                Text("仅删除此 iPhone 上 AirSIM 内的短信记录，不删除安卓系统短信，无法恢复。")
+            }
+            .confirmationDialog("删除短信记录？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
+                    model.deleteMessages(ids: pendingDeletion)
+                    selectedConversations = []
+                    pendingDeletion = []
+                }
+                Button("取消", role: .cancel) { pendingDeletion = [] }
+            } message: {
+                Text("仅删除此 iPhone 上的所选记录，不删除安卓系统短信。新收到的短信不受影响。")
             }
         }
     }
@@ -836,6 +923,12 @@ struct MessagesView: View {
         guard let sender = pendingConversation else { return }
         conversationPath = [sender]
         pendingConversation = nil
+    }
+
+    private func requestDelete(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        pendingDeletion = ids
+        showingDeleteConfirmation = true
     }
 
     private struct MessageConversationRow: View {
@@ -887,6 +980,8 @@ private struct MessageThreadView: View {
     @EnvironmentObject private var model: AppModel
     let sender: String
     @State private var reply = ""
+    @State private var pendingDeletion: String?
+    @State private var showingDeleteConfirmation = false
 
     private var messages: [SMSMessage] {
         model.messages
@@ -925,6 +1020,12 @@ private struct MessageThreadView: View {
                                 if !message.isOutgoing { Spacer(minLength: 48) }
                             }
                             .id(message.id)
+                            .contextMenu {
+                                Button("删除短信", role: .destructive) {
+                                    pendingDeletion = message.id
+                                    showingDeleteConfirmation = true
+                                }
+                            }
                         }
                     }
                     .padding()
@@ -948,6 +1049,13 @@ private struct MessageThreadView: View {
         }
         .navigationTitle(model.contacts.displayName(for: sender))
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("删除这条短信？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                if let id = pendingDeletion { model.deleteMessages(ids: [id]) }
+                pendingDeletion = nil
+            }
+            Button("取消", role: .cancel) { pendingDeletion = nil }
+        } message: { Text("仅删除此 iPhone 上 AirSIM 内的记录，不删除安卓系统短信。") }
     }
 }
 

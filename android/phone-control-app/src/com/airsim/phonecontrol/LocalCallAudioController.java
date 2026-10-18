@@ -13,7 +13,12 @@ final class LocalCallAudioController {
         if (shouldSilence == silencing) return;
         silencing = shouldSilence;
         privilegedBridge.setLocalOutputMuted(shouldSilence);
-        BridgeLog.info("local_call_output_requested target_silent=" + shouldSilence
+        BridgeLog.info("local_call_output_requested target_suppressed=" + shouldSilence
+                + " policy=" + ("samsung".equalsIgnoreCase(android.os.Build.MANUFACTURER) ? "minimum_volume" : "mute")
                 + " backend=shizuku");
+    }
+
+    void updateWatchdog(boolean active, String key, String transports) {
+        privilegedBridge.updateAudioWatchdog(active, key, transports);
     }
 }

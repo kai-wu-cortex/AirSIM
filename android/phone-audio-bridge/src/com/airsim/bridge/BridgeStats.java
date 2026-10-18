@@ -1,6 +1,9 @@
 package com.airsim.bridge;
 
 final class BridgeStats {
+    synchronized void resetAudio() {
+        downlinkBytes = 0; downlinkPeak = 0; uplinkBytes = 0; uplinkPeak = 0;
+    }
     private long downlinkBytes;
     private int downlinkPeak;
     private long uplinkBytes;
@@ -57,5 +60,9 @@ final class BridgeStats {
         long uplinkBytes,
         long uplinkFrames,
         int uplinkPeak,
-        long rejectedClients) {}
+        long rejectedClients) {
+        String downlinkSignal() {
+            return downlinkBytes == 0 ? "not_observed" : downlinkPeak == 0 ? "all_zero" : "observed";
+        }
+    }
 }

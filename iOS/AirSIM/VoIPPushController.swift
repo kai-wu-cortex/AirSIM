@@ -24,6 +24,7 @@ enum VoIPPushPayloadError: LocalizedError {
 }
 
 struct IncomingVoIPCall: Equatable, Sendable {
+    let agentID: String?
     let callID: String
     let uuid: UUID
     let generation: UInt64
@@ -55,6 +56,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
         if let expiresAt, expiresAt <= now { throw VoIPPushPayloadError.expired }
 
         callID = rawCallID
+        agentID = userInfo["agent_id"] as? String
         self.uuid = uuid
         generation = Self.positiveUInt64(from: userInfo["generation"]) ?? 1
         number = Self.nonEmpty(userInfo["number"] as? String)
@@ -85,7 +87,8 @@ struct IncomingVoIPCall: Equatable, Sendable {
         secret: String,
         mediaURL: URL,
         generation: UInt64 = 1,
-        mediaTransport: CloudMediaTransport = .legacyPCM
+        mediaTransport: CloudMediaTransport = .legacyPCM,
+        agentID: String? = nil
     ) throws {
         guard !outgoingCallID.isEmpty, secret.count >= 24,
               var components = URLComponents(url: mediaURL, resolvingAgainstBaseURL: false),
@@ -100,6 +103,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
             throw VoIPPushPayloadError.invalidCallUUID
         }
         callID = outgoingCallID
+        self.agentID = agentID
         self.uuid = uuid
         self.generation = max(1, generation)
         self.number = number
@@ -110,6 +114,26 @@ struct IncomingVoIPCall: Equatable, Sendable {
         ttsText = nil
         authenticatedMediaURL = authenticatedURL
         requestedMediaTransport = mediaTransport
+    }
+
+    init(
+        bluetoothCallID: String,
+        uuid: UUID,
+        generation: UInt64,
+        number: String?
+    ) {
+        callID = bluetoothCallID
+        agentID = nil
+        self.uuid = uuid
+        self.generation = max(1, generation)
+        self.number = number
+        callerName = nil
+        expiresAt = Date().addingTimeInterval(5 * 60 * 60)
+        isVirtual = false
+        isOutgoing = false
+        ttsText = nil
+        authenticatedMediaURL = nil
+        requestedMediaTransport = .legacyPCM
     }
 
     func matches(backendID: String?, uuid: UUID?) -> Bool {
@@ -159,6 +183,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
 
 enum CallTransport: Equatable, Sendable {
     case vowlan
+    case bluetooth
     case moduleLocal
     case cloud
 }
@@ -178,6 +203,11 @@ enum CloudModePreference {
     static let key = "airsim.cloud-audio-relay-enabled"
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: ConnectionModePreference.key) != nil {
+            return ConnectionModeRuntimePolicy(
+                mode: ConnectionModePreference.selected(defaults: defaults)
+            ).startsCloud
+        }
         guard !LocalModePreference.isEnabled(defaults: defaults) else { return false }
         guard defaults.object(forKey: key) != nil else { return true }
         return defaults.bool(forKey: key)
@@ -188,7 +218,10 @@ enum LocalModePreference {
     static let key = "airsim.local-only-mode-enabled"
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: key)
+        if defaults.object(forKey: ConnectionModePreference.key) != nil {
+            return ConnectionModePreference.selected(defaults: defaults) == .vowlan
+        }
+        return defaults.bool(forKey: key)
     }
 }
 
@@ -237,32 +270,51 @@ enum RelayHealthValidation {
     }
 }
 
-enum AirSIMConnectionMode: Equatable, Sendable {
+enum ConnectionPresentationMode: Equatable, Sendable {
     case vowlan
+    case bluetooth
     case cloud
     case offline
 }
 
 struct ConnectionModePresentation: Equatable, Sendable {
-    let mode: AirSIMConnectionMode
+    let mode: ConnectionPresentationMode
     let title: String
     let status: String
     let detail: String
 
     static func make(
+        selectedMode: AirSIMConnectionMode = .automatic,
         vowlanOnline: Bool,
+        bluetoothReady: Bool = false,
         cloudModeEnabled: Bool,
         cloudOnline: Bool
     ) -> ConnectionModePresentation {
-        if vowlanOnline {
+        let selected = DialRouteSelector.preferred(
+            mode: selectedMode,
+            vowlanReady: vowlanOnline,
+            bluetoothReady: bluetoothReady,
+            cloudReady: cloudModeEnabled && cloudOnline
+        )
+        if selected == .vowlan {
             return ConnectionModePresentation(
                 mode: .vowlan,
                 title: "VoWLAN",
                 status: "已连接",
-                detail: cloudOnline ? "局域网优先，云端可回退" : "同一 Wi-Fi / 三星热点"
+                detail: bluetoothReady || cloudOnline
+                    ? "自动模式优先使用同一 Wi-Fi / 三星热点"
+                    : "同一 Wi-Fi / 三星热点"
             )
         }
-        if cloudModeEnabled {
+        if selected == .bluetooth {
+            return ConnectionModePresentation(
+                mode: .bluetooth,
+                title: "VoBLE",
+                status: "已连接",
+                detail: "蓝牙控制与通话音频已认证，不经过 Relay"
+            )
+        }
+        if selected == .cloud {
             return ConnectionModePresentation(
                 mode: .cloud,
                 title: "云端",
@@ -270,12 +322,20 @@ struct ConnectionModePresentation: Equatable, Sendable {
                 detail: cloudOnline ? "独立 Relay 与 Agent 心跳正常" : "运行云端模式自检定位故障"
             )
         }
-        return ConnectionModePresentation(
-            mode: .offline,
-            title: "未连接",
-            status: "离线",
-            detail: "VoWLAN 不可达且云端模式已关闭"
-        )
+        switch selectedMode {
+        case .vowlan:
+            return .init(mode: .vowlan, title: "VoWLAN", status: "不可达",
+                         detail: "尚未发现已配对且通过鉴权的 VoWLAN Agent")
+        case .bluetooth:
+            return .init(mode: .bluetooth, title: "VoBLE", status: "不可达",
+                         detail: "蓝牙 Agent 尚未完成连接与应用层认证")
+        case .cloud:
+            return .init(mode: .cloud, title: "云端", status: "不可达",
+                         detail: "运行云端模式自检定位故障")
+        case .automatic:
+            return .init(mode: .offline, title: "自动", status: "无可用路由",
+                         detail: "正在按 VoWLAN、VoBLE、云端顺序查找拨号路由")
+        }
     }
 }
 
@@ -458,6 +518,7 @@ enum CloudCommandError: LocalizedError {
 
 private struct CloudCommandEnqueueResponse: Decodable {
     struct Call: Decodable {
+        let agentID: String?
         let callID: String
         let callUUID: String
         let generation: UInt64?
@@ -466,6 +527,7 @@ private struct CloudCommandEnqueueResponse: Decodable {
         let mediaTransport: CloudMediaTransport?
         enum CodingKeys: String, CodingKey {
             case callID = "call_id"
+            case agentID = "agent_id"
             case callUUID = "call_uuid"
             case generation
             case callSecret = "call_secret"
@@ -615,6 +677,7 @@ struct AgentPushRegistration: Encodable, Equatable, Sendable {
 }
 
 struct AgentPushStatus: Decodable, Sendable {
+    let localMode: Bool?
     let cloudModeEnabled: Bool?
     let configured: Bool
     let callPushReady: Bool
@@ -623,7 +686,16 @@ struct AgentPushStatus: Decodable, Sendable {
     let relayURL: String?
     let lastError: String?
 
+    var preservesLocalPairing: Bool {
+        if let localMode { return localMode }
+        // Older AVF Agents omit local_mode but only report configured without
+        // cloud credentials for a local pairing. Never infer from HTTP 200 alone.
+        return configured && cloudModeEnabled == false && !callPushReady && !messagePushReady
+            && (relayURL ?? "").isEmpty
+    }
+
     enum CodingKeys: String, CodingKey {
+        case localMode = "local_mode"
         case cloudModeEnabled = "cloud_enabled"
         case configured
         case callPushReady = "call_push_ready"
@@ -737,6 +809,7 @@ final class VoIPPushController: NSObject {
     private var lastRegisteredRoute: LocalAgentRoute?
     private var lastRelayRegisteredFingerprint: String?
     private var registrationInFlight = false
+    private let pairingGate = SamsungPairingRegistrationGate()
     private var registrationPending = false
     private var nextRegistrationAttempt = Date.distantPast
     private var nextRelayRegistrationAttempt = Date.distantPast
@@ -982,9 +1055,15 @@ final class VoIPPushController: NSObject {
             "环境=\(registration.environment)，Relay=\(registration.relayURL.isEmpty ? "未配置" : "已配置")"
         )
 #endif
-        if !agentRegistered {
+        if !agentRegistered, pairingGate.beginAgentWrite() {
+            defer { pairingGate.endAgentWrite() }
             do {
                 guard case .vowlan = api.route else { throw CallKitBridgeError.noReachableTransport }
+                if try await api.pushStatus().preservesLocalPairing {
+                    // Preserve only this Agent's local choice; global Relay token
+                    // refresh for other paired devices remains independent below.
+                    agentRegistered = true
+                } else {
                 try await api.registerVoIPPush(registration)
                 lastRegisteredFingerprint = fingerprint
                 lastRegisteredRoute = api.route
@@ -1005,6 +1084,7 @@ final class VoIPPushController: NSObject {
                     }
                 }
 #endif
+                }
             } catch {
 #if DEBUG
                 print("[AirSIM PushKit] 向模块注册 token 失败：\(error.localizedDescription)")
@@ -1225,23 +1305,26 @@ final class VoIPPushController: NSObject {
 
     func startCloudOutgoingCall(
         number: String,
+        target: CloudCommandTarget,
         mediaTransport: CloudMediaTransport? = nil,
         timeout: TimeInterval = 25
     ) async throws -> IncomingVoIPCall {
         let commandID = UUID()
+        guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
+            target: target, registration: registration,
             commandID: commandID,
             type: "dial",
             number: number,
             message: nil,
             mediaTransport: mediaTransport
         )
-        guard enqueue.accepted, let call = enqueue.call,
+        guard enqueue.accepted, let call = enqueue.call, call.agentID == target.agentID,
               let uuid = UUID(uuidString: call.callUUID),
               let mediaURL = URL(string: call.mediaURL) else {
             throw CloudCommandError.invalidResponse
         }
-        let outcome = try await waitForCloudCommand(commandID: commandID, timeout: timeout)
+        let outcome = try await waitForCloudCommand(commandID: commandID, target: target, registration: registration, timeout: timeout)
         guard outcome.status == "completed", outcome.result?.dialing == true else {
             throw CloudCommandError.failed(outcome.error ?? "模块未能开始拨号")
         }
@@ -1252,90 +1335,102 @@ final class VoIPPushController: NSObject {
             secret: call.callSecret,
             mediaURL: mediaURL,
             generation: call.generation ?? 1,
-            mediaTransport: call.mediaTransport ?? .legacyPCM
+            mediaTransport: call.mediaTransport ?? .legacyPCM,
+            agentID: call.agentID
         )
     }
 
-    func sendCloudSMS(to number: String, message: String) async throws -> SMSSendResult {
+    func sendCloudSMS(to number: String, message: String, target: CloudCommandTarget) async throws -> SMSSendResult {
         let commandID = UUID()
+        guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
+            target: target, registration: registration,
             commandID: commandID,
             type: "send_sms",
             number: number,
             message: message
         )
         guard enqueue.accepted else { throw CloudCommandError.invalidResponse }
-        let outcome = try await waitForCloudCommand(commandID: commandID, timeout: 5 * 60)
+        let outcome = try await waitForCloudCommand(commandID: commandID, target: target, registration: registration, timeout: 5 * 60)
         guard outcome.status == "completed", outcome.result?.sent == true else {
             throw CloudCommandError.failed(outcome.error ?? "模块发送短信失败")
         }
         return SMSSendResult(sent: true, segments: outcome.result?.segments)
     }
 
-    func sendCloudDTMF(_ digit: String) async throws {
+    func sendCloudDTMF(_ digit: String, call: IncomingVoIPCall) async throws {
+        guard let agentID = call.agentID, CloudAgentRouting.validID(agentID),
+              let registration = currentRegistration() else { throw CloudCommandError.unavailable }
+        let target = CloudCommandTarget(agentID: agentID, routingVersion: 1)
         let commandID = UUID()
         let enqueue = try await enqueueCloudCommand(
+            target: target, registration: registration,
             commandID: commandID,
             type: "dtmf",
             number: digit,
-            message: nil
+            message: nil,
+            call: call
         )
         guard enqueue.accepted else { throw CloudCommandError.invalidResponse }
-        let outcome = try await waitForCloudCommand(commandID: commandID, timeout: 15)
+        let outcome = try await waitForCloudCommand(commandID: commandID, target: target, registration: registration, timeout: 15)
         guard outcome.status == "completed", outcome.result?.sent == true else {
             throw CloudCommandError.failed(outcome.error ?? "模块发送 DTMF 失败")
         }
     }
 
     private func enqueueCloudCommand(
+        target: CloudCommandTarget,
+        registration: AgentPushRegistration,
         commandID: UUID,
         type: String,
         number: String,
         message: String?,
-        mediaTransport: CloudMediaTransport? = nil
+        mediaTransport: CloudMediaTransport? = nil,
+        call: IncomingVoIPCall? = nil
     ) async throws -> CloudCommandEnqueueResponse {
         guard CloudModePreference.isEnabled() else { throw CloudCommandError.cloudModeDisabled }
-        guard let registration = currentRegistration(),
-              let url = RelayEndpoint.url(base: registration.relayURL, path: "v1/commands/enqueue") else {
+        try Task.checkCancellation()
+        guard target.routingVersion == 1, CloudAgentRouting.validID(target.agentID),
+              let url = RelayEndpoint.url(base: registration.relayURL, path: "v2/commands/enqueue") else {
             throw CloudCommandError.unavailable
         }
-        var body: [String: String] = [
+        var body: [String: Any] = [
             "device_id": registration.deviceID,
             "device_secret": registration.deviceSecret,
             "command_id": commandID.uuidString.lowercased(),
             "type": type,
             "number": number,
+            "target_agent_id": target.agentID,
         ]
+        if let call {
+            body.merge(CloudAgentRouting.callIdentity(call)) { _, new in new }
+        }
         if let message { body["message"] = message }
         if let mediaTransport { body["media_transport"] = mediaTransport.rawValue }
         return try await relayRequest(url: url, body: body, as: CloudCommandEnqueueResponse.self)
     }
 
-    private func waitForCloudCommand(commandID: UUID, timeout: TimeInterval) async throws -> CloudCommandResultResponse {
-        guard let registration = currentRegistration(),
-              let url = RelayEndpoint.url(base: registration.relayURL, path: "v1/commands/result") else {
+    private func waitForCloudCommand(commandID: UUID, target: CloudCommandTarget, registration: AgentPushRegistration, timeout: TimeInterval) async throws -> CloudCommandResultResponse {
+        guard let url = RelayEndpoint.url(base: registration.relayURL, path: "v2/commands/result") else {
             throw CloudCommandError.unavailable
         }
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            let response = try await relayRequest(
+        return try await CloudAgentRouting.poll(timeout: timeout, request: {
+            try await self.relayRequest(
                 url: url,
                 body: [
                     "device_id": registration.deviceID,
                     "device_secret": registration.deviceSecret,
                     "command_id": commandID.uuidString.lowercased(),
+                    "target_agent_id": target.agentID,
                 ],
                 as: CloudCommandResultResponse.self
             )
-            if response.status == "completed" || response.status == "failed" { return response }
-            try await Task.sleep(for: .milliseconds(500))
-        }
-        throw CloudCommandError.timeout
+        }, isTerminal: { $0.status == "completed" || $0.status == "failed" })
     }
 
     private func relayRequest<Response: Decodable>(
         url: URL,
-        body: [String: String],
+        body: [String: Any],
         as type: Response.Type
     ) async throws -> Response {
         var request = URLRequest(url: url)
@@ -1343,7 +1438,7 @@ final class VoIPPushController: NSObject {
         request.timeoutInterval = 10
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(body)
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 12
@@ -1448,18 +1543,28 @@ final class VoIPPushController: NSObject {
         )
     }
 
-    func pairingRegistration() -> AgentPushRegistration? {
-        if LocalModePreference.isEnabled() {
-            guard let secret = try? VoWLANCredentialStore.loadOrCreate().encodedSecret else { return nil }
-            return .local(vowlanSecret: secret)
+    func performAndroidPairing<T>(
+        localOnly: Bool,
+        operation: (AgentPushRegistration) async throws -> T
+    ) async throws -> T {
+        try await pairingGate.withPairing {
+            guard let registration = self.pairingRegistration(localOnly: localOnly) else {
+                throw SamsungPairingClientError.registrationUnavailable
+            }
+            return try await operation(registration)
         }
-        guard var registration = currentRegistration() else { return nil }
-        registration.vowlanSecret = (try? VoWLANCredentialStore.loadOrCreate().encodedSecret)
-        return registration
     }
 
-    private func currentRegistration() -> AgentPushRegistration? {
-        guard !LocalModePreference.isEnabled() else { return nil }
+    func pairingRegistration(localOnly: Bool = LocalModePreference.isEnabled()) -> AgentPushRegistration? {
+        guard let secret = try? VoWLANCredentialStore.loadOrCreate().encodedSecret else { return nil }
+        return try? SamsungPairingRegistrationPolicy.registration(
+            localOnly: localOnly, vowlanSecret: secret,
+            cloudRegistration: { self.currentRegistration(allowLocalMode: true) }
+        )
+    }
+
+    private func currentRegistration(allowLocalMode: Bool = false) -> AgentPushRegistration? {
+        guard allowLocalMode || !LocalModePreference.isEnabled() else { return nil }
         guard let token = UserDefaults.standard.string(forKey: Keys.token), !token.isEmpty else {
 #if DEBUG
             print("[AirSIM PushKit] 暂无 VoIP token，跳过同步")

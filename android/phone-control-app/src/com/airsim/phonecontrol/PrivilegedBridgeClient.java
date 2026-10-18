@@ -24,6 +24,10 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
         return transact(PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_MUTED, true, muted);
     }
 
+    @Override public String audioSnapshot() throws RemoteException {
+        return transact(PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT, false, false);
+    }
+
     String ensureDialerRole() throws RemoteException {
         return transact(PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE, false, false);
     }

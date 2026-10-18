@@ -25,7 +25,8 @@ enum LocalAgentRoute: Equatable, Sendable {
     var traceDescription: String {
         switch self {
         case .moduleLocal: return "已停用的旧模块路线"
-        case .vowlan: return "VoWLAN · 同一局域网"
+        case let .vowlan(endpoint, _): return VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host)
+            ? "VoWLAN · VPN 直连" : "VoWLAN · 同一局域网"
         }
     }
 
@@ -88,14 +89,10 @@ struct AirSIMAPI: Sendable {
     }
 
     /// 限制高权限控制接口只能指向环回或私有网络，避免误发到公网主机。
-    private static func isAllowedLocalURL(_ url: URL) -> Bool {
+    static func isAllowedLocalURL(_ url: URL) -> Bool {
         guard url.scheme == "http", let host = url.host?.lowercased() else { return false }
         if host == "localhost" || host == "127.0.0.1" || host == "::1" { return true }
-        if host.hasPrefix("10.") || host.hasPrefix("192.168.") { return true }
-        guard host.hasPrefix("172."), let second = Int(host.split(separator: ".").dropFirst().first ?? "") else {
-            return false
-        }
-        return (16...31).contains(second)
+        return VoWLANEndpoint.permitsDirectIPv4(host)
     }
 
     // MARK: 通话与短信

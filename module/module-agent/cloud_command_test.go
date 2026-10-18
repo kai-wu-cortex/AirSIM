@@ -14,7 +14,7 @@ import (
 )
 
 func TestCloudCommandReconnectBackoffCapsFailedAttempts(t *testing.T) {
-	want := []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second, 15 * time.Second, 15 * time.Second}
+	want := []time.Duration{3 * time.Second, 6 * time.Second, 12 * time.Second, 24 * time.Second, 48 * time.Second, 60 * time.Second}
 	for i, expected := range want {
 		if got := cloudCommandReconnectDelay(i + 1); got != expected {
 			t.Fatalf("failure=%d delay=%s want=%s", i+1, got, expected)
@@ -211,9 +211,14 @@ func TestHeartbeatPullExecutesRescueAndPostsFinalResult(t *testing.T) {
 		defer requestMu.Unlock()
 		requests = append(requests, request.URL.Path)
 		switch request.URL.Path {
-		case "/v1/commands/pull":
+		case "/v2/commands/pull":
+			var identity map[string]string
+			if err := json.NewDecoder(request.Body).Decode(&identity); err != nil || identity["agent_id"] != "android-test" {
+				t.Error("pull lost agent identity")
+			}
 			_ = json.NewEncoder(response).Encode(map[string]any{"commands": []cloudDeviceCommand{{
-				CommandID: commandID, Type: "call_control", Action: "rescue_hangup",
+				TargetAgentID: "android-test",
+				CommandID:     commandID, Type: "call_control", Action: "rescue_hangup",
 				Owner: "iphone", TraceID: "trace-rescue",
 				ExpiresAt: time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
 				Call: &cloudCommandCall{
@@ -221,8 +226,9 @@ func TestHeartbeatPullExecutesRescueAndPostsFinalResult(t *testing.T) {
 					Generation: descriptor.Generation, Direction: descriptor.Direction,
 				},
 			}}})
-		case "/v1/commands/complete":
+		case "/v2/commands/complete":
 			var body struct {
+				AgentID      string `json:"agent_id"`
 				DeviceID     string `json:"device_id"`
 				DeviceSecret string `json:"device_secret"`
 				cloudCommandResult
@@ -230,7 +236,7 @@ func TestHeartbeatPullExecutesRescueAndPostsFinalResult(t *testing.T) {
 			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body.DeviceID == "" || body.DeviceSecret == "" {
+			if body.DeviceID == "" || body.DeviceSecret == "" || body.AgentID != "android-test" {
 				t.Fatal("命令完成回写缺少设备凭据")
 			}
 			completion = body.cloudCommandResult
@@ -260,7 +266,7 @@ func TestHeartbeatPullExecutesRescueAndPostsFinalResult(t *testing.T) {
 	}
 	requestMu.Lock()
 	defer requestMu.Unlock()
-	if strings.Join(requests, ",") != "/v1/commands/pull,/v1/commands/complete" {
+	if strings.Join(requests, ",") != "/v2/commands/pull,/v2/commands/complete" {
 		t.Fatalf("HTTP 补漏链路=%v", requests)
 	}
 	if completion.CommandID != commandID || completion.Status != "completed" ||

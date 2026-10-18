@@ -469,7 +469,7 @@ extension WatchCallSession: CXProviderDelegate {
                     } else {
                         self.answered = true
                         if case .cloud = voIPCall.media {
-                            self.media.sendControl("answer", callID: voIPCall.callID)
+                            self.media.sendControl("answer", call: voIPCall)
                         }
                         action.fulfill()
                     }
@@ -507,7 +507,7 @@ extension WatchCallSession: CXProviderDelegate {
                         self.answered = true
                         self.answering = false
                         if case .cloud = selectedMedia {
-                            self.media.sendControl("answer", callID: voIPCall.callID)
+                            self.media.sendControl("answer", call: voIPCall)
                         }
                         action.fulfill()
                     }
@@ -577,7 +577,7 @@ extension WatchCallSession: CXProviderDelegate {
             } else if voIPCall.isOutgoing && !answered, let activeDialRequestID {
                 abortCompanionDial(activeDialRequestID)
             } else {
-                media.sendControl(answered || voIPCall.isOutgoing ? "end" : "reject", callID: voIPCall.callID)
+                media.sendControl(answered || voIPCall.isOutgoing ? "end" : "reject", call: voIPCall)
             }
             publishLocalPhase(.ended)
         }
@@ -714,8 +714,8 @@ private final class WatchCallMediaBridge: @unchecked Sendable {
         }
     }
 
-    func sendControl(_ action: String, callID: String) {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["action": action, "call_id": callID]),
+    func sendControl(_ action: String, call: WatchVoIPCall) {
+        guard let data = try? JSONSerialization.data(withJSONObject: call.controlMessage(action: action)),
               let text = String(data: data, encoding: .utf8) else { return }
         queue.async { [weak self] in self?.webSocket?.send(.string(text)) { _ in } }
     }

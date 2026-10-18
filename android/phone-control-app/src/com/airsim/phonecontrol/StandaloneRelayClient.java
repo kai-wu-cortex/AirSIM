@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
 
 /** Small HTTPS-only Relay client used by the embedded Android Agent. */
 final class StandaloneRelayClient {
-    record Response(int status, String body) {}
+    record Response(int status, String body, long retryAfterMillis) {}
 
     Response post(JSONObject registration, String path, JSONObject payload, int timeoutMillis) throws Exception {
         String base = registration.getString("relay_url");
@@ -35,7 +35,8 @@ final class StandaloneRelayClient {
             int status = connection.getResponseCode();
             InputStream stream = status >= 200 && status < 300
                     ? connection.getInputStream() : connection.getErrorStream();
-            return new Response(status, read(stream));
+            return new Response(status, read(stream), RelayHTTPException.parseRetryAfter(
+                    connection.getHeaderField("Retry-After"), System.currentTimeMillis()));
         } finally {
             connection.disconnect();
         }
@@ -45,7 +46,7 @@ final class StandaloneRelayClient {
             throws Exception {
         Response response = post(registration, path, payload, timeoutMillis);
         if (response.status < 200 || response.status >= 300) {
-            throw new RelayHTTPException(response.status, response.body);
+            throw new RelayHTTPException(response.status, response.body, response.retryAfterMillis);
         }
         return response.body.isBlank() ? new JSONObject() : new JSONObject(response.body);
     }
@@ -56,7 +57,7 @@ final class StandaloneRelayClient {
             byte[] buffer = new byte[4096];
             int count;
             while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
-            return output.toString(StandardCharsets.UTF_8);
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
         }
     }
 }

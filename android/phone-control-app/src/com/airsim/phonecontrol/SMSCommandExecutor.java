@@ -39,8 +39,10 @@ final class SMSCommandExecutor {
             if (subscriptionID == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
                 return AgentCommandDispatcher.Result.failure("请在三星 SIM 卡设置中选择默认短信 SIM");
             }
-            SmsManager manager = context.getSystemService(SmsManager.class)
-                    .createForSubscriptionId(subscriptionID);
+            SmsManager manager = managerForSubscription(context, subscriptionID);
+            if (manager == null) {
+                return AgentCommandDispatcher.Result.failure("系统短信服务不可用");
+            }
             ArrayList<String> parts = manager.divideMessage(command.message);
             if (parts == null || parts.isEmpty()) {
                 return AgentCommandDispatcher.Result.failure("短信分段失败");
@@ -105,5 +107,13 @@ final class SMSCommandExecutor {
             BridgeLog.error("sms_send_failed", error);
             return AgentCommandDispatcher.Result.failure("Android 短信发送失败：" + error.getClass().getSimpleName());
         }
+    }
+
+    static SmsManager managerForSubscription(Context context, int subscriptionID) {
+        if (Build.VERSION.SDK_INT >= 31) {
+            SmsManager service = context.getSystemService(SmsManager.class);
+            if (service != null) return service.createForSubscriptionId(subscriptionID);
+        }
+        return SmsManager.getSmsManagerForSubscriptionId(subscriptionID);
     }
 }

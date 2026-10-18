@@ -57,8 +57,9 @@ public final class PairingServer implements Closeable {
                 server.setReuseAddress(true);
                 socket = server;
                 session = created;
-                advertise(server.getLocalPort(), created);
-                String address = preferredPrivateIPv4() + ":" + server.getLocalPort();
+                try { advertise(server.getLocalPort(), created); }
+                catch (RuntimeException error) { BridgeLog.error("pairing_advertisement_failed_manual_available", error); }
+                String address = manualAddresses(server.getLocalPort());
                 listener.onStarted(created.code(), address, created.expiresAtMillis());
                 timer.schedule(() -> {
                     listener.onFailed("配对窗口已过期");
@@ -67,6 +68,9 @@ public final class PairingServer implements Closeable {
                 while (!server.isClosed() && System.currentTimeMillis() <= created.expiresAtMillis()) {
                     try (Socket peer = server.accept()) {
                         if (handle(peer, created)) break;
+                    } catch (Exception error) {
+                        if (server.isClosed()) break;
+                        BridgeLog.info("pairing_peer_failed reason=" + error.getClass().getSimpleName());
                     }
                 }
             } catch (Exception error) {
@@ -83,7 +87,9 @@ public final class PairingServer implements Closeable {
     private boolean handle(Socket peer, PairingSession created) throws Exception {
         peer.setSoTimeout(8_000);
         InetAddress remote = peer.getInetAddress();
-        if (!(remote.isSiteLocalAddress() || remote.isLinkLocalAddress() || remote.isLoopbackAddress())) {
+        NetworkInterface localNetwork = NetworkInterface.getByInetAddress(peer.getLocalAddress());
+        if (!VoWLANNetworkPolicy.permitsPairingPeer(remote.getHostAddress(), peer.getLocalAddress().getHostAddress(),
+                localNetwork == null ? null : localNetwork.getName())) {
             BridgeLog.info("pairing_claim_rejected reason=non_private_peer");
             respond(peer, 403, "{\"error\":\"private_network_required\"}");
             return false;
@@ -92,6 +98,21 @@ public final class PairingServer implements Closeable {
         byte[] headers = readHeaders(input);
         String headerText = new String(headers, StandardCharsets.US_ASCII);
         String[] lines = headerText.split("\\r\\n");
+        if (System.currentTimeMillis() > created.expiresAtMillis()) {
+            respond(peer, 410, "{\"error\":\"pairing_expired\"}");
+            return true;
+        }
+        if (lines.length > 0 && "GET /pair/v1/info HTTP/1.1".equals(lines[0])) {
+            // Same public, short-lived material as Bonjour TXT. Never reveal code or credentials.
+            // server_time lets the client correct its clock skew before signing requests;
+            // without it a device clock drift can push every HMAC timestamp outside the
+            // server tolerance and the pairing succeeds while all later calls 401.
+            respond(peer, 200, new JSONObject().put("product", "airsim-pair").put("version", 1)
+                    .put("session_id", created.id()).put("server_public_key", PairingCrypto.base64URL(created.publicKey()))
+                    .put("expires_at", created.expiresAtMillis())
+                    .put("server_time", System.currentTimeMillis()).toString());
+            return false;
+        }
         if (lines.length == 0 || !"POST /pair/v1/claim HTTP/1.1".equals(lines[0])) {
             BridgeLog.info("pairing_claim_rejected reason=route");
             respond(peer, 404, "{\"error\":\"not_found\"}");
@@ -131,10 +152,25 @@ public final class PairingServer implements Closeable {
             // 注册结构使用严格 JSON 解码，且无须接触该密钥，因此转发前必须移除。
             registration.remove("vowlan_secret");
             String agentResponse = new AgentClient(context).registerPairing(registration.toString());
+            JSONObject response = new JSONObject(agentResponse)
+                    .put("agent_id", AndroidAgentIdentity.agentID(context));
             VoWLANPairingStore.saveEncoded(context, vowlanSecret);
             VoWLANGatewayService.start(context);
-            respond(peer, 200, agentResponse);
-            listener.onSucceeded(agentResponse);
+            if (claim.optBoolean("want_direct_route", false)) {
+                // Return the live gateway on this exact pairing interface, never guessed ports.
+                DirectGatewayRoutes.Ports ports = awaitDirectRoute(peer.getLocalAddress().getHostAddress());
+                if (ports != null) {
+                    byte[] secret = PairingCrypto.decodeBase64URL(vowlanSecret);
+                    try {
+                        String agentID = AndroidAgentIdentity.agentID(context);
+                        response.put("control_port", ports.controlPort()).put("pcm_port", ports.pcmPort());
+                        response.put("route_proof", DirectGatewayRoutes.proof(secret, created.id(),
+                                claim.getString("client_public_key"), agentID, ports.controlPort(), ports.pcmPort()));
+                    } finally { java.util.Arrays.fill(secret, (byte) 0); }
+                }
+            }
+            respond(peer, 200, response.toString());
+            listener.onSucceeded(response.toString());
             return true;
         } finally {
             java.util.Arrays.fill(plaintext, (byte) 0);
@@ -157,7 +193,7 @@ public final class PairingServer implements Closeable {
             @Override public void onServiceRegistered(NsdServiceInfo ignored) {}
             @Override public void onRegistrationFailed(NsdServiceInfo ignored, int code) {
                 BridgeLog.info("pairing_advertisement_failed code=" + code);
-                listener.onFailed("热点发现发布失败（" + code + "）");
+                // Keep manual TCP pairing available even if multicast/NSD fails.
             }
             @Override public void onServiceUnregistered(NsdServiceInfo ignored) {}
             @Override public void onUnregistrationFailed(NsdServiceInfo ignored, int code) {}
@@ -231,6 +267,35 @@ public final class PairingServer implements Closeable {
             }
         }
         throw new IOException("未找到 VoWLAN IPv4 地址，请连接 Wi-Fi 或开启移动热点");
+    }
+
+    private static DirectGatewayRoutes.Ports awaitDirectRoute(String localHost) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(12);
+        do {
+            DirectGatewayRoutes.Ports ports = VoWLANGatewayService.DIRECT_ROUTES.forHost(localHost);
+            if (ports != null) return ports;
+            Thread.sleep(100);
+        } while (System.nanoTime() < deadline);
+        return null;
+    }
+
+    private static String manualAddresses(int port) throws IOException {
+        List<String> values = new ArrayList<>();
+        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+        while (interfaces.hasMoreElements()) {
+            NetworkInterface item = interfaces.nextElement();
+            if (!item.isUp() || item.isLoopback()) continue;
+            Enumeration<InetAddress> addresses = item.getInetAddresses();
+            while (addresses.hasMoreElements()) {
+                InetAddress value = addresses.nextElement();
+                if (!(value instanceof Inet4Address)) continue;
+                String host = value.getHostAddress();
+                if (VoWLANNetworkPolicy.isVoWLANInterface(item.getName(), host)) values.add("局域网 " + host + ":" + port);
+                else if (VoWLANNetworkPolicy.isOverlayInterface(item.getName(), host)) values.add("VPN " + host + ":" + port);
+            }
+        }
+        values.add("Tailscale：填写本机在 Tailscale 中的 IPv4；配对端口 " + port);
+        return String.join("\n", values);
     }
 
     private static int interfacePriority(String name) {

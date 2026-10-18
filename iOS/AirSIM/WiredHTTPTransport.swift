@@ -2,6 +2,22 @@ import Foundation
 import Network
 import Darwin
 
+/// Shared by the app and its extension; no AppModel/controller dependency.
+enum VoWLANNetworkRoutePolicy {
+    static func permitsDirectIPv4(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4, parts.allSatisfy({ !$0.isEmpty && $0.count <= 3
+            && !($0.count > 1 && $0.first == "0") && $0.utf8.allSatisfy { (48...57).contains($0) } }) else { return false }
+        let fields = parts.compactMap { UInt8($0) }
+        guard fields.count == 4 else { return false }
+        return fields[0] == 10 || (fields[0] == 172 && (16...31).contains(fields[1]))
+            || (fields[0] == 192 && fields[1] == 168) || (fields[0] == 100 && (64...127).contains(fields[1]))
+    }
+    static func usesSystemRouting(host: String) -> Bool {
+        permitsDirectIPv4(host) && host.hasPrefix("100.")
+    }
+}
+
 /// 模块 HTTP 响应；传输层只保留上层解码和错误处理真正需要的字段。
 struct WiredHTTPResponse: Sendable {
     let statusCode: Int
@@ -31,6 +47,11 @@ final class WiredHTTPTransport: @unchecked Sendable {
         }
     }
 
+    static func pathSetupTimeout(systemRouting: Bool, requestTimeout: TimeInterval) -> TimeInterval? {
+        // VPN establishment uses the request deadline, not the short USB interface probe deadline.
+        systemRouting ? nil : min(1.5, max(1, requestTimeout))
+    }
+
     func send(_ request: URLRequest, uploadFileURL: URL? = nil) async throws -> WiredHTTPResponse {
         guard let url = request.url,
               url.scheme?.lowercased() == "http",
@@ -58,7 +79,7 @@ final class WiredHTTPTransport: @unchecked Sendable {
                 host: NWEndpoint.Host(host),
                 port: port,
                 body: body,
-                route: .type(.wifi)
+                route: VoWLANNetworkRoutePolicy.usesSystemRouting(host: host) ? .system : .type(.wifi)
             )
         }
 
@@ -206,11 +227,18 @@ enum ModuleUSBInterfaceResolver {
 }
 
 private enum WiredInterfaceRoute {
+    case system
     case exact(NWInterface)
     case type(NWInterface.InterfaceType)
 
+    var usesSystemRouting: Bool {
+        if case .system = self { return true }
+        return false
+    }
+
     var description: String {
         switch self {
+        case .system: return "system-vpn-route"
         case let .exact(interface): return "\(interface.name):\(interface.type)"
         case let .type(type): return String(describing: type)
         }
@@ -219,6 +247,7 @@ private enum WiredInterfaceRoute {
     func matches(_ path: NWPath?) -> Bool {
         guard let path else { return false }
         switch self {
+        case .system: return path.status == .satisfied
         case let .exact(interface):
             return path.availableInterfaces.contains { $0.name == interface.name }
         case let .type(type):
@@ -284,6 +313,7 @@ private final class WiredHTTPRequestOperation: @unchecked Sendable {
         let parameters = NWParameters(tls: nil, tcp: tcp)
         // 优先绑定实际 USB ECM 接口；找不到接口名时才按接口类型约束。
         switch route {
+        case .system: break // Let iOS select the active VPN route, including cellular underlay.
         case let .exact(interface): parameters.requiredInterface = interface
         case let .type(type): parameters.requiredInterfaceType = type
         }
@@ -327,9 +357,13 @@ private final class WiredHTTPRequestOperation: @unchecked Sendable {
         connection.start(queue: queue)
 
         // 严格路径不匹配时连接可能一直 waiting；请求尚未发送，可安全交给上层决定是否回退。
-        queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            guard let self, !self.finished, !self.requestStarted else { return }
-            self.finish(.failure(WiredHTTPError.wiredPathUnavailable))
+        if let pathTimeout = WiredHTTPTransport.pathSetupTimeout(
+            systemRouting: route.usesSystemRouting, requestTimeout: request.timeoutInterval
+        ) {
+            queue.asyncAfter(deadline: .now() + pathTimeout) { [weak self] in
+                guard let self, !self.finished, !self.requestStarted else { return }
+                self.finish(.failure(WiredHTTPError.wiredPathUnavailable))
+            }
         }
 
         let timeout = max(1, request.timeoutInterval)

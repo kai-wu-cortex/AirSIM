@@ -194,7 +194,7 @@ enum CloudMediaTransportPreference {
 struct CloudPCMPlaybackWindow {
     static let completionType: AVAudioPlayerNodeCompletionCallbackType = .dataRendered
     private(set) var scheduledPackets = 0
-    var availablePackets: Int { max(0, 12 - scheduledPackets) }
+    var availablePackets: Int { max(0, 2 - scheduledPackets) }
     mutating func schedulePacket() { scheduledPackets += 1 }
     mutating func didRenderPacket() { scheduledPackets = max(0, scheduledPackets - 1) }
 }
@@ -210,7 +210,7 @@ struct CloudPCMUplinkSendQueue {
     mutating func enqueue(_ pcm: Data, at now: TimeInterval) {
         guard pcm.count == 320 else { return }
         pending.append((pcm, now))
-        if pending.count > 50 {
+        if pending.count > 12 {
             pending.removeFirst()
             droppedPackets &+= 1
         }
@@ -218,7 +218,7 @@ struct CloudPCMUplinkSendQueue {
 
     mutating func next(at now: TimeInterval) -> Data? {
         guard inFlightAt == nil else { return nil }
-        while let first = pending.first, now - first.capturedAt > 1 {
+        while let first = pending.first, now - first.capturedAt > 0.25 {
             pending.removeFirst()
             droppedPackets &+= 1
         }
@@ -243,9 +243,14 @@ struct CloudPCMAdaptiveJitterBuffer {
     private var expectedSequence: UInt32?
     private var lastArrivalAt: Date?
     private var estimatedJitter: TimeInterval = 0
-    private(set) var targetFrameCount = 10
+    private var stableFrames = 0
+    private var missingFrames = 0
+    private var lastGoodPCM: Data?
+    private(set) var targetFrameCount = 4
     private(set) var isPrimed = false
     private(set) var droppedFrameCount: UInt64 = 0
+    private(set) var underrunCount: UInt64 = 0
+    private(set) var concealedFrameCount: UInt64 = 0
     var bufferedFrameCount: Int { frames.count }
 
     mutating func enqueue(sequence: UInt32, pcm: Data, arrivedAt: Date) {
@@ -259,17 +264,29 @@ struct CloudPCMAdaptiveJitterBuffer {
             let delta = arrivedAt.timeIntervalSince(previous)
             if delta >= 0 {
                 estimatedJitter += (abs(delta - 0.02) - estimatedJitter) / 16
-                targetFrameCount = max(targetFrameCount, min(30, 10 + Int(estimatedJitter * 200)))
+                targetFrameCount = max(targetFrameCount, min(10, 4 + Int(estimatedJitter / 0.02)))
+                stableFrames = (0.015...0.025).contains(delta) ? stableFrames + 1 : 0
+                if stableFrames >= 100 {
+                    targetFrameCount = max(4, targetFrameCount - 1)
+                    stableFrames = 0
+                    trim(to: targetFrameCount + 2)
+                }
             }
         }
         lastArrivalAt = arrivedAt
         frames[sequence] = CloudPCMBufferedFrame(sequence: sequence, pcm: pcm)
-        while frames.count > 50, let oldest = frames.keys.min() {
+        trim(to: 12)
+        if !isPrimed, frames.count >= targetFrameCount { isPrimed = true }
+    }
+
+    private mutating func trim(to maximum: Int) {
+        while frames.count > maximum, let oldest = frames.keys.min() {
             frames.removeValue(forKey: oldest)
             droppedFrameCount &+= 1
-            if expectedSequence == oldest { expectedSequence = oldest &+ 1 }
+            if let expectedSequence, Int32(bitPattern: oldest &- expectedSequence) >= 0 {
+                self.expectedSequence = oldest &+ 1
+            }
         }
-        if !isPrimed, frames.count >= targetFrameCount { isPrimed = true }
     }
 
     mutating func dequeue(maxFrames: Int) -> [CloudPCMBufferedFrame] {
@@ -279,19 +296,56 @@ struct CloudPCMAdaptiveJitterBuffer {
         while ready.count < maxFrames, !frames.isEmpty {
             guard let expected = expectedSequence else { break }
             if let frame = frames.removeValue(forKey: expected) {
-                ready.append(frame)
+                var pcm = frame.pcm
+                if missingFrames > 0, let lastGoodPCM {
+                    // Five-millisecond crossfade avoids a hard edge after concealment.
+                    let previous = Self.sample(lastGoodPCM, 159) / 4
+                    for i in 0..<40 {
+                        Self.put(&pcm, i, (previous * (40 - i) + Self.sample(pcm, i) * i) / 40)
+                    }
+                }
+                missingFrames = 0
+                lastGoodPCM = pcm
+                ready.append(CloudPCMBufferedFrame(sequence: frame.sequence, pcm: pcm))
                 expectedSequence = expected &+ 1
             } else if let next = frames.keys.min(), next > expected {
                 droppedFrameCount &+= UInt64(next - expected)
                 expectedSequence = next
             } else { break }
         }
+        if ready.isEmpty, frames.isEmpty {
+            underrunCount &+= 1
+            missingFrames += 1
+            stableFrames = 0
+            if missingFrames <= 2, let lastGoodPCM, let expectedSequence {
+                var pcm = Data(repeating: 0, count: 320)
+                let gain = missingFrames == 1 ? 0.5 : 0.2
+                for i in 0..<160 {
+                    Self.put(&pcm, i, Int(Double(Self.sample(lastGoodPCM, i)) * gain * (1 - Double(i) / 320)))
+                }
+                concealedFrameCount &+= 1
+                // Arrival ordinals aren't wire sequence numbers: do not advance on concealment.
+                ready.append(CloudPCMBufferedFrame(sequence: expectedSequence, pcm: pcm))
+            } else {
+                notePlaybackUnderrun()
+            }
+        }
         return ready
     }
 
     mutating func notePlaybackUnderrun() {
-        targetFrameCount = min(30, targetFrameCount + 5)
+        targetFrameCount = min(10, targetFrameCount + 1)
+        stableFrames = 0
         isPrimed = false
+    }
+
+    private static func sample(_ pcm: Data, _ index: Int) -> Int {
+        Int(Int16(bitPattern: UInt16(pcm[index * 2]) | UInt16(pcm[index * 2 + 1]) << 8))
+    }
+    private static func put(_ pcm: inout Data, _ index: Int, _ value: Int) {
+        let bits = UInt16(bitPattern: Int16(clamping: value))
+        pcm[index * 2] = UInt8(truncatingIfNeeded: bits)
+        pcm[index * 2 + 1] = UInt8(truncatingIfNeeded: bits >> 8)
     }
 
     mutating func reset() { self = CloudPCMAdaptiveJitterBuffer() }
@@ -306,6 +360,31 @@ enum CloudCallRetryPolicy {
     static func shouldRetryAudio(after error: Error) -> Bool {
         if case IPhoneCloudCallError.microphonePermissionDenied = error { return false }
         return true
+    }
+}
+
+@MainActor
+enum CloudCallRecoveryCoordinator {
+    static func run(delays: [TimeInterval], isCurrent: () -> Bool,
+                    connect: (Int) async throws -> Void,
+                    connected: () -> Void, failed: (Error) -> Void) async {
+        var lastError: Error = IPhoneCloudCallError.connectionClosed
+        for (index, delay) in delays.enumerated() {
+            guard !Task.isCancelled, isCurrent() else { return }
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            guard !Task.isCancelled, isCurrent() else { return }
+            do {
+                try await connect(index)
+                guard !Task.isCancelled, isCurrent() else { return }
+                connected()
+                return
+            } catch {
+                guard !Task.isCancelled, isCurrent() else { return }
+                lastError = error
+            }
+        }
+        guard !Task.isCancelled, isCurrent() else { return }
+        failed(lastError)
     }
 }
 
@@ -333,6 +412,11 @@ enum CloudCallTerminationCoordinator {
 }
 
 struct CloudPCMControlMessage: Equatable, Sendable {
+    func matches(callID: String, uuid: UUID, generation: UInt64) -> Bool {
+        (self.callID == nil || self.callID == callID)
+            && (callUUID == nil || callUUID?.lowercased() == uuid.uuidString.lowercased())
+            && (self.generation == nil || self.generation == generation)
+    }
     let status: String
     let message: String?
     let action: String?
@@ -514,7 +598,7 @@ enum CloudCallControlClient {
     ) throws -> URLRequest {
         guard let url = RelayEndpoint.url(
             base: credentials.relayURL,
-            path: "/v1/calls/\(envelope.callUUID)/actions"
+            path: "/v2/calls/\(envelope.callUUID)/actions"
         ) else { throw CloudCallControlClientError.invalidRelayURL }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -540,7 +624,7 @@ enum CloudCallControlClient {
     ) throws -> URLRequest {
         guard let url = RelayEndpoint.url(
             base: credentials.relayURL,
-            path: "/v1/calls/\(envelope.callUUID)/actions/\(envelope.commandID)"
+            path: "/v2/calls/\(envelope.callUUID)/actions/\(envelope.commandID)"
         ) else { throw CloudCallControlClientError.invalidRelayURL }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -626,8 +710,11 @@ final class IPhoneCloudCallSession {
     var onMediaHealthChange: ((CloudMediaHealthSnapshot) -> Void)?
     var onLifecycleEvent: ((CallLifecycleEvent) -> Void)?
     private var audioRetryTask: Task<Void, Never>?
+    private var audioRetryID = UUID()
     private var reconnectTask: Task<Void, Never>?
+    private var reconnectID = UUID()
     private var mediaHealthTask: Task<Void, Never>?
+    private var mediaHealthID = UUID()
     private var mediaHealthTracker: CloudMediaHealthTracker?
     private var answerRetryTask: Task<Void, Never>?
     private var answerRetryGeneration = 0
@@ -643,14 +730,15 @@ final class IPhoneCloudCallSession {
     var isAudioRunning: Bool { media.isAudioRunning }
 
     private init() {
-        media.onConnectionLost = {
+        media.onConnectionLost = { connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
+                guard session.call != nil, session.media.isCurrentConnection(connection) else { return }
                 session.answerAcknowledged = false
                 session.requestMediaRebuild(.connectionLost)
             }
         }
-        media.onControl = { control in
+        media.onControl = { control, connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
                 let status = control.status
@@ -664,6 +752,9 @@ final class IPhoneCloudCallSession {
                     fields: control.traceFields,
                     isFailure: status == "action_error"
                 )
+                // The trace await can outlive hangup or even the next call.
+                guard let call = session.call, session.media.isCurrentConnection(connection),
+                      control.matches(callID: call.callID, uuid: call.uuid, generation: call.generation) else { return }
                 switch status {
                 case _ where CloudCallAnswerPolicy.isAcknowledged(status: status):
                     session.confirmAnswer()
@@ -698,17 +789,18 @@ final class IPhoneCloudCallSession {
                 }
             }
         }
-        media.onDownlinkPlayback = {
+        media.onDownlinkPlayback = { connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
-                if session.hasActiveCall, session.media.isAudioRunning {
+                if session.media.isCurrentConnection(connection), session.hasActiveCall, session.media.isAudioRunning {
                     session.audioState = .connected
                 }
             }
         }
-        media.onDownlinkFrame = { bytes, peak, jitterBufferFrames, droppedFrames in
+        media.onDownlinkFrame = { bytes, peak, jitterBufferFrames, droppedFrames, connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
+                guard session.call != nil, session.media.isCurrentConnection(connection) else { return }
                 session.mediaHealthTracker?.recordDownlink(
                     bytes: bytes,
                     peak: peak,
@@ -719,9 +811,10 @@ final class IPhoneCloudCallSession {
                 session.publishMediaHealth()
             }
         }
-        media.onUplinkFrame = { bytes, peak in
+        media.onUplinkFrame = { bytes, peak, connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
+                guard session.call != nil, session.media.isCurrentConnection(connection) else { return }
                 session.mediaHealthTracker?.recordUplink(bytes: bytes, peak: peak, at: Date())
                 session.publishMediaHealth()
             }
@@ -750,11 +843,13 @@ final class IPhoneCloudCallSession {
             } catch {
                 // 系统接听动作不能因为第一次 WebSocket 建连抖动而直接失败。
                 // 保留同一通话并在后台有界重连，成功后再补发 answer 控制帧。
+                guard call?.uuid == incoming.uuid, answered else { return }
                 requestMediaRebuild(.connectionLost)
                 scheduleAnswerConfirmation(for: incoming)
                 return
             }
         }
+        guard call?.uuid == incoming.uuid, answered else { return }
         scheduleAnswerConfirmation(for: incoming)
     }
 
@@ -789,6 +884,17 @@ final class IPhoneCloudCallSession {
                 self.submitPersistentControl(envelope, credentials: credentials)
             }
         )
+    }
+
+    /// A cancelled dial can return a cloud identity after its UI is gone. End
+    /// exactly that remote call without replacing/stopping a newer media session.
+    func endUnadoptedOutgoing(_ outgoing: IncomingVoIPCall) {
+        guard let envelope = media.controlEnvelope(action: "end", call: outgoing),
+              let credentials = VoIPPushController.shared.cloudCallControlCredentials() else {
+            Task { await tracePersistentControlUnavailable(action: "end", call: outgoing) }
+            return
+        }
+        submitPersistentControl(envelope, credentials: credentials)
     }
 
     private func submitPersistentControl(
@@ -875,7 +981,9 @@ final class IPhoneCloudCallSession {
         failure: String? = nil
     ) {
         guard let uuid = UUID(uuidString: envelope.callUUID) else { return }
-        lifecycleState = state
+        // A delayed receipt still goes to the lifecycle merger, but must never
+        // overwrite the media state of a subsequent call.
+        if call?.uuid == uuid { lifecycleState = state }
         onLifecycleEvent?(CallLifecycleEvent(
             callID: envelope.callID,
             callUUID: uuid,
@@ -945,9 +1053,11 @@ final class IPhoneCloudCallSession {
             return
         }
         guard audioRetryTask == nil else { return }
+        let id = UUID()
+        audioRetryID = id
         audioRetryTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { audioRetryTask = nil }
+            defer { if audioRetryID == id { audioRetryTask = nil } }
             let delays = CloudCallRetryPolicy.audioDelays
             for (index, delay) in delays.enumerated() {
                 guard !Task.isCancelled, canAttemptAudio else { return }
@@ -1114,9 +1224,11 @@ final class IPhoneCloudCallSession {
 
     private func startMediaHealthMonitoring() {
         guard mediaHealthTask == nil else { return }
+        let id = UUID()
+        mediaHealthID = id
         mediaHealthTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { mediaHealthTask = nil }
+            defer { if mediaHealthID == id { mediaHealthTask = nil } }
             while !Task.isCancelled, hasActiveCall, media.isAudioRunning {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled, hasActiveCall, media.isAudioRunning,
@@ -1175,37 +1287,31 @@ final class IPhoneCloudCallSession {
               let url = call.authenticatedMediaURL else { return }
         media.stopAudio()
         audioState = .connecting(attempt: 1, maximumAttempts: CloudCallRetryPolicy.reconnectDelays.count)
+        let id = UUID()
+        reconnectID = id
         reconnectTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { reconnectTask = nil }
+            defer { if reconnectID == id { reconnectTask = nil } }
             let delays = CloudCallRetryPolicy.reconnectDelays
-            var lastError: Error = IPhoneCloudCallError.connectionClosed
-            for (index, delay) in delays.enumerated() {
-                guard !Task.isCancelled, self.call?.uuid == call.uuid, answered else { return }
-                if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
-                guard !Task.isCancelled, self.call?.uuid == call.uuid, answered else { return }
-                audioState = .connecting(attempt: index + 1, maximumAttempts: delays.count)
-                do {
-                    media.stop()
-                    try await media.connect(to: url)
-                    answerAcknowledged = false
-                    replayAnswerIfNeeded()
-                    scheduleAnswerConfirmation(for: call)
-                    startAudioWithRetry()
-                    return
-                } catch {
-                    lastError = error
+            await CloudCallRecoveryCoordinator.run(
+                delays: delays,
+                isCurrent: { self.call?.uuid == call.uuid && self.answered && self.reconnectID == id },
+                connect: { index in
+                    self.audioState = .connecting(attempt: index + 1, maximumAttempts: delays.count)
+                    self.media.stop()
+                    try await self.media.connect(to: url)
+                }, connected: {
+                    self.answerAcknowledged = false
+                    self.replayAnswerIfNeeded()
+                    self.scheduleAnswerConfirmation(for: call)
+                    self.startAudioWithRetry()
+                }, failed: { error in
+                    self.audioState = .failed(error.localizedDescription)
+                    self.emitLifecycle(.failed, source: .relay, traceID: nil, failure: error.localizedDescription)
+                    CallKitController.shared.reportCurrentCallEnded(reason: .failed)
+                    self.stop()
                 }
-            }
-            audioState = .failed(lastError.localizedDescription)
-            emitLifecycle(
-                .failed,
-                source: .relay,
-                traceID: nil,
-                failure: lastError.localizedDescription
             )
-            CallKitController.shared.reportCurrentCallEnded(reason: .failed)
-            stop()
         }
     }
 }
@@ -1216,20 +1322,23 @@ private struct CloudCallControlOperationIdentity {
 }
 
 private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
-    var onConnectionLost: (() -> Void)?
-    var onControl: ((CloudPCMControlMessage) -> Void)?
-    var onDownlinkPlayback: (() -> Void)?
-    var onDownlinkFrame: ((_ bytes: Int, _ peak: Int, _ jitterBufferFrames: Int, _ droppedFrames: Int) -> Void)?
-    var onUplinkFrame: ((_ bytes: Int, _ peak: Int) -> Void)?
+    var onConnectionLost: ((UUID) -> Void)?
+    var onControl: ((CloudPCMControlMessage, UUID) -> Void)?
+    var onDownlinkPlayback: ((UUID) -> Void)?
+    var onDownlinkFrame: ((_ bytes: Int, _ peak: Int, _ jitterBufferFrames: Int, _ droppedFrames: Int, _ connection: UUID) -> Void)?
+    var onUplinkFrame: ((_ bytes: Int, _ peak: Int, _ connection: UUID) -> Void)?
 
     private let queue = DispatchQueue(label: "com.example.airsim.iphone-cloud-media", qos: .userInteractive)
     private var webSocket: URLSessionWebSocketTask?
+    private var connectionID = UUID()
+    func isCurrentConnection(_ id: UUID) -> Bool { queue.sync { connectionID == id } }
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
     private var encoder: IPhoneCloudVoicePCMEncoder?
     private var uplinkBuffer = Data()
     private var uplinkSender = CloudPCMUplinkSendQueue()
     private var uplinkTimer: DispatchSourceTimer?
+    private var playbackTimer: DispatchSourceTimer?
     private var uplinkGeneration = UUID()
     private var jitterBuffer = CloudPCMAdaptiveJitterBuffer()
     private var playbackWindow = CloudPCMPlaybackWindow()
@@ -1239,6 +1348,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     private var muted = false
     private var stopped = true
     private var controlOperations: [String: CloudCallControlOperationIdentity] = [:]
+    private var lastQualityTraceAt: TimeInterval = 0
 
     var isConnected: Bool {
         queue.sync { webSocket != nil && !stopped }
@@ -1271,13 +1381,20 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
                     return
                 }
                 stopped = false
+                connectionID = UUID()
                 let socket = URLSession(configuration: .ephemeral).webSocketTask(with: url)
                 webSocket = socket
                 socket.resume()
                 receiveNext(socket)
                 socket.sendPing { error in
-                    if let error { continuation.resume(throwing: error) }
-                    else { continuation.resume() }
+                    self.queue.async {
+                        guard !self.stopped, self.webSocket === socket else {
+                            continuation.resume(throwing: IPhoneCloudCallError.connectionClosed)
+                            return
+                        }
+                        if let error { continuation.resume(throwing: error) }
+                        else { continuation.resume() }
+                    }
                 }
             }
         }
@@ -1448,7 +1565,11 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         timer.setEventHandler { [weak self] in self?.pumpUplink() }
         uplinkTimer = timer
         timer.resume()
-        drainPlayback()
+        let playbackTimer = DispatchSource.makeTimerSource(queue: queue)
+        playbackTimer.schedule(deadline: .now(), repeating: .milliseconds(20), leeway: .milliseconds(1))
+        playbackTimer.setEventHandler { [weak self] in self?.drainPlayback() }
+        self.playbackTimer = playbackTimer
+        playbackTimer.resume()
     }
 
     func stopAudio() { queue.sync { stopAudioLocked() } }
@@ -1458,6 +1579,8 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         uplinkGeneration = UUID()
         uplinkTimer?.cancel()
         uplinkTimer = nil
+        playbackTimer?.cancel()
+        playbackTimer = nil
         uplinkSender = CloudPCMUplinkSendQueue()
         uplinkBuffer.removeAll(keepingCapacity: false)
         if engine != nil { engine?.inputNode.removeTap(onBus: 0) }
@@ -1470,12 +1593,14 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         jitterBuffer.reset()
         downlinkSequence = 0
         receivedDownlink = false
+        lastQualityTraceAt = 0
     }
 
     func stop() {
         queue.async { [weak self] in
             guard let self else { return }
             stopped = true
+            connectionID = UUID()
             webSocket?.cancel(with: .normalClosure, reason: nil)
             webSocket = nil
             uplinkBuffer.removeAll(keepingCapacity: false)
@@ -1501,7 +1626,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
                 case .failure:
                     self.webSocket = nil
                     self.stopped = true
-                    self.onConnectionLost?()
+                    self.onConnectionLost?(self.connectionID)
                 }
             }
         }
@@ -1509,7 +1634,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
 
     private func consumeControl(_ text: String) {
         guard let control = try? CloudPCMControlMessage.decode(text) else { return }
-        onControl?(control)
+        onControl?(control, connectionID)
     }
 
     private func enqueueUplink(_ data: Data, generation: UUID) {
@@ -1531,11 +1656,29 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     private func pumpUplink() {
         guard !stopped, let socket = webSocket else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        if now - lastQualityTraceAt >= 5 {
+            lastQualityTraceAt = now
+            let fields = [
+                "tx_queue": String(uplinkSender.pendingPackets),
+                "tx_drop": String(uplinkSender.droppedPackets),
+                "rx_queue": String(jitterBuffer.bufferedFrameCount),
+                "rx_target_ms": String(jitterBuffer.targetFrameCount * 20),
+                "rx_drop": String(jitterBuffer.droppedFrameCount),
+                "underruns": String(jitterBuffer.underrunCount),
+                "concealed": String(jitterBuffer.concealedFrameCount),
+            ]
+            Task {
+                await AgentVerboseTraceRecorder.shared.recordEvent(
+                    source: "APP", category: "cloud-call-audio", phase: "quality",
+                    title: "云端 PCM 缓冲统计", detail: "", fields: fields, isFailure: false
+                )
+            }
+        }
         if let inFlight = uplinkSender.inFlightAt, now - inFlight >= 6 {
             stopped = true
             webSocket = nil
             socket.cancel(with: .goingAway, reason: nil)
-            onConnectionLost?()
+            onConnectionLost?(connectionID)
             return
         }
         guard let frame = uplinkSender.next(at: now) else { return }
@@ -1549,11 +1692,11 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
                     self.stopped = true
                     self.webSocket = nil
                     socket.cancel(with: .goingAway, reason: nil)
-                    self.onConnectionLost?()
+                    self.onConnectionLost?(self.connectionID)
                     return
                 }
                 self.uplinkSender.complete()
-                self.onUplinkFrame?(frame.count, Self.peak(of: frame))
+                self.onUplinkFrame?(frame.count, Self.peak(of: frame), self.connectionID)
             }
         }
     }
@@ -1562,16 +1705,15 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         guard !pcm.isEmpty, pcm.count.isMultiple(of: 320) else { return }
         receivedDownlink = true
         let droppedBefore = jitterBuffer.droppedFrameCount
-        let now = Date()
+        let now = Date(timeIntervalSince1970: ProcessInfo.processInfo.systemUptime)
         for offset in stride(from: 0, to: pcm.count, by: 320) {
             jitterBuffer.enqueue(sequence: downlinkSequence,
                                  pcm: Data(pcm[offset..<(offset + 320)]), arrivedAt: now)
             downlinkSequence &+= 1
         }
-        drainPlayback()
         onDownlinkFrame?(pcm.count, Self.peak(of: pcm),
                          jitterBuffer.bufferedFrameCount + playbackWindow.scheduledPackets,
-                         Int(jitterBuffer.droppedFrameCount - droppedBefore))
+                         Int(jitterBuffer.droppedFrameCount - droppedBefore), connectionID)
     }
 
     private func drainPlayback() {
@@ -1608,11 +1750,9 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
             self?.queue.async {
                 guard let self, self.playbackGeneration == generation else { return }
                 self.playbackWindow.didRenderPacket()
-                self.onDownlinkPlayback?()
-                self.drainPlayback()
-                if self.playbackWindow.scheduledPackets == 0 {
-                    self.jitterBuffer.notePlaybackUnderrun()
-                }
+                self.onDownlinkPlayback?(self.connectionID)
+                // Only the playout clock consumes the jitter buffer. A callback/network
+                // burst must not drain the reserve or prematurely declare an underrun.
             }
         }
     }

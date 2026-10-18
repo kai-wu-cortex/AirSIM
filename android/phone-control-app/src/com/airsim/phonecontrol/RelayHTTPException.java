@@ -5,13 +5,31 @@ import java.io.IOException;
 /** Preserves the Relay response status so retry behavior does not depend on message text. */
 final class RelayHTTPException extends IOException {
     private final int statusCode;
+    private final long retryAfterMillis;
 
     RelayHTTPException(int statusCode, String detail) {
+        this(statusCode, detail, 0);
+    }
+    RelayHTTPException(int statusCode, String detail, long retryAfterMillis) {
         super("Relay HTTP " + statusCode + (detail == null || detail.isBlank() ? "" : ": " + detail));
         this.statusCode = statusCode;
+        this.retryAfterMillis = Math.max(0, retryAfterMillis);
     }
 
     int statusCode() { return statusCode; }
+    long retryAfterMillis() { return retryAfterMillis; }
+    static long parseRetryAfter(String value, long wallTimeMillis) {
+        if (value == null) return 0;
+        try {
+            if (value.matches("[0-9]+")) {
+                long seconds = Long.parseLong(value);
+                return seconds > Long.MAX_VALUE / 1000 ? Long.MAX_VALUE : seconds * 1000;
+            }
+            long date = java.time.ZonedDateTime.parse(value, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+                    .toInstant().toEpochMilli();
+            return Math.max(0, Math.subtractExact(date, wallTimeMillis));
+        } catch (RuntimeException ignored) { return 0; }
+    }
 
     static RelayHTTPException fromHandshakeStatusLine(String line) throws IOException {
         if (line == null) throw new IOException("WebSocket 握手失败: empty");

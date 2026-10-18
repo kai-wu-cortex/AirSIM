@@ -1,5 +1,11 @@
 import AVFoundation
 import CallKit
+
+enum CallKitSynchronizationPolicy {
+    static func mayFinishEndedHistory(currentBackendID: String?, endedID: String) -> Bool {
+        currentBackendID == endedID
+    }
+}
 import Foundation
 
 /// 把系统 CallKit 操作转发给模块控制层，协议限定在主线程以保护 AppModel 状态。
@@ -108,6 +114,7 @@ final class CallKitController: NSObject {
     private var endActionFulfilled = false
     private var missingCallPolls = 0
     private var outgoingStartInFlight = false
+    private var outgoingStartID = UUID()
     private var handledOutgoingActions: Set<ObjectIdentifier> = []
     private var dialedOutgoingUUIDs: Set<UUID> = []
     private var appAnswerRequestUUID: UUID?
@@ -307,10 +314,15 @@ final class CallKitController: NSObject {
             // 模块已把同一 ID 写入带 ended_at 的 history，这是明确的结束事件，
             // 必须立即关闭系统通话，不再等待空 CLCC 防抖。
             if previous?.endedAt != nil {
+                guard let previous,
+                      CallKitSynchronizationPolicy.mayFinishEndedHistory(
+                        currentBackendID: currentBackendID, endedID: previous.id
+                      ) else { return }
                 finishCurrentCall(previous: previous)
                 return
             }
             // AT+CLCC 偶发空响应不等于电话已挂断；保留 UUID，避免系统扬声器/静音事务变成未知 UUID。
+            if currentDirection == "outgoing", outgoingStartInFlight { return }
             if currentUUID != nil, systemCallReported || currentDirection == "outgoing" {
                 missingCallPolls += 1
                 guard missingCallPolls >= 3 else { return }
@@ -547,7 +559,9 @@ final class CallKitController: NSObject {
             return
         }
         outgoingStartInFlight = true
-        defer { outgoingStartInFlight = false }
+        let operationID = UUID()
+        outgoingStartID = operationID
+        defer { if outgoingStartID == operationID { outgoingStartInFlight = false } }
         do {
             guard let handler else { throw CallKitBridgeError.handlerUnavailable }
             // 除了 App 内提交的事务，系统也可能通过 Siri/联系人把呼出动作
@@ -574,6 +588,9 @@ final class CallKitController: NSObject {
                 },
                 backend: { try await handler.callKitStart(number: action.handle.value) }
             )
+            // A completed backend request belongs to this CXCall only. The user
+            // may have ended it and started another while the request was pending.
+            guard currentUUID == action.callUUID else { return }
             if let backendError {
                 finishCurrentCall(previous: nil, reason: .failed)
                 handler.callKitDidFail(backendError.localizedDescription)

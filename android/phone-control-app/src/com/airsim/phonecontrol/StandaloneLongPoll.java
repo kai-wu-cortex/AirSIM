@@ -1,7 +1,6 @@
 package com.airsim.phonecontrol;
 
 import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -24,11 +23,14 @@ final class StandaloneLongPoll {
                 query.putIfAbsent(decode(name), decode(value));
             }
         }
-        long after;
-        try {
-            after = Long.parseUnsignedLong(query.getOrDefault("after", ""));
-        } catch (NumberFormatException error) {
-            throw new IllegalArgumentException("after cursor is invalid", error);
+        long after = 0L;
+        String afterParam = query.get("after");
+        if (afterParam != null && !afterParam.trim().isEmpty()) {
+            try {
+                after = Long.parseUnsignedLong(afterParam.trim());
+            } catch (NumberFormatException error) {
+                throw new IllegalArgumentException("after cursor is invalid", error);
+            }
         }
         int timeout = defaultTimeoutMillis;
         if (query.containsKey("timeout_ms")) {
@@ -74,7 +76,9 @@ final class StandaloneLongPoll {
 
     private static String decode(String value) {
         try {
-            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+            return URLDecoder.decode(value, "UTF-8");
+        } catch (java.io.UnsupportedEncodingException impossible) {
+            throw new IllegalStateException("UTF-8 unavailable", impossible);
         } catch (IllegalArgumentException error) {
             throw new IllegalArgumentException("query encoding is invalid", error);
         }

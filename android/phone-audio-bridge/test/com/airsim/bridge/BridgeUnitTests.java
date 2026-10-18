@@ -14,7 +14,9 @@ public final class BridgeUnitTests {
         testArguments();
         testArgumentFailures();
         testHandshake();
+        testReadyRequiresSuccessfulAudioStartup();
         testStats();
+        testNewSessionCannotReuseOldAudioEvidence();
         testSessionGate();
         testSamsungAudioContract();
         testListenerRecoveryPolicy();
@@ -80,6 +82,10 @@ public final class BridgeUnitTests {
 
     private static void testStats() {
         BridgeStats stats = new BridgeStats();
+        check(stats.snapshot().downlinkSignal().equals("not_observed"), "no frames reported as usable audio");
+        stats.recordDownlink(new byte[320], 320);
+        check(stats.snapshot().downlinkSignal().equals("all_zero"), "silent PCM reported as observed speech");
+        stats.resetAudio();
         byte[] twoFrames = new byte[BridgeProtocol.FRAME_BYTES * 2];
         twoFrames[0] = 0;
         twoFrames[1] = (byte) 0x80;
@@ -91,6 +97,7 @@ public final class BridgeUnitTests {
         check(snapshot.downlinkBytes() == 640, "downlink bytes");
         check(snapshot.downlinkFrames() == 2, "downlink frames");
         check(snapshot.downlinkPeak() == 32768, "downlink peak");
+        check(snapshot.downlinkSignal().equals("observed"), "non-zero PCM not distinguished from silence");
         check(snapshot.uplinkBytes() == 320, "uplink bytes");
         check(snapshot.uplinkFrames() == 1, "uplink frames");
         check(snapshot.uplinkPeak() == 0, "silent uplink peak");
@@ -98,6 +105,22 @@ public final class BridgeUnitTests {
         for (Field field : BridgeStats.class.getDeclaredFields()) {
             check(!field.getType().isArray(), "stats retain no frame payloads");
         }
+    }
+
+    private static void testReadyRequiresSuccessfulAudioStartup() throws Exception {
+        ByteArrayOutputStream failed = new ByteArrayOutputStream();
+        boolean threw = false;
+        try {
+            BridgeProtocol.acceptHandshake(new ByteArrayInputStream(BridgeProtocol.CLIENT_HELLO), failed,
+                () -> { throw new java.io.IOException("capture initialization failed"); });
+        } catch (java.io.IOException expected) { threw = true; }
+        check(threw && failed.size() == 0, "failed audio startup advertised PCM READY");
+        ByteArrayOutputStream ready = new ByteArrayOutputStream();
+        boolean[] initialized = {false};
+        BridgeProtocol.acceptHandshake(new ByteArrayInputStream(BridgeProtocol.CLIENT_HELLO), ready,
+            () -> { check(ready.size() == 0, "READY preceded audio initialization"); initialized[0] = true; });
+        check(initialized[0] && ready.toString(StandardCharsets.US_ASCII).equals("AIRSIMREADY"),
+            "successful audio startup did not preserve protocol");
     }
 
     private static void testSessionGate() {
@@ -110,6 +133,18 @@ public final class BridgeUnitTests {
         check(!gate.tryAcquire(second), "non-owner cannot release session");
         gate.release(first);
         check(gate.tryAcquire(second), "next client accepted after release");
+    }
+
+    private static void testNewSessionCannotReuseOldAudioEvidence() {
+        BridgeStats stats = new BridgeStats();
+        byte[] speech = new byte[320]; speech[1] = 16;
+        stats.recordDownlink(speech, speech.length);
+        stats.recordUplink(speech, speech.length);
+        stats.recordRejectedClient();
+        stats.resetAudio();
+        check(stats.snapshot().downlinkPeak() == 0 && stats.snapshot().uplinkBytes() == 0,
+            "new silent call inherited previous call's successful PCM evidence");
+        check(stats.snapshot().rejectedClients() == 1, "new audio session lost listener diagnostics");
     }
 
     private static void testSamsungAudioContract() {

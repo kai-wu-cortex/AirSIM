@@ -50,7 +50,10 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
     }
 
     @MainActor
-    func publish(call: CallRecord?, previous: CallRecord?, callerName: String?) {
+    func publish(
+        call: CallRecord?, previous: CallRecord?, callerName: String?,
+        transport: String? = nil
+    ) {
         start()
         let phase: WatchCallPhase
         if let call {
@@ -69,13 +72,17 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
             phase: phase,
             number: identityCall?.number,
             callerName: callerName,
+            transport: transport,
             updatedAt: identityCall?.updatedAt ?? Date()
         )
         publish(payload)
     }
 
     @MainActor
-    func publishIncoming(_ call: IncomingVoIPCall, callerName: String? = nil) {
+    func publishIncoming(
+        _ call: IncomingVoIPCall, callerName: String? = nil,
+        transport: String? = nil
+    ) {
         start()
         publish(WatchCallPayload(
             callID: call.callID,
@@ -83,6 +90,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
             phase: .incoming,
             number: call.number,
             callerName: callerName ?? call.callerName,
+            transport: transport,
             updatedAt: Date()
         ))
     }
@@ -98,7 +106,8 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
            lastPayload.callUUID == payload.callUUID,
            lastPayload.phase == payload.phase,
            lastPayload.number == payload.number,
-           lastPayload.callerName == payload.callerName {
+           lastPayload.callerName == payload.callerName,
+           lastPayload.transport == payload.transport {
             return
         }
         lastPayload = payload
@@ -213,6 +222,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
         _ message: [String: Any],
         replyHandler: @escaping ([String: Any]) -> Void
     ) async {
+        let boundAtStart = AndroidAgentBindingPreference.selected()
         guard let requestID = (message["request_id"] as? String).flatMap(UUID.init(uuidString:)),
               let number = (message["number"] as? String).flatMap(WatchDialNumber.validated) else {
             replyHandler(["ok": false, "error": "请输入有效的电话号码"])
@@ -267,14 +277,16 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
                 return
             }
             let status = try await VoIPPushController.shared.fetchCloudAgentStatus()
-            guard status.cloudOnline else { throw CloudCommandError.unavailable }
+            let target = try CloudAgentRouting.select(boundAgentID: boundAtStart,
+                agents: status.agents.filter { PairedAndroidDeviceStore.permits($0.agentID) },
+                relayRoutingVersion: status.commandRoutingVersion)
             guard !cancelledWatchDialIDs.contains(requestID) else {
                 replyHandler(["ok": false, "error": "已取消拨号"])
                 return
             }
             // 没有可验证的本地 VoWLAN 时才回退公网 PCM。
             let outgoing = try await VoIPPushController.shared.startCloudOutgoingCall(
-                number: number, mediaTransport: .legacyPCM, timeout: 15
+                number: number, target: target, mediaTransport: .legacyPCM, timeout: 15
             )
             guard !cancelledWatchDialIDs.contains(requestID) else {
                 await endAbandonedWatchCall(outgoing)
@@ -301,6 +313,8 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
                 "request_id": requestID.uuidString,
                 "call_id": outgoing.callID,
                 "call_uuid": outgoing.uuid.uuidString,
+                "agent_id": outgoing.agentID ?? "",
+                "generation": outgoing.generation,
                 "number": number,
                 "call_secret": secret,
                 "media_url": mediaURL.absoluteString,

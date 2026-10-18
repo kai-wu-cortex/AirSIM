@@ -10,4 +10,7 @@ final class CommandPollingPolicy {
         return !channelConnected && (lastPollMillis == 0 || nowMillis < lastPollMillis
                 || nowMillis - lastPollMillis >= FALLBACK_INTERVAL_MILLIS);
     }
+    static boolean shouldPoll(boolean connected, long lastPoll, long now, long cooldown) {
+        return cooldown == 0 && shouldPoll(connected, lastPoll, now);
+    }
 }

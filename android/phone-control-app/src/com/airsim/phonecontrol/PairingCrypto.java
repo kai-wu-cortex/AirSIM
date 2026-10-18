@@ -3,19 +3,14 @@ package com.airsim.phonecontrol;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.security.KeyFactory;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
 import java.security.PublicKey;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Base64;
 	import java.security.SecureRandom;
 
 import javax.crypto.Cipher;
-import javax.crypto.KeyAgreement;
+import org.bouncycastle.math.ec.rfc7748.X25519;
 import javax.crypto.Mac;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
@@ -38,20 +33,22 @@ public final class PairingCrypto {
 	}
 
 	public static KeyMaterial generateKeyMaterial() throws GeneralSecurityException {
-		KeyPairGenerator generator = KeyPairGenerator.getInstance("XDH");
-		KeyPair pair = generator.generateKeyPair();
-		return new KeyMaterial(rawPrivateKey(pair.getPrivate()), rawPublicKey(pair.getPublic()));
+        // Use the bundled lightweight primitive, not the optional Android JCA
+        // XDH provider (only standardized on API 33+). No global provider changes.
+        byte[] privateKey = new byte[32];
+        byte[] publicKey = new byte[32];
+        X25519.generatePrivateKey(new SecureRandom(), privateKey);
+        X25519.generatePublicKey(privateKey, 0, publicKey, 0);
+        return new KeyMaterial(privateKey, publicKey);
 	}
 
     public static byte[] sharedSecret(byte[] privateRaw, byte[] publicRaw) throws GeneralSecurityException {
         if (privateRaw.length != 32 || publicRaw.length != 32) throw new GeneralSecurityException("X25519 key must be 32 bytes");
-        KeyFactory factory = KeyFactory.getInstance("XDH");
-        PrivateKey privateKey = factory.generatePrivate(new PKCS8EncodedKeySpec(concat(X25519_PRIVATE_PREFIX, privateRaw)));
-        PublicKey publicKey = factory.generatePublic(new X509EncodedKeySpec(concat(X25519_PUBLIC_PREFIX, publicRaw)));
-        KeyAgreement agreement = KeyAgreement.getInstance("XDH");
-        agreement.init(privateKey);
-        agreement.doPhase(publicKey, true);
-        return agreement.generateSecret();
+        byte[] shared = new byte[32];
+        if (!X25519.calculateAgreement(privateRaw, 0, publicRaw, 0, shared, 0)) {
+            throw new GeneralSecurityException("invalid X25519 peer key");
+        }
+        return shared;
     }
 
     public static byte[] deriveKey(byte[] sharedSecret, String sessionID, String code) throws GeneralSecurityException {
@@ -135,8 +132,8 @@ public final class PairingCrypto {
 
     private static byte[] concat(byte[] first, byte[] second) {
         ByteArrayOutputStream output = new ByteArrayOutputStream(first.length + second.length);
-        output.writeBytes(first);
-        output.writeBytes(second);
+        output.write(first, 0, first.length);
+        output.write(second, 0, second.length);
         return output.toByteArray();
     }
 }

@@ -8,6 +8,11 @@ APK=${1:-$ROOT/build/android/AirSIM-Phone-Bridge-debug.apk}
 
 permissions=$($AAPT2 dump permissions "$APK")
 manifest=$($AAPT2 dump xmltree --file AndroidManifest.xml "$APK")
+package_name=$($AAPT2 dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+case "$package_name" in
+  com.airsim.phonecontrol|com.airsim.phonecontrol.standalone) ;;
+  *) echo "FAIL: unexpected AirSIM package id" >&2; exit 1 ;;
+esac
 
 case "$permissions" in
   *moe.shizuku.manager.permission.API_V23*) ;;
@@ -18,7 +23,7 @@ case "$manifest" in
   *) echo "FAIL: Shizuku V3 client marker missing from APK" >&2; exit 1 ;;
 esac
 case "$manifest" in
-  *com.airsim.phonecontrol.shizuku*) ;;
+  *"\"${package_name}.shizuku\""*) ;;
   *) echo "FAIL: Shizuku provider authority missing from APK" >&2; exit 1 ;;
 esac
 

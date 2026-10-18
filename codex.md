@@ -1,10 +1,20 @@
 # AirSIM 全项目 Codex 部署辅助
 
+2026-10-16 应用发布更新：Apps `v0.9.7.2`，Android `0.9.7.2 (91)`，iOS `0.9.7 (91)`。见 `docs/releases/0.9.7.2.md`；推荐 Android 10–13 升级 Standalone。包含后续候选功能，但三星最低音量与更多后台／OEM 场景仍待真机验收；不更新 Linux Agent 二进制，不新增 workflow，不随应用发布部署 Relay。以下较早基线保留追溯。
+
 本文为 AI 编码代理提供 AirSIM 全仓库的事实来源、构建顺序、部署边界和安全约束。开始任务前先阅读根目录 `README.md`，再阅读所修改组件的 README 和实际源码。涉及 AVF 安装、配对或恢复时，还要阅读 `docs/AVF_INSTALL_GUIDE.md` 和 `LLM.txt`。源码与测试是协议事实来源；本文不能替代它们。
 
-当前发布基线（2026-10-12）：Android AVF/Standalone/iOS Apps `v0.9.6`（build `79`），兼容用 AVF Agent `v0.4.6`（Debian `0.4.6-1`），Relay 协议 `0.2.1`。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
+当前发布基线（2026-10-14）：Apps `v0.9.7.1`，Android `0.9.7.1 (81)`，iOS `0.9.7 (81)`；Android 10–13 修复版推荐安装 Standalone。兼容用 AVF Agent 保持 `v0.4.6`（Debian `0.4.6-1`），Relay 协议 `0.2.1`。GitHub IPA 为 unsigned 重签包；维护者通过 Xcode 单独上传 TestFlight，上传、处理和审核状态不能混为一谈。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
+
+本版改动：iOS「配对安卓手机」的本地配对开关仅控制本次配置包，不写全局模式；Agent 自动注册须保护该本地配置，配对与在途 Agent 写入串行化。Android API 29+ 兼容分支见共享 README；旧 AVF 恢复在 API 34 以下采用可点击通知，不调用新 ActivityOptions 方法。云端挂断代际隔离与 PCM 抖动优化见 `docs/cloud-pcm-resilience.md`，用户已反馈本轮真机挂断 UI 不再重现、声音更稳；不代表全机型/弱网/Watch 验收。
 
 ## 1. 项目目标
+
+工作区候选 build 85 的同网 VoWLAN 恢复见 `docs/vowlan-network-return.md`。安卓观察 Wi-Fi Network／接口／地址变化并重发 NSD，过期注册回调必须代际隔离；iOS 路径变化后有限次重新认证，仅自动模式空闲时优先回本地。固定云端不变、通话中不换链路、不新增 Relay 定时器。未安装／发布／锁屏真机验收，不得承诺系统挂起或 OEM 强停后仍即时恢复。
+
+工作区候选 build 84：iOS 短信删除仅本机、哈希标记原子保存防回流；安卓 Watchdog 只修复已确认远程通话，最多三次、冷却 15 秒，不重启 PCM／系统音频、不自动挂断。TXT 导出与旧 AVF 云端限制见 `docs/sms-deletion-audio-watchdog.md`。未安装或发布，不得声称双真机验收。
+
+工作区候选 build 83 新增手动 IP＋配对端口，协议及使用说明见 `docs/manual-ip-pairing.md`，尚未发布或真机 Tailscale 验收。手动入口不能依赖 Bonjour；保存地址不等于认证在线。支持局域网及 `100.64.0.0/10`，Android userspace Tailscale 代理需要显式回环网关，仍执行 HMAC／nonce／时间戳及 PCM 单会话校验；不得开放 AVF／Shell 内部接口。设备删除须清理手动地址，旧异步探测不得覆盖已切换端点，断链清理只操作绑定通话 ID。
 
 AirSIM 以 Android 手机作为蜂窝电话与短信终端：
 
@@ -171,3 +181,4 @@ npx wrangler deploy --dry-run --config wrangler.toml
 ## 8. 完成标准
 
 “构建通过”只说明本地编译或测试成功；“部署完成”必须有目标环境的部署结果；“真机可用”必须有实际三星 Android、iPhone/Apple Watch、AVF 和网络链路证据。不能把未执行的步骤写成已完成。
+未发布 Relay 定向命令实现见 docs/relay-agent-routing.md：保持设备鉴权，目标不可变，WSS/HTTP 共享冷却；无额外 iOS 状态轮询。本轮未部署、安装、提交或发布，不能机械修改发布版本基线。

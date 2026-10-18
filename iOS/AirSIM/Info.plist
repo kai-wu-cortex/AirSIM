@@ -24,6 +24,16 @@
 				<string>im</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER).liveactivity</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>airsim</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
@@ -54,6 +64,8 @@
 		<string>_airsim-pair._tcp</string>
 		<string>_airsim-vowlan._tcp</string>
 	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>用于连接 Android AirSIM Agent，并通过蓝牙传输通话控制和加密语音。</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于在三星热点内发现并安全配对 AirSIM 电话桥。</string>
 	<key>NSMicrophoneUsageDescription</key>
@@ -63,6 +75,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>bluetooth-central</string>
 		<!-- PushKit 来电唤醒需要 VoIP 后台能力；媒体仍由 audio 模式保活。 -->
 		<string>voip</string>
 		<!-- 普通 APNs 短信通知到达时，在系统允许的后台时间内同步本地历史。 -->

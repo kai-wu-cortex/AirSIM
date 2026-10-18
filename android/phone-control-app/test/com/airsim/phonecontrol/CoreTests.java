@@ -2,6 +2,57 @@ package com.airsim.phonecontrol;
 
 public final class CoreTests {
     public static void main(String[] args) throws Exception {
+        byte[] routeSecret = new byte[32];
+        for (int index = 0; index < routeSecret.length; index++) routeSecret[index] = (byte) index;
+        assertEquals("hQLACWxrSaTjg3tib03xCffgi2LQfdBAV_HLMPmj3hI",
+                DirectGatewayRoutes.proof(routeSecret, "session-1", "client-key", "agent-1", 7592, 7593));
+        DirectGatewayRoutes routes = new DirectGatewayRoutes();
+        routes.put("127.0.0.1", 7592, 7593);
+        assertEquals(7593, routes.forHost("127.0.0.1").pcmPort());
+        assertTrue(routes.forHost("192.168.1.2") == null);
+        routes.remove("127.0.0.1");
+        assertTrue(routes.forHost("127.0.0.1") == null);
+        assertTrue(VoWLANNetworkPolicy.isOverlayInterface("tun0", "100.64.1.2"));
+        assertTrue(!VoWLANNetworkPolicy.isOverlayInterface("rmnet0", "100.64.1.2"));
+        assertTrue(!VoWLANNetworkPolicy.isOverlayInterface("tun0", "100.128.1.2"));
+        assertTrue(!VoWLANNetworkPolicy.isOverlayInterface("tun0", "8.8.8.8"));
+        assertTrue(VoWLANNetworkPolicy.permitsPeer("127.0.0.1", "127.0.0.1"));
+        assertTrue(VoWLANNetworkPolicy.permitsPeer("100.64.1.3", "100.100.1.2"));
+        assertTrue(VoWLANNetworkPolicy.permitsPeer("192.168.1.3", "192.168.1.2"));
+        assertTrue(!VoWLANNetworkPolicy.permitsPeer("100.64.1.3", "192.168.1.2"));
+        assertTrue(!VoWLANNetworkPolicy.permitsPeer("8.8.8.8", "127.0.0.1"));
+        assertTrue(!VoWLANNetworkPolicy.permitsPeer("100.64.1.3", "8.8.8.8"));
+        assertTrue(!VoWLANNetworkPolicy.permitsPeer("192.168.1..3", "192.168.1.2"));
+        assertTrue(!VoWLANNetworkPolicy.permitsPeer("010.0.0.1", "192.168.1.2"));
+        assertTrue(!VoWLANNetworkPolicy.permitsPairingPeer("100.64.1.3", "100.64.1.2", "rmnet0"));
+        assertTrue(VoWLANNetworkPolicy.permitsPairingPeer("100.64.1.3", "100.64.1.2", "tun0"));
+        assertTrue(VoWLANNetworkPolicy.permitsPairingPeer("127.0.0.1", "127.0.0.1", "lo"));
+        android.content.Context versionContext = new android.content.Context();
+        android.content.pm.PackageInfo versionInfo = new android.content.pm.PackageInfo();
+        versionInfo.versionName = "1.2.3";
+        versionInfo.versionCode = 456;
+        versionContext.getPackageManager().info = versionInfo;
+        assertEquals("1.2.3 (456)", AppInformation.version(versionContext));
+        assertEquals(456, AppInformation.privilegedServiceVersion(versionContext));
+        versionInfo.versionCode = 457;
+        assertEquals(457, AppInformation.privilegedServiceVersion(versionContext));
+        versionInfo.versionCode = 0;
+        assertTrue(AppInformation.privilegedServiceVersion(versionContext) > 9);
+        versionInfo.versionCode = 456;
+        versionInfo.versionName = null;
+        assertEquals("未知版本 (456)", AppInformation.version(versionContext));
+        versionContext.getPackageManager().info = null;
+        assertTrue(AppInformation.privilegedServiceVersion(versionContext) > 9);
+        assertEquals("未知版本", AppInformation.version(versionContext));
+        assertEquals("https://github.com/kai-wu-cortex/AirSIM/releases", AppInformation.RELEASES_URL);
+		assertCrashReportIsSanitizedBoundedAndPersisted();
+		assertCrashSharePayloadRequiresAReportAndSanitizesRecentLogs();
+		assertVoBLEAudioVectorAndBounds();
+		assertVoBLEPairingAndReplay();
+		assertVoBLEControlOwnershipAndCallDeduplication();
+		assertVoBLEHangupAfterTerminalEventIsIdempotentAndCannotEndNextCall();
+		assertVoBLERevocationClosesOnlyOwnedTransport();
+		assertVoBLEPCMResolutionHandshakeAndMediaCrypto();
 		assertTransientMuteFailureRetriesAndRestorationCancelsStaleRetry();
 		assertMutedCallRecoversAfterThreeTransientAudioFailures();
 		assertLiveStatusPollerUpdatesWithoutRebuildingPage();
@@ -84,6 +135,11 @@ public final class CoreTests {
 		assertArrayEquals(new String[0], invokeMissingRuntimePermissions(36, true, true, true));
 		assertArrayEquals(new String[]{"android.permission.RECEIVE_SMS"},
 				RuntimePermissionPolicy.missingPermissions(36, true, true, false, true, true, true));
+		assertArrayEquals(new String[]{"android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_ADVERTISE"},
+				RuntimePermissionPolicy.missingPermissions(
+						36, true, true, true, true, true, true, false, false));
+		assertArrayEquals(new String[0], RuntimePermissionPolicy.missingPermissions(
+				30, true, true, true, true, true, true, false, false));
 		assertArrayEquals(new String[]{"android.permission.READ_SMS"},
 				invokeOptionalInboxPermissions(false, false));
 		assertArrayEquals(new String[0], invokeOptionalInboxPermissions(true, false));
@@ -540,6 +596,14 @@ public final class CoreTests {
 			assertContains(expected.getMessage(), "package");
 		}
 		assertEquals("266 145", MainScreenPresentation.formatPairingCode("266145"));
+		assertEquals("等待 iPhone 发起首次配对",
+				MainScreenPresentation.voBLEAuthenticationStatus(false, false, ""));
+		assertEquals("请在两端核对安全码",
+				MainScreenPresentation.voBLEAuthenticationStatus(false, false, "266145"));
+		assertEquals("已认证并连接",
+				MainScreenPresentation.voBLEAuthenticationStatus(true, true, ""));
+		assertEquals("266 145", MainScreenPresentation.voBLEPairingCode("266145"));
+		assertEquals("等待 iPhone 发起配对", MainScreenPresentation.voBLEPairingCode(""));
 		assertEquals(
 				"22:45 VoWLAN 健康检查通过\n22:43 VoWLAN 广播已发现",
 				MainScreenPresentation.recentLogLines(
@@ -601,6 +665,450 @@ public final class CoreTests {
 				new RelayHTTPException(429, "rate limited")));
 		assertEquals(2_000L, RelayRetryPolicy.delayMillis(2,
 				new java.io.IOException("temporary network failure")));
+	}
+
+	private static void assertVoBLEAudioVectorAndBounds() {
+		byte[] tag = new byte[16];
+		java.util.Arrays.fill(tag, (byte) 0xa5);
+		com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket packet =
+				new com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket(
+						0, com.airsim.phonecontrol.voble.VoBLEProtocol.CODEC_G711_MULAW, 7,
+						0x01020304L, 0x05060708L,
+						new byte[]{0x00, 0x7f, (byte) 0x80, (byte) 0xff}, tag);
+		for (int maximumPacketLength : new int[]{23, 185, 247}) {
+			java.util.List<byte[]> fragments =
+					com.airsim.phonecontrol.voble.VoBLEProtocol.encodeAudioFragments(
+							packet, maximumPacketLength);
+			assertTrue(fragments.stream().allMatch(value -> value.length <= maximumPacketLength));
+			byte[] first = fragments.get(0);
+			assertTrue(java.util.Arrays.equals(
+					new byte[]{1, 2, 3, 4}, java.util.Arrays.copyOfRange(first, 7, 11)));
+			assertTrue(java.util.Arrays.equals(
+					new byte[]{5, 6, 7, 8}, java.util.Arrays.copyOfRange(first, 11, 15)));
+			com.airsim.phonecontrol.voble.VoBLEProtocol.AudioReassembler reassembler =
+					new com.airsim.phonecontrol.voble.VoBLEProtocol.AudioReassembler();
+			com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket decoded = null;
+			for (byte[] fragment : fragments) {
+				com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket next =
+						reassembler.append(fragment, 10_000L);
+				if (next != null) decoded = next;
+			}
+			assertEquals(packet, decoded);
+		}
+		byte[] expectedVector = new byte[]{
+				(byte) 0xa5, 0x5a, 0x01, 0x01, 0x00, 0x01, 0x07,
+				0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+				0x00, 0x01, 0x14, 0x00, 0x7f, (byte) 0x80, (byte) 0xff,
+				(byte) 0xa5, (byte) 0xa5, (byte) 0xa5, (byte) 0xa5,
+				(byte) 0xa5, (byte) 0xa5, (byte) 0xa5, (byte) 0xa5,
+				(byte) 0xa5, (byte) 0xa5, (byte) 0xa5, (byte) 0xa5,
+				(byte) 0xa5, (byte) 0xa5, (byte) 0xa5, (byte) 0xa5};
+		assertTrue(java.util.Arrays.equals(expectedVector,
+				com.airsim.phonecontrol.voble.VoBLEProtocol
+						.encodeAudioFragments(packet, 247).get(0)));
+
+		com.airsim.phonecontrol.voble.VoBLEAudioQueue queue =
+				new com.airsim.phonecontrol.voble.VoBLEAudioQueue(8);
+		for (int sequence = 1; sequence <= 9; sequence++) {
+			queue.offer(sequence, new byte[]{(byte) sequence});
+		}
+		assertEquals(8, queue.size());
+		assertEquals(2L, queue.poll().sequence());
+		assertEquals(1L, queue.droppedFrames());
+		assertTrue(queue.consumeDiscontinuity());
+		assertTrue(!queue.consumeDiscontinuity());
+
+		com.airsim.phonecontrol.voble.VoBLEProtocol.ControlEnvelope control =
+				new com.airsim.phonecontrol.voble.VoBLEProtocol.ControlEnvelope(
+						"answer", "call-7", 0x0102030405060708L,
+						new byte[]{1, 2, 3, 4}, new byte[12], new byte[]{6, 7, 8}, new byte[16]);
+		byte[] encodedControl = com.airsim.phonecontrol.voble.VoBLEProtocol.encodeControl(control);
+		assertTrue(java.util.Arrays.equals(
+				new byte[]{1, 2, 3, 4, 5, 6, 7, 8},
+				java.util.Arrays.copyOfRange(encodedControl, 4, 12)));
+		assertEquals(control, com.airsim.phonecontrol.voble.VoBLEProtocol.decodeControl(encodedControl));
+		for (int maximumPacketLength : new int[]{23, 185, 247}) {
+			var fragments = com.airsim.phonecontrol.voble.VoBLEProtocol.encodeMessageFragments(
+					encodedControl, maximumPacketLength,
+					com.airsim.phonecontrol.voble.VoBLEProtocol.MESSAGE_CONTROL, 0x1234);
+			assertTrue(fragments.stream().allMatch(value -> value.length <= maximumPacketLength));
+			var reassembler = new com.airsim.phonecontrol.voble.VoBLEProtocol.MessageReassembler();
+			com.airsim.phonecontrol.voble.VoBLEProtocol.Message decoded = null;
+			for (byte[] fragment : fragments) {
+				var next = reassembler.append(fragment, 10_000L);
+				if (next != null) decoded = next;
+			}
+			assertEquals(0x1234, decoded.messageId());
+			assertTrue(java.util.Arrays.equals(encodedControl, decoded.payload()));
+		}
+	}
+
+	private static void assertVoBLEPairingAndReplay() throws Exception {
+		byte[] androidPrivate = new byte[32];
+		byte[] iphonePrivate = new byte[32];
+		for (int index = 0; index < 32; index++) {
+			androidPrivate[index] = (byte) (index + 1);
+			iphonePrivate[index] = (byte) (index + 33);
+		}
+		byte[] androidPublic = com.airsim.phonecontrol.voble.VoBLEPairingManager
+				.publicKey(androidPrivate);
+		byte[] iphonePublic = com.airsim.phonecontrol.voble.VoBLEPairingManager
+				.publicKey(iphonePrivate);
+		com.airsim.phonecontrol.voble.VoBLEPairingManager.Transcript transcript =
+				new com.airsim.phonecontrol.voble.VoBLEPairingManager.Transcript(
+						"samsung-test", androidPublic, iphonePublic,
+						filledBytes(32, 0x11), filledBytes(32, 0x22));
+		com.airsim.phonecontrol.voble.VoBLEPairingManager.PairingMaterial android =
+				com.airsim.phonecontrol.voble.VoBLEPairingManager.derivePairing(
+						androidPrivate, iphonePublic, transcript);
+		com.airsim.phonecontrol.voble.VoBLEPairingManager.PairingMaterial iphone =
+				com.airsim.phonecontrol.voble.VoBLEPairingManager.derivePairing(
+						iphonePrivate, androidPublic, transcript);
+		assertTrue(java.util.Arrays.equals(android.pairingKey(), iphone.pairingKey()));
+		assertEquals("41cef6294f3575441997664149bd8a014c8db026ad3a5312410be90f7d76c48a",
+				PairingCrypto.hex(android.pairingKey()));
+		assertEquals("922247", android.sas());
+		assertEquals("a09d46e2afc3444bffc9013831d265c7", PairingCrypto.hex(
+				com.airsim.phonecontrol.voble.VoBLEPairingManager.reconnectTag(
+						android.pairingKey(), transcript)));
+		assertEquals(16, com.airsim.phonecontrol.voble.VoBLEPairingManager.confirmationTag(
+				android.pairingKey(), "challenge-1").length);
+		com.airsim.phonecontrol.voble.VoBLEPairingManager.Transcript modified =
+				new com.airsim.phonecontrol.voble.VoBLEPairingManager.Transcript(
+						"samsung-modified", androidPublic, iphonePublic,
+						filledBytes(32, 0x11), filledBytes(32, 0x22));
+		assertTrue(!java.util.Arrays.equals(android.pairingKey(),
+				com.airsim.phonecontrol.voble.VoBLEPairingManager.derivePairing(
+						androidPrivate, iphonePublic, modified).pairingKey()));
+
+		com.airsim.phonecontrol.voble.VoBLEPairingManager.SessionKeys first =
+				com.airsim.phonecontrol.voble.VoBLEPairingManager.deriveSessionKeys(
+						android.pairingKey(), filledBytes(16, 3), "call-1", 1);
+		com.airsim.phonecontrol.voble.VoBLEPairingManager.SessionKeys reconnect =
+				com.airsim.phonecontrol.voble.VoBLEPairingManager.deriveSessionKeys(
+						android.pairingKey(), filledBytes(16, 4), "call-1", 1);
+		assertTrue(!java.util.Arrays.equals(first.control(), first.media()));
+		assertTrue(!java.util.Arrays.equals(first.media(), first.reconnect()));
+		assertTrue(!java.util.Arrays.equals(first.control(), reconnect.control()));
+		assertEquals(32, com.airsim.phonecontrol.voble.VoBLEPairingManager.deriveSessionKeys(
+				android.pairingKey(), filledBytes(16, 5), "", 0).control().length);
+		byte[] authenticatedMessage = "authenticated-control".getBytes(
+				java.nio.charset.StandardCharsets.UTF_8);
+		byte[] controlTag = com.airsim.phonecontrol.voble.VoBLEPairingManager
+				.authenticationTag(authenticatedMessage, first.control());
+		assertTrue(com.airsim.phonecontrol.voble.VoBLEPairingManager.authenticateTag(
+				authenticatedMessage, controlTag, first.control()));
+		assertTrue(!com.airsim.phonecontrol.voble.VoBLEPairingManager.authenticateTag(
+				authenticatedMessage, controlTag, new byte[32]));
+
+		com.airsim.phonecontrol.voble.VoBLEReplayWindow window =
+				new com.airsim.phonecontrol.voble.VoBLEReplayWindow(30_000L, 4);
+		assertTrue(window.accept(new byte[]{1}, 100_000L, 100_000L));
+		assertTrue(!window.accept(new byte[]{1}, 100_000L, 100_000L));
+		assertTrue(!window.accept(new byte[]{2}, 69_999L, 100_000L));
+		window.revoke();
+		assertTrue(!window.accept(new byte[]{3}, 100_000L, 100_000L));
+
+		java.util.Map<String, String> protectedValues = new java.util.HashMap<>();
+		com.airsim.phonecontrol.voble.VoBLECredentialStore store =
+				new com.airsim.phonecontrol.voble.VoBLECredentialStore(
+						new com.airsim.phonecontrol.voble.VoBLECredentialStore.ProtectedBackend() {
+							@Override public String load(String key) { return protectedValues.get(key); }
+							@Override public void save(String key, String value) { protectedValues.put(key, value); }
+							@Override public void remove(String key) { protectedValues.remove(key); }
+						});
+		store.save("samsung-test", android.pairingKey());
+		assertTrue(store.hasCredential("samsung-test"));
+		com.airsim.phonecontrol.voble.VoBLEPairingManager manager =
+				new com.airsim.phonecontrol.voble.VoBLEPairingManager(store);
+		long now = 1_000_000L;
+		var challenge = manager.begin("samsung-new", now);
+		var preview = manager.preview(
+				challenge.id(), iphonePublic, filledBytes(32, 0x22), now);
+		assertEquals(preview.sas(), manager.confirm(
+				challenge.id(), iphonePublic, filledBytes(32, 0x22), preview.sas(), now).sas());
+		assertTrue(store.load("samsung-new") != null);
+
+		var reconnectChallenge = manager.begin("samsung-new", now + 1);
+		var reconnectTranscript = new com.airsim.phonecontrol.voble.VoBLEPairingManager.Transcript(
+				reconnectChallenge.androidIdentity(), reconnectChallenge.androidPublicKey(),
+				iphonePublic, reconnectChallenge.androidNonce(), filledBytes(32, 0x33));
+		byte[] oldPairingKey = store.load("samsung-new");
+		var reconnected = manager.confirmReconnect(
+				reconnectChallenge.id(), iphonePublic, filledBytes(32, 0x33),
+				com.airsim.phonecontrol.voble.VoBLEPairingManager.reconnectTag(
+						oldPairingKey, reconnectTranscript), now + 1);
+		assertTrue(!java.util.Arrays.equals(oldPairingKey, reconnected.pairingKey()));
+		manager.revoke("samsung-test");
+		assertTrue(!store.hasCredential("samsung-test"));
+		assertTrue(store.load("samsung-test") == null);
+	}
+
+	private static void assertVoBLERevocationClosesOnlyOwnedTransport() {
+		var channel = new com.airsim.phonecontrol.voble.VoBLEControlChannel();
+		var disconnects = new java.util.concurrent.atomic.AtomicInteger();
+		channel.subscribeControl("owner");
+		channel.subscribeAudio("owner");
+		assertTrue(channel.authenticate("owner"));
+		assertTrue(!channel.revokeOwnerAndDisconnect("other", disconnects::incrementAndGet));
+		assertTrue(disconnects.get() == 0);
+		assertTrue(channel.revokeOwnerAndDisconnect("owner", disconnects::incrementAndGet));
+		assertTrue(disconnects.get() == 1);
+		assertTrue(!channel.isControlSubscribed("owner"));
+		assertTrue(!channel.isAudioSubscribed("owner"));
+		assertTrue(!channel.revokeOwnerAndDisconnect("owner", disconnects::incrementAndGet));
+		assertTrue(disconnects.get() == 1);
+	}
+
+	private static void assertVoBLEControlOwnershipAndCallDeduplication() {
+		com.airsim.phonecontrol.voble.VoBLEControlChannel channel =
+				new com.airsim.phonecontrol.voble.VoBLEControlChannel();
+		assertTrue(channel.canAuthenticate("iphone-air"));
+		channel.subscribeControl("iphone-air");
+		assertTrue(!channel.isReady("iphone-air"));
+		assertTrue(channel.authenticate("iphone-air"));
+		assertTrue(!channel.canAuthenticate("iphone-other"));
+		assertTrue(channel.isReady("iphone-air"));
+		channel.subscribeAudio("iphone-air");
+		channel.unsubscribeAudio("iphone-air");
+		assertTrue(channel.isControlSubscribed("iphone-air"));
+		assertTrue(!channel.isAudioSubscribed("iphone-air"));
+		assertTrue(!channel.authenticate("other-iphone"));
+		assertTrue(channel.revokeOwner("iphone-air"));
+		assertTrue(!channel.owns("iphone-air"));
+		assertTrue(channel.canAuthenticate("other-iphone"));
+		assertTrue(!channel.revokeOwner("iphone-air"));
+
+		java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+		com.airsim.phonecontrol.voble.VoBLECallController controller =
+				new com.airsim.phonecontrol.voble.VoBLECallController(request -> {
+					calls.incrementAndGet();
+					return com.airsim.phonecontrol.voble.VoBLECallController.Result.success("ok");
+				});
+		controller.observeCall("call-1", 7, "incoming");
+		var request = new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"request-1", "answer", "call-1", "", 7);
+		assertEquals("authentication_failed", controller.execute(request, false).code());
+		assertEquals("ok", controller.execute(request, true).code());
+		assertEquals("ok", controller.execute(request, true).code());
+		assertEquals(1, calls.get());
+		var stale = new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"request-2", "answer", "call-1", "", 6);
+		assertEquals("stale_generation", controller.execute(stale, true).code());
+		assertEquals(1, calls.get());
+		assertTrue(controller.observeCall("call-1", 7, "ended"));
+		assertTrue(!controller.observeCall("call-1", 7, "ended"));
+		java.util.concurrent.atomic.AtomicInteger mediaStarts = new java.util.concurrent.atomic.AtomicInteger();
+		var mediaRequest = new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"media-1", "start_media", "call-1", "", 7);
+		controller.executeOnce(mediaRequest, true, ignored -> {
+			mediaStarts.incrementAndGet();
+			return com.airsim.phonecontrol.voble.VoBLECallController.Result.success("media_ready");
+		});
+		controller.executeOnce(mediaRequest, true, ignored -> {
+			mediaStarts.incrementAndGet();
+			return com.airsim.phonecontrol.voble.VoBLECallController.Result.success("media_ready");
+		});
+		assertEquals(1, mediaStarts.get());
+
+		var dial = new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"dial-1", "dial", "provisional-call", "10086", 8);
+		assertEquals("ok", controller.execute(dial, true).code());
+		assertTrue(controller.ownsCall("provisional-call", 8));
+		controller.observeCall("android-call", 8, "dialing");
+		assertTrue(controller.ownsCall("android-call", 8));
+
+		// Android process/app data can restart while iPhone keeps its monotonic
+		// generation. The first authenticated dial must resynchronize forward,
+		// while an older delayed dial must still be rejected.
+		var restarted = new com.airsim.phonecontrol.voble.VoBLECallController(ignored ->
+				com.airsim.phonecontrol.voble.VoBLECallController.Result.success("ok"));
+		var resumedDial = new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"dial-resume", "dial", "provisional-resume", "10086", 42);
+		assertEquals("ok", restarted.execute(resumedDial, true).code());
+		assertTrue(restarted.ownsCall("provisional-resume", 42));
+		var delayedDial = new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"dial-delayed", "dial", "provisional-old", "10010", 41);
+		assertEquals("stale_generation", restarted.execute(delayedDial, true).code());
+	}
+
+	private static void assertVoBLEHangupAfterTerminalEventIsIdempotentAndCannotEndNextCall() {
+		var invocations = new java.util.concurrent.atomic.AtomicInteger();
+		var controller = new com.airsim.phonecontrol.voble.VoBLECallController(request -> {
+			invocations.incrementAndGet();
+			return com.airsim.phonecontrol.voble.VoBLECallController.Result.success("accepted");
+		});
+		controller.observeCall("ended-call", 7, "active");
+		assertTrue(controller.observeCall("ended-call", 7, "ended"));
+		for (String action : new String[]{"end", "reject"}) {
+			var late = new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+					"late-" + action, action, "ended-call", "", 7);
+			assertTrue(controller.execute(late, true).success());
+			assertEquals("authentication_failed", controller.execute(late, false).code());
+		}
+		assertEquals(0, invocations.get());
+		controller.observeCall("next-call", 8, "active");
+		assertTrue(controller.execute(new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"late-again", "end", "ended-call", "", 7), true).success());
+		assertTrue(controller.ownsCall("next-call", 8));
+		assertEquals(0, invocations.get());
+		assertEquals("call_mismatch", controller.execute(
+				new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+						"unknown", "end", "unknown-call", "", 8), true).code());
+		assertTrue(controller.execute(new com.airsim.phonecontrol.voble.VoBLECallController.Request(
+				"end-next", "end", "next-call", "", 8), true).success());
+		assertEquals(1, invocations.get());
+	}
+
+	private static void assertVoBLEPCMResolutionHandshakeAndMediaCrypto() throws Exception {
+		var standalone = com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
+				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.STANDALONE, "");
+		assertEquals("127.0.0.1", standalone.getAddress().getHostAddress());
+		assertEquals(7580, standalone.getPort());
+		var avf = com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
+				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "10.185.5.25");
+		assertEquals("10.185.5.25", avf.getAddress().getHostAddress());
+		var movedAVF = com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
+				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "10.185.5.31");
+		assertEquals("10.185.5.31", movedAVF.getAddress().getHostAddress());
+		assertEquals("10.185.5.25", avf.getAddress().getHostAddress());
+		var unsafeDiagnostics = new java.util.LinkedHashMap<String, String>();
+		unsafeDiagnostics.put("pcm_ready", "true");
+		unsafeDiagnostics.put("phone_number", "+8613800000000");
+		unsafeDiagnostics.put("media_key", "secret");
+		unsafeDiagnostics.put("nonce", "secret");
+		unsafeDiagnostics.put("audio_payload", "secret");
+		var safeDiagnostics = com.airsim.phonecontrol.voble.VoBLEDiagnostics.sanitize(unsafeDiagnostics);
+		assertEquals(java.util.Map.of("pcm_ready", "true"), safeDiagnostics);
+		var diagnosticSnapshot = new com.airsim.phonecontrol.voble.VoBLEDiagnostics.Snapshot(
+				"Standalone", true, true, "G.711-mu/8000/mono", 4, 3, 2, "");
+		assertTrue(com.airsim.phonecontrol.voble.VoBLEDiagnostics.summary(diagnosticSnapshot)
+				.contains("PCM 运行中"));
+		try {
+			com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
+					com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "");
+			throw new AssertionError("missing AVF address must fail closed");
+		} catch (IllegalArgumentException expected) {}
+
+		java.io.ByteArrayOutputStream hello = new java.io.ByteArrayOutputStream();
+		var bridge = com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.open(
+				standalone, endpoint -> new com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.Duplex() {
+					@Override public java.io.InputStream input() {
+						return new java.io.ByteArrayInputStream("AIRSIMREADY".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+					}
+					@Override public java.io.OutputStream output() { return hello; }
+					@Override public void close() {}
+				});
+		assertEquals("AIRSIMPCM1\n", new String(hello.toByteArray(), java.nio.charset.StandardCharsets.US_ASCII));
+		assertTrue(bridge.ready());
+		bridge.close();
+		try {
+			com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.open(
+					standalone, endpoint -> new com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.Duplex() {
+						@Override public java.io.InputStream input() { return new java.io.ByteArrayInputStream("BAD".getBytes()); }
+						@Override public java.io.OutputStream output() { return java.io.OutputStream.nullOutputStream(); }
+						@Override public void close() {}
+					});
+			throw new AssertionError("AIRSIMREADY is required");
+		} catch (java.io.IOException expected) {}
+
+		byte[] pcm = new byte[320];
+		for (int index = 0; index < 160; index++) {
+			short sample = (short) ((index - 80) * 300);
+			pcm[index * 2] = (byte) sample;
+			pcm[index * 2 + 1] = (byte) (sample >>> 8);
+		}
+		byte[] ulaw = com.airsim.phonecontrol.voble.VoBLEMediaSession.encodeMuLaw(pcm);
+		assertEquals(160, ulaw.length);
+		assertEquals(320, com.airsim.phonecontrol.voble.VoBLEMediaSession.decodeMuLaw(ulaw).length);
+		byte[] key = filledBytes(32, 7);
+		var encrypted = com.airsim.phonecontrol.voble.VoBLEMediaSession.encrypt(
+				ulaw, key, true, 3, 9, 1_440);
+		assertTrue(java.util.Arrays.equals(ulaw,
+				com.airsim.phonecontrol.voble.VoBLEMediaSession.decrypt(
+						encrypted, key, true, 3, 9, 1_440)));
+		try {
+			com.airsim.phonecontrol.voble.VoBLEMediaSession.decrypt(
+					encrypted, filledBytes(32, 8), true, 3, 9, 1_440);
+			throw new AssertionError("wrong media key must fail");
+		} catch (java.security.GeneralSecurityException expected) {}
+
+		class BlockingDuplex implements com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.Duplex {
+			final byte[] ready = "AIRSIMREADY".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+			final java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+			int offset;
+			boolean closed;
+			final java.io.InputStream input = new java.io.InputStream() {
+				@Override public synchronized int read() throws java.io.IOException {
+					if (offset < ready.length) return ready[offset++] & 0xff;
+					while (!closed) try { wait(); }
+					catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new java.io.IOException(error); }
+					return -1;
+				}
+			};
+			@Override public java.io.InputStream input() { return input; }
+			@Override public java.io.OutputStream output() { return output; }
+			@Override public void close() {
+				closed = true;
+				synchronized (input) { input.notifyAll(); }
+			}
+		}
+		BlockingDuplex duplex = new BlockingDuplex();
+		var identity = new com.airsim.phonecontrol.voble.VoBLEMediaSession.Identity("call-media", 3);
+		var media = new com.airsim.phonecontrol.voble.VoBLEMediaSession(
+				standalone,
+				endpoint -> com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.open(endpoint, ignored -> duplex),
+				packet -> true);
+		assertTrue(!media.onUplinkFragment(identity, new byte[]{1}));
+		media.start(identity, key);
+		assertTrue(media.ready());
+		var uplinkEncrypted = com.airsim.phonecontrol.voble.VoBLEMediaSession.encrypt(
+				ulaw, key, true, 3, 10, 1_600);
+		var uplinkPacket = new com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket(
+				0, com.airsim.phonecontrol.voble.VoBLEProtocol.CODEC_G711_MULAW,
+				3, 10, 1_600, uplinkEncrypted.payload(), uplinkEncrypted.authenticationTag());
+		for (byte[] fragment : com.airsim.phonecontrol.voble.VoBLEProtocol.encodeAudioFragments(
+				uplinkPacket, 247)) assertTrue(media.onUplinkFragment(identity, fragment));
+		boolean duplicateAccepted = true;
+		for (byte[] fragment : com.airsim.phonecontrol.voble.VoBLEProtocol.encodeAudioFragments(
+				uplinkPacket, 247)) duplicateAccepted = media.onUplinkFragment(identity, fragment);
+		assertTrue(!duplicateAccepted);
+		long deadline = System.currentTimeMillis() + 1_000;
+		while (duplex.output.size() < "AIRSIMPCM1\n".length() + 320
+				&& System.currentTimeMillis() < deadline) Thread.sleep(5);
+		assertTrue(duplex.output.size() >= "AIRSIMPCM1\n".length() + 320);
+		media.stop();
+		assertTrue(duplex.closed);
+		assertTrue(!media.ready());
+
+		byte[] readyAndPCM = new byte["AIRSIMREADY".length() + 320];
+		System.arraycopy("AIRSIMREADY".getBytes(java.nio.charset.StandardCharsets.US_ASCII),
+				0, readyAndPCM, 0, "AIRSIMREADY".length());
+		java.util.concurrent.atomic.AtomicInteger notificationAttempts =
+				new java.util.concurrent.atomic.AtomicInteger();
+		var retryMedia = new com.airsim.phonecontrol.voble.VoBLEMediaSession(
+				standalone,
+				endpoint -> com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.open(endpoint, ignored ->
+						new com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.Duplex() {
+							@Override public java.io.InputStream input() { return new java.io.ByteArrayInputStream(readyAndPCM); }
+							@Override public java.io.OutputStream output() { return java.io.OutputStream.nullOutputStream(); }
+							@Override public void close() {}
+						}),
+				packet -> { notificationAttempts.incrementAndGet(); return false; });
+		retryMedia.start(new com.airsim.phonecontrol.voble.VoBLEMediaSession.Identity("call-retry", 4), key);
+		deadline = System.currentTimeMillis() + 1_000;
+		while (retryMedia.stats().droppedFrames() == 0 && System.currentTimeMillis() < deadline) {
+			Thread.sleep(5);
+		}
+		assertTrue(notificationAttempts.get() > 1);
+		assertTrue(retryMedia.stats().droppedFrames() >= 1);
+		retryMedia.stop();
+	}
+
+	private static byte[] filledBytes(int count, int value) {
+		byte[] result = new byte[count];
+		java.util.Arrays.fill(result, (byte) value);
+		return result;
 	}
 
 	private static void assertTransientMuteFailureRetriesAndRestorationCancelsStaleRetry() {
@@ -986,6 +1494,47 @@ public final class CoreTests {
 		} catch (ClassNotFoundException | NoSuchMethodException error) {
 			throw new AssertionError("new-message-only inbox cursor is missing", error);
 		}
+	}
+
+	private static void assertCrashReportIsSanitizedBoundedAndPersisted() throws Exception {
+		String repeated = "x".repeat(80_000);
+		RuntimeException crash = new RuntimeException(
+				"number=+8613800000000 token=super-secret-value " + repeated);
+		String report = CrashReportFormatter.format(
+				"0.9.6", "com.airsim.phonecontrol.standalone",
+				"samsung", "SM-F766U", 35, "main", crash);
+		assertContains(report, "AirSIM Android Crash Report");
+		assertContains(report, "RuntimeException");
+		assertContains(report, "[truncated]");
+		assertTrue(report.length() <= CrashReportFormatter.MAX_REPORT_CHARS);
+		assertTrue(!report.contains("+8613800000000"));
+		assertTrue(!report.contains("super-secret-value"));
+
+		java.nio.file.Path directory = java.nio.file.Files.createTempDirectory("airsim-crash-test");
+		try {
+			CrashReportStore.write(directory.toFile(), report);
+			assertTrue(CrashReportStore.hasReport(directory.toFile()));
+			assertEquals(report, CrashReportStore.read(directory.toFile()));
+			CrashReportStore.clear(directory.toFile());
+			assertTrue(!CrashReportStore.hasReport(directory.toFile()));
+			assertEquals("", CrashReportStore.read(directory.toFile()));
+		} finally {
+			java.nio.file.Files.walk(directory)
+					.sorted(java.util.Comparator.reverseOrder())
+					.forEach(path -> { try { java.nio.file.Files.deleteIfExists(path); } catch (Exception ignored) {} });
+		}
+	}
+
+	private static void assertCrashSharePayloadRequiresAReportAndSanitizesRecentLogs() {
+		assertEquals("", CrashReportSharePayload.compose("", "debug line"));
+		String payload = CrashReportSharePayload.compose(
+				"AirSIM Android Crash Report\nRuntimeException: failure",
+				"number=+8613800000000 token=private-value " + "d".repeat(80_000));
+		assertContains(payload, "AirSIM Android Crash Report");
+		assertContains(payload, "Recent sanitized debug log");
+		assertTrue(payload.length() <= CrashReportSharePayload.MAX_SHARE_CHARS);
+		assertTrue(!payload.contains("+8613800000000"));
+		assertTrue(!payload.contains("private-value"));
 	}
 
 	private static String invokeTelecomAction(Runnable action) throws Exception {

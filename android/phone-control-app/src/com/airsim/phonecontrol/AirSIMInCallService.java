@@ -4,6 +4,8 @@ import android.content.Intent;
 import android.net.Uri;
 import android.telecom.Call;
 import android.telecom.InCallService;
+import android.os.Handler;
+import android.os.Looper;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,6 +14,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class AirSIMInCallService extends InCallService {
+    private static volatile AirSIMInCallService instance;
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final Map<Call, Call.Callback> callbacks = new ConcurrentHashMap<>();
 	private final Map<Call, String> callStates = new ConcurrentHashMap<>();
@@ -22,6 +26,7 @@ public final class AirSIMInCallService extends InCallService {
     @Override
     public void onCallAdded(Call call) {
         super.onCallAdded(call);
+		instance = this;
 		if (localAudio == null) localAudio = new LocalCallAudioController(this);
         String callId = CallRepository.add(call);
         BridgeLog.info("telecom_call_added call_id=" + DebugRedactor.safeIdentifier(callId)
@@ -67,19 +72,41 @@ public final class AirSIMInCallService extends InCallService {
     }
 
 	private void updateLocalAudioPolicy() {
-		if (localAudio == null) return;
-		String mode = AppConfig.mode(this);
-		boolean shouldSilence = false;
-		for (String state : callStates.values()) {
-			if (TelecomStateMapper.shouldSilenceLocalOutput(mode, state)) {
-				shouldSilence = true;
-				break;
-			}
-		}
-		localAudio.update(shouldSilence);
+		if (localAudio == null || instance != this) return;
+        java.util.List<String> liveCalls = new java.util.ArrayList<>();
+        boolean relayingAudio = false;
+        for (Map.Entry<Call, String> item : callStates.entrySet()) {
+            if (!"ended".equals(item.getValue())) liveCalls.add(CallRepository.id(item.getKey()));
+            // A prepared incoming PCM connection is not an answered call. Also do not
+            // treat STATE_DISCONNECTING (mapped to dialing by the legacy wire protocol)
+            // as permission to re-mute while hangup/media cleanup is still asynchronous.
+            if (item.getKey().getState() != Call.STATE_DISCONNECTING
+                    && ((!"samsung".equalsIgnoreCase(android.os.Build.MANUFACTURER)
+                        && "dialing".equals(item.getValue())) || "active".equals(item.getValue())
+                    || "held".equals(item.getValue()))) relayingAudio = true;
+        }
+        java.util.Collections.sort(liveCalls);
+        String transports = RemoteAudioSessionRegistry.diagnostic();
+        boolean ownsRemoteCall = RemoteAudioSessionRegistry.ownsCall(liveCalls);
+        // Notification presentation mode never proves remote audio ownership. Only
+        // the unique, authenticated call with a ready PCM owner may silence output.
+        // This also restores local audio immediately on media loss, even if Telecom
+        // has not removed the carrier call yet. Microphone and PCM gain are untouched.
+        boolean shouldSilence = relayingAudio && ownsRemoteCall;
+        localAudio.update(shouldSilence);
+        // Multiple native calls cannot safely share a global mute-repair decision.
+        localAudio.updateWatchdog(shouldSilence,
+                liveCalls.toString() + transports, transports);
 	}
 
+    public static void refreshAudioPolicy() {
+        AirSIMInCallService active = instance;
+        if (active != null) MAIN.post(active::updateLocalAudioPolicy);
+    }
+
     private void emit(String callId, String direction, String state, String number) {
+        com.airsim.phonecontrol.voble.VoBLEGatewayService.publishCallState(
+                this, callId, direction, state, number);
         String eventId = Long.toString(System.currentTimeMillis()) + "-" + events.incrementAndGet();
         String json = WireJson.callEvent(eventId, callId, direction, state, number, AppConfig.mode(this));
         network.execute(() -> {
@@ -106,7 +133,11 @@ public final class AirSIMInCallService extends InCallService {
 
     @Override public void onDestroy() {
 		BridgeLog.info("incall_service_destroyed");
-		if (localAudio != null) localAudio.update(false);
+		if (localAudio != null) {
+            localAudio.updateWatchdog(false, "", "");
+            localAudio.update(false);
+        }
+        if (instance == this) instance = null;
         network.shutdownNow();
         super.onDestroy();
     }

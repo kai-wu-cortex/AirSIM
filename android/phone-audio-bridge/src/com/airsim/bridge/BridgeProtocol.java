@@ -14,6 +14,12 @@ final class BridgeProtocol {
     private BridgeProtocol() {}
 
     static void acceptHandshake(InputStream input, OutputStream output) throws IOException {
+        acceptHandshake(input, output, () -> {});
+    }
+
+    interface AudioStartup { void start() throws IOException; }
+
+    static void acceptHandshake(InputStream input, OutputStream output, AudioStartup startup) throws IOException {
         byte[] hello = new byte[CLIENT_HELLO.length];
         int offset = 0;
         while (offset < hello.length) {
@@ -29,6 +35,7 @@ final class BridgeProtocol {
         if (!Arrays.equals(hello, CLIENT_HELLO)) {
             throw new IllegalArgumentException("invalid PCM handshake");
         }
+        startup.start();
         output.write(SERVER_READY);
         output.flush();
     }

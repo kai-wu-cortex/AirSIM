@@ -1,10 +1,13 @@
 # AirSIM — Android 与 iPhone / Apple Watch 跨设备通话、短信和 VoWLAN
 
+[Apps v0.9.7.2 · build 91](docs/releases/0.9.7.2.md)：连接恢复、VoBLE、完整联系人姓名、短信删除与音频诊断。推荐 Android 10–13 用户升级 Standalone；三星最低通话音量效果仍待真机复验。包含 [Relay 多安卓定向命令与退避](docs/relay-agent-routing.md)；本次应用发布不部署 Relay。
+
 [![Android Standalone](https://img.shields.io/badge/Android-Standalone%20APK-3DDC84?logo=android&logoColor=white)](android-standalone/README.md)
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
-[![Apps release](https://img.shields.io/badge/Apps-v0.9.6-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.6)
+[![Apps release](https://img.shields.io/badge/Apps-v0.9.7.2-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.7.2)
+[![Android 10–13 recommended hotfix](https://img.shields.io/badge/Android%2010–13-修复版·推荐安装-3DDC84)](docs/releases/0.9.7.1-android10-13.md)
 [![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.6-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)
 [![Cloudflare Relay](https://img.shields.io/badge/Relay-airsim--push.remotepilot.site-F38020?logo=cloudflare&logoColor=white)](https://airsim-push.remotepilot.site/healthz)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
@@ -35,8 +38,12 @@ https://t.me/+TRDazm-qnXlhNGRl
 
 - **跨设备电话**：在 iPhone 或 Apple Watch 上拨号、接听、拒接、挂断、静音并发送 DTMF，由三星 Android 手机完成运营商通话。
 - **跨设备短信**：同步短信状态、发送短信并通过 APNs 通知 Apple 客户端。
+- **回到同一 Wi-Fi 恢复 VoWLAN（候选 build 85）**：安卓网络事件重发发现广播，iOS 重新发现并认证；自动模式空闲时回到 VoWLAN，固定云端不变、通话中不换链路，不新增 Relay 定时查询。未发布／真机验收，详见[说明](docs/vowlan-network-return.md)。
+- **本地短信删除与音频诊断（候选 build 84）**：iOS 支持单条／会话／多选删除并防旧同步回流；安卓对已确认的远程通话执行有界静音复检与修复，可导出 VERBOSE TXT。未发布／真机验收，详见[说明](docs/sms-deletion-audio-watchdog.md)。
 - **CallKit 与 PushKit**：在 iPhone 上呈现系统来电界面，并支持 VoIP push 唤醒与来电上报。
 - **VoWLAN 本地直连**：iPhone 与三星手机处于同一局域网或三星热点时，使用经过 HMAC 认证的控制与 PCM 链路。
+- **手动地址配对（工作区候选 build 83）**：自动发现受限时，可填写安卓 IPv4 与本次配对端口，保留六位码加密认证；支持局域网及 Tailscale 地址，不依赖 AirSIM Relay。两端更新及验收边界见[使用说明](docs/manual-ip-pairing.md)，尚未发布／真机 Tailscale 验收。
+- **VoBLE 蓝牙直连（VoBLE 分支）**：把蓝牙作为设置中的独立连接模式；不依赖 Wi-Fi、Relay、PushKit 或云端参数，通过认证 BLE GATT 通道承载电话控制和双向通话音频。
 - **单 APK Android 端**：内置 Agent 与 Bridge，安装后不再依赖 AVF Linux、Terminal、Debian 或 installer。
 - **云端 Relay**：通过独立部署的 Cloudflare Worker、KV 与 Durable Objects 连接 Android 内置 Agent 和 Apple 客户端。
 - **可观察的模式与自检**：Android 首页和 iOS 设置页显示当前 VoWLAN / 云端状态；iOS 可依次验证 Push 凭据、AirSIM Relay 身份、设备注册和 AVF Agent 90 秒心跳。
@@ -49,7 +56,7 @@ https://t.me/+TRDazm-qnXlhNGRl
 
 ```text
 iPhone / Apple Watch
-        │  VoWLAN 或 Cloudflare Relay
+        │  VoWLAN、VoBLE 或 Cloudflare Relay
         ▼
 Android AirSIM Standalone APK
         ├─ 内置 Agent：身份、心跳、命令和媒体编排
@@ -63,6 +70,14 @@ Android AirSIM Standalone APK
 
 每通电话在建立时选择 VoWLAN 或 Relay，并在本次通话结束前保持同一传输路径，避免媒体和控制面在通话中途漂移。
 
+### VoBLE 蓝牙模式
+
+VoBLE 是与 VoWLAN、云端 Relay 并列的模式选项，不是现有 Wi-Fi 链路的必需组件。选择“蓝牙直连”后，iPhone 与 Android 使用一次性短码确认的临时密钥完成配对，控制消息和 G.711 μ-law 8 kHz 单声道音频均使用 AES-256-GCM 认证加密；通话期间绑定同一个 `call_id` 和 generation，避免重连后误操作另一通电话。短暂断链只允许在三秒内、同一通电话和同一 generation 上恢复。
+
+蓝牙模式只传送 AirSIM 控制与通话音频，**不会把 Android 的移动网络通过 Bluetooth PAN 共享给 iPhone**。需要上网时仍应单独使用 Android 热点、Wi-Fi 或 iPhone 自身蜂窝网络。iOS 端继续使用 CallKit 展示和管理通话，但本地蓝牙模式不需要 PushKit 或 Relay；App 被用户强制退出后，iOS 不保证 BLE 后台唤醒，来电前应重新打开 AirSIM。Apple Watch 可镜像 iPhone 的 CallKit 来电和控制状态，实际音频路由仍由 iPhone/watchOS 系统决定，并不是 Watch 直接连接 Android BLE。
+
+实现与验收边界见 [VoBLE 设计](docs/superpowers/specs/2026-10-12-voble-bluetooth-call-design.md) 和 [VoBLE 真机测试矩阵](docs/voble-real-device-test-matrix.md)。
+
 ## 仓库结构
 
 | 目录 | 组件 | 主要职责 |
@@ -75,7 +90,7 @@ Android AirSIM Standalone APK
 | [`module/packaging`](module/packaging/README.md) | AVF Debian 发布 | 构建单一 `arm64` 包、systemd 单元和首次安装脚本 |
 | [`iOS`](iOS/README.md) | iPhone / Apple Watch App | CallKit、PushKit、VoWLAN、短信、实时活动与通话媒体 |
 | [`push-relay-worker`](push-relay-worker/README.md) | Cloudflare Relay | 设备注册、APNs、云端命令、Dashboard 与公网媒体 |
-| [`docs`](docs) | 协议与设计文档 | VoWLAN 设计、三星热点配对协议与安全边界 |
+| [`docs`](docs) | 协议与设计文档 | VoWLAN / VoBLE 设计、三星热点配对协议与安全边界 |
 
 ## 快速开始
 
@@ -83,14 +98,25 @@ Android AirSIM Standalone APK
 
 | 组件 | 当前版本或地址 |
 | --- | --- |
-| Android AVF / Standalone APK、iPhone / Apple Watch App | [`v0.9.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.6) |
+| Android Standalone / AVF Bridge · Android 10–13 修复 APK | [`v0.9.7.2 (91)`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.7.2)，推荐安装 Standalone |
+| iPhone / Apple Watch App | `0.9.7 (91)`，随 [v0.9.7.2](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.7.2) 提供 full／sideload unsigned IPA；TestFlight 单独上传处理 |
 | Android AVF Linux Agent | [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包版本 `0.4.6-1`） |
 | AirSIM Relay | `0.2.1` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
 | DJOneHub Relay | `https://push.remotepilot.site`（独立服务，AirSIM 不得使用） |
 
 ### 应用发布包
 
-[AirSIM Apps v0.9.6](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.6) 新增 Android Standalone 本地/云端完整编排、可操作锁屏来电页和短信读取兜底；iPhone 增加多 Agent 状态、本地模式、网络恢复与新版实时活动，并修复通话结束后的延迟 CallKit 回调误报。Release 同时提供 AVF Bridge APK、Standalone APK 与 unsigned IPA；正式 iOS build `79` 另行提交 TestFlight。摘要、安装和重签步骤见 [v0.9.6 发布说明](docs/releases/0.9.6.md)。
+当前版为 [Apps v0.9.7.2（91）](docs/releases/0.9.7.2.md)，包含以下旧系统修复及其后续稳定性改动。公开 IPA 需自行重签；优先选 Standalone APK，不需更新 Linux Agent。旧版本说明保留作为历史记录。
+
+#### Android 10–13 专用修复版
+
+[AirSIM v0.9.7.1 — Android 10–13 修复版，推荐安装](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.7.1)。新安装优先选择 `AirSIM-Android-Standalone-0.9.7.1-Android10-13.apk`：内置 Agent，不需要 AVF Linux；正式签名构建可覆盖同证书的 Standalone 并保留数据，版本号由 80 升至 81。不要先卸载或清除配对数据；其他证书的 Debug/第三方重签版不能直接覆盖。旧 AVF 部署可选择同版 AVF Bridge APK，但不需要更新 Linux Agent。
+
+修复旧系统缺少 Java 方法导致的启动、日志/闪退报告读取、权限申请，以及 VoWLAN、Relay、PCM 读取路径崩溃。替换 `ByteArrayOutputStream.toString(Charset)`、`InputStream.readNBytes` 和 `Collection.toArray(IntFunction)`，构建时检查编译产物，防止这些调用重新进入 APK。未降低 `targetSdk`，未移除权限或蓝牙功能；面向 10–13 发布不表示禁止更高系统安装，也不保证厂商通话音频能力。
+
+Redmi M2004J19C（Android 12）已保留数据安装修复包，用户确认 VoBLE 配对正常；最新双端云端通话实测反馈「挂断后不再重现通话页，声音更稳」。iOS 配对页新增仅控制本次配对的本地开关，并修复云端异步挂断竞态。vivo Android 11、Android 10/13 及 realme 尚未完成本轮修复包真机验收，短信与双向音频仍须按机型验证。公开 IPA 需自行重签，TestFlight 上传不等于审核通过。详情见 [发布说明](docs/releases/0.9.7.1-android10-13.md)。
+
+[AirSIM Apps v0.9.7](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.7) 引入独立 VoBLE 蓝牙模式、可用拨号路由优先级、配对设备管理与当前 SIM 身份刷新；修复蓝牙通话音频、重连和挂断竞态，并增加 Android 默认通话卡、闪退报告分享及 Shizuku 启动引导。Release 同时提供 AVF Bridge APK、Standalone APK 与 unsigned IPA；正式 iOS build `80` 另行上传 TestFlight。摘要、验收边界、安装和重签步骤见 [v0.9.7 发布说明](docs/releases/0.9.7.md)。
 
 ### 1. 准备开发环境
 
@@ -194,6 +220,7 @@ AirSIM 不附带原作者的 Apple Developer Team、App ID、证书或 provision
 | [iOS 与 watchOS](iOS/README.md) | Xcode、Bundle ID、Apple 签名、CallKit、PushKit 与真机测试 |
 | [Cloudflare Relay](push-relay-worker/README.md) | Wrangler、KV、Durable Objects、APNs、Secret 与自定义域名 |
 | [VoWLAN 设计](docs/2026-09-11-vowlan-design.md) | 本地传输设计与协议边界 |
+| [VoBLE 真机测试矩阵](docs/voble-real-device-test-matrix.md) | 蓝牙模式配置、自动化结果、设备矩阵与尚未完成的硬件验收 |
 | [三星热点配对协议](docs/samsung-hotspot-pairing-protocol.md) | 配对、密钥派生、HMAC 与防重放 |
 | [Codex 部署辅助](codex.md) | 面向 Codex 的全项目构建、验证与部署规则 |
 | [Claude 部署辅助](claude.md) | 面向 Claude 的全项目操作顺序与安全约束 |

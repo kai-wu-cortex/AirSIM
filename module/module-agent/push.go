@@ -23,6 +23,7 @@ import (
 // APNs provider credentials never live on the phone or the module; the HTTPS
 // relay is the only component that owns the Apple .p8 key.
 type pushRegistration struct {
+	commandEpoch                 uint64   // runtime-only, never serialized
 	CloudEnabled                 *bool    `json:"cloud_enabled,omitempty"`
 	LocalMode                    bool     `json:"local_mode,omitempty"`
 	DeviceID                     string   `json:"device_id"`
@@ -62,6 +63,7 @@ type pushStatus struct {
 }
 
 type incomingPushEvent struct {
+	AgentID        string `json:"agent_id"`
 	Event          string `json:"event"`
 	DeviceID       string `json:"device_id"`
 	DeviceSecret   string `json:"device_secret"`
@@ -99,6 +101,7 @@ type callOwnerPushEvent struct {
 }
 
 type callStatePushEvent struct {
+	AgentID      string `json:"agent_id"`
 	Event        string `json:"event"`
 	DeviceID     string `json:"device_id"`
 	DeviceSecret string `json:"device_secret"`
@@ -121,35 +124,40 @@ type agentHeartbeatSnapshot struct {
 }
 
 type agentHeartbeatEvent struct {
-	Event                string `json:"event"`
-	DeviceID             string `json:"device_id"`
-	DeviceSecret         string `json:"device_secret"`
-	AgentVersion         string `json:"agent_version"`
-	AgentID              string `json:"agent_id,omitempty"`
-	AgentKind            string `json:"agent_kind,omitempty"`
-	DeviceName           string `json:"device_name,omitempty"`
-	Manufacturer         string `json:"manufacturer,omitempty"`
-	Model                string `json:"model,omitempty"`
-	PhoneNumber          string `json:"phone_number,omitempty"`
-	ATOK                 bool   `json:"at_ok"`
-	CellularState        string `json:"cellular_state"`
-	CellularRegistration string `json:"cellular_registration,omitempty"`
-	CellularRecovery     string `json:"cellular_recovery,omitempty"`
-	ECMCarrier           string `json:"ecm_carrier,omitempty"`
-	SignalDBM            *int   `json:"signal_dbm,omitempty"`
+	CommandRoutingVersion int    `json:"command_routing_version"`
+	Event                 string `json:"event"`
+	DeviceID              string `json:"device_id"`
+	DeviceSecret          string `json:"device_secret"`
+	AgentVersion          string `json:"agent_version"`
+	AgentID               string `json:"agent_id,omitempty"`
+	AgentKind             string `json:"agent_kind,omitempty"`
+	DeviceName            string `json:"device_name,omitempty"`
+	Manufacturer          string `json:"manufacturer,omitempty"`
+	Model                 string `json:"model,omitempty"`
+	PhoneNumber           string `json:"phone_number,omitempty"`
+	ATOK                  bool   `json:"at_ok"`
+	CellularState         string `json:"cellular_state"`
+	CellularRegistration  string `json:"cellular_registration,omitempty"`
+	CellularRecovery      string `json:"cellular_recovery,omitempty"`
+	ECMCarrier            string `json:"ecm_carrier,omitempty"`
+	SignalDBM             *int   `json:"signal_dbm,omitempty"`
 }
 
 type pushManager struct {
-	mu             sync.Mutex
-	configPath     string
-	config         pushRegistration
-	client         *http.Client
-	lastError      string
-	lastCallID     string
-	lastUUID       string
-	lastSecret     string
-	lastGeneration uint64
-	lastSMSID      string
+	commandConnected bool
+	commandSocket    *cloudWebSocket
+	commandRetryAt   time.Time
+	lastCommandPull  time.Time
+	mu               sync.Mutex
+	configPath       string
+	config           pushRegistration
+	client           *http.Client
+	lastError        string
+	lastCallID       string
+	lastUUID         string
+	lastSecret       string
+	lastGeneration   uint64
+	lastSMSID        string
 
 	callDelivered   bool
 	callInFlight    bool
@@ -359,6 +367,18 @@ func (p *pushManager) store(registration pushRegistration) error {
 		return err
 	}
 	p.mu.Lock()
+	nextEnabled := !registration.LocalMode && (registration.CloudEnabled == nil || *registration.CloudEnabled)
+	if !sameCommandIdentity(p.config, registration) || nextEnabled != p.cloudEnabledLocked() {
+		if p.commandSocket != nil {
+			_ = p.commandSocket.conn.Close()
+		}
+		p.commandConnected = false
+		p.commandRetryAt = time.Time{}
+		p.lastCommandPull = time.Time{}
+		registration.commandEpoch = p.config.commandEpoch + 1
+	} else {
+		registration.commandEpoch = p.config.commandEpoch
+	}
 	p.config = registration
 	p.lastError = ""
 	p.mu.Unlock()
@@ -528,7 +548,8 @@ func (p *pushManager) sendIncoming(call callRecord, now time.Time) (bool, error)
 	p.mu.Unlock()
 
 	payload := incomingPushEvent{
-		Event: "incoming_call", DeviceID: registration.DeviceID,
+		AgentID: registration.AndroidAgentID,
+		Event:   "incoming_call", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, CallID: call.ID, CallUUID: uuid,
 		Generation: generation, CallSecret: secret,
 		Number: call.Number, IssuedAt: now.UTC().Format(time.RFC3339Nano),
@@ -539,7 +560,7 @@ func (p *pushManager) sendIncoming(call callRecord, now time.Time) (bool, error)
 			registration.ForceLegacyPCM,
 		),
 	}
-	if err := p.postJSON(client, registration.RelayURL+"/v1/events/call", payload); err != nil {
+	if err := p.postJSON(client, registration.RelayURL+"/v2/events/call", payload); err != nil {
 		p.mu.Lock()
 		if p.lastCallID == call.ID {
 			p.callInFlight = false
@@ -645,8 +666,9 @@ func (p *pushManager) sendCallState(callID, phase string) error {
 	if !cloudEnabled || registration.RelayURL == "" || callUUID == "" {
 		return nil
 	}
-	return p.postJSON(client, registration.RelayURL+"/v1/events/call-state", callStatePushEvent{
-		Event: "call_state", DeviceID: registration.DeviceID,
+	return p.postJSON(client, registration.RelayURL+"/v2/events/call-state", callStatePushEvent{
+		AgentID: registration.AndroidAgentID,
+		Event:   "call_state", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, CallID: callID,
 		CallUUID: callUUID, Generation: generation, Phase: phase,
 		Source: "agent", Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
@@ -677,7 +699,8 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
 		return nil
 	}
 	return p.postJSON(client, registration.RelayURL+"/v1/events/heartbeat", agentHeartbeatEvent{
-		Event: "agent_heartbeat", DeviceID: registration.DeviceID,
+		CommandRoutingVersion: 1,
+		Event:                 "agent_heartbeat", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, AgentVersion: agentVersion,
 		AgentID: registration.AndroidAgentID, AgentKind: registration.AndroidAgentKind,
 		DeviceName: registration.AndroidDeviceName, Manufacturer: registration.AndroidManufacturer,
@@ -703,14 +726,22 @@ func (p *pushManager) pullCommands() ([]cloudDeviceCommand, error) {
 	if !ready {
 		return nil, nil
 	}
+	return p.pullCommandsFor(registration)
+}
+
+func (p *pushManager) pullCommandsFor(registration pushRegistration) ([]cloudDeviceCommand, error) {
+	if !validCommandAgentID(registration.AndroidAgentID) {
+		return nil, errors.New("需补全原配对配置中的 Android Agent 身份")
+	}
 	var batch struct {
 		Commands []cloudDeviceCommand `json:"commands"`
 	}
 	err := p.postJSONResponse(
 		p.client,
-		registration.RelayURL+"/v1/commands/pull",
+		registration.RelayURL+"/v2/commands/pull",
 		map[string]string{
 			"device_id": registration.DeviceID, "device_secret": registration.DeviceSecret,
+			"agent_id": registration.AndroidAgentID,
 		},
 		&batch,
 	)
@@ -725,7 +756,15 @@ func (p *pushManager) completeCommand(result cloudCommandResult) error {
 	if !ready {
 		return errors.New("公网命令设备身份无效")
 	}
+	return p.completeCommandFor(registration, result)
+}
+
+func (p *pushManager) completeCommandFor(registration pushRegistration, result cloudCommandResult) error {
+	if !validCommandAgentID(registration.AndroidAgentID) {
+		return errors.New("需补全原配对配置中的 Android Agent 身份")
+	}
 	payload := struct {
+		AgentID      string         `json:"agent_id"`
 		DeviceID     string         `json:"device_id"`
 		DeviceSecret string         `json:"device_secret"`
 		CommandID    string         `json:"command_id"`
@@ -733,10 +772,11 @@ func (p *pushManager) completeCommand(result cloudCommandResult) error {
 		Result       map[string]any `json:"result,omitempty"`
 		Error        string         `json:"error,omitempty"`
 	}{
+		AgentID:  registration.AndroidAgentID,
 		DeviceID: registration.DeviceID, DeviceSecret: registration.DeviceSecret,
 		CommandID: result.CommandID, Status: result.Status, Result: result.Result, Error: result.Error,
 	}
-	return p.postJSON(p.client, registration.RelayURL+"/v1/commands/complete", payload)
+	return p.postJSON(p.client, registration.RelayURL+"/v2/commands/complete", payload)
 }
 
 func (p *pushManager) postJSON(client *http.Client, endpoint string, value any) error {
@@ -760,7 +800,7 @@ func (p *pushManager) postJSONResponse(client *http.Client, endpoint string, val
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("推送中继返回 HTTP %d", response.StatusCode)
+		return &relayCommandHTTPError{Status: response.StatusCode, RetryAfter: commandRetryAfter(response.Header.Get("Retry-After"), time.Now())}
 	}
 	if output != nil {
 		if err := json.NewDecoder(response.Body).Decode(output); err != nil {

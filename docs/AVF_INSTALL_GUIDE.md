@@ -1,8 +1,16 @@
 # AirSIM AVF Linux Agent 安装与无损排障
 
+未发布源码已适配 [Relay v2 设备定向协议](relay-agent-routing.md)，不是新的 Debian Release。缺 AndroidAgentID 的旧配置需补全原配对，不从号码生成身份。先更新 Relay 后再升级 Agent；本轮未触碰 installerd 或现网。
+
+候选 build 85 的[同网 VoWLAN 恢复](vowlan-network-return.md)修改安卓 App 与 iOS 客户端，不要求升级本指南的 Linux Agent 或部署 Relay。保留既有认证、固定模式与通话链路，不能以构建通过替代锁屏／回家真机验收。候选版尚未发布。
+
+候选 build 84 的短信删除及音频 Watchdog 不要求升级本指南的 Linux Agent；旧 AVF 云端无法确认 APK 媒体归属时不推测通话做自动修复，详见[诊断说明](sms-deletion-audio-watchdog.md)。候选版尚未发布。
+
 本指南适用于支持 Android AVF Linux Terminal 的三星手机。AirSIM Android App、AVF 中的 `airsim-agent`、独立的 `airsim-installerd` 是三个不同组件；App 能打开 Terminal，并不等于 Agent 已安装。`8575` Agent 健康端点可达，也不等于 `8576` 安装服务和控制令牌已就绪。
 
-当前应用发布是 [`v0.9.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.6)，本指南安装的 AVF Agent 是独立版本 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包 `0.4.6-1`）。两条版本线用途不同，不应相互替换。
+当前应用发布是 [`v0.9.7.1`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.7.1)，本指南安装的 AVF Agent 是独立版本 [`v0.4.6`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.6)（Debian 包 `0.4.6-1`）。两条版本线用途不同，不应相互替换。
+
+Android 10–13 推荐安装 Standalone 修复版 `0.9.7.1 (81)`，不需要本指南的 Linux 安装流程。旧 AVF Bridge 共享修复在 API 34 以下仅通过可点击通知提示用户打开 Terminal 恢复连接；不会调用该系统不存在的 ActivityOptions 方法或绕过后台启动限制。
 
 若 AVF 内已有 DJOneHub，保留其服务和 `7575` 端口。AirSIM 使用独立的 `8575` / `8576`，健康响应还应包含 `"product":"airsim"`；`7575` 返回成功不能当成 AirSIM 已安装。首次安装固定到 v0.4.6。已有 `0.4.4-1` 的设备须先按下文执行一次性签名密钥迁移到 v0.4.5，再通过安装器升级，不能用首次安装命令或 App 的旧 installer 直接跳过迁移。
 
@@ -104,9 +112,14 @@ sudo apt-get -s --no-remove install 'libudev1=252.39-1~deb12u2'
 
 ## 5. 验收与故障记录
 
+### iPhone 一直“发现中”与 Tailscale
+
+工作区候选 build 83 的[手动地址配对](manual-ip-pairing.md)可绕过 Bonjour。这里填的是 **Android App 当次配对页的地址／端口**，不是本指南的 Linux `8575/8576`、Shell `7580` 或无线 ADB 端口。安卓与 iOS 均需更新；不需要将 Linux 端口暴露给局域网或 Tailscale，也不需要升级 Linux Agent。路由、权限或 ACL 不可达时，手动输入不能绕过这些限制；实际通话与短信仍须两端真机验收。
+
 1. Terminal 出现可交互的 Debian 提示符；`avf_tap_fixed` 存在。
 2. `airsim-agent` 与 `airsim-installerd` 均为 `active`；`8575` 的 `/api/health` 返回 `ok: true`，`8576` 可连接。
 3. `sudo airsim-avf-pair` 能显示地址说明和控制 token；App 保存后显示 Agent 与 installerd 在线。
 4. 随后再验证默认电话角色、Shizuku 授权、VoWLAN/Relay、真实通话及双向 PCM。Agent 健康不等于电话链路已经验收。
 
 提交故障报告时记录：手机型号、Android/Terminal 版本、Agent 包版本、两项 `systemctl status`、脱敏 `journalctl`、两个端口的连通性和安装脚本退出码。不要附上控制 token、真实号码、短信或 PCM。
+> 2026-10-16：应用版更新为 [Apps v0.9.7.2（Android build 91）](releases/0.9.7.2.md)，推荐 Android 10–13 升级 Standalone；旧 AVF 部署可更新 Android AVF Bridge APK。Linux Debian Agent 二进制仍为 v0.4.6，本次无需重装 Linux 或修改其签名公钥。

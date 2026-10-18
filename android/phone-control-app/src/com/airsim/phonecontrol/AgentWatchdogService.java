@@ -9,7 +9,6 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
-import android.telecom.TelecomManager;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -64,6 +63,7 @@ public final class AgentWatchdogService extends Service {
                 flushIncomingSMS();
                 String payload = new AgentClient(this).nextCommand();
                 failures = 0;
+                getSystemService(android.app.NotificationManager.class).cancel(BridgeNotification.RECOVERY_ID);
                 update(payload.isEmpty() ? "Linux Agent 在线" : "正在执行设备命令");
                 if (!payload.isEmpty()) {
                     AgentCommand command = AgentCommand.parse(payload);
@@ -76,7 +76,7 @@ public final class AgentWatchdogService extends Service {
                             command, dialerRoleHeld,
                             call -> {
                                 CallRepository.ActionResult telecom = CallRepository.execute(
-                                        call, getSystemService(TelecomManager.class));
+                                        AgentWatchdogService.this, call);
                                 return new AgentCommandDispatcher.Result(
                                         telecom.success, telecom.error, 0);
                             },
@@ -126,6 +126,13 @@ public final class AgentWatchdogService extends Service {
 	private void attemptTerminalRecovery() {
 		try {
 			Intent terminal = AVFEnvironmentActions.terminalIntent(this);
+			if (Build.VERSION.SDK_INT < 34) {
+				getSystemService(android.app.NotificationManager.class).notify(
+						BridgeNotification.RECOVERY_ID,
+						BridgeNotification.terminalRecovery(this, terminal));
+				BridgeLog.info("terminal_recovery_waiting_for_user");
+				return;
+			}
 			int backgroundStartMode = RecoveryLaunchPolicy.backgroundActivityStartMode(Build.VERSION.SDK_INT);
 			ActivityOptions creatorOptions = ActivityOptions.makeBasic()
 					.setPendingIntentCreatorBackgroundActivityStartMode(
@@ -156,6 +163,7 @@ public final class AgentWatchdogService extends Service {
         BridgeLog.info("watchdog_destroyed");
         running = false;
         worker.shutdownNow();
+        getSystemService(android.app.NotificationManager.class).cancel(BridgeNotification.RECOVERY_ID);
         super.onDestroy();
     }
 }

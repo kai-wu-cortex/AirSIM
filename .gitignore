@@ -1,4 +1,5 @@
 .DS_Store
+/.wrangler/
 .idea/
 .vscode/
 android/phone-control-app/build/

@@ -1,11 +1,21 @@
 AIRSIM PROJECT CONTEXT
 ======================
 
+Workspace candidate build85 handles return-to-Wi-Fi VoWLAN recovery; see docs/vowlan-network-return.md. Android observes Wi-Fi network/address revisions and republishes NSD with atomic registration epochs; iOS restarts discovery with finite authenticated probes. Only automatic idle routing prefers VoWLAN; fixed cloud and active-call transport stay unchanged. No added Relay polling timer. Not installed/published or lock-screen hardware verified; suspended iOS/OEM force-stop recovery cannot be guaranteed.
+
+Workspace candidate build 84 adds local-only iOS SMS deletion with hashed atomic tombstones and Android confirmed-call audio Watchdog with bounded retries and UTF-8 TXT export. See docs/sms-deletion-audio-watchdog.md. Not installed/published; OS mute flags are not acoustic verification. Legacy AVF cloud without confirmed media ownership is not auto-repaired.
+
 PURPOSE
 AirSIM is a cross-device calling and messaging project. An Android phone owns the carrier call and SMS capabilities. iPhone and Apple Watch clients use those capabilities over authenticated VoWLAN or an independently deployed Cloudflare Relay. The recommended Android Standalone APK embeds the Agent and does not require AVF Linux.
 
-CURRENT RELEASE BASELINE (2026-10-10)
-Android AVF/Standalone/iOS Apps v0.9.6 (build 79); legacy AVF Agent v0.4.6 (Debian 0.4.6-1); Relay protocol 0.2.1.
+CURRENT RELEASE BASELINE (2026-10-14)
+Apps v0.9.7.1: Android 0.9.7.1 (81), iOS 0.9.7 (81). Android 10–13 compatibility hotfix: recommended installation, prefer Standalone. Legacy AVF Agent stays v0.4.6 (Debian 0.4.6-1); Relay protocol 0.2.1. GitHub IPA is unsigned; the maintainer uploads a separate production build via Xcode to TestFlight. Upload, processing, external testing and review are distinct states; verify before reporting.
+
+PAIRING/COMPATIBILITY
+Unpublished workspace candidate build83 adds manual IPv4 + per-window pairing port without Bonjour dependency. See docs/manual-ip-pairing.md. Both apps need updating; no Linux Agent or Relay deployment. Support private LAN IPv4 and100.64.0.0/10; Android userspace Tailscale may proxy to an explicitly bound loopback gateway. Preserve HMAC/replay/PCM exclusivity, never expose AVF8575/8576 or shell7580. Persist only authenticated route identity/address/ports, not old phone numbers. Honor deletion/binding and current endpoint epochs. Proxy loss ends only the owned Telecom call ID, including late control completions. Physical Tailscale operation remains unverified.
+iOS Pair Android Phone has a per-attempt local-only toggle; never mutate global local/cloud mode. Local packages contain only VoWLAN credentials. Serialize pairing with in-flight Agent registration writes and preserve local Agent configuration during automatic refresh, without disabling unrelated global Relay token refresh. Android API 29+ compatibility and API 34-gated AVF recovery details are in the shared Android README.
+
+Cloud end-intent tombstones and callback/operation identities suppress late UI resurrection. Bounded adaptive PCM queues, short concealment and paced independent send/playout improve jitter resilience without changing Relay/VoWLAN/VoBLE protocols. See docs/cloud-pcm-resilience.md; user confirmed no UI reappearance and steadier audio in this real-device cloud test, not all-network/OEM/Watch certification.
 
 PRIMARY SEARCH / PRODUCT TERMS
 Samsung Android, iPhone, Apple Watch, cross-device calling, cross-device SMS, CallKit, PushKit, ActivityKit, VoWLAN, Android AVF Linux, Cloudflare Workers, APNs, Shizuku, Android Telecom.
@@ -128,3 +138,5 @@ AVF INSTALLATION AND RECOVERY
 - AirSIM v0.4.5 rotates the AVF release key because the v0.4.4 private key was not retained. Existing 0.4.4-1 devices must use the one-time, pinned rotate-avf-key.sh from the v0.4.5 Release in the AVF Terminal; the old installerd cannot verify a new-key package. The script preserves the old package and checks the new signature and health before declaring success. The new private key is stored outside Git and backed by GitHub Actions Secret AIRSIM_RELEASE_PRIVATE_KEY_PEM; never print or commit it.
 - A Debian udev/libudev1 exact-version mismatch is an AVF guest package-state fault, not an AirSIM libudev1 dependency. Simulate `apt-get -s -f install` and inspect `apt-cache policy` before any repair; never auto-run fix-broken, remove essential packages, or downgrade system packages. The bootstrap runs `apt-get check` before installation.
 - Future related changes must keep the relevant README files, installation guide, LLM.txt, codex.md, and claude.md synchronized. Source changes do not update published Release assets or devices automatically.
+未发布工作区另有 Relay v2 多安卓定向命令、共享退避与 Apple 目标快照，见 docs/relay-agent-routing.md。未部署/安装/发布，不得把新源码当现网能力；升级顺序 Relay → Android/AVF → Apple，未知 v2 安全失败不得回退 v1 动作。
+2026-10-16 应用发布：Apps v0.9.7.2，Android 0.9.7.2 (91)、iOS 0.9.7 (91)。详见 docs/releases/0.9.7.2.md。推荐 Android 10–13 升级 Standalone；三星最低音量效果仍待真机复验。公开 full/sideload IPA 都需重签；TestFlight 单独核对。Linux Agent 仍为 v0.4.6，本次不部署生产 Relay，不新增 workflow。上文旧版本记录保留追溯。

@@ -1,6 +1,19 @@
 import SwiftUI
 import UIKit
 
+enum AppInformation {
+    static let repositoryURL = URL(string: "https://github.com/kai-wu-cortex/AirSIM")!
+    static let releasesURL = repositoryURL.appendingPathComponent("releases")
+    static var version: String { version(info: Bundle.main.infoDictionary ?? [:]) }
+
+    static func version(info: [String: Any]) -> String {
+        let name = (info["CFBundleShortVersionString"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let build = (info["CFBundleVersion"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        guard let build else { return name ?? "未知版本" }
+        return "\(name ?? "未知版本") (\(build))"
+    }
+}
+
 /// 集中提供移动设备名称，避免 iPhone 上继续出现硬编码的 iPad 文案。
 enum DeviceContext {
     static var displayName: String {

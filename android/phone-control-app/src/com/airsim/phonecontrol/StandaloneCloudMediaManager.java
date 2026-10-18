@@ -2,9 +2,8 @@ package com.airsim.phonecontrol;
 
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
-import java.io.InputStream;
+import java.io.DataInputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -78,11 +77,20 @@ final class StandaloneCloudMediaManager implements Closeable {
                     .put("issued_at", Instant.now().toString())
                     .put("expires_at", Instant.now().plusSeconds(90).toString())
                     .put("media_transport", "legacy_pcm");
-            relay.postJSON(registration, "/v1/events/call", payload, 15_000);
+            relay.postJSON(registration, "/v2/events/call", payload, 15_000);
             start(descriptor);
         } else if (descriptor != null && descriptor.androidID.isEmpty()
                 && "outgoing".equals(direction)) {
             descriptor.androidID = androidID;
+            synchronized (lock) {
+                if (active != null && active.descriptor == descriptor) {
+                    synchronized (active) {
+                        if (active.running && active.mediaStarted && active.pcm != null && !active.pcm.isClosed()) {
+                            RemoteAudioSessionRegistry.setCloud(active.pcm, true, androidID);
+                        }
+                    }
+                }
+            }
         }
         if (descriptor != null) {
             String phase = phase(state);
@@ -92,7 +100,7 @@ final class StandaloneCloudMediaManager implements Closeable {
                         .put("generation", descriptor.generation).put("phase", phase)
                         .put("source", "agent").put("timestamp", Instant.now().toString())
                         .put("trace_id", "standalone-" + descriptor.callUUID + "-" + phase);
-                relay.postJSON(registration, "/v1/events/call-state", lifecycle, 12_000);
+                relay.postJSON(registration, "/v2/events/call-state", lifecycle, 12_000);
             }
             if ("ended".equals(state)) closeActive(descriptor);
         }
@@ -121,6 +129,7 @@ final class StandaloneCloudMediaManager implements Closeable {
         volatile boolean running = true;
         volatile StandaloneWebSocket webSocket;
         volatile Socket pcm;
+        volatile CloudPCMMediaPump mediaPump;
         volatile String mediaProtocol = "";
         volatile boolean mediaStarted;
         int sequence;
@@ -129,22 +138,36 @@ final class StandaloneCloudMediaManager implements Closeable {
 
         @Override public void run() {
             while (running) {
+                StandaloneWebSocket owner = null;
                 try {
                     URI endpoint = URI.create(descriptor.relayURL.replaceFirst("^https", "wss")
                             + "/v1/calls/" + descriptor.callUUID + "/connect?role=agent&token="
-                            + URLEncoder.encode(descriptor.secret, StandardCharsets.UTF_8));
-                    webSocket = StandaloneWebSocket.connect(endpoint, "");
-                    webSocket.writeText(status("agent_ready", ""));
+                            + URLEncoder.encode(descriptor.secret, "UTF-8"));
+                    owner = StandaloneWebSocket.connect(endpoint, "");
+                    synchronized (this) {
+                        if (!running) { closeSocket(owner); return; }
+                        webSocket = owner;
+                    }
+                    owner.writeText(status("agent_ready", ""));
                     BridgeLog.info("standalone_cloud_media_connected call_uuid="
                             + DebugRedactor.safeIdentifier(descriptor.callUUID));
-                    readLoop();
+                    readLoop(owner);
                 } catch (Exception error) {
                     if (running) BridgeLog.error("standalone_cloud_media_disconnected", error);
                 } finally {
-                    closeSocket(webSocket);
-                    webSocket = null;
-                    closeSocket(pcm);
-                    pcm = null;
+                    closeSocket(owner);
+                    synchronized (this) {
+                        if (webSocket == owner) {
+                            webSocket = null;
+                            // The next answer/replay must restart PCM for the new socket.
+                            mediaStarted = false;
+                            RemoteAudioSessionRegistry.setCloud(pcm, false, "");
+                            closeSocket(mediaPump);
+                            mediaPump = null;
+                            closeSocket(pcm);
+                            pcm = null;
+                        }
+                    }
                 }
                 if (running) {
                     try { Thread.sleep(1_000); }
@@ -153,11 +176,12 @@ final class StandaloneCloudMediaManager implements Closeable {
             }
         }
 
-        private void readLoop() throws Exception {
-            while (running && webSocket != null) {
-                StandaloneWebSocket.Message message = webSocket.read();
+        private void readLoop(StandaloneWebSocket owner) throws Exception {
+            while (running && webSocket == owner) {
+                StandaloneWebSocket.Message message = owner.read();
                 if (message.opcode() == 2) {
-                    if (mediaStarted && pcm != null) pcm.getOutputStream().write(decodePCM(message.payload()));
+                    CloudPCMMediaPump pump = mediaPump;
+                    if (pump != null) pump.receive(decodePCM(message.payload()));
                     continue;
                 }
                 JSONObject control = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
@@ -172,73 +196,75 @@ final class StandaloneCloudMediaManager implements Closeable {
                                 .put("generation", descriptor.generation));
                 JSONObject result = StandaloneAgentGateway.get(context).executeCloudCommand(command);
                 if (!"completed".equals(result.optString("status"))) {
-                    webSocket.writeText(status("action_error", result.optString("error", "Telecom command failed")));
+                    owner.writeText(status("action_error", result.optString("error", "Telecom command failed")));
                     continue;
                 }
                 if ("answer".equals(action)) {
-                    webSocket.writeText(status("answer_ok", ""));
+                    owner.writeText(status("answer_ok", ""));
                     if (!mediaStarted) {
                         mediaStarted = true;
-                        sessions.execute(this::runPCM);
+                        sessions.execute(() -> runPCM(owner));
                     }
                 } else {
-                    webSocket.writeText(status("reject".equals(action) ? "rejected" : "ended", ""));
+                    owner.writeText(status("reject".equals(action) ? "rejected" : "ended", ""));
                     running = false;
                 }
             }
         }
 
-        private void runPCM() {
+        private void runPCM(StandaloneWebSocket owner) {
             long deadline = System.currentTimeMillis() + 45_000;
-            while (running && mediaStarted && System.currentTimeMillis() < deadline) {
+            while (running && webSocket == owner && mediaStarted && System.currentTimeMillis() < deadline) {
+                Socket connection = new Socket();
                 try {
-                    Socket connection = new Socket();
                     connection.connect(new InetSocketAddress("127.0.0.1", 7580), 2_000);
                     connection.setTcpNoDelay(true);
-                    connection.setSoTimeout(0);
+                    connection.setSoTimeout(5_000);
                     OutputStream output = connection.getOutputStream();
                     output.write("AIRSIMPCM1\n".getBytes(StandardCharsets.US_ASCII));
                     output.flush();
-                    byte[] ready = connection.getInputStream().readNBytes(11);
+                    byte[] ready = new byte[11];
+                    new DataInputStream(connection.getInputStream()).readFully(ready);
                     if (!"AIRSIMREADY".equals(new String(ready, StandardCharsets.US_ASCII))) {
                         connection.close();
                         throw new java.io.IOException("PCM handshake failed");
                     }
-                    pcm = connection;
-                    webSocket.writeText(status("pcm_listening", ""));
-                    webSocket.writeText(status("active", ""));
-                    webSocket.writeText(status("pcm_ready", ""));
-                    pipeDownlink(connection.getInputStream());
+                    connection.setSoTimeout(0);
+                    synchronized (this) {
+                        if (!running || webSocket != owner || !mediaStarted) {
+                            closeSocket(connection); return;
+                        }
+                        pcm = connection;
+                        boolean[] first = {true};
+                        mediaPump = new CloudPCMMediaPump(connection.getInputStream(), output, frame -> {
+                            owner.writeBinary(encodePCM(frame));
+                            if (first[0]) { first[0] = false; owner.writeText(status("pcm_first_frame", "")); }
+                        }, error -> {
+                            if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
+                            // Only the owning connection is closed; old workers cannot touch a new call/socket.
+                            closeSocket(owner);
+                        }, sessions);
+                        mediaPump.start();
+                        RemoteAudioSessionRegistry.setCloud(connection, true, descriptor.androidID);
+                    }
+                    owner.writeText(status("pcm_listening", ""));
+                    owner.writeText(status("active", ""));
+                    owner.writeText(status("pcm_ready", ""));
+                    return;
                 } catch (Exception error) {
-                    closeSocket(pcm);
-                    pcm = null;
-                    if (running) BridgeLog.error("standalone_pcm_bridge_failed", error);
+                    closeSocket(connection);
+                    synchronized (this) {
+                        if (pcm == connection) {
+                            RemoteAudioSessionRegistry.setCloud(connection, false, "");
+                            closeSocket(mediaPump); mediaPump = null; pcm = null;
+                        }
+                    }
+                    if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
                 }
                 if (running) {
                     try { Thread.sleep(750); }
                     catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
                 }
-            }
-        }
-
-        private void pipeDownlink(InputStream input) throws Exception {
-            ByteArrayOutputStream pending = new ByteArrayOutputStream();
-            byte[] chunk = new byte[2048];
-            boolean first = true;
-            while (running && mediaStarted) {
-                int count = input.read(chunk);
-                if (count < 0) return;
-                pending.write(chunk, 0, count);
-                byte[] bytes = pending.toByteArray();
-                int offset = 0;
-                while (bytes.length - offset >= 320) {
-                    byte[] frame = java.util.Arrays.copyOfRange(bytes, offset, offset + 320);
-                    webSocket.writeBinary(encodePCM(frame));
-                    if (first) { first = false; webSocket.writeText(status("pcm_first_frame", "")); }
-                    offset += 320;
-                }
-                pending.reset();
-                if (offset < bytes.length) pending.write(bytes, offset, bytes.length - offset);
             }
         }
 
@@ -265,9 +291,12 @@ final class StandaloneCloudMediaManager implements Closeable {
             return result.toString();
         }
 
-        @Override public void close() {
+        @Override public synchronized void close() {
             running = false;
+            mediaStarted = false;
+            RemoteAudioSessionRegistry.setCloud(pcm, false, "");
             closeSocket(webSocket);
+            closeSocket(mediaPump);
             closeSocket(pcm);
         }
     }
@@ -327,6 +356,7 @@ final class StandaloneCloudMediaManager implements Closeable {
 
     private static JSONObject identity(JSONObject registration) throws Exception {
         return new JSONObject().put("device_id", registration.getString("device_id"))
+                .put("agent_id", registration.getString("android_agent_id"))
                 .put("device_secret", registration.getString("device_secret"));
     }
 

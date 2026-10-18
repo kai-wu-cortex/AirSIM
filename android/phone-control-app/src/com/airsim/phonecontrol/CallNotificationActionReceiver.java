@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
-import android.telecom.TelecomManager;
 
 import java.util.UUID;
 
@@ -41,8 +40,7 @@ public final class CallNotificationActionReceiver extends BroadcastReceiver {
         new Thread(() -> {
             try {
                 CallRepository.ActionResult result = CallRepository.execute(
-                        new AgentCommand(UUID.randomUUID().toString(), action, callId, ""),
-                        application.getSystemService(TelecomManager.class));
+                        application, new AgentCommand(UUID.randomUUID().toString(), action, callId, ""));
                 if (!result.success) BridgeLog.info("call_notification_action_failed action=" + action
                         + " reason=" + DebugRedactor.sanitize(result.error));
             } finally {

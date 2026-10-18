@@ -38,6 +38,19 @@ public final class MainScreenPresentation {
         return digits.substring(0, 3) + " " + digits.substring(3);
     }
 
+    public static String voBLEAuthenticationStatus(
+            boolean credentialStored, boolean authenticated, String pairingCode) {
+        if (authenticated) return "已认证并连接";
+        if (!"--- ---".equals(formatPairingCode(pairingCode))) return "请在两端核对安全码";
+        if (credentialStored) return "已保存认证凭据 · 等待 iPhone 连接";
+        return "等待 iPhone 发起首次配对";
+    }
+
+    public static String voBLEPairingCode(String pairingCode) {
+        String formatted = formatPairingCode(pairingCode);
+        return "--- ---".equals(formatted) ? "等待 iPhone 发起配对" : formatted;
+    }
+
     public static String recentLogLines(String log, String filter, int maximum) {
         if (log == null || log.isBlank() || maximum <= 0) return "暂无 Debug 日志";
         String category = filter == null ? "" : filter.trim();

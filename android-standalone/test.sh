@@ -20,9 +20,9 @@ assert_not_contains() {
 
 assert_contains "$MANIFEST" 'package="com.airsim.phonecontrol.standalone"' \
   'standalone package id is missing'
-assert_contains "$MANIFEST" 'android:versionCode="79"' \
-  'standalone version code does not match the Apps release'
-assert_contains "$MANIFEST" 'android:versionName="0.9.6"' \
+assert_contains "$MANIFEST" 'android:versionCode="91"' \
+  'standalone version code does not match the current candidate build'
+assert_contains "$MANIFEST" 'android:versionName="0.9.7.2"' \
   'standalone version name does not match the Apps release'
 assert_contains "$MANIFEST" 'com.airsim.phonecontrol.STANDALONE_AGENT' \
   'standalone runtime flag is missing'
@@ -43,6 +43,7 @@ assert_not_contains "$MANIFEST" 'AgentWatchdogService' \
 "$ROOT/../android/phone-audio-bridge/build.sh"
 
 "$ROOT/build.sh" >/dev/null
+sh "$ROOT/../android/phone-control-app/test-gateway-lifecycle.sh"
 APK="$ROOT/build/android/AirSIM-Android-Standalone-debug.apk"
 APKANALYZER=${APKANALYZER:-$(command -v apkanalyzer || true)}
 if [ -z "$APKANALYZER" ]; then

@@ -158,8 +158,7 @@ public final class PhoneAudioBridge {
         try (client) {
             client.setKeepAlive(true);
             client.setTcpNoDelay(true);
-            BridgeProtocol.acceptHandshake(client.getInputStream(), client.getOutputStream());
-            emit(started, "client_ready", Map.of("result", "ok"));
+            client.setSoTimeout(3_000);
             streamCallAudio(client, started, stats);
         } catch (Throwable error) {
             emit(started, "session_error", Map.of(
@@ -173,6 +172,7 @@ public final class PhoneAudioBridge {
 
     private static void streamCallAudio(Socket client, long started, BridgeStats stats)
             throws Exception {
+        stats.resetAudio();
         int recordBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING);
         int trackBufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, ENCODING);
         if (recordBufferSize <= 0 || trackBufferSize <= 0) {
@@ -223,11 +223,16 @@ public final class PhoneAudioBridge {
                 "track_buffer_bytes", trackBufferSize,
                 "result", "ok"));
 
-            recorder.startRecording();
-            track.play();
-            if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
-                throw new IllegalStateException("VOICE_DOWNLINK AudioRecord did not start");
-            }
+            // Transport READY is emitted only after the actual audio endpoints
+            // start. A successful TCP/HELLO is not evidence of usable call audio.
+            BridgeProtocol.acceptHandshake(client.getInputStream(), client.getOutputStream(), () -> {
+                recorder.startRecording();
+                track.play();
+                if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                    throw new IOException("VOICE_DOWNLINK AudioRecord did not start");
+                }
+            });
+            emit(started, "client_ready", Map.of("result", "audio_initialized", "route_verified", false));
 
             AtomicBoolean running = new AtomicBoolean(true);
             Runnable stop = () -> {
@@ -242,7 +247,7 @@ public final class PhoneAudioBridge {
                 () -> captureDownlink(recorder, client, stats, running, stop),
                 "airsim-phone-downlink");
             Thread uplink = new Thread(
-                () -> playUplink(track, client, started, stats, running, stop),
+                () -> playUplink(track, playbackRoute, client, started, stats, running, stop),
                 "airsim-phone-uplink");
             Thread reporter = new Thread(
                 () -> reportStats(started, stats, running),
@@ -302,6 +307,7 @@ public final class PhoneAudioBridge {
 
     private static void playUplink(
             AudioTrack track,
+            PlaybackRoute playbackRoute,
             Socket client,
             long started,
             BridgeStats stats,
@@ -309,7 +315,12 @@ public final class PhoneAudioBridge {
             Runnable stop) {
         byte[] frame = new byte[BridgeProtocol.FRAME_BYTES];
         long firstPlaybackAt = 0;
+        // A vendor tag is a routing request, not proof of the route actually used.
+        // Hidden Samsung routes may remain unverified: report that honestly,
+        // without destroying a working downlink or falling back to the loudspeaker.
         boolean routeVerified = false;
+        boolean routeWarningEmitted = false;
+        boolean routeObserved = false;
         try {
             client.setSoTimeout(250);
             InputStream input = client.getInputStream();
@@ -318,9 +329,12 @@ public final class PhoneAudioBridge {
                 try {
                     count = readFrame(input, frame);
                 } catch (SocketTimeoutException timeout) {
-                    if (voiceTxRouteTimedOut(
+                    if (!routeWarningEmitted && voiceTxRouteTimedOut(
                             routeVerified, firstPlaybackAt, SystemClock.elapsedRealtime())) {
-                        throw new IllegalStateException("VOICE_TX did not route to Telephony Tx");
+                        routeWarningEmitted = true;
+                        emit(started, "voice_tx_route_unverified", Map.of(
+                                "playback_route", playbackRoute.name().toLowerCase(),
+                                "result", "degraded"));
                     }
                     continue;
                 }
@@ -333,6 +347,15 @@ public final class PhoneAudioBridge {
                     firstPlaybackAt = SystemClock.elapsedRealtime();
                 }
                 AudioDeviceInfo routed = track.getRoutedDevice();
+                if (!routeObserved && routed != null) {
+                    routeObserved = true;
+                    emit(started, "voice_tx_route_observed", Map.of(
+                        "playback_route", playbackRoute.name().toLowerCase(),
+                        "device_id", routed.getId(),
+                        "device_type", routed.getType(),
+                        "telephony_sink", routed.getType() == AudioDeviceInfo.TYPE_TELEPHONY,
+                        "result", "observed"));
+                }
                 if (!routeVerified && routed != null
                         && routed.getType() == AudioDeviceInfo.TYPE_TELEPHONY) {
                     routeVerified = true;
@@ -341,9 +364,15 @@ public final class PhoneAudioBridge {
                         "device_type", routed.getType(),
                         "result", "ok"));
                 }
-                if (voiceTxRouteTimedOut(
+                if (!routeWarningEmitted && voiceTxRouteTimedOut(
                         routeVerified, firstPlaybackAt, SystemClock.elapsedRealtime())) {
-                    throw new IllegalStateException("VOICE_TX did not route to Telephony Tx");
+                    // Do not tear down capture/downlink just because an OEM does not
+                    // report its hidden telephony sink. Keep the call alive and expose
+                    // the degraded route through diagnostics.
+                    routeWarningEmitted = true;
+                    emit(started, "voice_tx_route_unverified", Map.of(
+                            "playback_route", playbackRoute.name().toLowerCase(),
+                            "result", "degraded"));
                 }
             }
         } catch (Throwable error) {
@@ -437,6 +466,9 @@ public final class PhoneAudioBridge {
         fields.put("downlink_bytes", snapshot.downlinkBytes());
         fields.put("downlink_frames", snapshot.downlinkFrames());
         fields.put("downlink_peak", snapshot.downlinkPeak());
+        // Nonzero samples are diagnostic evidence, not proof of intelligibility
+        // or of acoustic silence on the Android handset.
+        fields.put("downlink_signal", snapshot.downlinkSignal());
         fields.put("uplink_bytes", snapshot.uplinkBytes());
         fields.put("uplink_frames", snapshot.uplinkFrames());
         fields.put("uplink_peak", snapshot.uplinkPeak());

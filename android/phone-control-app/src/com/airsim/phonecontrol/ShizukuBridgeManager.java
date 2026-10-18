@@ -21,6 +21,9 @@ final class ShizukuBridgeManager {
     }
 
     static final int PERMISSION_REQUEST = 7301;
+    static final String MANAGER_PACKAGE = "moe.shizuku.privileged.api";
+    static final String DOWNLOAD_URL = "https://shizuku.rikka.app/zh-hans/download/";
+    record StartupSnapshot(boolean installed, boolean running, boolean authorized) {}
     private static volatile ShizukuBridgeManager instance;
 
     private final Context app;
@@ -34,6 +37,11 @@ final class ShizukuBridgeManager {
     private volatile String status = "等待 Shizuku";
     private volatile boolean binding;
     private volatile PrivilegedBridgeClient privilegedClient;
+    private final java.util.concurrent.atomic.AtomicLong audioWatchdogGeneration = new java.util.concurrent.atomic.AtomicLong();
+    private volatile boolean audioWatchdogActive;
+    private String audioWatchdogKey = "";
+    private final ExecutorService audioProbeWorker = Executors.newSingleThreadExecutor();
+    private final AtomicBoolean audioProbeInFlight = new AtomicBoolean();
     private DialerRoleCallback pendingRoleCallback;
     private boolean roleRequestInFlight;
 
@@ -91,7 +99,7 @@ final class ShizukuBridgeManager {
             }
         }, coordinator::setLocalOutputMuted, (muted, error) -> {
             if (error != null) {
-                status = "本机通话静音失败";
+                status = "本机通话音量控制失败";
                 BridgeLog.error("shizuku_local_output_failed target_muted=" + muted, error);
             } else if (privilegedClient != null) {
                 status = "Shizuku 已连接 · " + coordinator.lastResult();
@@ -100,6 +108,13 @@ final class ShizukuBridgeManager {
             } else {
                 BridgeLog.info("shizuku_local_output_queued target_muted=" + muted);
             }
+            // Persist both mute and restore outcomes even when ordinary Debug logging
+            // is disabled. A queued intent is not a verified privileged operation.
+            BridgeLog.watchdog("audio_watchdog phase=" + (muted ? "mute" : "restore")
+                    + " success=" + (error == null && privilegedClient != null)
+                    + " result=" + coordinator.lastResult()
+                    + " error=" + (error == null ? "none" : error.getClass().getSimpleName())
+                    + " acoustic_check=unavailable");
         });
         serviceArgs = new Shizuku.UserServiceArgs(new ComponentName(
                 app.getPackageName(), ShizukuBridgeUserService.class.getName()))
@@ -107,7 +122,9 @@ final class ShizukuBridgeManager {
                 .processNameSuffix("pcm_shell")
                 .debuggable(true)
                 .tag("airsim-pcm-v1")
-                .version(5);
+                // Bump when the embedded bridge or its lifecycle changes so an
+                // APK update cannot keep Vivo/Samsung running an old daemon.
+                .version(AppInformation.privilegedServiceVersion(app));
         Shizuku.addBinderReceivedListenerSticky(binderReceived);
         Shizuku.addBinderDeadListener(binderDead);
         Shizuku.addRequestPermissionResultListener(permissionResult);
@@ -206,6 +223,21 @@ final class ShizukuBridgeManager {
         catch (RuntimeException error) { return false; }
     }
 
+    StartupSnapshot startupSnapshot() {
+        boolean installed = false;
+        try {
+            app.getPackageManager().getPackageInfo(MANAGER_PACKAGE, 0);
+            installed = true;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            // Both APK manifests declare package visibility for the manager.
+        } catch (RuntimeException error) {
+            BridgeLog.error("shizuku_package_check_failed", error);
+        }
+        boolean running = dialerRoleAutomationAvailable();
+        return new StartupSnapshot(installed || running, running,
+                running && dialerRoleAutomationAuthorized());
+    }
+
     void ensureDialerRole(boolean requestPermission, DialerRoleCallback callback) {
         synchronized (roleLock) {
             pendingRoleCallback = callback;
@@ -277,6 +309,68 @@ final class ShizukuBridgeManager {
         muteRetrier.request(muted);
     }
 
+    // Invalidate queued checks immediately when the remote owner or native call changes.
+    synchronized void updateAudioWatchdog(boolean active, String key, String transports) {
+        if (audioWatchdogActive == active && audioWatchdogKey.equals(key)) return;
+        audioWatchdogActive = active;
+        audioWatchdogKey = key;
+        long generation = audioWatchdogGeneration.incrementAndGet();
+        if (!active) {
+            worker.execute(() -> BridgeLog.watchdog("audio_watchdog phase=stop generation=" + generation));
+            return;
+        }
+        worker.execute(() -> {
+            if (!watchdogCurrent(generation)) return;
+            BridgeLog.watchdog("audio_watchdog phase=start generation=" + generation + " " + transports
+                    + " app=" + AppInformation.version(app) + " sdk=" + android.os.Build.VERSION.SDK_INT
+                    + " manufacturer=" + android.os.Build.MANUFACTURER + " model=" + android.os.Build.MODEL);
+            RemoteAudioWatchdog monitor = new RemoteAudioWatchdog(new RemoteAudioWatchdog.Backend() {
+                public AudioWatchdogSnapshot probe() throws Exception { return boundedAudioProbe(); }
+                public void repair(int step) throws Exception {
+                    if (!watchdogCurrent(generation)) return;
+                    if (step >= 2) AirSIMInCallService.refreshAudioPolicy();
+                    if (step >= 3 && privilegedClient == null) recoverWatchdogTransport(generation);
+                    if (watchdogCurrent(generation)) coordinator.reassertLocalOutputMuted();
+                }
+                public void reconnect() { recoverWatchdogTransport(generation); }
+            }, value -> BridgeLog.watchdog("generation=" + generation + " " + value));
+            runAudioWatchdog(monitor, generation);
+        });
+    }
+
+    private boolean watchdogCurrent(long generation) {
+        return audioWatchdogActive && audioWatchdogGeneration.get() == generation;
+    }
+
+    private void runAudioWatchdog(RemoteAudioWatchdog monitor, long generation) {
+        if (!watchdogCurrent(generation)) return;
+        monitor.tick(android.os.SystemClock.elapsedRealtime(),
+                () -> watchdogCurrent(generation) && coordinator.desiredMuted());
+        if (watchdogCurrent(generation)) mainHandler.postDelayed(() -> {
+            if (watchdogCurrent(generation)) worker.execute(() -> runAudioWatchdog(monitor, generation));
+        }, 2_000);
+    }
+
+    private void recoverWatchdogTransport(long generation) {
+        if (!watchdogCurrent(generation)) return;
+        // Rebind, never remove the user service or kill a live PCM bridge.
+        mainHandler.post(() -> { if (watchdogCurrent(generation)) ensureStarted(); });
+    }
+
+    private AudioWatchdogSnapshot boundedAudioProbe() throws Exception {
+        if (!audioProbeInFlight.compareAndSet(false, true)) throw new java.io.IOException("previous audio probe still busy");
+        java.util.concurrent.Future<AudioWatchdogSnapshot> query = audioProbeWorker.submit(() -> {
+            try { return coordinator.audioSnapshot(); }
+            finally { audioProbeInFlight.set(false); }
+        });
+        // Binder cannot safely be interrupted. Keep at most one actual probe alive, never queue more.
+        try { return query.get(1, java.util.concurrent.TimeUnit.SECONDS); }
+        catch (java.util.concurrent.ExecutionException error) {
+            if (error.getCause() instanceof Exception cause) throw cause;
+            throw error;
+        }
+    }
+
     private void bindPrivilegedService() {
         if (binding) return;
         binding = true;
@@ -303,7 +397,9 @@ final class ShizukuBridgeManager {
         worker.execute(() -> {
             try {
                 if (privilegedClient != null) {
-                    status = "Shizuku 已连接 · " + coordinator.refreshStatus();
+                    String report = coordinator.refreshStatus();
+                    status = "Shizuku 已连接 · " + report;
+                    BridgeLog.watchdog("pcm_health " + report);
                 }
             } catch (Exception error) {
                 status = "Shizuku PCM 状态检查失败";
@@ -315,12 +411,16 @@ final class ShizukuBridgeManager {
     }
 
     void openShizuku() {
-        Intent launch = app.getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
+        Intent launch = app.getPackageManager().getLaunchIntentForPackage(MANAGER_PACKAGE);
         if (launch == null) {
             status = "未安装 Shizuku";
             return;
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        app.startActivity(launch);
+        try { app.startActivity(launch); }
+        catch (RuntimeException error) {
+            status = "无法打开 Shizuku";
+            BridgeLog.error("shizuku_open_failed", error);
+        }
     }
 }

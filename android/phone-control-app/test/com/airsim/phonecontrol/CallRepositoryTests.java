@@ -4,10 +4,93 @@ import android.telecom.Call;
 
 public final class CallRepositoryTests {
     public static void main(String[] args) {
+        watchdogRequiresPCMAndConfirmedControlIdentity();
+        oldHangupCompletionCannotCloseReplacementLease();
+        newDialOwnershipIgnoresIncomingAndDifferentOutgoingCalls();
+        lateDialCompletionAfterProxyLossEndsOnlyThatCall();
+        lossOfOldDirectSessionCannotEndAnotherCall();
         answerNeverTargetsAnActiveCallWithoutRinging();
         cloudRejectTargetsOnlyItsAuthenticatedCall();
         localRejectUsesPublishedCallIdentity();
         System.out.println("call repository tests passed");
+    }
+
+    private static void watchdogRequiresPCMAndConfirmedControlIdentity() {
+        DirectCallOwnership.Lease lease = DirectCallOwnership.begin("127.0.0.1");
+        Call target = new Call(Call.STATE_ACTIVE);
+        String id = CallRepository.add(target);
+        try {
+            if (RemoteCallAudioScope.SHARED.owns(java.util.List.of(id))) throw new AssertionError("PCM alone owns no call");
+            DirectCallOwnership.record("127.0.0.1", id, lease);
+            if (RemoteCallAudioScope.SHARED.owns(java.util.List.of(id))) throw new AssertionError("control without ready PCM owns no audio");
+            DirectCallOwnership.pcmReady(lease);
+            if (!RemoteCallAudioScope.SHARED.owns(java.util.List.of(id))) throw new AssertionError("confirmed control + ready PCM must own audio");
+            DirectCallOwnership.end(lease, false);
+            if (RemoteCallAudioScope.SHARED.owns(java.util.List.of(id))) throw new AssertionError("closed lease still owns audio");
+        } finally { DirectCallOwnership.end(lease, false); CallRepository.remove(target); }
+    }
+
+    private static void oldHangupCompletionCannotCloseReplacementLease() {
+        DirectCallOwnership.Lease old = DirectCallOwnership.begin("127.0.0.1");
+        DirectCallOwnership.end(old, true);
+        Call replacement = new Call(Call.STATE_ACTIVE);
+        String id = CallRepository.add(replacement);
+        DirectCallOwnership.Lease current = DirectCallOwnership.begin("127.0.0.1");
+        try {
+            DirectCallOwnership.record("127.0.0.1", id, current);
+            DirectCallOwnership.end(old, false);
+            DirectCallOwnership.end(current, true);
+            assertEquals(Integer.toString(Call.STATE_DISCONNECTED), Integer.toString(replacement.getState()));
+        } finally { CallRepository.remove(replacement); }
+    }
+
+    private static void newDialOwnershipIgnoresIncomingAndDifferentOutgoingCalls() {
+        java.util.Set<String> before = CallRepository.callIDs();
+        Call incoming = new Call(Call.STATE_RINGING, Call.Details.DIRECTION_INCOMING, "2025550100");
+        Call otherOutgoing = new Call(Call.STATE_ACTIVE, Call.Details.DIRECTION_OUTGOING, "2025550101");
+        Call target = new Call(Call.STATE_ACTIVE, Call.Details.DIRECTION_OUTGOING, "2025550199");
+        CallRepository.add(incoming);
+        CallRepository.add(otherOutgoing);
+        try {
+            assertEquals("", CallRepository.newOutgoingCallSince(before, "2025550199"));
+            String id = CallRepository.add(target);
+            assertEquals(id, CallRepository.newOutgoingCallSince(before, "2025550199"));
+        } finally { CallRepository.remove(incoming); CallRepository.remove(otherOutgoing); CallRepository.remove(target); }
+    }
+
+    private static void lateDialCompletionAfterProxyLossEndsOnlyThatCall() {
+        DirectCallOwnership.Lease lease = DirectCallOwnership.begin("127.0.0.1");
+        DirectCallOwnership.Lease captured = DirectCallOwnership.capture("127.0.0.1");
+        DirectCallOwnership.end(lease, true);
+        Call created = new Call(Call.STATE_ACTIVE);
+        Call other = new Call(Call.STATE_RINGING);
+        String id = CallRepository.add(created);
+        CallRepository.add(other);
+        try {
+            DirectCallOwnership.record("127.0.0.1", id, captured);
+            assertEquals(Integer.toString(Call.STATE_DISCONNECTED), Integer.toString(created.getState()));
+            assertEquals(Integer.toString(Call.STATE_RINGING), Integer.toString(other.getState()));
+        } finally { CallRepository.remove(created); CallRepository.remove(other); }
+    }
+
+    private static void lossOfOldDirectSessionCannotEndAnotherCall() {
+        Call target = new Call(Call.STATE_ACTIVE);
+        Call other = new Call(Call.STATE_RINGING);
+        String targetID = CallRepository.add(target);
+        String otherID = CallRepository.add(other);
+        try {
+            DirectCallOwnership.Lease lease = DirectCallOwnership.begin("127.0.0.1");
+            DirectCallOwnership.record("127.0.0.1", targetID);
+            // A later call/control completion must not be attached to an old PCM lease.
+            DirectCallOwnership.record("127.0.0.1", otherID);
+            DirectCallOwnership.end(lease, true);
+            assertEquals(Integer.toString(Call.STATE_DISCONNECTED), Integer.toString(target.getState()));
+            assertEquals(Integer.toString(Call.STATE_RINGING), Integer.toString(other.getState()));
+            DirectCallOwnership.end(lease, false);
+        } finally {
+            CallRepository.remove(target);
+            CallRepository.remove(other);
+        }
     }
 
     private static void answerNeverTargetsAnActiveCallWithoutRinging() {
@@ -38,7 +121,7 @@ public final class CallRepositoryTests {
                     "relay-call-7", "d9b59660-05bb-4ea8-9aeb-4505b35c93f9", 3);
             assertEquals(targetID, selected);
             CallRepository.ActionResult result = CallRepository.execute(
-                    new AgentCommand("command-7", "reject", selected, ""), null);
+                    null, new AgentCommand("command-7", "reject", selected, ""));
             assertTrue(result.success);
             assertEquals(Integer.toString(Call.STATE_DISCONNECTED), Integer.toString(target.getState()));
             assertEquals(Integer.toString(Call.STATE_RINGING), Integer.toString(other.getState()));
@@ -62,7 +145,7 @@ public final class CallRepositoryTests {
                     "reject", "visible-target", "visible-target", targetID);
             assertEquals(targetID, selected);
             assertTrue(CallRepository.execute(
-                    new AgentCommand("local-reject", "reject", selected, ""), null).success);
+                    null, new AgentCommand("local-reject", "reject", selected, "")).success);
             assertEquals(Integer.toString(Call.STATE_DISCONNECTED), Integer.toString(target.getState()));
             assertEquals(Integer.toString(Call.STATE_RINGING), Integer.toString(other.getState()));
             assertEquals("", CallRepository.idForPublishedAction(

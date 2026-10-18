@@ -5,6 +5,7 @@ import android.content.Context;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -24,7 +25,7 @@ public final class VoWLANControlGateway implements Closeable {
     private static final int MAX_HEADERS = 8_192;
     private static final int MAX_BODY = 32_768;
     private final Context context;
-    private final VoWLANReplayCache replayCache = new VoWLANReplayCache(30);
+    private static final VoWLANReplayCache replayCache = new VoWLANReplayCache(30);
     private final ExecutorService acceptor = Executors.newSingleThreadExecutor();
     private final ExecutorService clients = Executors.newCachedThreadPool();
     private volatile ServerSocket server;
@@ -54,7 +55,8 @@ public final class VoWLANControlGateway implements Closeable {
         String[] pathForLog = {"unknown"};
         VoWLANPeerLifecycle.run(peer, () -> {
             peer.setSoTimeout(75_000);
-            if (!(peer.getInetAddress().isSiteLocalAddress() || peer.getInetAddress().isLinkLocalAddress())) {
+            if (!VoWLANNetworkPolicy.permitsPeer(peer.getInetAddress().getHostAddress(),
+                    peer.getLocalAddress().getHostAddress())) {
                 respond(peer, 403, "{\"error\":\"private_peer_required\"}");
                 return;
             }
@@ -97,6 +99,22 @@ public final class VoWLANControlGateway implements Closeable {
                         .put("phone_number", AndroidAgentIdentity.phoneNumber(context))
                         .toString();
             } else {
+                String local = peer.getLocalAddress().getHostAddress();
+                DirectCallOwnership.Lease callLease = DirectCallOwnership.capture(local);
+                java.util.Set<String> before = CallRepository.callIDs();
+                String answerTarget = "";
+                if ("/api/calls/answer".equals(request.path)) {
+                    String requested = request.body.length == 0 ? "" : new org.json.JSONObject(
+                            new String(request.body, StandardCharsets.UTF_8)).optString("call_id");
+                    AgentClient.ForwardResponse status = new AgentClient(context).forwardVoWLAN("GET", "/api/calls/status", null);
+                    org.json.JSONObject active = new org.json.JSONObject(status.payload()).optJSONObject("active");
+                    if (active != null && (requested.isEmpty() || requested.equals(active.optString("id")))) {
+                        String exactID = active.optString("android_id", active.optString("id"));
+                        if (CallRepository.state(exactID) == android.telecom.Call.STATE_RINGING) answerTarget = exactID;
+                    }
+                }
+                String dialNumber = "/api/calls/dial".equals(request.path)
+                        ? new org.json.JSONObject(new String(request.body, StandardCharsets.UTF_8)).optString("number") : "";
                 String body = request.body.length == 0 ? null : new String(request.body, StandardCharsets.UTF_8);
                 AgentClient.ForwardResponse forwarded =
                         new AgentClient(context).forwardVoWLAN(request.method, request.path, body);
@@ -105,6 +123,26 @@ public final class VoWLANControlGateway implements Closeable {
                 if (output.isEmpty()) output = "{}";
                 ownsCall = VoWLANControlPolicy.ownsCallAfterResponse(
                         request.path, responseStatus, ownsCall);
+                if (responseStatus >= 200 && responseStatus < 300) {
+                    if ("/api/calls/dial".equals(request.path)) {
+                        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+                        String created;
+                        do {
+                            created = CallRepository.newOutgoingCallSince(before, dialNumber);
+                            if (!created.isEmpty()) break;
+                            Thread.sleep(50);
+                        } while (System.nanoTime() < deadline);
+                        DirectCallOwnership.record(local, created, callLease);
+                        AirSIMInCallService.refreshAudioPolicy();
+                    } else if ("/api/calls/answer".equals(request.path)
+                            && CallRepository.state(answerTarget) == android.telecom.Call.STATE_ACTIVE) {
+                        DirectCallOwnership.record(local, answerTarget, callLease);
+                        AirSIMInCallService.refreshAudioPolicy();
+                    } else if ("/api/calls/hangup".equals(request.path) || "/api/calls/reject".equals(request.path)) {
+                        DirectCallOwnership.end(callLease, false);
+                        AirSIMInCallService.refreshAudioPolicy();
+                    }
+                }
             }
             respond(peer, responseStatus, output);
             BridgeLog.info("vowlan_control_forwarded method=" + request.method + " path=" + safePath(request.path));
@@ -133,7 +171,7 @@ public final class VoWLANControlGateway implements Closeable {
             if (state == 4) break;
         }
         if (state != 4) throw new IOException("headers too large");
-        String[] lines = headerBytes.toString(StandardCharsets.US_ASCII).split("\\r\\n");
+        String[] lines = new String(headerBytes.toByteArray(), StandardCharsets.US_ASCII).split("\\r\\n");
         String[] first = lines[0].split(" ", 3);
         if (first.length != 3 || !first[2].startsWith("HTTP/1.")) throw new IOException("invalid request line");
         Map<String, String> headers = new HashMap<>();
@@ -146,8 +184,8 @@ public final class VoWLANControlGateway implements Closeable {
         try { length = Integer.parseInt(headers.getOrDefault("content-length", "0")); }
         catch (NumberFormatException error) { throw new IOException("invalid content length", error); }
         if (length < 0 || length > MAX_BODY) throw new IOException("body too large");
-        byte[] body = input.readNBytes(length);
-        if (body.length != length) throw new IOException("incomplete body");
+        byte[] body = new byte[length];
+        new DataInputStream(input).readFully(body);
         return new Request(first[0].toUpperCase(Locale.ROOT), first[1], headers, body);
     }
 

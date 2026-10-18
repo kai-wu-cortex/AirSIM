@@ -1,10 +1,18 @@
 # AirSIM 全项目 Claude 部署辅助
 
+工作区候选 build 85 的 Wi-Fi 返回恢复见 `docs/vowlan-network-return.md`：安卓网络变化重发 NSD 并隔离旧回调，iOS 有限次重新发现认证。固定云端不变、通话中不换链路、不新增 Relay 查询定时器。未安装／发布／锁屏真机验收，不承诺系统挂起或 OEM 强停后的即时恢复。
+
+工作区候选 build 84 的 iOS 本机短信删除、安卓身份约束音频 Watchdog 与 VERBOSE TXT 导出见 `docs/sms-deletion-audio-watchdog.md`。未安装或发布，不得将系统静音标志视为物理无声或真机验收。
+
 你正在处理 AirSIM：一个用三星 Android 手机承载蜂窝通话与短信，并让 iPhone / Apple Watch 通过 VoWLAN 或 Cloudflare Relay 使用这些能力的多端项目。
 
-当前发布基线（2026-10-12）：Android AVF/Standalone/iOS Apps `v0.9.6`（build `79`），兼容用 AVF Agent `v0.4.6`（Debian `0.4.6-1`），Relay 协议 `0.2.1`。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
+当前发布基线（2026-10-14）：Apps `v0.9.7.1`，Android `0.9.7.1 (81)`，iOS `0.9.7 (81)`；Android 10–13 修复版推荐安装 Standalone。兼容用 AVF Agent 保持 `v0.4.6`（Debian `0.4.6-1`），Relay 协议 `0.2.1`。GitHub IPA 为 unsigned 重签包；维护者通过 Xcode 单独上传 TestFlight，上传、处理和审核状态不能混为一谈。维护者 AirSIM Relay 为 `https://airsim-push.remotepilot.site`；DJOneHub 的 `https://push.remotepilot.site` 不得用于 AirSIM。历史 Release 文档中的旧版本号属于归档事实，不能机械替换。
+
+本版改动：iOS「配对安卓手机」的本地配对开关仅控制本次配置包，不写全局模式；Agent 自动注册须保护该本地配置，配对与在途 Agent 写入串行化。Android API 29+ 兼容分支见共享 README；旧 AVF 恢复在 API 34 以下采用可点击通知，不调用新 ActivityOptions 方法。云端挂断代际隔离与 PCM 抖动优化见 `docs/cloud-pcm-resilience.md`，用户已反馈本轮真机挂断 UI 不再重现、声音更稳；不代表全机型/弱网/Watch 验收。
 
 ## 开始前
+
+工作区候选 build 83 增加手动 IP＋配对端口，见 `docs/manual-ip-pairing.md`；尚未发布／真机 Tailscale 验收。保留六位码加密、HMAC 和 PCM 单会话；地址保存不等于在线，重连需验证身份。Android 回环代理用于 userspace Tailscale，不得暴露 AVF `8575/8576` 或 Shell `7580`。删除清理保存地址，断链只结束绑定通话，过期异步回调不可覆盖新端点。
 
 依次完成：
 
@@ -117,3 +125,7 @@ xcodebuild -project iOS/AirSIM.xcodeproj -scheme AirSIM \
 - 已知风险与下一步。
 
 不要把 dry-run 写成部署成功，不要把模拟器编译写成真机可用，也不要把代码中的能力写成已经通过运营商网络验收。
+未发布 Relay 定向命令实现见 docs/relay-agent-routing.md：多安卓连接分槽，命令/通话固定归属，HTTP/WSS 冷却避免重复请求放大。必须另行授权按 Relay → Android/AVF → Apple 上线；未部署或发布。
+# 2026-10-16 应用发布更新
+
+Apps `v0.9.7.2`：Android `0.9.7.2 (91)`、iOS `0.9.7 (91)`，见 `docs/releases/0.9.7.2.md`。推荐 Android 10–13 升级 Standalone。三星最低音量物理效果待复验；不随本次应用发布部署 Relay 或发布 Linux Agent。上文旧基线保留追溯。

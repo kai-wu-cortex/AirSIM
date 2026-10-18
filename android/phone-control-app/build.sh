@@ -56,12 +56,15 @@ for artifact in api aidl shared provider; do
   SHIZUKU_JARS+=("$jar_path")
 done
 SHIZUKU_JARS+=("$DEPS/androidx-annotation.jar")
+SHIZUKU_JARS+=("$(sh "$ROOT/crypto-dependency.sh")")
 CLASSPATH="$ANDROID_JAR:$(IFS=:; echo "${SHIZUKU_JARS[*]}")"
 
 SOURCES=()
 while IFS= read -r -d '' source; do SOURCES+=("$source"); done < <(find "$ROOT/src" -name '*.java' -print0)
 while IFS= read -r -d '' source; do SOURCES+=("$source"); done < <(find "$ROOT/../phone-audio-bridge/src" -name '*.java' -print0)
 "$JAVA_HOME/bin/javac" -source 17 -target 17 -Xlint:all -classpath "$CLASSPATH" -d "$CLASSES" "${SOURCES[@]}"
+
+sh "$ROOT/verify-io-api.sh" "$CLASSES"
 
 CLASSES_ARGS=()
 while IFS= read -r -d '' class_file; do CLASSES_ARGS+=("$class_file"); done < <(find "$CLASSES" -name '*.class' -print0)
@@ -77,7 +80,7 @@ else
 fi
 "$BUILD_TOOLS/aapt2" link -o "$OUT/unsigned.apk" -I "$ANDROID_JAR" \
   --manifest "$MANIFEST" "$COMPILED_RES"
-(cd "$DEX" && zip -q -j "$OUT/unsigned.apk" classes.dex)
+(cd "$DEX" && zip -q -j "$OUT/unsigned.apk" classes*.dex)
 "$BUILD_TOOLS/zipalign" -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
 if [ "$BUILD_VARIANT" = debug ]; then

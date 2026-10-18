@@ -9,6 +9,7 @@ final class PrivilegedBridgeProtocol {
     static final int TRANSACTION_STATUS = 2;
     static final int TRANSACTION_SET_LOCAL_OUTPUT_MUTED = 3;
     static final int TRANSACTION_ENSURE_DIALER_ROLE = 4;
+    static final int TRANSACTION_AUDIO_SNAPSHOT = 5;
     static final int STREAM_VOICE_CALL = 0;
     private static final String DIALER_ROLE = "android.app.role.DIALER";
     private static final Pattern PACKAGE_NAME = Pattern.compile(

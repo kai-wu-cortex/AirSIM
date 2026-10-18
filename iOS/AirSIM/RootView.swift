@@ -3,10 +3,14 @@ import SwiftUI
 enum SystemCommunicationDestination: Equatable {
     case call(String)
     case message(String)
+    case liveActivity(AirSIMLiveActivityAction, callID: String)
 }
 
 enum SystemCommunicationURL {
     static func destination(for url: URL) -> SystemCommunicationDestination? {
+        if let action = AirSIMLiveActivityActionURL.parse(url) {
+            return .liveActivity(action.action, callID: action.callID)
+        }
         guard let scheme = url.scheme?.lowercased(), scheme == "tel" || scheme == "im" else {
             return nil
         }
@@ -178,6 +182,8 @@ struct RootView: View {
             dial(number)
         case let .message(recipient):
             composeMessage(recipient)
+        case let .liveActivity(action, callID):
+            Task { await model.performVoBLELiveActivityAction(action, callID: callID) }
         case nil:
             break
         }

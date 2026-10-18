@@ -23,12 +23,13 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public final class VoWLANPCMRelay implements Closeable {
     private final Context context;
-    private final VoWLANReplayCache replayCache = new VoWLANReplayCache(30);
-    private final VoWLANPCMProtocol.SessionGate gate = new VoWLANPCMProtocol.SessionGate();
+    private static final VoWLANReplayCache replayCache = new VoWLANReplayCache(30);
+    private static final VoWLANPCMProtocol.SessionGate gate = new VoWLANPCMProtocol.SessionGate();
     private final ExecutorService workers = Executors.newCachedThreadPool();
     private volatile ServerSocket server;
     private volatile InetSocketAddress shellPCM;
     private volatile boolean activeSession;
+    private final java.util.Set<Socket> sockets = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public VoWLANPCMRelay(Context context) {
         this.context = context.getApplicationContext();
@@ -51,19 +52,24 @@ public final class VoWLANPCMRelay implements Closeable {
     public int localPort() { return server == null || server.isClosed() ? -1 : server.getLocalPort(); }
 
     private void acceptLoop(ServerSocket active) {
-        VoWLANAcceptLoop.run(active, peer -> workers.execute(() -> handle(peer)),
+        VoWLANAcceptLoop.run(active, peer -> {
+            if (track(peer)) workers.execute(() -> handle(peer));
+        },
                 error -> BridgeLog.error("vowlan_pcm_accept_failed", error));
     }
 
     private void handle(Socket peer) {
         String owner = UUID.randomUUID().toString();
+        boolean proxied = peer.getLocalAddress().isLoopbackAddress();
         boolean acquired = false;
         Socket internal = null;
+        DirectCallOwnership.Lease callLease = null;
         PCMStats uplink = new PCMStats();
         PCMStats downlink = new PCMStats();
         try (peer) {
             peer.setSoTimeout(5_000);
-            if (!(peer.getInetAddress().isSiteLocalAddress() || peer.getInetAddress().isLinkLocalAddress())) {
+            if (!VoWLANNetworkPolicy.permitsPeer(peer.getInetAddress().getHostAddress(),
+                    peer.getLocalAddress().getHostAddress())) {
                 throw new SecurityException("private peer required");
             }
             BufferedInputStream peerInput = new BufferedInputStream(peer.getInputStream());
@@ -81,9 +87,12 @@ public final class VoWLANPCMRelay implements Closeable {
             }
             acquired = gate.tryAcquire(owner);
             if (!acquired) throw new IllegalStateException("PCM session busy");
+            callLease = DirectCallOwnership.begin(peer.getLocalAddress().getHostAddress());
             activeSession = true;
             internal = new Socket();
+            if (!track(internal)) return;
             internal.connect(shellPCM, 3_000);
+            internal.setSoTimeout(3_000);
             internal.setTcpNoDelay(true);
             internal.getOutputStream().write("AIRSIMPCM1\n".getBytes(StandardCharsets.US_ASCII));
             if (!VoWLANPCMProtocol.acceptReady(internal.getInputStream())) {
@@ -91,6 +100,8 @@ public final class VoWLANPCMRelay implements Closeable {
             }
             peer.getOutputStream().write(VoWLANPCMProtocol.READY.getBytes(StandardCharsets.US_ASCII));
             peer.getOutputStream().flush();
+            DirectCallOwnership.pcmReady(callLease);
+            RemoteAudioSessionRegistry.setVoWLAN(true);
             peer.setSoTimeout(0);
             internal.setSoTimeout(0);
             Socket activeInternal = internal;
@@ -104,8 +115,15 @@ public final class VoWLANPCMRelay implements Closeable {
             BridgeLog.error("vowlan_pcm_session_failed", error);
         } finally {
             closeQuietly(internal);
-            if (acquired) gate.release(owner);
+            sockets.remove(peer);
+            if (internal != null) sockets.remove(internal);
             if (acquired) activeSession = false;
+            try {
+                if (acquired) RemoteAudioSessionRegistry.setVoWLAN(false);
+            } finally {
+                try { DirectCallOwnership.end(callLease, proxied); }
+                finally { if (acquired) gate.release(owner); }
+            }
             BridgeLog.info("vowlan_pcm_closed uplink_bytes=" + uplink.bytes.get()
                     + " uplink_frames=" + uplink.frames.get() + " uplink_peak=" + uplink.peak.get()
                     + " downlink_bytes=" + downlink.bytes.get() + " downlink_frames=" + downlink.frames.get()
@@ -115,7 +133,7 @@ public final class VoWLANPCMRelay implements Closeable {
 
     private static InputStream activeInternalInput(Socket socket) {
         try { return socket.getInputStream(); }
-        catch (IOException error) { return InputStream.nullInputStream(); }
+        catch (IOException error) { return new java.io.ByteArrayInputStream(new byte[0]); }
     }
 
     private static void copy(
@@ -156,10 +174,18 @@ public final class VoWLANPCMRelay implements Closeable {
         try { value.close(); } catch (IOException ignored) {}
     }
 
+    private synchronized boolean track(Socket socket) {
+        if (server == null || server.isClosed()) { closeQuietly(socket); return false; }
+        sockets.add(socket);
+        return true;
+    }
+
     @Override public synchronized void close() throws IOException {
         ServerSocket active = server;
         server = null;
         if (active != null) active.close();
+        for (Socket socket : sockets) closeQuietly(socket);
+        sockets.clear();
         workers.shutdownNow();
     }
 

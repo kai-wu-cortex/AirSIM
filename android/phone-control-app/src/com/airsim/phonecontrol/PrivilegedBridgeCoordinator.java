@@ -5,6 +5,7 @@ final class PrivilegedBridgeCoordinator {
         String startBridge() throws Exception;
         String status() throws Exception;
         String setLocalOutputMuted(boolean muted) throws Exception;
+        default String audioSnapshot() throws Exception { throw new java.io.IOException("snapshot unsupported"); }
     }
 
     private Transport transport;
@@ -36,6 +37,25 @@ final class PrivilegedBridgeCoordinator {
 
     synchronized boolean desiredMuted() {
         return desiredMuted;
+    }
+
+    AudioWatchdogSnapshot audioSnapshot() throws Exception {
+        Transport current;
+        synchronized (this) { current = transport; }
+        if (current == null) throw new java.io.IOException("privileged transport disconnected");
+        // A slow OEM AudioManager query must not hold the mute/restore coordinator lock.
+        return AudioWatchdogSnapshot.parse(current.audioSnapshot());
+    }
+
+    void reassertLocalOutputMuted() throws Exception {
+        Transport current;
+        synchronized (this) {
+            if (!desiredMuted || !hasMuteIntent) throw new java.io.IOException("obsolete mute intent");
+            current = transport;
+        }
+        if (current == null) throw new java.io.IOException("privileged transport disconnected");
+        String result = current.setLocalOutputMuted(true);
+        synchronized (this) { if (current == transport && desiredMuted) lastResult = result; }
     }
 
     synchronized String lastResult() {

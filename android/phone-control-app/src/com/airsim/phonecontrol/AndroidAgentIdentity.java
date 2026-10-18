@@ -15,10 +15,10 @@ import java.util.List;
 import java.util.Locale;
 
 /** Stable, non-secret metadata used to distinguish paired Android Agent instances. */
-final class AndroidAgentIdentity {
+public final class AndroidAgentIdentity {
     private AndroidAgentIdentity() {}
 
-    static String agentID(Context context) {
+    public static String agentID(Context context) {
         String androidID = Settings.Secure.getString(
                 context.getContentResolver(), Settings.Secure.ANDROID_ID);
         String source = context.getPackageName() + ":" + (androidID == null ? "unknown" : androidID);
@@ -35,7 +35,7 @@ final class AndroidAgentIdentity {
         }
     }
 
-    static String deviceName() {
+    public static String deviceName() {
         String manufacturer = clean(Build.MANUFACTURER);
         String model = clean(Build.MODEL);
         if (manufacturer.isEmpty()) return model;
@@ -45,15 +45,30 @@ final class AndroidAgentIdentity {
         return (manufacturer + " " + model).trim();
     }
 
-    static String phoneNumber(Context context) {
+    public static String phoneNumber(Context context) {
         if (context.checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS)
                 != PackageManager.PERMISSION_GRANTED) return "";
         try {
+            String selected = DefaultCallAccount.selectedKey(context);
+            if (!selected.isEmpty()) {
+                for (DefaultCallAccount.Account account : DefaultCallAccount.snapshot(context).accounts()) {
+                    if (selected.equals(account.key())) return clean(account.number());
+                }
+                // A disabled chosen card must not borrow another SIM's number.
+                return "";
+            }
             SubscriptionManager manager = context.getSystemService(SubscriptionManager.class);
             if (manager != null && context.checkSelfPermission(Manifest.permission.READ_PHONE_STATE)
                     == PackageManager.PERMISSION_GRANTED) {
                 List<SubscriptionInfo> subscriptions = manager.getActiveSubscriptionInfoList();
                 if (subscriptions != null) {
+                    int defaultVoice = SubscriptionManager.getDefaultVoiceSubscriptionId();
+                    for (SubscriptionInfo subscription : subscriptions) {
+                        if (subscription.getSubscriptionId() == defaultVoice) {
+                            return clean(Build.VERSION.SDK_INT >= 33
+                                    ? manager.getPhoneNumber(defaultVoice) : subscription.getNumber());
+                        }
+                    }
                     for (SubscriptionInfo subscription : subscriptions) {
                         String value = Build.VERSION.SDK_INT >= 33
                                 ? manager.getPhoneNumber(subscription.getSubscriptionId())
@@ -64,7 +79,7 @@ final class AndroidAgentIdentity {
             }
             TelephonyManager telephony = context.getSystemService(TelephonyManager.class);
             return telephony == null ? "" : clean(telephony.getLine1Number());
-        } catch (SecurityException ignored) {
+        } catch (RuntimeException ignored) {
             return "";
         }
     }

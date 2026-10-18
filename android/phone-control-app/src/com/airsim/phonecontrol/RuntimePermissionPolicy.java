@@ -11,6 +11,8 @@ final class RuntimePermissionPolicy {
     private static final String READ_PHONE_STATE = "android.permission.READ_PHONE_STATE";
     private static final String READ_PHONE_NUMBERS = "android.permission.READ_PHONE_NUMBERS";
     private static final String POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
+    private static final String BLUETOOTH_CONNECT = "android.permission.BLUETOOTH_CONNECT";
+    private static final String BLUETOOTH_ADVERTISE = "android.permission.BLUETOOTH_ADVERTISE";
 
     private RuntimePermissionPolicy() {}
 
@@ -26,7 +28,7 @@ final class RuntimePermissionPolicy {
         if (!sendSMSGranted) missing.add(SEND_SMS);
         if (!sendSMSGranted) missing.add(RECEIVE_SMS);
         if (sdk >= 33 && !notificationsGranted) missing.add(POST_NOTIFICATIONS);
-        return missing.toArray(String[]::new);
+        return missing.toArray(new String[0]);
     }
 
     static String[] missingPermissions(
@@ -34,6 +36,16 @@ final class RuntimePermissionPolicy {
             boolean receiveSMSGranted,
             boolean readPhoneStateGranted, boolean readPhoneNumbersGranted,
             boolean notificationsGranted) {
+        return missingPermissions(sdk, callPhoneGranted, sendSMSGranted, receiveSMSGranted,
+                readPhoneStateGranted, readPhoneNumbersGranted, notificationsGranted, true, true);
+    }
+
+    static String[] missingPermissions(
+            int sdk, boolean callPhoneGranted, boolean sendSMSGranted,
+            boolean receiveSMSGranted,
+            boolean readPhoneStateGranted, boolean readPhoneNumbersGranted,
+            boolean notificationsGranted, boolean bluetoothConnectGranted,
+            boolean bluetoothAdvertiseGranted) {
         List<String> missing = new ArrayList<>();
         if (!callPhoneGranted) missing.add(CALL_PHONE);
         if (!sendSMSGranted) missing.add(SEND_SMS);
@@ -41,6 +53,8 @@ final class RuntimePermissionPolicy {
         if (!readPhoneStateGranted) missing.add(READ_PHONE_STATE);
         if (!readPhoneNumbersGranted) missing.add(READ_PHONE_NUMBERS);
         if (sdk >= 33 && !notificationsGranted) missing.add(POST_NOTIFICATIONS);
-        return missing.toArray(String[]::new);
+        if (sdk >= 31 && !bluetoothConnectGranted) missing.add(BLUETOOTH_CONNECT);
+        if (sdk >= 31 && !bluetoothAdvertiseGranted) missing.add(BLUETOOTH_ADVERTISE);
+        return missing.toArray(new String[0]);
     }
 }

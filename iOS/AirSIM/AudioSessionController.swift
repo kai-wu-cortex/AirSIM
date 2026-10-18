@@ -20,7 +20,12 @@ enum PCMRoute: Equatable, Sendable {
     }
 
     var requiresWiFi: Bool {
-        if case .vowlan = self { return true }
+        if case let .vowlan(endpoint, _) = self { return !VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host) }
+        return false
+    }
+
+    var usesSystemRouting: Bool {
+        if case let .vowlan(endpoint, _) = self { return VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host) }
         return false
     }
 
@@ -97,6 +102,7 @@ final class AudioSessionController: ObservableObject {
     @Published var errorMessage: String?
 
     private var engine: AVAudioEngine?
+    private(set) var sessionOwner: UUID?
     private var player: AVAudioPlayerNode?
     private var transport: NetworkPCMTransport?
     private var encoder: VoicePCMEncoder?
@@ -108,6 +114,15 @@ final class AudioSessionController: ObservableObject {
     private var sessionActivationManagedByCallKit = false
     private var routeChangeObserver: NSObjectProtocol?
     private var playbackQueue = PlaybackQueueTracker(maximumFrames: 4_000)
+    private var startupUptime: TimeInterval = 0
+    private var recordedFirstDownlink = false
+
+    private func recordStartup(_ phase: String) {
+        let elapsed = Int(max(0, ProcessInfo.processInfo.systemUptime - startupUptime) * 1_000)
+        Task { await AgentVerboseTraceRecorder.shared.recordAudioStartup(
+            phase: phase, elapsedMilliseconds: elapsed
+        ) }
+    }
 
     init() {
         // CallKit、蓝牙或系统控制中心都可能改变输出路由，按钮状态必须跟随真实会话。
@@ -148,11 +163,20 @@ final class AudioSessionController: ObservableObject {
     @discardableResult
     func activateForCall(
         route: PCMRoute = .moduleLocal,
-        sessionAlreadyActive: Bool = false
+        sessionAlreadyActive: Bool = false,
+        owner: UUID = UUID(),
+        isCurrent: () -> Bool = { true }
     ) async -> Bool {
+        guard !Task.isCancelled, isCurrent() else { return false }
         guard !active else { return true }
+        startupUptime = ProcessInfo.processInfo.systemUptime
+        recordedFirstDownlink = false
+        recordStartup("phone_start")
         let permission = await requestMicrophonePermission()
+        // Authorization may outlive the call that asked for it.
+        guard !Task.isCancelled, isCurrent() else { return false }
         guard permission else {
+            recordStartup("failed")
             errorMessage = "需要麦克风权限才能进行双向通话"
             return false
         }
@@ -186,11 +210,18 @@ final class AudioSessionController: ObservableObject {
                 port: NWEndpoint.Port(rawValue: route.port)!,
                 handshakeSequence: handshakeSequence,
                 requiresWiFi: route.requiresWiFi,
+                usesSystemRouting: route.usesSystemRouting,
                 onPCM: { [weak self] pcm in
-                    Task { @MainActor [weak self] in self?.schedulePlayback(pcm) }
+                    Task { @MainActor [weak self] in
+                        guard self?.sessionOwner == owner else { return }
+                        self?.schedulePlayback(pcm)
+                    }
                 },
                 onEvent: { [weak self] event in
-                    Task { @MainActor [weak self] in self?.handleTransportEvent(event) }
+                    Task { @MainActor [weak self] in
+                        guard self?.sessionOwner == owner else { return }
+                        self?.handleTransportEvent(event)
+                    }
                 }
             )
 
@@ -221,15 +252,18 @@ final class AudioSessionController: ObservableObject {
             engine.prepare()
             try engine.start()
             player.play()
+            recordStartup("engine_ready")
 
             self.engine = engine
+            sessionOwner = owner
             self.player = player
             self.encoder = encoder
             self.transport = transport
             playbackQueue.reset()
             active = true
             transportReady = false
-            routeDescription = route.requiresWiFi ? "正在连接 VoWLAN 语音…" : "正在连接模块网络语音…"
+            routeDescription = route.usesSystemRouting ? "正在连接 VPN 直连语音…"
+                : (route.requiresWiFi ? "正在连接 VoWLAN 语音…" : "正在连接模块网络语音…")
             diagnosticDescription = "\(DeviceContext.displayName) PCM 尚未握手"
             moduleDiagnosticDescription = ""
             errorMessage = nil
@@ -237,6 +271,7 @@ final class AudioSessionController: ObservableObject {
             transport.start()
             return true
         } catch {
+            recordStartup("failed")
             deactivate()
             errorMessage = "无法启用通话音频：\(error.localizedDescription)"
             return false
@@ -392,7 +427,9 @@ final class AudioSessionController: ObservableObject {
         moduleDiagnosticDescription = details.joined(separator: "；")
     }
 
-    func deactivate() {
+    func deactivate(preservingSharedSession: Bool = false) {
+        if active { recordStartup("stopped") }
+        sessionOwner = nil
         let callKitManagedSession = sessionActivationManagedByCallKit
         sessionActivationManagedByCallKit = false
         muted = false
@@ -400,7 +437,7 @@ final class AudioSessionController: ObservableObject {
         speakerRouteRetryTask?.cancel()
         speakerRouteRetryTask = nil
         speakerRoutePending = false
-        stopCallTone()
+        stopCallTone(deactivateSession: !preservingSharedSession)
         transport?.stop()
         transport = nil
         encoder = nil
@@ -412,18 +449,17 @@ final class AudioSessionController: ObservableObject {
         player = nil
         engine = nil
         playbackQueue.reset()
-        do {
-            let session = AVAudioSession.sharedInstance()
-            // 清除本次通话的外放覆盖，避免影响下一次通话或其他 App。
-            try session.overrideOutputAudioPort(.none)
-            if !callKitManagedSession {
-                try session.setActive(
-                    false,
-                    options: .notifyOthersOnDeactivation
-                )
+        if !preservingSharedSession {
+            do {
+                let session = AVAudioSession.sharedInstance()
+                // 清除本次通话的外放覆盖，避免影响下一次通话或其他 App。
+                try session.overrideOutputAudioPort(.none)
+                if !callKitManagedSession {
+                    try session.setActive(false, options: .notifyOthersOnDeactivation)
+                }
+            } catch {
+                errorMessage = error.localizedDescription
             }
-        } catch {
-            errorMessage = error.localizedDescription
         }
         active = false
         transportReady = false
@@ -471,6 +507,7 @@ final class AudioSessionController: ObservableObject {
     private func handleTransportEvent(_ event: NetworkPCMTransport.Event) {
         switch event {
         case .connected:
+            recordStartup("pcm_ready")
             transportReady = true
             diagnosticDescription = "\(DeviceContext.displayName) PCM 已握手，等待语音数据"
             refreshRouteDescription()
@@ -486,6 +523,7 @@ final class AudioSessionController: ObservableObject {
             // 连接状态单独显示，避免把“尚未握手”误读成模块已经拒绝握手。
             diagnosticDescription = "\(DeviceContext.displayName) PCM：\(message)"
         case let .failed(message):
+            recordStartup("failed")
             transportReady = false
             routeDescription = "网络语音未连接"
             diagnosticDescription = "\(DeviceContext.displayName) PCM 连接失败：\(message)"
@@ -542,6 +580,10 @@ final class AudioSessionController: ObservableObject {
         }
 
         buffer.frameLength = AVAudioFrameCount(frames)
+        if !recordedFirstDownlink {
+            recordedFirstDownlink = true
+            recordStartup("first_downlink")
+        }
         pcm.withUnsafeBytes { rawBuffer in
             let bytes = rawBuffer.bindMemory(to: UInt8.self)
             for frame in 0 ..< frames {
@@ -751,6 +793,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
     private let port: NWEndpoint.Port
     private let handshakeSequence: PCMHandshakeSequence
     private let requiresWiFi: Bool
+    private let usesSystemRouting: Bool
     private let queue = DispatchQueue(label: "com.jieden.airsim.network-pcm")
     private let onPCM: @Sendable (Data) -> Void
     private let onEvent: @Sendable (Event) -> Void
@@ -777,6 +820,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         port: NWEndpoint.Port,
         handshakeSequence: PCMHandshakeSequence,
         requiresWiFi: Bool,
+        usesSystemRouting: Bool,
         onPCM: @escaping @Sendable (Data) -> Void,
         onEvent: @escaping @Sendable (Event) -> Void
     ) {
@@ -784,6 +828,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         self.port = port
         self.handshakeSequence = handshakeSequence
         self.requiresWiFi = requiresWiFi
+        self.usesSystemRouting = usesSystemRouting
         self.onPCM = onPCM
         self.onEvent = onEvent
     }
@@ -841,7 +886,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         guard !stopped else { return }
         generation += 1
         let attempt = generation
-        let useWiredInterface = !requiresWiFi && !fallbackAttempted
+        let useWiredInterface = !usesSystemRouting && !requiresWiFi && !fallbackAttempted
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         tcp.enableKeepalive = true
@@ -856,7 +901,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         let connection = NWConnection(host: host, port: port, using: parameters)
         self.connection = connection
         readyForPCM = false
-        onEvent(.status(requiresWiFi ? "正在通过 VoWLAN 连接 PCM" : (useWiredInterface ? "正在通过 USB 网卡连接 PCM" : "正在回退到普通 TCP 连接 PCM")))
+        onEvent(.status(usesSystemRouting ? "正在通过 VPN 直连 PCM" : (requiresWiFi ? "正在通过 VoWLAN 连接 PCM" : (useWiredInterface ? "正在通过 USB 网卡连接 PCM" : "正在回退到普通 TCP 连接 PCM"))))
         connection.pathUpdateHandler = { [weak self, weak connection] path in
             guard let self, connection != nil else { return }
             self.queue.async {
@@ -1051,7 +1096,7 @@ private struct NetworkPCMStatistics: Sendable {
 }
 
 /// 对麦克风做语音带限与线性降采样，输出模块需要的 8 kHz PCM16LE。
-private final class VoicePCMEncoder: @unchecked Sendable {
+final class VoicePCMEncoder: @unchecked Sendable {
     private let lock = NSLock()
     private var conditioner = VoiceCaptureConditioner()
     private var samples: [Float] = []
@@ -1136,7 +1181,7 @@ private struct VoiceCaptureConditioner {
     }
 }
 
-private enum VoiceAudioError: LocalizedError {
+enum VoiceAudioError: LocalizedError {
     case microphoneUnavailable
     case invalidPlaybackFormat
     case tonePlaybackFailed

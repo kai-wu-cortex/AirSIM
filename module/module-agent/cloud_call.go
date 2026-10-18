@@ -1156,7 +1156,7 @@ func dialCloudWebSocketAuthorized(ctx context.Context, endpoint, bearerToken str
 		!strings.EqualFold(response.Header.Get("Upgrade"), "websocket") ||
 		response.Header.Get("Sec-WebSocket-Accept") != cloudWebSocketAccept(key) {
 		_ = connection.Close()
-		return nil, fmt.Errorf("公网媒体握手返回 HTTP %d", response.StatusCode)
+		return nil, &relayCommandHTTPError{Status: response.StatusCode, RetryAfter: commandRetryAfter(response.Header.Get("Retry-After"), time.Now())}
 	}
 	_ = connection.SetDeadline(time.Time{})
 	return &cloudWebSocket{conn: connection, reader: reader}, nil
@@ -1254,7 +1254,7 @@ func (socket *cloudWebSocket) ReadMessage() (byte, []byte, error) {
 		case cloudOpcodePong:
 			continue
 		case cloudOpcodeClose:
-			return 0, nil, io.EOF
+			return 0, nil, decodeCloudPeerClose(payload)
 		case cloudOpcodeText, cloudOpcodeBinary:
 			return opcode, payload, nil
 		default:

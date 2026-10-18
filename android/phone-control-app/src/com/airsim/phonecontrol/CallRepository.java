@@ -1,5 +1,6 @@
 package com.airsim.phonecontrol;
 
+import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -38,6 +39,34 @@ public final class CallRepository {
 
     public static String firstId() {
         return idForAction("end");
+    }
+
+    public static java.util.Set<String> callIDs() { return new java.util.HashSet<>(CALLS.keySet()); }
+
+    public static String newOutgoingCallSince(java.util.Set<String> before, String number) {
+        if (number == null || number.trim().isEmpty()) return "";
+        String candidate = "";
+        for (Map.Entry<String, Call> entry : CALLS.entrySet()) {
+            int state = entry.getValue().getState();
+            if (before.contains(entry.getKey()) || state == Call.STATE_DISCONNECTED || state == Call.STATE_DISCONNECTING) continue;
+            Call.Details details = entry.getValue().getDetails();
+            if (details == null || details.getCallDirection() != Call.Details.DIRECTION_OUTGOING
+                    || details.getHandle() == null || !android.telephony.PhoneNumberUtils.compare(
+                            details.getHandle().getSchemeSpecificPart(), number)) continue;
+            if (!candidate.isEmpty()) return "";
+            candidate = entry.getKey();
+        }
+        return candidate;
+    }
+
+    public static void disconnect(String callID) {
+        Call owned = CALLS.get(callID);
+        if (owned == null) return;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (CALLS.get(callID) != owned || owned.getState() == Call.STATE_DISCONNECTED
+                    || owned.getState() == Call.STATE_DISCONNECTING) return;
+            try { owned.disconnect(); } catch (RuntimeException ignored) {}
+        });
     }
 
     public static int state(String callId) {
@@ -80,13 +109,20 @@ public final class CallRepository {
         });
     }
 
-    public static ActionResult execute(AgentCommand command, TelecomManager telecomManager) {
+    public static ActionResult execute(Context context, AgentCommand command) {
         if (!command.isSupported()) return ActionResult.failure("unsupported action");
         if ("dial".equals(command.action)) {
             if (command.number.isEmpty()) return ActionResult.failure("number missing");
             String error = TelecomInvocation.run(
                     task -> new Handler(Looper.getMainLooper()).post(task),
-                    () -> telecomManager.placeCall(Uri.parse("tel:" + command.number), null),
+                    () -> {
+                        // Honour an explicit slot when the caller supplied one; otherwise
+                        // keep the upstream behaviour of following the system default card.
+                        android.os.Bundle dialExtras =
+                                SIMSlotManager.dialExtrasForCommand(context, command);
+                        context.getSystemService(TelecomManager.class).placeCall(
+                                Uri.parse("tel:" + command.number), dialExtras);
+                    },
                     2_000L);
             return error.isEmpty() ? ActionResult.success() : ActionResult.failure(error);
         }
@@ -135,6 +171,11 @@ public final class CallRepository {
         } catch (Exception error) {
             return ActionResult.failure(error.getClass().getSimpleName() + ": " + error.getMessage());
         }
+    }
+
+    public static ActionResult executeRemote(
+            Context context, String requestId, String action, String callId, String number) {
+        return execute(context, new AgentCommand(requestId, action, callId, number));
     }
 
     public static final class ActionResult {

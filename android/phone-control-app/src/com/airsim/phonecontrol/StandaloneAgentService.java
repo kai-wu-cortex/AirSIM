@@ -34,6 +34,10 @@ public final class StandaloneAgentService extends Service {
     private long lastCommandPoll;
     private volatile StandaloneWebSocket commandSocket;
     private volatile boolean commandChannelConnected;
+    private final RelayCommandRetryState commandRetry = new RelayCommandRetryState();
+    private RelayCommandConfiguration<JSONObject> commandConfiguration;
+    private final android.content.SharedPreferences.OnSharedPreferenceChangeListener commandPreferences =
+            (preferences, key) -> commandConfiguration.snapshot();
 
     public static void start(Context context) {
         try { context.startForegroundService(new Intent(context, StandaloneAgentService.class)); }
@@ -53,6 +57,8 @@ public final class StandaloneAgentService extends Service {
                 BridgeNotification.status(this, "内置 Agent 正在启动"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
         running = true;
+        commandConfiguration = new RelayCommandConfiguration<>(store::registration, this::commandScope, commandRetry);
+        getSharedPreferences("standalone_agent", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(commandPreferences);
         ShizukuBridgeManager.get(this).ensureStarted();
         VoWLANGatewayService.start(this);
         worker.execute(this::loop);
@@ -68,7 +74,8 @@ public final class StandaloneAgentService extends Service {
         while (running) {
             try {
                 SMSInboxScanner.scanIfDue(this);
-                JSONObject registration = store.registration();
+                var snapshot = commandConfiguration.snapshot();
+                JSONObject registration = snapshot.registration();
                 if (registration == null || !store.cloudEnabled()) {
                     update(registration == null ? "内置 Agent 在线 · 等待 iPhone 配对" : "内置 Agent 在线 · 云端已关闭");
                     Thread.sleep(2_000);
@@ -78,9 +85,11 @@ public final class StandaloneAgentService extends Service {
                 long now = System.currentTimeMillis();
                 if (now - lastHeartbeat >= 30_000) sendHeartbeat(registration);
                 flushEvents(registration);
-                if (CommandPollingPolicy.shouldPoll(commandChannelConnected, lastCommandPoll, now)) {
+                if (commandConfiguration.isCurrent(snapshot) && CommandPollingPolicy.shouldPoll(commandChannelConnected, lastCommandPoll, now,
+                        commandRetry.remainingMillis(android.os.SystemClock.elapsedRealtime()))) {
                     lastCommandPoll = now;
-                    pollCommands(registration);
+                    try { pollCommands(snapshot); }
+                    catch (Exception error) { if (commandConfiguration.isCurrent(snapshot)) commandFailure(snapshot.epoch(), -1, error); }
                 }
                 failures = 0;
                 update("内置 Agent 在线 · Relay 已连接");
@@ -113,10 +122,11 @@ public final class StandaloneAgentService extends Service {
                 .put("event", "agent_heartbeat").put("agent_version", "standalone-0.1.0")
                 .put("agent_id", registration.optString("android_agent_id", AndroidAgentIdentity.agentID(this)))
                 .put("agent_kind", "standalone")
-                .put("device_name", registration.optString("android_device_name", AndroidAgentIdentity.deviceName()))
+                .put("command_routing_version", 1)
+                .put("device_name", AndroidAgentIdentity.deviceName())
                 .put("manufacturer", registration.optString("android_manufacturer", android.os.Build.MANUFACTURER))
                 .put("model", registration.optString("android_model", android.os.Build.MODEL))
-                .put("phone_number", registration.optString("android_phone_number", AndroidAgentIdentity.phoneNumber(this)))
+                .put("phone_number", AndroidAgentIdentity.phoneNumber(this))
                 .put("at_ok", true).put("cellular_state", "registered")
                 .put("cellular_registration", "Android Telecom")
                 .put("cellular_recovery", "not_required").put("ecm_carrier", "android-default");
@@ -125,12 +135,16 @@ public final class StandaloneAgentService extends Service {
         store.recordHeartbeat();
     }
 
-    private void pollCommands(JSONObject registration) throws Exception {
-        JSONObject batch = relay.postJSON(registration, "/v1/commands/pull", identity(registration), 12_000);
+    private void pollCommands(RelayCommandConfiguration.Snapshot<JSONObject> snapshot) throws Exception {
+        if (!commandConfiguration.isCurrent(snapshot)) return;
+        JSONObject registration = snapshot.registration();
+        JSONObject batch = relay.postJSON(registration, "/v2/commands/pull", identity(registration), 12_000);
         JSONArray commands = batch.optJSONArray("commands");
         if (commands == null) return;
         for (int index = 0; index < commands.length(); index++) {
+            if (!commandConfiguration.isCurrent(snapshot)) return;
             JSONObject command = commands.getJSONObject(index);
+            if (!agentID(registration).equals(command.optString("target_agent_id"))) continue;
             String commandID = command.optString("command_id", "").toLowerCase();
             if (commandID.isBlank() || completedCommands.contains(commandID)) continue;
             JSONObject result;
@@ -140,7 +154,9 @@ public final class StandaloneAgentService extends Service {
                     result = new JSONObject().put("command_id", commandID).put("status", "failed")
                             .put("error", "云端命令已过期");
                 } else {
-                    result = StandaloneAgentGateway.get(this).executeCloudCommand(command);
+                    if (!commandConfiguration.isCurrent(snapshot)) return;
+                    result = StandaloneAgentGateway.get(this).executeCloudCommand(command,
+                            () -> commandConfiguration.isCurrent(snapshot));
                     if (result.optString("status").equals("completed") && "dial".equals(command.optString("type"))) {
                         StandaloneCloudMediaManager.get(this).startOutgoing(command.optJSONObject("call"));
                     }
@@ -153,39 +169,55 @@ public final class StandaloneAgentService extends Service {
             for (String key : new String[]{"command_id", "status", "result", "error"}) {
                 if (result.has(key)) completion.put(key, result.get(key));
             }
-            relay.postJSON(registration, "/v1/commands/complete", completion, 12_000);
+            if (!commandConfiguration.isCurrent(snapshot)) return;
+            relay.postJSON(registration, "/v2/commands/complete", completion, 12_000);
             rememberCompleted(commandID);
         }
     }
 
     private void commandLoop() {
-        int failures = 0;
         while (running) {
             StandaloneWebSocket socket = null;
-            Throwable failure = null;
+            long connectedAt = -1;
+            long epoch = -1;
+            RelayCommandConfiguration.Snapshot<JSONObject> snapshot = null;
             try {
-                JSONObject registration = store.registration();
+                snapshot = commandConfiguration.snapshot();
+                JSONObject registration = snapshot.registration();
+                epoch = snapshot.epoch();
                 if (registration == null || !store.cloudEnabled()) {
                     Thread.sleep(2_000);
                     continue;
                 }
+                if (!commandRetry.isCurrent(epoch)) { Thread.sleep(2_000); continue; }
+                long cooldown = commandRetry.remainingMillis(android.os.SystemClock.elapsedRealtime());
+                if (cooldown > 0) { Thread.sleep(Math.min(2_000, cooldown)); continue; }
                 URI relayURI = URI.create(registration.getString("relay_url"));
-                String deviceID = URLEncoder.encode(registration.getString("device_id"), StandardCharsets.UTF_8)
+                String deviceID = URLEncoder.encode(registration.getString("device_id"), "UTF-8")
                         .replace("+", "%20");
                 URI endpoint = URI.create("wss://" + relayURI.getRawAuthority()
-                        + "/v1/devices/" + deviceID + "/commands/connect");
-                socket = StandaloneWebSocket.connect(endpoint, registration.getString("device_secret"));
+                        + "/v2/devices/" + deviceID + "/commands/connect?agent_id="
+                        + URLEncoder.encode(agentID(registration), "UTF-8").replace("+", "%20"));
+                final long connectionEpoch = epoch;
+                socket = StandaloneWebSocket.connect(endpoint, registration.getString("device_secret"),
+                        attempt -> commandRetry.attach(connectionEpoch, attempt),
+                        () -> (javax.net.ssl.SSLSocket)javax.net.ssl.SSLSocketFactory.getDefault().createSocket());
+                if (!running || !commandRetry.attach(epoch, socket)) continue;
                 commandSocket = socket;
                 commandChannelConnected = true;
-                failures = 0;
+                connectedAt = android.os.SystemClock.elapsedRealtime();
                 socket.setReadTimeout(20_000);
                 BridgeLog.info("standalone_command_channel_connected");
-                while (running) {
+                final var commandSnapshot = snapshot;
+                while (running && commandConfiguration.isCurrent(snapshot)) {
                     try {
                         StandaloneWebSocket.Message message = socket.read();
                         if (message.opcode() != 1) continue;
                         JSONObject command = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
-                        JSONObject result = StandaloneAgentGateway.get(this).executeCloudCommand(command);
+                        if (!commandConfiguration.isCurrent(snapshot)) break;
+                        if (!agentID(registration).equals(command.optString("target_agent_id"))) continue;
+                        JSONObject result = StandaloneAgentGateway.get(this).executeCloudCommand(command,
+                                () -> commandConfiguration.isCurrent(commandSnapshot));
                         if (result.optString("status").equals("completed")
                                 && "dial".equals(command.optString("type"))) {
                             StandaloneCloudMediaManager.get(this).startOutgoing(command.optJSONObject("call"));
@@ -199,19 +231,39 @@ public final class StandaloneAgentService extends Service {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception error) {
-                failures++;
-                failure = error;
-                if (running) BridgeLog.error("standalone_command_channel_failed failures=" + failures, error);
+                if (running && commandConfiguration.isCurrent(snapshot)) commandFailure(epoch, connectedAt, error);
             } finally {
                 commandChannelConnected = false;
                 commandSocket = null;
                 if (socket != null) socket.close();
             }
-            if (running) {
-                try { Thread.sleep(RelayRetryPolicy.delayMillis(failures, failure)); }
-                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+        }
+    }
+
+    private String commandScope(JSONObject registration) {
+        String scope = null;
+        if (running && registration != null && !registration.optBoolean("local_mode",false)
+                && registration.optBoolean("cloud_enabled",true)) {
+            String id = agentID(registration);
+            if (RelayCommandRetryState.validAgentID(id)) {
+                // Only transport identity participates: SIM, metadata and push-token refreshes do not reconnect.
+                scope = new JSONArray().put(registration.optString("relay_url"))
+                        .put(registration.optString("device_id")).put(registration.optString("device_secret"))
+                        .put(id).toString();
             }
         }
+        return scope;
+    }
+
+    private static String agentID(JSONObject registration) { return registration.optString("android_agent_id", ""); }
+
+    private void commandFailure(long epoch, long connectedAt, Throwable error) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        RetryDecision decision = commandRetry.failedFor(epoch, now, connectedAt < 0 ? 0 : Math.max(0, now - connectedAt),
+                error, java.util.concurrent.ThreadLocalRandom.current().nextDouble());
+        if (decision == null) return;
+        BridgeLog.info("standalone_command_retry reason=" + decision.reason() + " tier=" + decision.failures()
+                + " delay_ms=" + decision.delayMillis() + " fallback=false");
     }
 
     private void flushEvents(JSONObject registration) throws Exception {
@@ -236,6 +288,7 @@ public final class StandaloneAgentService extends Service {
 
     private static JSONObject identity(JSONObject registration) throws Exception {
         return new JSONObject().put("device_id", registration.getString("device_id"))
+                .put("agent_id", agentID(registration))
                 .put("device_secret", registration.getString("device_secret"));
     }
 
@@ -256,6 +309,8 @@ public final class StandaloneAgentService extends Service {
 
     @Override public void onDestroy() {
         running = false;
+        getSharedPreferences("standalone_agent", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(commandPreferences);
+        commandConfiguration.stop();
         StandaloneWebSocket socket = commandSocket;
         if (socket != null) socket.close();
         worker.shutdownNow();

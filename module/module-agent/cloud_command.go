@@ -14,6 +14,7 @@ import (
 var cloudCommandIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}$`)
 
 type cloudCommandCall struct {
+	AgentID        string `json:"agent_id,omitempty"`
 	CallID         string `json:"call_id"`
 	CallUUID       string `json:"call_uuid"`
 	Generation     uint64 `json:"generation,omitempty"`
@@ -24,15 +25,16 @@ type cloudCommandCall struct {
 }
 
 type cloudDeviceCommand struct {
-	CommandID string            `json:"command_id"`
-	Type      string            `json:"type"`
-	Action    string            `json:"action,omitempty"`
-	TraceID   string            `json:"trace_id,omitempty"`
-	Owner     string            `json:"owner,omitempty"`
-	ExpiresAt string            `json:"expires_at"`
-	Number    string            `json:"number"`
-	Message   string            `json:"message,omitempty"`
-	Call      *cloudCommandCall `json:"call,omitempty"`
+	TargetAgentID string            `json:"target_agent_id,omitempty"`
+	CommandID     string            `json:"command_id"`
+	Type          string            `json:"type"`
+	Action        string            `json:"action,omitempty"`
+	TraceID       string            `json:"trace_id,omitempty"`
+	Owner         string            `json:"owner,omitempty"`
+	ExpiresAt     string            `json:"expires_at"`
+	Number        string            `json:"number"`
+	Message       string            `json:"message,omitempty"`
+	Call          *cloudCommandCall `json:"call,omitempty"`
 }
 
 type cloudCommandResult struct {
@@ -50,9 +52,15 @@ func cloudCommandURL(registration pushRegistration) (string, error) {
 	if registration.DeviceID == "" || registration.DeviceSecret == "" {
 		return "", errors.New("公网命令设备身份无效")
 	}
+	if !validCommandAgentID(registration.AndroidAgentID) {
+		return "", errors.New("需补全原配对配置中的 Android Agent 身份")
+	}
 	relay.Scheme = "wss"
-	relay.Path = "/v1/devices/" + url.PathEscape(registration.DeviceID) + "/commands/connect"
-	relay.RawQuery = ""
+	relay.Path = "/v2/devices/" + registration.DeviceID + "/commands/connect"
+	relay.RawPath = "/v2/devices/" + url.PathEscape(registration.DeviceID) + "/commands/connect"
+	query := url.Values{}
+	query.Set("agent_id", registration.AndroidAgentID)
+	relay.RawQuery = query.Encode()
 	return relay.String(), nil
 }
 
@@ -61,11 +69,11 @@ func cloudCommandReconnectDelay(failures int) time.Duration {
 		failures = 1
 	}
 	delay := 3 * time.Second
-	for attempt := 1; attempt < failures && delay < 15*time.Second; attempt++ {
+	for attempt := 1; attempt < failures && delay < 60*time.Second; attempt++ {
 		delay *= 2
 	}
-	if delay > 15*time.Second {
-		return 15 * time.Second
+	if delay > 60*time.Second {
+		return 60 * time.Second
 	}
 	return delay
 }
@@ -79,6 +87,16 @@ func (a *agent) cloudCommandLoop() {
 			time.Sleep(3 * time.Second)
 			continue
 		}
+		a.push.mu.Lock()
+		remaining := time.Until(a.push.commandRetryAt)
+		a.push.mu.Unlock()
+		if remaining > 0 {
+			if remaining > 2*time.Second {
+				remaining = 2 * time.Second
+			}
+			time.Sleep(remaining)
+			continue
+		}
 		endpoint, err := cloudCommandURL(registration)
 		if err != nil {
 			a.debug.add("cloud-command", "error", "公网命令地址无效", err.Error(), nil)
@@ -87,7 +105,9 @@ func (a *agent) cloudCommandLoop() {
 			continue
 		}
 		if err := a.syncCloudCommandsOnce(); err != nil {
-			a.debug.add("cloud-command", "pull_failed", "WebSocket 建连前拉取待处理命令失败", err.Error(), nil)
+			failures++
+			a.push.commandFailedFor(&registration, failures, err)
+			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		socket, err := dialCloudWebSocketAuthorized(ctx, endpoint, registration.DeviceSecret)
@@ -95,12 +115,26 @@ func (a *agent) cloudCommandLoop() {
 			cancel()
 			a.debug.add("cloud-command", "error", "连接公网命令通道失败", err.Error(), nil)
 			failures++
-			time.Sleep(cloudCommandReconnectDelay(failures))
+			a.push.commandFailedFor(&registration, failures, err)
 			continue
 		}
 		connectedAt := time.Now()
+		a.push.mu.Lock()
+		if !sameCommandRegistration(a.push.config, registration) || !a.push.cloudEnabledLocked() {
+			a.push.mu.Unlock()
+			_ = socket.conn.Close()
+			cancel()
+			continue
+		}
+		a.push.commandConnected = true
+		a.push.commandSocket = socket
+		a.push.mu.Unlock()
 		a.debug.add("cloud-command", "event", "公网拨号与短信通道已连接", "", nil)
-		a.serveCloudCommands(ctx, socket)
+		err = a.serveCloudCommands(ctx, socket, registration)
+		a.push.mu.Lock()
+		a.push.commandConnected = false
+		a.push.commandSocket = nil
+		a.push.mu.Unlock()
 		_ = socket.Close()
 		cancel()
 		if time.Since(connectedAt) >= time.Minute {
@@ -108,25 +142,37 @@ func (a *agent) cloudCommandLoop() {
 		} else {
 			failures++
 		}
-		time.Sleep(cloudCommandReconnectDelay(failures))
+		a.push.commandFailedFor(&registration, failures, err)
 	}
 }
 
 func (a *agent) syncCloudCommandsOnce() error {
-	commands, err := a.push.pullCommands()
+	registration, ready := a.push.commandRegistration()
+	if !ready {
+		return nil
+	}
+	if !a.push.beginCommandPull(time.Now()) {
+		return nil
+	}
+	commands, err := a.push.pullCommandsFor(registration)
 	if err != nil {
+		a.push.commandFailedFor(&registration, 1, err)
 		return err
 	}
 	for _, command := range commands {
-		result := a.executeCloudCommand(command)
-		if err := a.push.completeCommand(result); err != nil {
-			return fmt.Errorf("回写命令 %s 结果失败: %w", command.CommandID, err)
+		result := a.executeCloudCommandFor(command, &registration)
+		current, ready := a.push.commandRegistration()
+		if !ready || !sameCommandRegistration(current, registration) || result.Error == "command_configuration_changed" {
+			return nil
+		}
+		if err := a.push.completeCommandFor(registration, result); err != nil {
+			return fmt.Errorf("回写命令结果失败: %w", err)
 		}
 	}
 	return nil
 }
 
-func (a *agent) serveCloudCommands(ctx context.Context, socket *cloudWebSocket) {
+func (a *agent) serveCloudCommands(ctx context.Context, socket *cloudWebSocket, registration pushRegistration) error {
 	keepaliveDone := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(20 * time.Second)
@@ -138,6 +184,11 @@ func (a *agent) serveCloudCommands(ctx context.Context, socket *cloudWebSocket) 
 			case <-keepaliveDone:
 				return
 			case <-ticker.C:
+				current, ready := a.push.commandRegistration()
+				if !ready || !sameCommandRegistration(current, registration) {
+					_ = socket.conn.Close()
+					return
+				}
 				if err := socket.writeMessage(cloudOpcodePing, []byte("command-keepalive")); err != nil {
 					_ = socket.Close()
 					return
@@ -149,7 +200,7 @@ func (a *agent) serveCloudCommands(ctx context.Context, socket *cloudWebSocket) 
 	for ctx.Err() == nil {
 		opcode, payload, err := socket.ReadMessage()
 		if err != nil {
-			return
+			return err
 		}
 		if opcode != cloudOpcodeText {
 			continue
@@ -158,17 +209,43 @@ func (a *agent) serveCloudCommands(ctx context.Context, socket *cloudWebSocket) 
 		if err := json.Unmarshal(payload, &command); err != nil {
 			continue
 		}
-		result := a.executeCloudCommand(command)
+		current, ready := a.push.commandRegistration()
+		if !ready || !sameCommandRegistration(current, registration) {
+			return errors.New("command configuration changed")
+		}
+		result := a.executeCloudCommandFor(command, &registration)
 		encoded, _ := json.Marshal(result)
 		if err := socket.WriteText(encoded); err != nil {
-			return
+			return err
 		}
 	}
+	return ctx.Err()
+}
+
+func sameCommandRegistration(a, b pushRegistration) bool {
+	return sameCommandIdentity(a, b) && a.commandEpoch == b.commandEpoch
+}
+
+func sameCommandIdentity(a, b pushRegistration) bool {
+	return a.RelayURL == b.RelayURL && a.DeviceID == b.DeviceID && a.DeviceSecret == b.DeviceSecret && a.AndroidAgentID == b.AndroidAgentID
 }
 
 func (a *agent) executeCloudCommand(command cloudDeviceCommand) cloudCommandResult {
+	return a.executeCloudCommandFor(command, nil)
+}
+
+func (a *agent) executeCloudCommandFor(command cloudDeviceCommand, origin *pushRegistration) cloudCommandResult {
 	a.cloudCommandExecMu.Lock()
 	defer a.cloudCommandExecMu.Unlock()
+	if a.push != nil {
+		current, ready := a.push.commandRegistration()
+		if origin != nil && (!ready || !sameCommandRegistration(current, *origin)) {
+			return cloudCommandResult{CommandID: command.CommandID, Status: "failed", Error: "command_configuration_changed"}
+		}
+		if !validCommandAgentID(command.TargetAgentID) || command.TargetAgentID != current.AndroidAgentID {
+			return cloudCommandResult{CommandID: command.CommandID, Status: "failed", Error: "command_target_mismatch"}
+		}
+	}
 	if !cloudCommandIDPattern.MatchString(command.CommandID) {
 		return cloudCommandResult{CommandID: command.CommandID, Status: "failed", Error: "云端命令 ID 无效"}
 	}
@@ -208,6 +285,12 @@ func (a *agent) executeCloudCommand(command cloudDeviceCommand) cloudCommandResu
 		}
 		result.Result = map[string]any{"sent": true, "segments": segments}
 	case "dtmf":
+		if command.Call != nil || command.TargetAgentID != "" {
+			if _, err := a.validateCloudCallCommand(command); err != nil {
+				result.Status, result.Error = "failed", err.Error()
+				break
+			}
+		}
 		if err := a.sendDTMFDigit(command.Number); err != nil {
 			result.Status, result.Error = "failed", err.Error()
 			break

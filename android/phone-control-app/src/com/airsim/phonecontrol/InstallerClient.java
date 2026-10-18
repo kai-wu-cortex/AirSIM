@@ -96,7 +96,7 @@ public final class InstallerClient {
             byte[] buffer = new byte[4096];
             int count;
             while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
-            return output.toString(StandardCharsets.UTF_8);
+            return new String(output.toByteArray(), StandardCharsets.UTF_8);
         }
     }
 }

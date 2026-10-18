@@ -1,6 +1,7 @@
 package com.airsim.phonecontrol;
 
 import android.content.Context;
+import android.media.AudioManager;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.Parcel;
@@ -24,19 +25,24 @@ public final class ShizukuBridgeUserService extends Binder {
     private static final int DESTROY_TRANSACTION_AIDL = 16777114;
 
     private final Object lock = new Object();
+    private final Object audioLock = new Object();
+    private final BoundedAudioOperation audioOperations = new BoundedAudioOperation(250);
     private String sourceApk = "";
     private String packageName = "";
     private boolean standalonePCM;
     private java.lang.Process bridgeProcess;
     private boolean bridgeDesired;
-    private boolean muteCycleStarted;
-    private boolean previousMuted;
+    private Context serviceContext;
+    private volatile LocalOutputMuteController outputMute;
+    private volatile CallOutputPolicyMute callOutputPolicyMute;
+    private final PCMHealthEvidence pcmEvidence = new PCMHealthEvidence();
 
     public ShizukuBridgeUserService() {
         Log.i(TAG, "created without context uid=" + Process.myUid());
     }
 
     public ShizukuBridgeUserService(Context context) {
+        serviceContext = context;
         sourceApk = context.getApplicationInfo().sourceDir;
         packageName = context.getPackageName();
         standalonePCM = RuntimeMode.isStandalone(context);
@@ -61,6 +67,7 @@ public final class ShizukuBridgeUserService extends Binder {
                 case PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_MUTED ->
                         setLocalOutputMuted(data.readInt() != 0);
                 case PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE -> ensureDialerRole();
+                case PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT -> audioSnapshot();
                 default -> null;
             };
             if (result == null) return super.onTransact(code, data, reply, flags);
@@ -92,6 +99,7 @@ public final class ShizukuBridgeUserService extends Binder {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
             builder.environment().put("CLASSPATH", sourceApk);
             bridgeProcess = builder.start();
+            pcmEvidence.reset();
             java.lang.Process launched = bridgeProcess;
             Thread monitor = new Thread(() -> monitorBridge(launched), "airsim-shizuku-pcm-monitor");
             monitor.setDaemon(true);
@@ -154,7 +162,12 @@ public final class ShizukuBridgeUserService extends Binder {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                 launched.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
-            while ((line = reader.readLine()) != null) Log.i("AirSIMPCM", line);
+            while ((line = reader.readLine()) != null) {
+                synchronized (lock) {
+                    if (bridgeProcess == launched) pcmEvidence.observe(line);
+                }
+                Log.i("AirSIMPCM", line);
+            }
         } catch (IOException error) {
             Log.w(TAG, "PCM log stream ended", error);
         }
@@ -178,32 +191,106 @@ public final class ShizukuBridgeUserService extends Binder {
     }
 
     private String setLocalOutputMuted(boolean muted) throws Exception {
-        synchronized (lock) {
+        synchronized (audioLock) {
             verifyIdentity();
-            if (muted && !muteCycleStarted) {
-                previousMuted = queryVoiceCallMuted();
-                muteCycleStarted = true;
-            }
-            if (muted) {
-                if (!previousMuted) runCommand(PrivilegedBridgeProtocol.audioMuteCommand(true));
-                boolean verified = queryVoiceCallMuted();
-                if (!verified) throw new IOException("voice-call output mute was not applied");
-                return "local_output_muted previous_muted=" + previousMuted + " verified=true";
-            }
-            if (muteCycleStarted && !previousMuted) {
-                runCommand(PrivilegedBridgeProtocol.audioMuteCommand(false));
-                if (queryVoiceCallMuted()) throw new IOException("voice-call output unmute was not applied");
-            }
-            boolean restoredPrevious = previousMuted;
-            muteCycleStarted = false;
-            previousMuted = false;
-            return "local_output_restored previous_muted=" + restoredPrevious + " verified=true";
+            if (outputMute == null && !muted) return "local_output_unchanged";
+            if (outputMute == null) outputMute = new LocalOutputMuteController(audioBackend(),
+                    "samsung".equalsIgnoreCase(android.os.Build.MANUFACTURER)
+                        ? LocalOutputMuteController.Strategy.MINIMUM_VOLUME
+                        : LocalOutputMuteController.Strategy.MUTE);
+            return outputMute.setMuted(muted);
         }
     }
 
-    private boolean queryVoiceCallMuted() throws Exception {
-        return PrivilegedBridgeProtocol.isStreamMuted(runCommand(
-                new String[]{"cmd", "audio", "get-stream-volume", "0"}));
+    private LocalOutputMuteController.Backend audioBackend() throws Exception {
+        AudioManager audio = shellAudioManager();
+        return new LocalOutputMuteController.Backend() {
+            public boolean isMuted() throws Exception {
+                return audioOperations.run(() -> audio.isStreamMute(AudioManager.STREAM_VOICE_CALL));
+            }
+            public int volume() throws Exception {
+                return audioOperations.run(() -> audibleCallVolume(audio));
+            }
+            public int minimumVolume() throws Exception {
+                return audioOperations.run(() -> audio.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL));
+            }
+            public void setVolume(int volume) throws Exception {
+                audioOperations.run(() -> { audio.setStreamVolume(AudioManager.STREAM_VOICE_CALL, volume, 0); return null; });
+            }
+            public void setMuted(boolean muted) throws Exception {
+                audioOperations.run(() -> {
+                    audio.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL,
+                            muted ? AudioManager.ADJUST_MUTE : AudioManager.ADJUST_UNMUTE, 0);
+                    return null;
+                });
+            }
+            public void prepareOutputMute(boolean originalMuted) throws Exception {
+                if (!"samsung".equalsIgnoreCase(android.os.Build.MANUFACTURER)) return;
+                callOutputPolicyMute = CallOutputPolicyMute.prepareWithin(
+                        audioOperations, new SystemCallOutputPolicy(), originalMuted);
+            }
+            public void applyOutputMute() throws Exception {
+                if (callOutputPolicyMute == null) return;
+                audioOperations.run(() -> {
+                    if (audio.getMode() != AudioManager.MODE_IN_CALL)
+                        throw new IOException("cellular output is not in call mode");
+                    callOutputPolicyMute.apply();
+                    return null;
+                });
+            }
+            public void restoreOutputMute() throws Exception {
+                if (callOutputPolicyMute == null) return;
+                audioOperations.run(() -> { callOutputPolicyMute.restore(); return null; });
+            }
+        };
+    }
+
+    private static int audibleCallVolume(AudioManager audio) throws Exception {
+        if (!audio.isStreamMute(AudioManager.STREAM_VOICE_CALL))
+            return audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL);
+        // The zero reported while muted is not the stored audible volume index.
+        return ((Number) AudioManager.class.getMethod("getLastAudibleStreamVolume", int.class)
+                .invoke(audio, AudioManager.STREAM_VOICE_CALL)).intValue();
+    }
+
+    private String audioSnapshot() throws Exception {
+        boolean pcmRunning;
+        synchronized (lock) {
+            verifyIdentity();
+            pcmRunning = bridgeProcess != null && bridgeProcess.isAlive();
+        }
+        // Read-only OEM queries must not monopolize the lock needed to restore local audio.
+        AudioManager audio = shellAudioManager();
+        return audioOperations.run(() -> "muted=" + audio.isStreamMute(AudioManager.STREAM_VOICE_CALL)
+                + " volume=" + (outputMute != null && outputMute.usesMinimumVolume()
+                    ? audibleCallVolume(audio) : audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL))
+                + " mode=" + audio.getMode() + " speaker=" + audio.isSpeakerphoneOn()
+                + " pcm=" + pcmRunning + " output_policy="
+                + outputPolicyDiagnostic()
+                + " " + pcmEvidence.snapshot());
+    }
+
+    private String outputPolicyDiagnostic() {
+        LocalOutputMuteController current = outputMute;
+        if (current != null && current.usesMinimumVolume())
+            return "minimum_volume minimum_volume=" + current.targetMinimumVolume();
+        return callOutputPolicyMute != null && callOutputPolicyMute.applied() ? "zero_readback" : "not_applied";
+    }
+
+    private AudioManager shellAudioManager() throws Exception {
+        Context context = serviceContext;
+        if (context == null) {
+            // Shizuku can instantiate a UserService without passing a Context.
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
+            if (thread == null) thread = activityThread.getMethod("systemMain").invoke(null);
+            context = (Context) activityThread.getMethod("getSystemContext").invoke(thread);
+        }
+        // Attribute public AudioManager operations to the actual shell UID, not the APK UID.
+        Context shell = context.createPackageContext("com.android.shell", 0);
+        AudioManager audio = shell.getSystemService(AudioManager.class);
+        if (audio == null) throw new IOException("系统通话音频服务不可用");
+        return audio;
     }
 
     private String ensureDialerRole() throws Exception {
@@ -227,7 +314,7 @@ public final class ShizukuBridgeUserService extends Binder {
                 process.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                if (!output.isEmpty()) output.append('\n');
+                if (output.length() > 0) output.append('\n');
                 output.append(line);
             }
         }
@@ -247,8 +334,12 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String statusLocked() {
         return "uid=" + Process.myUid()
+                + " service_revision=11"
                 + " pcm=" + (bridgeProcess != null && bridgeProcess.isAlive() ? "running" : "stopped")
-                + " local_output=" + (muteCycleStarted ? "muted" : "normal");
+                + " local_output=" + (outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
+                    : outputMute != null && outputMute.isVerifiedMuted() ? "muted" : "normal")
+                + " output_policy=" + outputPolicyDiagnostic()
+                + " " + pcmEvidence.snapshot();
     }
 
     private void verifyIdentity() {
@@ -265,6 +356,7 @@ public final class ShizukuBridgeUserService extends Binder {
         }
         try { setLocalOutputMuted(false); }
         catch (Throwable error) { Log.w(TAG, "restore output during destroy failed", error); }
+        audioOperations.close();
         System.exit(0);
     }
 

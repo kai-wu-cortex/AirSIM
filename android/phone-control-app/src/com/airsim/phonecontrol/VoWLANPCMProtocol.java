@@ -1,6 +1,8 @@
 package com.airsim.phonecontrol;
 
 import java.io.IOException;
+import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -32,7 +34,10 @@ public final class VoWLANPCMProtocol {
 
     static boolean acceptReady(InputStream input) throws IOException {
         byte[] expected = READY.getBytes(StandardCharsets.US_ASCII);
-        return Arrays.equals(input.readNBytes(expected.length), expected);
+        byte[] actual = new byte[expected.length];
+        try { new DataInputStream(input).readFully(actual); }
+        catch (EOFException incomplete) { return false; }
+        return Arrays.equals(actual, expected);
     }
 
     public record Preface(long timestamp, String nonce, String signature) {}

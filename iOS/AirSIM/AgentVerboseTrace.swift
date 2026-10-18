@@ -146,6 +146,24 @@ actor AgentVerboseTraceRecorder {
         persist()
     }
 
+    /// Always retain a bounded, non-identifying startup timeline, even when full
+    /// request tracing is off. Never accept arbitrary call data through this API.
+    func recordAudioStartup(phase: String, elapsedMilliseconds: Int? = nil) {
+        let allowed: Set<String> = ["answer_observed", "phone_start", "engine_ready",
+                                    "agent_register", "agent_ready", "pcm_ready",
+                                    "first_downlink", "stopped", "failed"]
+        guard allowed.contains(phase) else { return }
+        entries.append(AgentVerboseTraceEntry(
+            id: UUID(), traceID: "--------", timestamp: Date(),
+            stage: phase == "failed" ? .failure : .event,
+            method: "AUDIO", path: "通话音频启动", detail: "",
+            elapsedMilliseconds: elapsedMilliseconds.map { max(0, $0) },
+            source: "APP", category: "call-audio", fields: ["phase": phase]
+        ))
+        trimIfNeeded()
+        persist()
+    }
+
     func snapshot() -> [AgentVerboseTraceEntry] { entries }
 
     func clear() {

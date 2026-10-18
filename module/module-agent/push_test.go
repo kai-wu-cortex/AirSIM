@@ -43,7 +43,8 @@ func TestPushDNSFallbackPrefersReliableIPv4Resolvers(t *testing.T) {
 
 func testPushRegistration(relayURL string) pushRegistration {
 	return pushRegistration{
-		DeviceID: "iphone-air", DeviceSecret: strings.Repeat("s", 32),
+		AndroidAgentID: "android-test",
+		DeviceID:       "iphone-air", DeviceSecret: strings.Repeat("s", 32),
 		VoIPToken: strings.Repeat("a", 64), AlertToken: strings.Repeat("b", 64),
 		WatchVoIPToken: strings.Repeat("c", 64),
 		WatchBundleID:  "com.example.airsim.watchkitapp",
@@ -196,7 +197,7 @@ func TestIncomingCallRelayUsesStableUUIDAndDeduplicates(t *testing.T) {
 	}
 	var received []payload
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/v1/events/call" {
+		if request.URL.Path != "/v2/events/call" {
 			t.Fatalf("请求路径=%q", request.URL.Path)
 		}
 		var value payload
@@ -304,7 +305,7 @@ func TestCloudCommandURLKeepsPersistentSecretOutOfURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(endpoint, "/v1/devices/") || strings.Contains(endpoint, registration.DeviceSecret) {
+	if !strings.Contains(endpoint, "/v2/devices/") || strings.Contains(endpoint, registration.DeviceSecret) {
 		t.Fatalf("公网命令地址泄露设备密钥或路径错误: %q", endpoint)
 	}
 }
@@ -390,7 +391,7 @@ func TestCallOwnershipPreservesAuthenticatedIPhoneOwner(t *testing.T) {
 func TestPushManagerSendsActivityStateWithOriginalCallUUID(t *testing.T) {
 	var received callStatePushEvent
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/v1/events/call-state" {
+		if request.URL.Path != "/v2/events/call-state" {
 			t.Fatalf("path=%s", request.URL.Path)
 		}
 		if err := json.NewDecoder(request.Body).Decode(&received); err != nil {

@@ -6,6 +6,7 @@ import {
   recordDashboardEvent,
 } from "./dashboard.mjs";
 import { constantTimeEqual, sha256Hex } from "./auth-crypto.mjs";
+import { RoutingError, parseAgentID, agentSocketKey, matchesTarget, resolveTarget, requestAgentID } from "./command-routing.mjs";
 import {
   authenticateAndReadAgentHeartbeats,
   authenticateAndWriteAgentHeartbeat,
@@ -41,7 +42,30 @@ export default {
 };
 
 export async function handleRequest(request, env) {
+  try { return await routeRequest(request, env); }
+  catch (error) {
+    if (error instanceof RoutingError) return jsonResponse(error.status,{error:error.code});
+    console.error("relay request failed", safeError(error));
+    return jsonResponse(500,{error:"relay internal error"});
+  }
+}
+
+function routingV2(request) { return new URL(request.url).pathname.startsWith("/v2/"); }
+function agentHeaders(request, value) {
+  const headers = new Headers();
+  const agentID = routingV2(request) ? parseAgentID(value.agent_id) : null;
+  if (agentID !== null) headers.set("x-airsim-agent-id",encodeURIComponent(agentID));
+  return headers;
+}
+
+async function routeRequest(request, env) {
   const url = new URL(request.url);
+  if (routingV2(request)) {
+    if (!/^\/v2\/(commands\/(enqueue|pull|complete|result)|events\/(call|call-state)|devices\/[^/]+\/commands\/connect|calls\/[^/]+\/actions(?:\/[^/]+)?)$/.test(url.pathname)) {
+      return jsonResponse(404,{error:"not found"});
+    }
+    url.pathname = url.pathname.replace(/^\/v2\//,"/v1/");
+  }
   if (request.method === "GET" && url.pathname === "/") {
     return Response.redirect(`${url.origin}/dashboard`, 302);
   }
@@ -71,7 +95,7 @@ export async function handleRequest(request, env) {
     }
   }
   if (request.method === "GET" && url.pathname === "/healthz") {
-    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.1" });
+    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.1", capabilities:{agent_command_routing:1} });
   }
   const callConnect = url.pathname.match(/^\/v1\/calls\/([0-9a-f-]+)\/connect$/i);
   if (request.method === "GET" && callConnect) {
@@ -133,6 +157,7 @@ export async function handleRequest(request, env) {
     }
     return jsonResponse(404, { error: "not found" });
   } catch (error) {
+    if (error instanceof RoutingError) return jsonResponse(error.status,{error:error.code});
     console.error("relay request failed", safeError(error));
     return jsonResponse(500, { error: "relay internal error" });
   }
@@ -152,6 +177,9 @@ async function connectDeviceCommands(request, env, deviceID) {
 
   const stub = env.COMMANDS.get(env.COMMANDS.idFromName(deviceID));
   const headers = new Headers(request.headers);
+  headers.delete("x-airsim-agent-id");
+  if (routingV2(request)) headers.set("x-airsim-agent-id",encodeURIComponent(
+    parseAgentID(new URL(request.url).searchParams.get("agent_id"))));
   headers.set("x-airsim-device-id", deviceID);
   return stub.fetch(new Request("https://commands.internal/connect", { headers }));
 }
@@ -163,14 +191,33 @@ async function enqueueDeviceCommand(request, env) {
   if (authenticated.response) return authenticated.response;
   const validation = validateDeviceCommand(value);
   if (validation) return jsonResponse(400, { error: validation });
+  let target = routingV2(request) ? parseAgentID(value.target_agent_id) : undefined;
+  let dtmfCall = null;
+  if (target === undefined) {
+    const resolver = env.COMMANDS.get(env.COMMANDS.idFromName(authenticated.device.device_id));
+    const resolved = await resolver.fetch("https://commands.internal/resolve", {method:"POST"});
+    if (!resolved.ok) return resolved;
+    target = (await resolved.json()).target_agent_id;
+  }
+  if (routingV2(request) && value.type === "dtmf") {
+    const call = await readRelayRecord(env, `call:${stringValue(value.call_uuid).toLowerCase()}`);
+    if (!call || call.device_id !== authenticated.device.device_id) return jsonResponse(404,{error:"call not found"});
+    const expiry = Date.parse(call.media_expires_at || call.expires_at);
+    if (value.generation !== (Number(call.generation) || 1) || !matchesTarget(call.agent_id,target)
+        || !Number.isFinite(expiry) || expiry <= Date.now()) return jsonResponse(409,{error:"call identity mismatch"});
+    target = call.agent_id;
+    dtmfCall = {call_id:call.call_id,call_uuid:call.call_uuid,generation:Number(call.generation)||1,agent_id:target};
+  }
 
   const command = {
     command_id: value.command_id.toLowerCase(),
     type: value.type,
+    ...(target !== undefined ? {target_agent_id:target} : {}),
     issued_at: new Date().toISOString(),
     expires_at: new Date(Date.now() + (value.type === "send_sms" ? 5 : 2) * 60_000).toISOString(),
     number: normalizePhoneNumber(value.number),
     ...(value.type === "send_sms" ? { message: value.message.trim() } : {}),
+    ...(dtmfCall ? {call:dtmfCall,owner:"iphone"} : {}),
   };
   let call = null;
   if (value.type === "dial") {
@@ -189,6 +236,7 @@ async function enqueueDeviceCommand(request, env) {
       call_secret: callSecret,
       relay_url: origin,
       direction: "outgoing",
+      agent_id: target ?? null,
       media_transport: mediaTransport,
     };
     await writeRelayState(env, `call:${callUUID}`, JSON.stringify({
@@ -197,6 +245,7 @@ async function enqueueDeviceCommand(request, env) {
       call_uuid: callUUID,
       generation: 1,
       direction: "outgoing",
+      agent_id: target ?? null,
       secret_hash: await sha256Hex(callSecret),
       expires_at: command.expires_at,
       media_expires_at: new Date(Date.now() + 5 * 60 * 60 * 1_000).toISOString(),
@@ -219,6 +268,15 @@ async function enqueueDeviceCommand(request, env) {
     body: JSON.stringify(command),
   });
   const result = await response.json();
+  if (call && (result.duplicate || !response.ok)) {
+    await deleteRelayState(env, `call:${call.call_uuid}`);
+  }
+  if (result.call) {
+    const stored = result.call;
+    call = {call_id:stored.call_id,call_uuid:stored.call_uuid,generation:stored.generation,
+      call_secret:stored.call_secret,agent_id:stored.agent_id ?? null,media_transport:stored.media_transport,
+      media_url:`${stored.relay_url.replace(/^http/,"ws")}/v1/calls/${stored.call_uuid}/connect`};
+  }
   await recordDashboardEvent(env, {
     type: value.type === "dial" ? "call" : "sms",
     device_id: authenticated.device.device_id,
@@ -238,7 +296,8 @@ async function readDeviceCommandResult(request, env) {
     return jsonResponse(400, { error: "invalid command id" });
   }
   const stub = env.COMMANDS.get(env.COMMANDS.idFromName(authenticated.device.device_id));
-  return stub.fetch(`https://commands.internal/result/${value.command_id.toLowerCase()}`);
+  const query = routingV2(request) ? `?target_agent_id=${encodeURIComponent(parseAgentID(value.target_agent_id))}` : "";
+  return stub.fetch(`https://commands.internal/result/${value.command_id.toLowerCase()}${query}`);
 }
 
 async function pullDeviceCommands(request, env) {
@@ -247,7 +306,7 @@ async function pullDeviceCommands(request, env) {
   const authenticated = await authenticate(value, env);
   if (authenticated.response) return authenticated.response;
   const stub = env.COMMANDS.get(env.COMMANDS.idFromName(authenticated.device.device_id));
-  return stub.fetch("https://commands.internal/pending", { method: "POST" });
+  return stub.fetch("https://commands.internal/pending", { method: "POST", headers:agentHeaders(request,value) });
 }
 
 async function completeDeviceCommand(request, env) {
@@ -262,7 +321,7 @@ async function completeDeviceCommand(request, env) {
   const stub = env.COMMANDS.get(env.COMMANDS.idFromName(authenticated.device.device_id));
   return stub.fetch("https://commands.internal/complete", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: new Headers([...agentHeaders(request,value),["content-type","application/json"]]),
     body: JSON.stringify({
       command_id: value.command_id.toLowerCase(),
       status: value.status,
@@ -300,6 +359,7 @@ async function enqueueCallAction(request, env, pathCallUUID) {
   const command = {
     command_id: value.command_id.toLowerCase(),
     type: "call_control",
+    target_agent_id: call.agent_id ?? null,
     action: value.action,
     trace_id: stringValue(value.trace_id).slice(0, 128),
     owner: value.owner,
@@ -403,26 +463,63 @@ export class DeviceCommandSession {
   constructor(state) {
     this.state = state;
     this.storage = state.storage;
+    this.operations = Promise.resolve();
   }
 
-  async fetch(request) {
+  serialize(operation) {
+    const result = this.operations.then(operation);
+    this.operations = result.catch(() => {});
+    return result;
+  }
+
+  fetch(request) { return this.serialize(() => this.handleFetch(request)); }
+
+  async handleFetch(request) {
+    try { return await this.dispatch(request); }
+    catch (error) {
+      if (error instanceof RoutingError) return jsonResponse(error.status, {error:error.code});
+      throw error;
+    }
+  }
+
+  agentSockets(agentID) {
+    return this.state.getWebSockets("agent").filter(socket =>
+      (socket.readyState === undefined || socket.readyState === 1) &&
+      matchesTarget(socket.deserializeAttachment()?.agent_id, agentID));
+  }
+
+  async dispatch(request) {
     const url = new URL(request.url);
+    const callerAgentID = requestAgentID(request);
+    if (url.pathname === "/resolve") {
+      return jsonResponse(200,{target_agent_id:resolveTarget(undefined,
+        this.state.getWebSockets("agent").filter(s => s.readyState === undefined || s.readyState === 1)
+          .map(s => s.deserializeAttachment()?.agent_id ?? null))});
+    }
     if (url.pathname === "/connect") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         return jsonResponse(426, { error: "websocket upgrade required" });
       }
-      for (const socket of this.state.getWebSockets("agent")) {
+      if (callerAgentID === null && this.agentSockets(null).length) {
+        return new Response(JSON.stringify({error:"legacy_agent_busy"}), {
+          status:429, headers:{"content-type":"application/json","retry-after":"60"},
+        });
+      }
+      for (const socket of this.agentSockets(callerAgentID)) {
         try { socket.close(4001, "replaced by a newer connection"); } catch {}
       }
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
-      server.serializeAttachment({ role: "agent" });
-      this.state.acceptWebSocket(server, ["agent"]);
+      server.serializeAttachment({ role: "agent", agent_id:callerAgentID, connection_id:crypto.randomUUID() });
+      this.state.acceptWebSocket(server, ["agent", agentSocketKey(callerAgentID)]);
       await this.flushPending(server);
       return new Response(null, { status: 101, webSocket: client });
     }
     if (url.pathname === "/enqueue" && request.method === "POST") {
       const command = await request.json();
+      command.target_agent_id = resolveTarget(command.target_agent_id,
+        this.state.getWebSockets("agent").filter(s => s.readyState === undefined || s.readyState === 1)
+          .map(s => s.deserializeAttachment()?.agent_id ?? null));
       const key = `command:${command.command_id}`;
       const existing = await this.storage.get(key);
       if (existing) {
@@ -433,8 +530,9 @@ export class DeviceCommandSession {
           accepted: true,
           command_id: command.command_id,
           status: existing.status,
-          agent_connected: this.state.getWebSockets("agent").length > 0,
+          agent_connected: this.agentSockets(existing.command.target_agent_id).length > 0,
           duplicate: true,
+          ...(existing.command.type === "dial" && existing.command.call ? {call:existing.command.call} : {}),
           ...(existing.rescue_command_id ? { rescue_command_id: existing.rescue_command_id } : {}),
           ...(existing.result ? { result: existing.result } : {}),
           ...(existing.error ? { error: existing.error } : {}),
@@ -453,7 +551,7 @@ export class DeviceCommandSession {
           : {}),
       };
       await this.storage.put(key, record);
-      const agents = this.state.getWebSockets("agent");
+      const agents = this.agentSockets(command.target_agent_id);
       for (const socket of agents) {
         try {
           socket.send(JSON.stringify(command));
@@ -471,12 +569,15 @@ export class DeviceCommandSession {
         command_id: command.command_id,
         status: record.status,
         agent_connected: agents.length > 0,
+        ...(command.type === "dial" && command.call ? {call:command.call} : {}),
       });
     }
     const result = url.pathname.match(/^\/result\/([0-9a-f-]+)$/i);
     if (result && request.method === "GET") {
       const record = await this.storage.get(`command:${result[1].toLowerCase()}`);
       if (!record) return jsonResponse(404, { error: "command not found" });
+      if (url.searchParams.has("target_agent_id") && !matchesTarget(record.command?.target_agent_id,
+          parseAgentID(url.searchParams.get("target_agent_id")))) return jsonResponse(403, {error:"wrong_agent"});
       const requestedCallUUID = url.searchParams.get("call_uuid")?.toLowerCase() || "";
       const recordCallUUID = stringValue(record.command?.call?.call_uuid).toLowerCase();
       if (requestedCallUUID && requestedCallUUID !== recordCallUUID) {
@@ -496,6 +597,7 @@ export class DeviceCommandSession {
       const now = Date.now();
       for (const [key, record] of records) {
         if (commands.length >= 16) break;
+        if (!matchesTarget(record.command?.target_agent_id, callerAgentID)) continue;
         if (!["pending", "delivered"].includes(record?.status)) continue;
         if (!Number.isFinite(record.expires_at_ms) || record.expires_at_ms <= now) {
           record.status = "expired";
@@ -520,25 +622,30 @@ export class DeviceCommandSession {
           !["completed", "failed"].includes(value?.status)) {
         return jsonResponse(400, { error: "invalid command completion" });
       }
-      const updated = await this.completeCommand(value);
+      const updated = await this.completeCommand(value, callerAgentID);
       return updated ? jsonResponse(202, { received: true }) : jsonResponse(404, { error: "command not found" });
     }
     return jsonResponse(404, { error: "not found" });
   }
 
-  async webSocketMessage(socket, message) {
+  webSocketMessage(socket, message) { return this.serialize(() => this.handleSocketMessage(socket, message)); }
+
+  async handleSocketMessage(socket, message) {
     if (typeof message !== "string" || encoder.encode(message).byteLength > 64 * 1024) return;
     let value;
     try { value = JSON.parse(message); } catch { return; }
     if (!UUID_PATTERN.test(value?.command_id || "") ||
         !["completed", "failed"].includes(value?.status)) return;
-    await this.completeCommand(value);
+    if (socket.readyState !== undefined && socket.readyState !== 1) return;
+    try { await this.completeCommand(value, socket.deserializeAttachment()?.agent_id ?? null); }
+    catch (error) { if (!(error instanceof RoutingError)) throw error; }
   }
 
-  async completeCommand(value) {
+  async completeCommand(value, callerAgentID = null) {
     const key = `command:${value.command_id.toLowerCase()}`;
     const record = await this.storage.get(key);
     if (!record) return false;
+    if (!matchesTarget(record.command?.target_agent_id, callerAgentID)) throw new RoutingError(403,"wrong_agent");
     if (["completed", "failed", "expired"].includes(record.status)) return true;
     record.status = value.status;
     record.completed_at_ms = Date.now();
@@ -561,6 +668,7 @@ export class DeviceCommandSession {
     const linkedKey = `command:${linkedID}`;
     const linked = await this.storage.get(linkedKey);
     if (!linked || !["pending", "delivered"].includes(linked.status)) return;
+    if (!matchesTarget(linked.command?.target_agent_id, record.command?.target_agent_id)) return;
     linked.status = record.status;
     linked.completed_at_ms = record.completed_at_ms;
     linked.completed_at = record.completed_at;
@@ -582,6 +690,7 @@ export class DeviceCommandSession {
     const records = await this.storage.list({ prefix: "command:" });
     const now = Date.now();
     for (const [key, record] of records) {
+      if (!matchesTarget(record.command?.target_agent_id, socket.deserializeAttachment()?.agent_id)) continue;
       if (Number.isFinite(record?.expires_at_ms) && record.expires_at_ms <= now) {
         if (!["completed", "failed", "expired"].includes(record.status)) {
           record.status = "expired";
@@ -606,11 +715,13 @@ export class DeviceCommandSession {
     await this.scheduleNextPendingAlarm();
   }
 
-  async alarm() {
+  alarm() { return this.serialize(() => this.handleAlarm()); }
+
+  async handleAlarm() {
     const records = await this.storage.list({ prefix: "command:" });
     const now = Date.now();
-    const agents = this.state.getWebSockets("agent");
     for (const [key, record] of records) {
+      const agents = this.agentSockets(record.command?.target_agent_id);
       if (!["pending", "delivered"].includes(record?.status)) continue;
       if (!Number.isFinite(record.expires_at_ms) || record.expires_at_ms <= now) {
         record.status = "expired";
@@ -713,6 +824,10 @@ export class DeviceCommandSession {
 
 function sameCommandIntent(left, right) {
   if (left?.type !== right?.type) return false;
+  if (!matchesTarget(left?.target_agent_id, right?.target_agent_id)) return false;
+  if (left?.type !== "call_control" && (left?.number !== right?.number || left?.message !== right?.message)) return false;
+  if (left?.type === "dtmf") return stringValue(left.call?.call_uuid).toLowerCase() === stringValue(right.call?.call_uuid).toLowerCase()
+    && (Number(left.call?.generation)||1) === (Number(right.call?.generation)||1);
   if (left?.type !== "call_control") return true;
   return left.action === right.action &&
     left.owner === right.owner &&
@@ -1033,6 +1148,7 @@ async function receiveCall(request, env) {
   const call = await readJSON(request);
   const authenticated = await authenticate(call, env);
   if (authenticated.response) return authenticated.response;
+  const agentID = routingV2(request) ? parseAgentID(call.agent_id) : null;
   if (!authenticated.device.voip_token && !authenticated.device.watch_voip_token) {
     return jsonResponse(409, { error: "VoIP token unavailable" });
   }
@@ -1097,6 +1213,7 @@ async function receiveCall(request, env) {
       call_uuid: call.call_uuid.toLowerCase(),
       generation,
       direction: "incoming",
+      agent_id: agentID,
       secret_hash: await sha256Hex(call.call_secret),
       expires_at: call.expires_at,
       media_expires_at: new Date(now + 4 * 60 * 60 * 1000).toISOString(),
@@ -1107,6 +1224,7 @@ async function receiveCall(request, env) {
   const voipPayload = {
     aps: { "content-available": 1 },
     event: "incoming_call",
+    agent_id: agentID,
     call_id: call.call_id,
     call_uuid: call.call_uuid,
     generation,
@@ -1312,6 +1430,7 @@ async function receiveAgentHeartbeat(request, env) {
   const record = {
     received_at_ms: Date.now(),
     agent_id: agentID,
+    ...(heartbeat.command_routing_version === 1 ? {command_routing_version:1} : {}),
     ...(nonEmpty(heartbeat.agent_kind) ? { agent_kind: heartbeat.agent_kind.trim() } : {}),
     ...(nonEmpty(heartbeat.device_name) ? { device_name: heartbeat.device_name.trim() } : {}),
     ...(nonEmpty(heartbeat.manufacturer) ? { manufacturer: heartbeat.manufacturer.trim() } : {}),
@@ -1360,11 +1479,12 @@ async function receiveDeviceStatus(request, env) {
     .filter((item) => item && Number.isFinite(item.received_at_ms) && now - item.received_at_ms <= 90_000)
     .sort((left, right) => right.received_at_ms - left.received_at_ms)[0];
   if (!heartbeat) {
-    return jsonResponse(200, { cloud_online: false, agents });
+    return jsonResponse(200, { cloud_online: false, agents, capabilities:{agent_command_routing:1} });
   }
   const { received_at_ms: _, ...publicStatus } = heartbeat;
   return jsonResponse(200, {
     cloud_online: true,
+    capabilities:{agent_command_routing:1},
     ...publicStatus,
     active_agent_id: publicStatus.agent_id || "legacy",
     agents,
@@ -1439,6 +1559,14 @@ async function receiveCallOwner(request, env) {
 
 async function receiveCallState(request, env) {
   const event = await readJSON(request);
+  if (routingV2(request)) {
+    const auth = await authenticate(event,env);
+    if (auth.response) return auth.response;
+    const agentID = parseAgentID(event.agent_id);
+    const call = await readRelayRecord(env, `call:${stringValue(event.call_uuid).toLowerCase()}`);
+    if (!call || call.device_id !== auth.device.device_id) return jsonResponse(404,{error:"call not found"});
+    if (!matchesTarget(call.agent_id,agentID)) return jsonResponse(403,{error:"wrong_agent"});
+  }
   const authenticated = await authenticate(event, env);
   if (authenticated.response) return authenticated.response;
   const generation = Number.isInteger(event.generation) && event.generation > 0

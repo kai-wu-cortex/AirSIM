@@ -147,6 +147,59 @@ function post(path, value) {
   });
 }
 
+test("v2 requires explicit command target and advertises routing capability", async () => {
+  const env = testEnvironment(); env.COMMANDS = new MemoryCommandNamespace();
+  await worker.fetch(post("/v1/devices/register",registration),env);
+  const payload={device_id:registration.device_id,device_secret:registration.device_secret,
+    command_id:"c87f982a-1750-4f03-9a96-6553e454f522",type:"send_sms",number:"10086",message:"synthetic"};
+  assert.equal((await worker.fetch(post("/v2/commands/enqueue",payload),env)).status,400);
+  const queued=await worker.fetch(post("/v2/commands/enqueue",{...payload,target_agent_id:"android-A"}),env);
+  assert.equal(queued.status,202);
+  const bPull=await worker.fetch(post("/v2/commands/pull",{...payload,agent_id:"android-B"}),env);
+  assert.deepEqual((await bPull.json()).commands,[]);
+  const aPull=await worker.fetch(post("/v2/commands/pull",{...payload,agent_id:"android-A"}),env);
+  assert.equal((await aPull.json()).commands.length,1);
+  const bad=await worker.fetch(post("/v2/commands/complete",{...payload,agent_id:"android-B",status:"completed"}),env);
+  assert.equal(bad.status,403);
+  const health=await worker.fetch(new Request("https://relay.example/healthz"),env);
+  assert.equal((await health.json()).capabilities.agent_command_routing,1);
+});
+test("v2 rejects missing Agent identity and never accepts forged internal headers", async () => {
+  const env=testEnvironment();env.COMMANDS=new MemoryCommandNamespace();
+  await worker.fetch(post("/v1/devices/register",registration),env);
+  const request=post("/v2/commands/pull",{device_id:registration.device_id,device_secret:registration.device_secret});
+  request.headers.set("x-airsim-agent-id","android-A");
+  assert.equal((await worker.fetch(request,env)).status,400);
+});
+test("v2 call controls stay on original Agent and duplicate dial keeps its media identity", async () => {
+  const env=testEnvironment(); env.COMMANDS=new MemoryCommandNamespace();
+  await worker.fetch(post("/v1/devices/register",registration),env);
+  const auth={device_id:registration.device_id,device_secret:registration.device_secret};
+  const dial={...auth,command_id:"c87f982a-1750-4f03-9a96-6553e454f522",type:"dial",number:"10086",target_agent_id:"android-A"};
+  const first=await(await worker.fetch(post("/v2/commands/enqueue",dial),env)).json();
+  const again=await(await worker.fetch(post("/v2/commands/enqueue",dial),env)).json();
+  assert.equal(again.call.call_uuid,first.call.call_uuid);
+  assert.equal(first.call.agent_id,"android-A");
+  const call=first.call;
+  const action={...auth,command_id:"d87f982a-1750-4f03-9a96-6553e454f522",action:"end",call_id:call.call_id,
+    call_uuid:call.call_uuid,generation:1,owner:"iphone",trace_id:"synthetic-trace"};
+  assert.equal((await worker.fetch(post(`/v2/calls/${call.call_uuid}/actions`,action),env)).status,202);
+  const queued=await(await worker.fetch(post("/v2/commands/pull",{...auth,agent_id:"android-A"}),env)).json();
+  assert.ok(queued.commands.some(c=>c.action==="end"&&c.target_agent_id==="android-A"));
+  const wrongState=await worker.fetch(post("/v2/events/call-state",{...auth,event:"call_state",agent_id:"android-B",call_id:call.call_id,
+    call_uuid:call.call_uuid,generation:1,phase:"ended",source:"agent",timestamp:new Date().toISOString()}),env);
+  assert.equal(wrongState.status,403);
+  assert.equal((await worker.fetch(post("/v2/commands/enqueue",{...dial,type:"dtmf",number:"1",target_agent_id:"android-B",
+    call_uuid:call.call_uuid,generation:1,command_id:"e87f982a-1750-4f03-9a96-6553e454f522"}),env)).status,409);
+  const toneID="f87f982a-1750-4f03-9a96-6553e454f522";
+  assert.equal((await worker.fetch(post("/v2/commands/enqueue",{...dial,type:"dtmf",number:"1",
+    call_uuid:call.call_uuid,generation:1,command_id:toneID}),env)).status,202);
+  const tones=await(await worker.fetch(post("/v2/commands/pull",{...auth,agent_id:"android-A"}),env)).json();
+  const tone=tones.commands.find(c=>c.command_id===toneID);
+  assert.equal(tone.call?.call_uuid,call.call_uuid);
+  assert.equal(tone.call?.generation,1);
+});
+
 const registration = {
   device_id: "iphone-air",
   device_secret: "s".repeat(32),
@@ -1321,6 +1374,7 @@ test("agent heartbeat lets iPhone distinguish cloud-only from fully offline", as
   assert.equal(status.status, 200);
   assert.deepEqual(await status.json(), {
     cloud_online: true,
+    capabilities:{agent_command_routing:1},
     agent_id: "legacy",
     agent_version: "0.3.35",
     at_ok: true,
