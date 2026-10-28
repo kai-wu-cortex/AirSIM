@@ -43,6 +43,7 @@ https://t.me/+TRDazm-qnXlhNGRl
 - **小米短信辅助**：MIUI 非默认短信 App 无法读取完整 inbox 时，使用无障碍辅助确认“是否发送短信”，并可选择只转发 `com.android.mms` 新短信通知来回信；不要求默认短信角色，也不能绕过系统签名限制。
 - **VoBLE 蓝牙直连**：独立于 Wi-Fi、Relay、PushKit 的连接模式，通过认证 BLE GATT 承载电话控制与双向音频；控制消息支持分片，选中会话断线后按 1/2/4/8/16 秒退避自动重连。
 - **VoWLAN 本地直连与恢复**：同一局域网或 Android 热点内使用 HMAC 认证的控制与 PCM 链路；网络恢复时重新发现并认证，通话中不切换传输。
+- **可选自建域名直连**：已配对设备可通过 NAS／软路由的 HTTPS 控制与 TLS 音频入口远程连接，局域网优先；默认关闭，兼容原版安卓 VoWLAN 协议。[配置与边界](docs/self-hosted-tls-direct.md)。
 - **手动地址配对**：自动发现受限时可填写 Android IPv4 与配对端口，保留六位码加密认证；支持局域网及 Tailscale 地址。
 - **CallKit、PushKit 与 Live Activity**：iPhone 使用系统来电界面和 VoIP push；灵动岛/锁屏可切换 Android Agent，并显示通话与连接状态。
 - **单 APK Android 端**：内置 Agent 与 Bridge，安装后不再依赖 AVF Linux、Terminal、Debian 或 installer。

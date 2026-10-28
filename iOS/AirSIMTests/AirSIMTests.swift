@@ -8,6 +8,240 @@ import SwiftUI
 @testable import AirSIM
 
 @MainActor
+final class RemoteDirectTests: XCTestCase {
+    private let credential = try! VoWLANCredential(secret: Data(repeating: 0x57, count: 32))
+
+    private func response(_ request: URLRequest, agentID: String, proof: Bool = true) throws -> WiredHTTPResponse {
+        let nonce = request.value(forHTTPHeaderField: "X-AirSIM-VoWLAN-Nonce") ?? ""
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("AIRSIM-HEALTH1\n\(nonce)\n\(agentID)".utf8),
+                                                 using: SymmetricKey(data: credential.secret))
+        var value: [String: Any] = ["ok": true, "agent_id": agentID]
+        if proof { value["identity_proof"] = Data(mac).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "") }
+        return WiredHTTPResponse(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
+    }
+
+    func testRemoteAddressValidationAndLegacyRestrictions() throws {
+        let route = try RemoteDirectConfiguration.route(agentID: "A", host: " Phone.Example.com \n",
+                                                        controlPort: "443", pcmPort: "17593")
+        let endpoint = try XCTUnwrap(route.endpoint)
+        XCTAssertEqual(endpoint.controlBaseURL.absoluteString, "https://phone.example.com:443/")
+        XCTAssertTrue(endpoint.usesTLS)
+        for host in ["8.8.8.8", "192.168.1.2", "::1", "https://phone.example.com", "a.example/path",
+                     "user@a.example", "a.example:443", "a..example", "-a.example", "a.example.", "localhost", "a.例子", "0x7f.1", "127.0x1"] {
+            XCTAssertThrowsError(try RemoteDirectConfiguration.route(agentID: "A", host: host,
+                                                                     controlPort: "443", pcmPort: "7593"), host)
+        }
+        for port in ["0", "65536", "-1", "+443", "44.3", ""] {
+            XCTAssertThrowsError(try RemoteDirectConfiguration.route(agentID: "A", host: "a.example",
+                                                                     controlPort: port, pcmPort: "7593"))
+        }
+        XCTAssertThrowsError(try VoWLANEndpoint(host: "phone.example.com", controlPort: 7592, pcmPort: 7593))
+        XCTAssertThrowsError(try VoWLANEndpoint(host: "8.8.8.8", controlPort: 7592, pcmPort: 7593))
+        XCTAssertFalse(AirSIMAPI.isAllowedLocalURL(endpoint.controlBaseURL))
+        let api = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential))
+        XCTAssertEqual(api.baseURL.scheme, "https")
+    }
+
+    func testLegacyRouteDecodingAndRemoteCoexistenceRemoval() throws {
+        let suite = "remote-routes-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let old = Data(#"[{"agentID":"A","host":"192.168.1.2","controlPort":7592,"pcmPort":7593}]"#.utf8)
+        defaults.set(old, forKey: "AirSIM.manualDirectRoutes.v1")
+        let local = try XCTUnwrap(VoWLANManualRouteStore.routes(defaults: defaults).first)
+        XCTAssertFalse(local.isRemote)
+        XCTAssertFalse(try XCTUnwrap(local.endpoint).usesTLS)
+        let remote = try RemoteDirectConfiguration.route(agentID: "A", host: "a.example", controlPort: "443", pcmPort: "7593")
+        try VoWLANManualRouteStore.save(remote, defaults: defaults)
+        let reopened = UserDefaults(suiteName: suite)!
+        XCTAssertEqual(VoWLANManualRouteStore.routes(defaults: reopened).count, 2)
+        XCTAssertEqual(VoWLANManualRouteStore.selected(defaults: reopened), local)
+        let updated = try RemoteDirectConfiguration.route(agentID: "A", host: "b.example", controlPort: "8443", pcmPort: "7593")
+        try VoWLANManualRouteStore.save(updated, defaults: defaults)
+        XCTAssertEqual(VoWLANManualRouteStore.routes(defaults: defaults), [local, updated])
+        VoWLANManualRouteStore.removeRemote(agentID: "A", defaults: defaults)
+        XCTAssertEqual(VoWLANManualRouteStore.routes(defaults: defaults), [local])
+        try VoWLANManualRouteStore.save(remote, defaults: defaults)
+        VoWLANManualRouteStore.remove(agentID: "A", defaults: defaults)
+        XCTAssertTrue(VoWLANManualRouteStore.routes(defaults: defaults).isEmpty)
+    }
+
+    func testFallbackIsSameDeviceBoundedAndPreservesPreferredRemoteIdentity() throws {
+        let lan = VoWLANManualRoute(agentID: "A", host: "192.168.1.2", controlPort: 7592, pcmPort: 7593)
+        let remote = try RemoteDirectConfiguration.route(agentID: "A", host: "a.example", controlPort: "443", pcmPort: "7593")
+        let other = try RemoteDirectConfiguration.route(agentID: "B", host: "b.example", controlPort: "443", pcmPort: "7593")
+        let le = try XCTUnwrap(lan.endpoint), re = try XCTUnwrap(remote.endpoint)
+        XCTAssertEqual(VoWLANRouteCandidates.alternateManualRoute([other, lan, remote], agentID: "A", failed: le), remote)
+        XCTAssertNil(VoWLANRouteCandidates.alternateManualRoute([other, lan, remote], agentID: "A", failed: re, attempted: [le, re]))
+        let routes = VoWLANRouteCandidates.merge(discovered: [], manual: [remote, lan], live: [], preferred: re)
+        XCTAssertEqual(routes.first?.id, "A")
+        XCTAssertEqual(routes.first?.endpoint, re)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [], manual: [remote, lan], live: [], preferred: nil).first?.endpoint, le)
+    }
+
+    func testTLSAudioAndWatchPayloadKeepEncryptionFlag() throws {
+        let endpoint = try VoWLANEndpoint(host: "a.example", controlPort: 443, pcmPort: 443, usesTLS: true)
+        let audio = PCMRoute.vowlan(endpoint: endpoint, credential: credential)
+        XCTAssertTrue(audio.usesTLS)
+        XCTAssertTrue(audio.usesSystemRouting)
+        XCTAssertFalse(audio.requiresWiFi)
+        XCTAssertTrue(String(data: try audio.handshake(), encoding: .utf8)!.hasPrefix("AIRSIMVWL1 "))
+        var payload: [String: Any] = ["pcm_host": "a.example", "pcm_port": 443,
+                                     "pcm_secret": credential.encodedSecret, "pcm_tls": true]
+        XCTAssertEqual(WatchLocalPCMEndpoint(dictionary: payload)?.usesTLS, true)
+        payload.removeValue(forKey: "pcm_tls")
+        XCTAssertNil(WatchLocalPCMEndpoint(dictionary: payload), "Never interpret a domain as plaintext")
+        payload["pcm_host"] = "192.168.1.2"; payload["pcm_port"] = 7593
+        XCTAssertEqual(WatchLocalPCMEndpoint(dictionary: payload)?.usesTLS, false)
+        let historical = VoWLANPairingRecord.Endpoint(endpoint)
+        let restored = try JSONDecoder().decode(VoWLANPairingRecord.Endpoint.self, from: JSONEncoder().encode(historical))
+        XCTAssertEqual(restored.endpoint, endpoint)
+    }
+
+    func testTLSControlSendsClientHelloAndNeverDowngradesToPlainHTTP() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let listening = expectation(description: "plain test server listening")
+        let received = expectation(description: "TLS ClientHello received")
+        let queue = DispatchQueue(label: "test.remote-direct.tls")
+        listener.stateUpdateHandler = { state in if case .ready = state { listening.fulfill() } }
+        listener.newConnectionHandler = { peer in
+            peer.start(queue: queue)
+            peer.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
+                XCTAssertEqual(data?.first, 0x16, "Expected TLS handshake, never a plaintext signed GET")
+                received.fulfill()
+                // A plaintext impostor cannot satisfy the HTTPS request.
+                peer.send(content: Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".utf8),
+                          completion: .contentProcessed { _ in peer.cancel() })
+            }
+        }
+        listener.start(queue: queue)
+        defer { listener.cancel() }
+        await fulfillment(of: [listening], timeout: 3)
+        let port = try XCTUnwrap(listener.port)
+        var request = URLRequest(url: URL(string: "https://127.0.0.1:\(port.rawValue)/v1/health")!)
+        request.timeoutInterval = 3
+        do { _ = try await WiredHTTPTransport().send(request); XCTFail("Accepted plaintext HTTP as TLS") }
+        catch {}
+        await fulfillment(of: [received], timeout: 3)
+    }
+
+    func testRemovedRemoteCandidateCannotReenterDeviceDirectory() async throws {
+        let id = "remote-directory-" + UUID().uuidString
+        let route = try RemoteDirectConfiguration.route(agentID: id, host: "a.example", controlPort: "443", pcmPort: "7593")
+        let endpoint = try XCTUnwrap(route.endpoint)
+        defer { VoWLANManualRouteStore.remove(agentID: id); VoWLANPairingRecordStore.remove(agentID: id) }
+        let directory = LocalDeviceDirectory(credentials: RemoteTestCredentials(agentID: id, credential: credential),
+            healthTransport: { try await self.response($0, agentID: id) })
+        try VoWLANManualRouteStore.save(route)
+        try await directory.verify(agentID: id, endpoint: endpoint)
+        XCTAssertEqual(directory.routes(for: id)?.vowlan, endpoint)
+        VoWLANManualRouteStore.removeRemote(agentID: id)
+        directory.invalidateRemoteRoute(agentID: id)
+        do { try await directory.verify(agentID: id, endpoint: endpoint); XCTFail("Disabled candidate resurrected") }
+        catch is CancellationError {} catch { XCTFail("\(error)") }
+        XCTAssertNil(directory.api(for: id))
+    }
+
+    func testRemoteHealthRequiresNonceProofAndExactAgent() async throws {
+        let endpoint = try VoWLANEndpoint(host: "a.example", controlPort: 443, pcmPort: 7593, usesTLS: true)
+        let valid = try await VoWLANAuthenticatedHealth.fetch(agentID: "A", endpoint: endpoint, credential: credential) { request in
+            XCTAssertEqual(request.url?.scheme, "https")
+            XCTAssertEqual(request.url?.path, "/v1/health")
+            XCTAssertNotNil(request.value(forHTTPHeaderField: "X-AirSIM-VoWLAN-Signature"))
+            return try await self.response(request, agentID: "A")
+        }
+        XCTAssertEqual(valid.agentID, "A")
+        for (id, proof) in [("B", true), ("A", false)] {
+            do {
+                _ = try await VoWLANAuthenticatedHealth.fetch(agentID: "A", endpoint: endpoint, credential: credential) {
+                    try await self.response($0, agentID: id, proof: proof)
+                }
+                XCTFail("Unauthenticated/misrouted NAS response accepted")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, VoWLANControllerError.authenticationFailed.localizedDescription) }
+        }
+    }
+
+    func testConfigureDoesNotPersistFailureOrChangeSelectedDevice() async throws {
+        let id = "remote-config-" + UUID().uuidString
+        let previousMode = ConnectionModePreference.selected(), previousBinding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set("other-device")
+        let store = RemoteTestCredentials(agentID: id, credential: credential)
+        defer {
+            VoWLANManualRouteStore.remove(agentID: id)
+            ConnectionModePreference.set(previousMode); AndroidAgentBindingPreference.set(previousBinding)
+        }
+        let controller = VoWLANController()
+        let local = try VoWLANEndpoint(host: "192.168.1.50", controlPort: 7592, pcmPort: 7593)
+        VoWLANPairingRecordStore.remember(agentID: id, credential: credential, endpoint: local, deviceName: nil)
+        defer { controller.stopBrowsing(); VoWLANPairingRecordStore.remove(agentID: id) }
+        let route = try RemoteDirectConfiguration.route(agentID: id, host: "a.example", controlPort: "443", pcmPort: "7593")
+        do {
+            try await controller.configureRemoteRoute(agentID: id, route: route, credentials: store) { _ in throw URLError(.serverCertificateUntrusted) }
+            XCTFail("TLS failure saved")
+        } catch {}
+        XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
+        try await controller.configureRemoteRoute(agentID: id, route: route, credentials: store) { try await self.response($0, agentID: id) }
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains(route))
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains { $0.agentID == id && $0.endpoint == local })
+        XCTAssertEqual(AndroidAgentBindingPreference.selected(), "other-device")
+        XCTAssertTrue(controller.discoveredAgents.isEmpty, "Cloud-only mode must not start local discovery")
+        controller.callInProgress = { true }
+        do { try await controller.configureRemoteRoute(agentID: id, route: nil); XCTFail("changed during call") } catch {}
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains(route))
+        controller.callInProgress = { false }
+        try await controller.configureRemoteRoute(agentID: id, route: nil)
+        XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id && $0.isRemote })
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains { $0.agentID == id && $0.endpoint == local })
+    }
+
+    func testDisableWhileVerificationIsInFlightCannotRestoreRemoteRoute() async throws {
+        let id = "remote-race-" + UUID().uuidString
+        let previous = ConnectionModePreference.selected()
+        ConnectionModePreference.set(.cloud)
+        let store = RemoteTestCredentials(agentID: id, credential: credential)
+        defer { VoWLANManualRouteStore.remove(agentID: id); ConnectionModePreference.set(previous) }
+        let controller = VoWLANController(), gate = RemoteHealthGate()
+        defer { controller.stopBrowsing() }
+        let route = try RemoteDirectConfiguration.route(agentID: id, host: "a.example", controlPort: "443", pcmPort: "7593")
+        let entered = expectation(description: "verification suspended")
+        let saving = Task {
+            try await controller.configureRemoteRoute(agentID: id, route: route, credentials: store) { request in
+                entered.fulfill()
+                await gate.wait()
+                return try await self.response(request, agentID: id)
+            }
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        try await controller.configureRemoteRoute(agentID: id, route: nil)
+        await gate.release()
+        do { try await saving.value; XCTFail("stale validation restored disabled route") } catch is CancellationError {} catch { XCTFail("\(error)") }
+        XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
+    }
+}
+
+private struct RemoteTestCredentials: LocalDeviceCredentialStoring {
+    let agentID: String
+    let credential: VoWLANCredential
+    func load(agentID: String) -> VoWLANCredential? { agentID == self.agentID ? credential : nil }
+    func save(_ credential: VoWLANCredential, agentID: String) throws {}
+    func remove(agentID: String) {}
+    func legacy() -> VoWLANCredential? { nil }
+}
+
+private actor RemoteHealthGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
+}
+
+@MainActor
 final class CloudStandbyLifecycleRegressionTests: XCTestCase {
     func testFailedFreshDialQueryClearsPreviousOnlinePresentation() async throws {
         let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()

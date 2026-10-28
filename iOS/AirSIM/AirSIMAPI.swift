@@ -20,7 +20,7 @@ enum LocalAgentRoute: Equatable, Sendable {
 
     var traceDescription: String {
         switch self {
-        case let .vowlan(endpoint, _): return VoWLANNetworkRoutePolicy.isOverlayHost(endpoint.host)
+        case let .vowlan(endpoint, _): return endpoint.usesTLS ? "VoWLAN · 自建 TLS 直连" : VoWLANNetworkRoutePolicy.isOverlayHost(endpoint.host)
             ? "VoWLAN · VPN 直连" : "VoWLAN · 同一局域网"
         }
     }
@@ -77,7 +77,12 @@ struct AirSIMAPI: Sendable {
     init(route: LocalAgentRoute, transport: (any AirSIMHTTPTransport)? = nil) {
         self.route = route
         let baseURL = route.baseURL
-        precondition(Self.isAllowedLocalURL(baseURL), "Agent 地址必须是本地 HTTP 地址")
+        // TLS endpoints are explicitly constructed for a paired remote gateway;
+        // keep the legacy local URL whitelist unchanged for other callers.
+        precondition(Self.isAllowedLocalURL(baseURL) || {
+            if case let .vowlan(endpoint, _) = route { return endpoint.usesTLS }
+            return false
+        }(), "Agent 地址必须是本地 HTTP 或已配对的 TLS 网关")
         self.baseURL = baseURL
         self.transport = transport ?? WiredHTTPTransport()
     }

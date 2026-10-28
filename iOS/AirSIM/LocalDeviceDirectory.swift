@@ -1,6 +1,26 @@
 import Combine
 import Foundation
 
+enum VoWLANAuthenticatedHealth {
+    static func fetch(agentID: String, endpoint: VoWLANEndpoint, credential: VoWLANCredential,
+                      transport: LocalDeviceDirectory.HealthTransport) async throws -> VoWLANHealthIdentity {
+        let signature = try VoWLANRequestSigner(credential: credential).sign(method: "GET", path: "/v1/health", body: Data())
+        var request = URLRequest(url: endpoint.controlBaseURL.appendingPathComponent("v1/health"))
+        // Tailscale/VPN round trips can exceed the old 4s budget even when the
+        // gateway is healthy; the encrypted route proof already bound this peer.
+        request.timeoutInterval = 8
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        VoWLANController.apply(signature, to: &request)
+        let response = try await transport(request)
+        guard response.statusCode == 200,
+              let identity = try? JSONDecoder().decode(VoWLANHealthIdentity.self, from: response.body),
+              identity.ok, identity.agentID == agentID,
+              VoWLANHealthProof.verify(identity.identityProof, nonce: signature.nonce,
+                agentID: agentID, credential: credential) else { throw VoWLANControllerError.authenticationFailed }
+        return identity
+    }
+}
+
 struct LocalDeviceRoutes: Equatable, Sendable {
     let agentID: String
     let vowlan: VoWLANEndpoint?
@@ -100,9 +120,16 @@ final class LocalDeviceDirectory: ObservableObject {
         let mayMigrate = binding == nil || binding == agentID
         let staged = pendingCredentials[agentID]
         let credential = await Task.detached {
-            staged ?? store.load(agentID: agentID) ?? (mayMigrate ? store.legacy() : nil)
+            staged ?? store.load(agentID: agentID) ?? (mayMigrate && !endpoint.usesTLS ? store.legacy() : nil)
         }.value
         guard let credential else { throw VoWLANControllerError.notPaired }
+        // A directory refresh may still hold an old candidate after the user
+        // disabled/replaced its remote route while Keychain loading was in flight.
+        if endpoint.usesTLS {
+            guard VoWLANManualRouteStore.routes().contains(where: {
+                $0.agentID == agentID && $0.isRemote && $0.endpoint == endpoint
+            }) else { throw CancellationError() }
+        }
         try await verifyPairing(agentID: agentID, endpoint: endpoint, credential: credential)
     }
     func verifyPairing(agentID: String, endpoint: VoWLANEndpoint, credential: VoWLANCredential) async throws {
@@ -139,6 +166,14 @@ final class LocalDeviceDirectory: ObservableObject {
         objectWillChange.send()
         if enabled { subscribe(agentID: agentID) }
     }
+    func invalidateRemoteRoute(agentID: String) {
+        verification[agentID] = UUID()
+        if peers[agentID]?.endpoint.usesTLS == true {
+            peers.removeValue(forKey: agentID)?.poll?.cancel()
+            objectWillChange.send()
+        }
+    }
+
     func forget(agentID: String) async throws {
         forgotten.insert(agentID)
         verification[agentID] = UUID()
@@ -159,20 +194,8 @@ final class LocalDeviceDirectory: ObservableObject {
 
     private func authenticatedHealth(agentID: String, endpoint: VoWLANEndpoint,
                                      credential: VoWLANCredential) async throws -> VoWLANHealthIdentity {
-        let signature = try VoWLANRequestSigner(credential: credential).sign(method: "GET", path: "/v1/health", body: Data())
-        var request = URLRequest(url: endpoint.controlBaseURL.appendingPathComponent("v1/health"))
-        // Tailscale/VPN round trips can exceed the old 4s budget even when the
-        // gateway is healthy; the encrypted route proof already bound this peer.
-        request.timeoutInterval = 8
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        VoWLANController.apply(signature, to: &request)
-        let response = try await healthTransport(request)
-        guard response.statusCode == 200,
-              let identity = try? JSONDecoder().decode(VoWLANHealthIdentity.self, from: response.body),
-              identity.ok, identity.agentID == agentID,
-              VoWLANHealthProof.verify(identity.identityProof, nonce: signature.nonce,
-                agentID: agentID, credential: credential) else { throw VoWLANControllerError.authenticationFailed }
-        return identity
+        try await VoWLANAuthenticatedHealth.fetch(agentID: agentID, endpoint: endpoint,
+            credential: credential, transport: healthTransport)
     }
 
     private func subscribe(agentID: String) {

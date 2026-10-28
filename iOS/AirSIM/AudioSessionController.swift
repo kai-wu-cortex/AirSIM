@@ -75,6 +75,11 @@ enum PCMRoute: Equatable, Sendable {
         }
     }
 
+    var usesTLS: Bool {
+        if case let .vowlan(endpoint, _) = self { return endpoint.usesTLS }
+        return false
+    }
+
     var requiresWiFi: Bool {
         if case let .vowlan(endpoint, _) = self { return !VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host) }
         return false
@@ -268,6 +273,7 @@ final class AudioSessionController: ObservableObject {
                 handshakeSequence: handshakeSequence,
                 requiresWiFi: route.requiresWiFi,
                 usesSystemRouting: route.usesSystemRouting,
+                usesTLS: route.usesTLS,
                 isOverlayHost: route.isOverlayHost,
                 onPCM: { [weak self] pcm in
                     Task { @MainActor [weak self] in
@@ -859,6 +865,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
     private let handshakeSequence: PCMHandshakeSequence
     private let requiresWiFi: Bool
     private let usesSystemRouting: Bool
+    private let usesTLS: Bool
     private let isOverlayHost: Bool
     private let queue = DispatchQueue(label: "com.jieden.airsim.network-pcm")
     private let onPCM: @Sendable (Data) -> Void
@@ -887,6 +894,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         handshakeSequence: PCMHandshakeSequence,
         requiresWiFi: Bool,
         usesSystemRouting: Bool,
+        usesTLS: Bool,
         isOverlayHost: Bool,
         onPCM: @escaping @Sendable (Data) -> Void,
         onEvent: @escaping @Sendable (Event) -> Void
@@ -896,6 +904,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         self.handshakeSequence = handshakeSequence
         self.requiresWiFi = requiresWiFi
         self.usesSystemRouting = usesSystemRouting
+        self.usesTLS = usesTLS
         self.isOverlayHost = isOverlayHost
         self.onPCM = onPCM
         self.onEvent = onEvent
@@ -958,14 +967,14 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         tcp.noDelay = true
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 2
-        let parameters = NWParameters(tls: nil, tcp: tcp)
+        let parameters = NWParameters(tls: usesTLS ? NWProtocolTLS.Options() : nil, tcp: tcp)
         if requiresWiFi {
             parameters.requiredInterfaceType = .wifi
         }
         let connection = NWConnection(host: host, port: port, using: parameters)
         self.connection = connection
         readyForPCM = false
-        onEvent(.status(isOverlayHost ? "正在通过 VPN 直连 PCM" : (requiresWiFi ? "正在通过 VoWLAN 连接 PCM" : "正在回退到普通 TCP 连接 PCM")))
+        onEvent(.status(usesTLS ? "正在通过自建 TLS 网关连接音频" : isOverlayHost ? "正在通过 VPN 直连 PCM" : (requiresWiFi ? "正在通过 VoWLAN 连接 PCM" : "正在回退到普通 TCP 连接 PCM")))
         connection.pathUpdateHandler = { [weak self, weak connection] path in
             guard let self, connection != nil else { return }
             self.queue.async {

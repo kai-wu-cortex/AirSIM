@@ -1,5 +1,7 @@
 # AirSIM 全项目 Codex 部署辅助
 
+未发布可选功能：NAS／软路由自建域名 TLS 直连见 `docs/self-hosted-tls-direct.md`。仅为已配对设备增加远程 HTTPS／PCM TLS 路由，默认关闭；沿用 Android 私网网关和 HMAC／身份验证，不开放配对或 AVF 内部端口，不新增后台推送。修改时同步 iPhone 与 Watch 的可选 `pcm_tls` 字段，保留旧路由解码、设备绑定、关闭／删除清理及通话路径固定。
+
 2026-10-19 发布准备：Apps `v0.9.8.1`，Android `0.9.8.1 (95)`、iOS／Watch／Live Activity `0.9.8 (95)`，见 `docs/releases/0.9.8.1.md`。用户授权本轮提交推送、GitHub Release及经 Xcode 上传 TestFlight；不部署 Relay，不新增 workflow，不发布 Linux Agent。Apps 不设 Latest，保留 Agent v0.4.6；Apple 上传／处理／审核分别确认。下文旧候选状态保留历史追溯。
 
 2026-10-19 工作区应用更新功能（未发布）见 `docs/app-updates.md`：iOS／Android 首次／升级版本说明与设置重看、应用新版检查；匿名 GitHub Release 列表每日一次自动尝试，手动可重试，不访问 Relay，不自动安装，不使用 Linux Agent 的 Latest 入口。后续发布须同步维护包内摘要，Android 同版本 build 检测需 APK 文件名含 `-buildNN`；不从 iOS build 猜 Android versionCode，不自动发布或安装。
