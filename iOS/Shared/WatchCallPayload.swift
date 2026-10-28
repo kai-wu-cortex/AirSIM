@@ -90,20 +90,43 @@ enum WatchVoIPPayloadError: LocalizedError {
     }
 }
 
+/// ASCII DNS names only; TLS always uses system certificate and hostname validation.
+/// Literal IPs, URLs, paths and numeric host aliases are deliberately excluded.
+enum RemoteDirectHost {
+    static func isValid(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard host.count <= 253, labels.count > 1,
+              let first = labels.last?.first, first.isASCII && first.isLetter else { return false }
+        return labels.allSatisfy { label in
+            !label.isEmpty && label.count <= 63 && label.first != "-" && label.last != "-"
+                && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
+    }
+}
+
 struct WatchLocalPCMEndpoint: Equatable, Sendable {
     let host: String
     let port: UInt16
     let secret: Data
+    let usesTLS: Bool
 
     init?(dictionary: [String: Any]) {
         guard let host = dictionary["pcm_host"] as? String,
               let rawPort = dictionary["pcm_port"] as? Int,
-              (1024...65535).contains(rawPort),
+              (1...65535).contains(rawPort),
               let encoded = dictionary["pcm_secret"] as? String else { return nil }
-        let octets = host.split(separator: ".").compactMap { UInt8($0) }
-        guard octets.count == 4,
-              octets[0] == 10 || (octets[0] == 172 && (16...31).contains(octets[1]))
-                || (octets[0] == 192 && octets[1] == 168) else { return nil }
+        if let flag = dictionary["pcm_tls"], !(flag is Bool) { return nil }
+        let usesTLS = dictionary["pcm_tls"] as? Bool ?? false
+        if usesTLS {
+            guard RemoteDirectHost.isValid(host) else { return nil }
+        } else {
+            let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+            let octets = parts.compactMap { UInt8($0) }
+            guard rawPort >= 1024, octets.count == 4, parts.count == 4,
+                  parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }),
+                  octets[0] == 10 || (octets[0] == 172 && (16...31).contains(octets[1]))
+                    || (octets[0] == 192 && octets[1] == 168) else { return nil }
+        }
         let base64 = encoded.replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
         let padded = base64 + String(repeating: "=", count: (4 - base64.count % 4) % 4)
@@ -111,6 +134,7 @@ struct WatchLocalPCMEndpoint: Equatable, Sendable {
         self.host = host
         port = UInt16(rawPort)
         self.secret = secret
+        self.usesTLS = usesTLS
     }
 }
 

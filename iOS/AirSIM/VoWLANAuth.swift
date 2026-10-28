@@ -230,15 +230,17 @@ struct VoWLANPairingRecord: Codable, Equatable, Identifiable, Sendable {
         let host: String
         let controlPort: UInt16
         let pcmPort: UInt16
+        var tls: Bool? = nil
 
         init(_ endpoint: VoWLANEndpoint) {
             host = endpoint.host
             controlPort = endpoint.controlPort
             pcmPort = endpoint.pcmPort
+            tls = endpoint.usesTLS ? true : nil
         }
 
         var endpoint: VoWLANEndpoint? {
-            try? VoWLANEndpoint(host: host, controlPort: controlPort, pcmPort: pcmPort)
+            try? VoWLANEndpoint(host: host, controlPort: controlPort, pcmPort: pcmPort, usesTLS: tls == true)
         }
     }
 

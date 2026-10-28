@@ -122,6 +122,10 @@ PushKit VoIP push 仅用于真实来电并交给 CallKit，不能拿它承载短
 
 重连使用当前广播和认证检查，不再凭缓存外设 UUID 建立连接。新版 Android APK 支持经认证的 BLE `device_info` 查询；旧 APK 不支持时不会借用 VoWLAN/Relay 的历史号码。Standalone 云端心跳及本地健康检查读取当前通话卡，不采用首次配对保存的号码。旧 AVF Linux Agent 的云端号码心跳尚未迁移到这一读取流程。
 
+## 可选自建域名直连
+
+局域网 VoWLAN 配对后，可在「设置 → 三星连接 → 自建域名直连（可选）」为每台安卓配置 DDNS 域名及控制、音频 TLS 端口。默认关闭；NAS 终止 TLS 并转发到现有安卓私网网关，不修改安卓协议。保存前验证证书和该设备的 nonce 绑定身份签名；局域网优先，通话中不换地址。此功能不新增后台推送。网关示例、Watch 兼容和验收边界见 [自建域名 TLS 直连](../docs/self-hosted-tls-direct.md)。
+
 ## 构建与测试
 
 ```sh

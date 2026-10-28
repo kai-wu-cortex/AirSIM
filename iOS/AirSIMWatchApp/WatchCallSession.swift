@@ -958,7 +958,7 @@ private final class WatchLocalPCMTransport: @unchecked Sendable {
         let connection = NWConnection(
             host: NWEndpoint.Host(endpoint.host),
             port: NWEndpoint.Port(rawValue: endpoint.port)!,
-            using: NWParameters(tls: nil, tcp: tcp)
+            using: NWParameters(tls: endpoint.usesTLS ? NWProtocolTLS.Options() : nil, tcp: tcp)
         )
         self.connection = connection
         connection.stateUpdateHandler = { [weak self, weak connection] state in

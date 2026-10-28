@@ -158,6 +158,86 @@ private struct PairedAndroidDeviceRows: View {
     }
 }
 
+private struct RemoteDirectSettingsView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var agentID = ""
+    @State private var enabled = false
+    @State private var host = ""
+    @State private var controlPort = "443"
+    @State private var pcmPort = "7593"
+    @State private var message = ""
+    @State private var saving = false
+    @State private var saveTask: Task<Void, Never>?
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("已配对设备", selection: $agentID) {
+                    Text("选择安卓手机").tag("")
+                    ForEach(model.pairedDeviceHistory) { device in
+                        Text(device.deviceName).tag(device.id)
+                    }
+                }
+                Toggle("启用自建域名直连", isOn: $enabled)
+                    .disabled(agentID.isEmpty)
+            } footer: {
+                Text("先在局域网完成 VoWLAN 配对，再为这台手机配置 NAS 或软路由的加密入口。默认关闭，保存后生效。")
+            }
+            .disabled(saving)
+            if enabled {
+                Section("远程入口") {
+                    TextField("DDNS 域名，例如 phone.example.com", text: $host)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("HTTPS 控制端口", text: $controlPort).keyboardType(.numberPad)
+                    TextField("TLS 音频端口", text: $pcmPort).keyboardType(.numberPad)
+                }
+                .disabled(saving)
+            }
+            Section {
+                Button(enabled ? "验证并保存" : "保存关闭") {
+                    saving = true
+                    let target = agentID
+                    saveTask = Task { @MainActor in
+                        defer { saving = false }
+                        do {
+                            let route = enabled ? try RemoteDirectConfiguration.route(agentID: target,
+                                host: host, controlPort: controlPort, pcmPort: pcmPort) : nil
+                            try await model.configureRemoteDirect(agentID: target, route: route)
+                            message = route == nil ? "已关闭此设备的自建域名直连。" :
+                                "控制入口与设备身份验证通过，已保存。音频入口需在实际通话时验证。"
+                        } catch is CancellationError {
+                            message = "配置已取消，请重新验证。"
+                        } catch { message = error.localizedDescription }
+                    }
+                }
+                .disabled(agentID.isEmpty || saving || model.vowlan.callInProgress())
+                if saving { ProgressView("正在验证远程设备…") }
+                if !message.isEmpty { Text(message).font(.footnote) }
+            } footer: {
+                Text("选择 VoWLAN 或自动模式后，局域网优先，不可达时尝试自建域名。NAS 需为控制与音频分别提供有效证书的 TLS 转发；只有网页反向代理不足以传输音频。此选项不提供后台来电推送，通话中不能更改。")
+            }
+        }
+        .navigationTitle("自建域名直连")
+        .onAppear {
+            if agentID.isEmpty { agentID = model.pairedDeviceHistory.first?.id ?? "" }
+            load()
+        }
+        .onChange(of: agentID) { _ in load() }
+        .onDisappear { saveTask?.cancel() }
+    }
+
+    private func load() {
+        let route = VoWLANManualRouteStore.routes().first { $0.agentID == agentID && $0.isRemote }
+        enabled = route != nil
+        host = route?.host ?? ""
+        controlPort = route.map { String($0.controlPort) } ?? "443"
+        pcmPort = route.map { String($0.pcmPort) } ?? "7593"
+        message = ""
+    }
+}
+
 struct AirSIMSettingsView: View {
     private enum SelfTestPhase {
         case idle
@@ -279,6 +359,11 @@ struct AirSIMSettingsView: View {
                         SamsungPairingView()
                     } label: {
                         Label("配对安卓手机", systemImage: "personalhotspot")
+                    }
+                    NavigationLink {
+                        RemoteDirectSettingsView()
+                    } label: {
+                        Label("自建域名直连（可选）", systemImage: "network.badge.shield.half.filled")
                     }
                     PairedAndroidDeviceRows(devices: model.pairedDeviceHistory, onDelete: { deletingDevice = $0 })
                         .disabled(deviceDeletionInProgress)

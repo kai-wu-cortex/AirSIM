@@ -1142,6 +1142,15 @@ final class AppModel: ObservableObject {
         if hasStarted { restartPolling() }
     }
 
+    func configureRemoteDirect(agentID: String, route: VoWLANManualRoute?) async throws {
+        try await vowlan.configureRemoteRoute(agentID: agentID, route: route)
+        localDevices.invalidateRemoteRoute(agentID: agentID)
+        if ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsVoWLAN {
+            await refreshLocalDeviceDirectory()
+        }
+        objectWillChange.send()
+    }
+
     func refreshPairedDeviceInformation() async {
         if ConnectionModePreference.selected() != .bluetooth { await vowlan.probeNow() }
         if voble.state == .ready { await voble.refreshDeviceInformation() }
@@ -1193,6 +1202,9 @@ final class AppModel: ObservableObject {
               let candidates = self.vowlan.discoveredAgents
               for candidate in candidates where PairedAndroidDeviceStore.permits(candidate.id) {
                 if self.localDevices.routes(for: candidate.id)?.vowlan == candidate.endpoint { continue }
+                // Keep a call's authenticated control/media endpoint pinned until
+                // it ends, even if Bonjour or a remote fallback discovers a new route.
+                if self.vowlan.callInProgress(), self.localDevices.routes(for: candidate.id)?.vowlan != nil { continue }
                 try? await self.localDevices.verify(agentID: candidate.id, endpoint: candidate.endpoint)
                 self.rememberVerifiedLocalDevice(candidate)
               }
