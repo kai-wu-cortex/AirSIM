@@ -328,32 +328,81 @@ final class OtherDeviceCallReminderTests: XCTestCase {
             XCTAssertEqual(ConnectionModeRuntimePolicy(mode: mode).startsCloud, mode == .cloud || mode == .automatic)
         }
     }
-    func testAndroidAnswerPolicyRequiresExactIdentityAndUnansweredState() {
+    func testPushedCallActiveEventOnlyWithdrawsUnansweredPresentation() {
+        let call = IncomingVoIPCall(bluetoothCallID: "call-1", uuid: UUID(), generation: 2, number: nil, agentID: "A")
         let event = DeviceCallEvent(agentID: "A", callID: "call-1", state: .active,
             transport: .bluetooth, transportEpoch: 1, backendGeneration: 2)
-        XCTAssertEqual(AndroidAnsweredCloudCallPolicy.action(
-            event: event, cloudCallID: "call-1", cloudAgentID: "A", cloudGeneration: 2,
-            cloudState: .ringing, answered: false, systemAnswered: false), .answeredElsewhere)
-        XCTAssertEqual(AndroidAnsweredCloudCallPolicy.action(
-            event: DeviceCallEvent(agentID: "A", callID: "call-1", state: .ended,
-                transport: .bluetooth, transportEpoch: 1, backendGeneration: 2),
-            cloudCallID: "call-1", cloudAgentID: "A", cloudGeneration: 2,
-            cloudState: .ringing, answered: false, systemAnswered: false), .ended)
-        XCTAssertNil(AndroidAnsweredCloudCallPolicy.action(
-            event: event, cloudCallID: "call-1", cloudAgentID: "B", cloudGeneration: 2,
-            cloudState: .ringing, answered: false, systemAnswered: false))
-        XCTAssertNil(AndroidAnsweredCloudCallPolicy.action(
-            event: event, cloudCallID: "other-call", cloudAgentID: "A", cloudGeneration: 2,
-            cloudState: .ringing, answered: false, systemAnswered: false))
-        XCTAssertNil(AndroidAnsweredCloudCallPolicy.action(
-            event: event, cloudCallID: "call-1", cloudAgentID: "A", cloudGeneration: 3,
-            cloudState: .ringing, answered: false, systemAnswered: false))
-        XCTAssertNil(AndroidAnsweredCloudCallPolicy.action(
-            event: event, cloudCallID: "call-1", cloudAgentID: "A", cloudGeneration: 2,
-            cloudState: .ringing, answered: true, systemAnswered: false))
-        XCTAssertNil(AndroidAnsweredCloudCallPolicy.action(
-            event: event, cloudCallID: "call-1", cloudAgentID: "A", cloudGeneration: 2,
-            cloudState: .active, answered: false, systemAnswered: false))
+        XCTAssertEqual(PushedCallTerminationPolicy.action(event: event, call: call, state: .ringing,
+            answered: false, systemAnswered: false), .answeredElsewhere)
+        XCTAssertNil(PushedCallTerminationPolicy.action(event: event, call: call, state: .ringing,
+            answered: true, systemAnswered: false))
+        XCTAssertNil(PushedCallTerminationPolicy.action(event: event, call: call, state: .ringing,
+            answered: false, systemAnswered: true))
+        XCTAssertNil(PushedCallTerminationPolicy.action(event: event, call: call, state: .active,
+            answered: false, systemAnswered: false))
+    }
+
+    func testPushedCallTerminalRequiresDeviceAndBackendIdentity() {
+        let call = IncomingVoIPCall(bluetoothCallID: "backend-1", uuid: UUID(), generation: 7, number: nil, agentID: "A")
+        for state in [CallLifecycleState.ringing, .connecting, .active, .ending] {
+            for terminal in [CallLifecycleState.ended, .failed] {
+                let event = DeviceCallEvent(agentID: "A", callID: "canonical-1", state: terminal,
+                    transport: .vowlan, transportEpoch: 3, backendCallID: "backend-1")
+                XCTAssertEqual(PushedCallTerminationPolicy.action(event: event, call: call, state: state,
+                    answered: true, systemAnswered: true), .ended)
+            }
+        }
+        for event in [
+            DeviceCallEvent(agentID: "B", callID: "backend-1", state: .ended, transport: .vowlan, transportEpoch: 1),
+            DeviceCallEvent(agentID: "A", callID: "other", state: .ended, transport: .vowlan, transportEpoch: 1),
+        ] {
+            XCTAssertNil(PushedCallTerminationPolicy.action(event: event, call: call, state: .active,
+                answered: true, systemAnswered: true))
+        }
+        let independentlyCountedBLE = DeviceCallEvent(agentID: "A", callID: "backend-1", state: .ended,
+            transport: .bluetooth, transportEpoch: 3, backendGeneration: 11)
+        XCTAssertEqual(PushedCallTerminationPolicy.action(event: independentlyCountedBLE, call: call,
+            state: .active, answered: true, systemAnswered: true), .ended)
+        let unscoped = IncomingVoIPCall(bluetoothCallID: "backend-1", uuid: UUID(), generation: 7, number: nil)
+        XCTAssertNil(PushedCallTerminationPolicy.action(event: .init(agentID: "A", callID: "backend-1",
+            state: .ended, transport: .vowlan, transportEpoch: 1), call: unscoped, state: .active,
+            answered: true, systemAnswered: true))
+    }
+
+    func testColdCloudHandoffAdoptsOnlyTheSurvivingSystemUUID() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.cloud)
+        defer { ConnectionModePreference.set(old); IPhoneCloudCallSession.shared.stop() }
+        let controller = CallKitController(); controller.setEnabled(true)
+        let retired = IncomingVoIPCall(bluetoothCallID: "cold-A", uuid: UUID(), generation: 7, number: nil, agentID: "A")
+        let surviving = IncomingVoIPCall(bluetoothCallID: "cold-B", uuid: UUID(), generation: 8, number: nil, agentID: "A")
+        for incoming in [retired, surviving] {
+            let reported = expectation(description: "cold push reported before model")
+            controller.reportIncomingPush(incoming, systemReport: { _, _, done in done(nil) }) { error in
+                XCTAssertNil(error); reported.fulfill()
+            }
+            await fulfillment(of: [reported], timeout: 2)
+            if incoming.uuid == retired.uuid { controller.reportCurrentCallEnded(reason: .remoteEnded) }
+        }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            callKitController: controller, historyStore: LocalHistoryStore(directoryURL: path))
+        defer { model.stop() }
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ringing)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, surviving.uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.callID, surviving.callID)
+        XCTAssertEqual(model.callLifecycleSnapshot.generation, surviving.generation)
+        model.callKitDidReceiveIncoming(retired)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, surviving.uuid)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: surviving.callID, state: .ended,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
+        XCTAssertNil(controller.currentSystemCallUUID)
+        let replacement = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            callKitController: controller, historyStore: LocalHistoryStore(directoryURL: path))
+        defer { replacement.stop() }
+        XCTAssertEqual(replacement.callLifecycleSnapshot.state, .idle)
+        XCTAssertNil(replacement.remoteCall)
     }
 
     func testAndroidAnswerRetiresCloudRingingPageWithoutHangup() throws {

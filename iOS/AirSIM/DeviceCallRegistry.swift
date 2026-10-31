@@ -61,9 +61,9 @@ struct DeviceCallRegistry: Sendable {
         guard let key else { return [] }
         let previous = entries[key]
         if let previous {
-            guard !previous.event.state.isTerminal,
-                  event.transportEpoch >= (previous.epochs[lane] ?? 0),
-                  Self.mayAdvance(from: previous.event.state, to: event.state) else { return [] }
+            guard event.transportEpoch >= (previous.epochs[lane] ?? 0),
+                  (previous.event.state.isTerminal ? event.state.isTerminal
+                    : Self.mayAdvance(from: previous.event.state, to: event.state)) else { return [] }
             if let generation = event.backendGeneration,
                let old = previous.generations[lane], generation < old { return [] }
         }
@@ -75,6 +75,9 @@ struct DeviceCallRegistry: Sendable {
         entries[key] = entry
         if previous == nil { order.append(key) }
         if event.state.isTerminal {
+            // A second lane may supply the backend alias missing from the first
+            // terminal. Refresh its validated metadata without ending twice.
+            if previous?.event.state.isTerminal == true { return [] }
             if active == key { active = nil }
             trimTerminalHistory()
             return [.dismiss(key), .ended(key)]

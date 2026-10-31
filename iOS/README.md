@@ -132,6 +132,16 @@ iOS/AirSIM.xcodeproj
 
 VoWLAN 接听、拒接和挂断请求在已知当前通话时携带 `/api/calls/status` 返回的 `call_id`（JSON 字段 `call_id`）。Standalone 与新版 AVF Agent 会校验它，避免旧来电通知误操作后续通话；未取得通话 ID 时仍可发送兼容旧版 Agent 的空请求。
 
+### APNs 来电的远端挂断（未发布）
+
+APNs 先建立主通话、随后通过 VoWLAN 接听时，本地终态按认证设备和后端通话 ID 映射到原 CallKit 身份。Registry serial、BLE generation 与 Relay generation 属于独立计数器，不跨命名空间比较；本地事件按各自通道的 epoch／generation 水位验证。另一通道已经结束时，后到的合法终态仍可补全后端映射，但不重复产生结束副作用，也不能恢复为活动通话。另一台设备、其他通话和过期事件不能结束当前通话。
+
+AppModel 接管冷启动 handler 时，认领仍匹配系统当前 ID／UUID／设备／generation 的推送通话，并保留已接听的状态；已结束或替换的 UUID 不会回放。身份保留到权威终态，支持本机先结束系统界面后再收到回执。终态先使生命周期结束，再关闭本机媒体、PCM 重连和原 CallKit 展示，不向后端补发拒接／挂断。在途接听回包不能重新锁定或启动已结束的通话；本地事件先到时仍沿原 owned-call 路径处理，不在通话中途迁移传输。
+
+原 fork 基线上的 65 项相关 XCTest 已通过，两位 reviewer 针对修复逻辑复审未发现新增问题。移植到上游 VoBLE 后，保留上游新增回归并适配其音频失效检查 API，44 项相关测试再次通过，覆盖跨通道终态、冷启动接管、APNs-first、在途接听取消、本地-first、系统回调后的终态与跨设备隔离。上游发布说明已记录的双设备链路超时和 Watch admission 两项既有异常未在本轮复跑，不宣称全量回归通过。上游构建的模拟器 App 进程已实际执行 push 先到／模型后建的身份认领，以及真实 TCP 鉴权、EOF 重连、BLE 先结束、过期 VoWLAN 忽略、合法映射终态关闭原 CallKit 和连接；合成来电使用受控 CallKit 上报边界，不等于真实 PushKit／系统界面验收。未重新验证音频引擎；已有模拟器 AudioToolbox RPC 超时限制，锁屏来电、双向音频和运营商远端挂断仍需真机复验。未安装真机、未发布，未改 NekoSIM、Android 或 Relay。
+
+Standalone 的本地 Gateway 与云端通话描述仍分别生成后端 ID；两端 ID 不同时的映射属于既有生产者限制，本轮未修改该跨端协议，不能据上述合成映射回归宣称已通过 Standalone 真实推送验收。
+
 ### 短信收发与推送
 
 AirSIM 与 DJOneHub 采用相同的通道分工，但使用各自独立的 Relay 和 APNs topic：iPhone 发短信时，VoWLAN 就绪则直接调用 Agent；离线且云端模式开启时，向 Relay 提交经设备鉴权的 `send_sms` 命令，由 AVF Agent 执行并回传结果。Agent 收到短信后，把带 `delivery_id` 的事件送到 Relay；Relay 使用主 App topic 的普通 APNs `alert` 通知 iPhone，App 保存本地历史并按 `delivery_id` 与下次 Agent 同步去重。点开通知会进入发件人会话，冷启动时也会保留这一导航请求。

@@ -116,6 +116,248 @@ final class LocalDeviceDirectoryTests: XCTestCase {
 
     private let aSecret = Data(repeating: 0x41, count: 32)
     private let bSecret = Data(repeating: 0x42, count: 32)
+    func testPushedVoWLANRemoteEndClosesOriginalSystemCall() async throws {
+        let old = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.automatic); AndroidAgentBindingPreference.set("A")
+        defer {
+            ConnectionModePreference.set(old); AndroidAgentBindingPreference.set(binding)
+            IPhoneCloudCallSession.shared.stop()
+        }
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, callID: "call-191")
+        peer.setCallState(nil)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
+            healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: "A", endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        let controller = CallKitController()
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, callKitController: controller,
+            historyStore: LocalHistoryStore(directoryURL: path))
+        defer { model.stop() }
+        directory.stop()
+        let pushed = try IncomingVoIPCall(userInfo: ["event": "incoming_call", "agent_id": "A",
+            "call_id": "call-191", "call_uuid": UUID().uuidString, "generation": 7])
+        let reported = expectation(description: "APNs system call reported")
+        controller.reportIncomingPush(pushed, systemReport: { _, _, done in done(nil) }) { error in
+            XCTAssertNil(error); reported.fulfill()
+        }
+        await fulfillment(of: [reported], timeout: 2)
+        let epoch = directory.transportEpoch(for: "A")
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .ringing,
+            transport: .vowlan, transportEpoch: epoch, backendCallID: "call-191"))
+        try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .active,
+            transport: .vowlan, transportEpoch: epoch, backendCallID: "call-191"))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
+        let startupInvalidation = model.makeLocalAudioStartupInvalidationCheck()
+        XCTAssertNil(startupInvalidation())
+        // BLE and Relay counters are independent; only compare BLE's own history.
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .active,
+            transport: .bluetooth, transportEpoch: 5, backendGeneration: 11))
+        let active = model.callLifecycleSnapshot
+        for event in [
+            DeviceCallEvent(agentID: "B", callID: "call-191", state: .ended, transport: .vowlan, transportEpoch: epoch),
+            DeviceCallEvent(agentID: "A", callID: "other-call", state: .ended, transport: .vowlan, transportEpoch: epoch),
+            DeviceCallEvent(agentID: "A", callID: "call-191", state: .ended, transport: .vowlan, transportEpoch: epoch - 1),
+            DeviceCallEvent(agentID: "A", callID: "call-191", state: .ended, transport: .bluetooth,
+                transportEpoch: 5, backendGeneration: 10),
+            DeviceCallEvent(agentID: "A", callID: "call-191", state: .ended, transport: .bluetooth,
+                transportEpoch: 4, backendGeneration: 11)
+        ] {
+            _ = model.receiveOwnedCallEvent(event)
+            XCTAssertEqual(model.callLifecycleSnapshot, active)
+            XCTAssertEqual(controller.currentSystemCallUUID, pushed.uuid)
+        }
+
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .ended,
+            transport: .vowlan, transportEpoch: epoch, backendCallID: "call-191"))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
+        XCTAssertEqual(model.callLifecycleSnapshot.callID, pushed.callID)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.generation, pushed.generation)
+        XCTAssertNil(controller.currentSystemCallUUID)
+        XCTAssertNil(model.remoteCall)
+        XCTAssertNotNil(startupInvalidation(), "An in-flight audio startup must not revive the ended APNs call")
+        XCTAssertFalse(peer.commands.contains { ["/api/calls/hangup", "/api/calls/reject"].contains($0.path) })
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .active,
+            transport: .vowlan, transportEpoch: epoch + 1))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended, "A late active event cannot revive the call")
+        let next = IncomingVoIPCall(bluetoothCallID: "next-call", uuid: UUID(), generation: 1, number: nil, agentID: "A")
+        let nextReported = expectation(description: "next call reported")
+        controller.reportIncomingPush(next, systemReport: { _, _, done in done(nil) }) { error in
+            XCTAssertNil(error); nextReported.fulfill()
+        }
+        await fulfillment(of: [nextReported], timeout: 2)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .ended,
+            transport: .vowlan, transportEpoch: epoch + 1))
+        XCTAssertEqual(controller.currentSystemCallUUID, next.uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ringing)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "next-call", state: .ended,
+            transport: .vowlan, transportEpoch: epoch + 1))
+        XCTAssertNil(controller.currentSystemCallUUID)
+    }
+
+    func testPushedRemoteEndDuringAnswerCannotRelockOrRestartAudio() async throws {
+        let old = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.automatic); AndroidAgentBindingPreference.set("A")
+        defer {
+            ConnectionModePreference.set(old); AndroidAgentBindingPreference.set(binding)
+            IPhoneCloudCallSession.shared.stop()
+        }
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        peer.setCallState(nil)
+        defer { peer.stop() }
+        let endpoint = try await peer.start(), gate = ResponseGate()
+        let held = expectation(description: "answer response pending")
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { route in
+            AirSIMAPI(route: route, transport: GatedPeerHTTPTransport(gate: gate, held: held, heldPath: "/api/calls/answer"))
+        }, healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: "A", endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        let controller = CallKitController()
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, callKitController: controller,
+            historyStore: LocalHistoryStore(directoryURL: path))
+        defer { model.stop() }
+        directory.stop()
+        let pushed = IncomingVoIPCall(bluetoothCallID: "answer-in-flight", uuid: UUID(),
+            generation: 7, number: nil, agentID: "A")
+        let reported = expectation(description: "APNs system call reported")
+        controller.reportIncomingPush(pushed, systemReport: { _, _, done in done(nil) }) { error in
+            XCTAssertNil(error); reported.fulfill()
+        }
+        await fulfillment(of: [reported], timeout: 2)
+        let answer = Task { try await model.callKitAnswer(uuid: pushed.uuid, origin: .system) }
+        await fulfillment(of: [held], timeout: 2)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "answer-in-flight", state: .ended,
+            transport: .vowlan, transportEpoch: directory.transportEpoch(for: "A")))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
+        await gate.release()
+        do { try await answer.value; XCTFail("The ended call must invalidate the pending answer") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
+        XCTAssertNil(controller.currentSystemCallUUID)
+        XCTAssertNil(model.remoteCall)
+        XCTAssertNotNil(model.makeLocalAudioStartupInvalidationCheck()())
+        XCTAssertFalse(peer.commands.contains { $0.path == "/api/calls/audio/host/register" })
+    }
+
+    func testMappedVoWLANEndAfterBLEEndClosesPushedCall() async throws {
+        for answered in [false, true] {
+            for legacyIngress in [false, true] {
+                try await assertMappedVoWLANEndAfterBLEEnd(answered: answered, legacyIngress: legacyIngress)
+            }
+        }
+    }
+
+    private func assertMappedVoWLANEndAfterBLEEnd(answered: Bool, legacyIngress: Bool) async throws {
+        let old = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.automatic); AndroidAgentBindingPreference.set("A")
+        defer {
+            ConnectionModePreference.set(old); AndroidAgentBindingPreference.set(binding)
+            IPhoneCloudCallSession.shared.stop()
+        }
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret,
+            callID: "telecom-A", backendCallID: "backend-A")
+        peer.setCallState(nil)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
+            healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: "A", endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        let controller = CallKitController()
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, callKitController: controller,
+            historyStore: LocalHistoryStore(directoryURL: path))
+        defer { model.stop() }
+        directory.stop()
+        let pushed = IncomingVoIPCall(bluetoothCallID: "backend-A", uuid: UUID(), generation: 7, number: nil, agentID: "A")
+        let reported = expectation(description: "pushed call reported")
+        controller.reportIncomingPush(pushed, systemReport: { _, _, done in done(nil) }) { error in
+            XCTAssertNil(error); reported.fulfill()
+        }
+        await fulfillment(of: [reported], timeout: 2)
+        let epoch = directory.transportEpoch(for: "A")
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ringing,
+            transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
+        if answered { try await model.callKitAnswer(uuid: pushed.uuid, origin: .system) }
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ended,
+            transport: .bluetooth, transportEpoch: 5, backendGeneration: 11))
+        let before = model.callLifecycleSnapshot
+        XCTAssertEqual(before.state, answered ? .active : .ringing)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ended,
+            transport: .vowlan, transportEpoch: epoch - 1, backendCallID: "backend-A"))
+        XCTAssertEqual(model.callLifecycleSnapshot, before, "The tombstone must retain the WLAN epoch watermark")
+        peer.setCallState("ended")
+        let api = try XCTUnwrap(directory.api(for: "A"))
+        let status = try await api.waitForCallEvent(after: 0, timeout: 1)
+        let terminal = try XCTUnwrap(status.history?.first)
+        if legacyIngress {
+            _ = model.receiveDeviceCallEvent(.init(agentID: "A", callID: try XCTUnwrap(terminal.androidID),
+                state: .ended, transport: .vowlan, transportEpoch: epoch, backendCallID: terminal.id))
+        } else {
+            _ = model.applyAgentCallRecord(terminal, forcedState: .ended, agentID: "A")
+        }
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
+        XCTAssertEqual(model.callLifecycleSnapshot.callID, pushed.callID)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.generation, pushed.generation)
+        XCTAssertNil(controller.currentSystemCallUUID)
+        XCTAssertFalse(peer.commands.contains { ["/api/calls/hangup", "/api/calls/reject"].contains($0.path) })
+    }
+
+    func testColdLaunchPushIsAdoptedBeforeVoWLANAnswer() async throws {
+        let old = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.automatic); AndroidAgentBindingPreference.set("A")
+        defer {
+            ConnectionModePreference.set(old); AndroidAgentBindingPreference.set(binding)
+            IPhoneCloudCallSession.shared.stop()
+        }
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        peer.setCallState(nil)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
+            healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: "A", endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        let controller = CallKitController(); controller.setEnabled(true)
+        let pushed = IncomingVoIPCall(bluetoothCallID: "cold-call", uuid: UUID(), generation: 7, number: nil, agentID: "A")
+        let reported = expectation(description: "push reported before AppModel exists")
+        controller.reportIncomingPush(pushed, systemReport: { _, _, done in done(nil) }) { error in
+            XCTAssertNil(error); reported.fulfill()
+        }
+        await fulfillment(of: [reported], timeout: 2)
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, callKitController: controller,
+            historyStore: LocalHistoryStore(directoryURL: path))
+        defer { model.stop() }
+        directory.stop()
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ringing)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
+        try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
+        XCTAssertTrue(peer.commands.contains { $0.path == "/api/calls/answer" })
+        controller.reportCurrentCallEnded(reason: .remoteEnded)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ending)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "cold-call", state: .ended,
+            transport: .vowlan, transportEpoch: directory.transportEpoch(for: "A")))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
+        XCTAssertNil(controller.currentSystemCallUUID)
+    }
+
     func testSMSIngestionCapturesAuthenticatedProducerAndAcknowledgesRawDeliveryIDs() async throws {
         let a = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
         let b = try AuthenticatedHealthPeer(agentID: "B", secret: bSecret)
@@ -606,9 +848,10 @@ private actor ResponseGate {
 private struct GatedPeerHTTPTransport: AirSIMHTTPTransport {
     let gate: ResponseGate
     let held: XCTestExpectation
+    var heldPath = "/api/calls/events"
     func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
         let response = try await AuthenticatedHealthPeer.transport(request)
-        if request.url?.path == "/api/calls/events" { held.fulfill(); await gate.wait() }
+        if request.url?.path == heldPath { held.fulfill(); await gate.wait() }
         return response
     }
 }

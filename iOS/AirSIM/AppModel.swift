@@ -167,34 +167,34 @@ enum CallKitEndDecision {
     }
 }
 
-/// Android 本机接听/结束时，若 iPhone 仍在响铃且尚未取得媒体所有权，
-/// 只结束 iPhone 的来电展示；绝不向 Android 发送 hangup。
-enum AndroidAnsweredCloudCallPolicy {
+/// Authenticated local events may retire the same pushed call, not another
+/// device's presentation. An active event only withdraws an unanswered call;
+/// a terminal event also closes a call already answered on this iPhone.
+enum PushedCallTerminationPolicy {
     enum Action: Equatable {
         case answeredElsewhere
         case ended
     }
 
+    static func matchesBackendCall(_ event: DeviceCallEvent, call: IncomingVoIPCall) -> Bool {
+        guard let agentID = call.agentID, !agentID.isEmpty, event.agentID == agentID else { return false }
+        return event.callID == call.callID || event.backendCallID == call.callID
+            || event.replacesCallID == call.callID
+    }
+
     static func action(
         event: DeviceCallEvent,
-        cloudCallID: String?,
-        cloudAgentID: String?,
-        cloudGeneration: UInt64?,
-        cloudState: CallLifecycleState,
+        call: IncomingVoIPCall,
+        state: CallLifecycleState,
         answered: Bool,
         systemAnswered: Bool
     ) -> Action? {
-        guard !answered, !systemAnswered,
-              cloudState.representsCall, cloudState != .active else { return nil }
-        guard event.state == .active || event.state.isTerminal else { return nil }
-        guard let cloudCallID,
-              event.callID == cloudCallID
-                || event.backendCallID == cloudCallID
-                || event.replacesCallID == cloudCallID else { return nil }
-        if let cloudAgentID, event.agentID != cloudAgentID { return nil }
-        if let cloudGeneration, let generation = event.backendGeneration,
-           generation != cloudGeneration { return nil }
-        return event.state == .active ? .answeredElsewhere : .ended
+        guard state.representsCall, matchesBackendCall(event, call: call) else { return nil }
+        // Backend generations are scoped to their transport, not Relay's counter.
+        // DeviceCallRegistry validates them before this presentation policy runs.
+        if event.state.isTerminal { return .ended }
+        guard event.state == .active, !answered, !systemAnswered, state != .active else { return nil }
+        return .answeredElsewhere
     }
 }
 
@@ -412,6 +412,9 @@ final class AppModel: ObservableObject {
         return router
     }()
     private var presentedDeviceCall: DeviceCallKey?
+    // Retain the backend identity through a local CallKit end (.ending), so
+    // a later authoritative terminal event still closes the original lifecycle.
+    private var pushedCallIdentity: IncomingVoIPCall?
     private var answerSnapshot: CallLifecycleSnapshot?
     private var callAnswerInFlight = false
     /// A non-terminal local call is currently presented (ringing or owned).
@@ -475,7 +478,7 @@ final class AppModel: ObservableObject {
                                 presentation: CallLifecycleEvent? = nil) -> [DeviceCallEffect] {
         let effects = deviceCalls.apply(event)
         guard let key = deviceCalls.key(agentID: event.agentID, callID: event.callID) else { return effects }
-        if dismissAndroidAnsweredCloudCallIfNeeded(event, key: key) { return effects }
+        if finishPushedCallIfNeeded(event, key: key) { return effects }
         // Explicit cloud mode must not turn an Android LAN discovery event into
         // an in-app ringing page. That page has no cloud media URL and its answer
         // falls back to VoWLAN, producing a misleading timeout. Cloud calls enter
@@ -528,7 +531,6 @@ final class AppModel: ObservableObject {
         }
         guard let key = deviceCalls.key(agentID: event.agentID, callID: event.callID),
               let latest = deviceCalls.latestEvent(for: key) else { return effects }
-        if dismissAndroidAnsweredCloudCallIfNeeded(event, key: key) { return effects }
         let previousRecord = ownedRecords[key]
         if effects.contains(.ended(key)) {
             persistOwnedTerminal(key, event: latest, previous: previousRecord)
@@ -537,6 +539,7 @@ final class AppModel: ObservableObject {
                 state: latest.state.callRecordState, number: latest.number,
                 startedAt: previousRecord?.startedAt ?? Date(), updatedAt: Date(), endedAt: nil, missed: false)
         }
+        if finishPushedCallIfNeeded(event, key: key) { return effects }
         if latest.state.isTerminal {
             if presentedDeviceCall == key { presentOwnedCall(key, state: latest.state) }
             return effects
@@ -577,50 +580,44 @@ final class AppModel: ObservableObject {
         "local:\(Data(key.agentID.utf8).base64EncodedString()):\(key.generation):\(deviceCallRouter.route(for: key)?.systemUUID.uuidString ?? "")"
     }
 
-    /// Android answered or ended the same call while the iPhone is still ringing.
-    /// Retire only the iPhone presentation; never call the Android end API.
+    /// Preserve the pushed UUID, backend ID and generation. A local registry
+    /// key has its own serial and must never replace that primary identity.
     @discardableResult
-    private func dismissAndroidAnsweredCloudCallIfNeeded(
-        _ event: DeviceCallEvent, key: DeviceCallKey
-    ) -> Bool {
-        let incoming = callKit.currentIncomingPush
+    private func finishPushedCallIfNeeded(_ event: DeviceCallEvent, key: DeviceCallKey) -> Bool {
         let session = IPhoneCloudCallSession.shared
-        guard incoming != nil || session.call != nil || callLifecycleSnapshot.source == .relay else {
-            return false
-        }
-        let callID = incoming?.callID ?? session.call?.callID ?? callLifecycleSnapshot.callID
-        let agentID = incoming?.agentID ?? session.call?.agentID
-        let generation = incoming?.generation ?? session.call?.generation ?? callLifecycleSnapshot.generation
-        guard let action = AndroidAnsweredCloudCallPolicy.action(
-            event: event,
-            cloudCallID: callID,
-            cloudAgentID: agentID,
-            cloudGeneration: generation,
-            cloudState: callLifecycleSnapshot.state,
-            answered: session.answered,
-            systemAnswered: callKit.currentCallIsAnswered
-        ) else { return false }
+        guard let call = pushedCallIdentity ?? session.call,
+              callLifecycleSnapshot.callID == call.callID,
+              callLifecycleSnapshot.callUUID == call.uuid,
+              callLifecycleSnapshot.generation == call.generation,
+              callKit.currentSystemCallUUID == nil || callKit.currentSystemCallUUID == call.uuid,
+              !ownsLocalCallPresentation,
+              deviceCalls.active == nil || deviceCalls.active == key,
+              deviceCallContext.media.owner == nil || deviceCallContext.media.owner == key,
+              let latest = deviceCalls.latestEvent(for: key),
+              latest.callID == event.callID, latest.state == event.state,
+              latest.transport == event.transport, latest.transportEpoch == event.transportEpoch,
+              latest.backendGeneration == event.backendGeneration,
+              let action = PushedCallTerminationPolicy.action(
+                event: event, call: call, state: callLifecycleSnapshot.state,
+                answered: session.answered, systemAnswered: callKit.currentCallIsAnswered
+              ) else { return false }
 
-        let uuid = incoming?.uuid ?? session.call?.uuid ?? callLifecycleSnapshot.callUUID
-        if callKit.currentSystemCallUUID != nil {
-            switch action {
-            case .answeredElsewhere:
-                callKit.reportCurrentCallEnded(reason: .answeredElsewhere)
-            case .ended:
-                callKit.reportCurrentCallEnded(reason: .remoteEnded)
-            }
-        }
-        // stop() closes only local media/control; it never sends reject/end.
-        session.stop()
-        if let callID, let uuid {
-            _ = applyCallLifecycle(.init(
-                callID: callID, callUUID: uuid, generation: generation,
-                state: .ended, source: .agent, timestamp: Date(),
-                traceID: nil, failure: nil
-            ))
-        }
-        // Drop the local lane without issuing a backend hangup.
+        // Invalidate queued answer/audio work before closing media or invoking
+        // CallKit's synchronous callback. No backend hangup is sent here.
+        let state: CallLifecycleState = event.state.isTerminal ? event.state : .ended
+        guard applyCallLifecycle(.init(
+            callID: call.callID, callUUID: call.uuid, generation: call.generation,
+            state: state, source: .agent, timestamp: Date(), traceID: nil,
+            failure: state == .failed ? "Agent 报告通话失败" : nil
+        )) else { return false }
+        beginCallTransitionProtection()
+        if audio.active || audio.sessionOwner != nil { audio.deactivate() }
+        if session.call?.uuid == call.uuid { session.stop() }
         deviceCallRouter.finished(key)
+        if callKit.currentSystemCallUUID == call.uuid {
+            callKit.reportCurrentCallEnded(reason: action == .answeredElsewhere ? .answeredElsewhere
+                : (state == .failed ? .failed : .remoteEnded))
+        }
         presentedDeviceCall = nil
         remoteCall = nil
         activeCall = nil
@@ -1532,6 +1529,24 @@ final class AppModel: ObservableObject {
         configureVoBLESession(vobleHub.placeholder)
         if ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsBluetooth {
             vobleHub.restoreInBackgroundIfAuthorized()
+        }
+        // PushKit may have reported the call to the cold-launch handler before
+        // this model existed. Adopt that exact surviving call before an answer
+        // captures lifecycle validity; never replay an ended/replaced UUID.
+        if let incoming = callKit.currentIncomingPush,
+           callKit.matchesCurrentCall(callID: incoming.callID, uuid: incoming.uuid,
+                agentID: incoming.agentID, generation: incoming.generation) {
+            callKitDidReceiveIncoming(incoming)
+            let session = IPhoneCloudCallSession.shared
+            if callLifecycleSnapshot.callUUID == incoming.uuid,
+               session.call?.uuid == incoming.uuid, session.lifecycleState.representsCall {
+                _ = applyCallLifecycle(.init(callID: incoming.callID, callUUID: incoming.uuid,
+                    generation: incoming.generation, state: session.lifecycleState, source: .relay,
+                    timestamp: Date(), traceID: nil, failure: nil))
+            } else if callLifecycleSnapshot.callUUID == incoming.uuid, callKit.currentCallIsAnswered {
+                applyCurrentCallIntent(.active, source: .callKit)
+                updateRemoteCallState("active")
+            }
         }
     }
 
@@ -3702,6 +3717,10 @@ final class AppModel: ObservableObject {
         let previous = callLifecycleSnapshot
         guard callLifecycleStore.apply(event, replacingProvisionalCallID: replacingProvisionalCallID) else { return false }
         callLifecycleSnapshot = callLifecycleStore.snapshot
+        if let call = pushedCallIdentity,
+           event.state.isTerminal || call.uuid != event.callUUID || call.generation != event.generation {
+            pushedCallIdentity = nil
+        }
         if previous.callID != callLifecycleSnapshot.callID
             || previous.callUUID != callLifecycleSnapshot.callUUID
             || previous.generation != callLifecycleSnapshot.generation
@@ -4321,6 +4340,13 @@ extension AppModel: CallKitActionHandling {
            deviceCalls.latestEvent(for: key)?.state.isTerminal == false {
             try await callKitAnswer(uuid: route.systemUUID, origin: origin); return
         }
+        let answeringCall = callLifecycleSnapshot
+        let isCurrent = { [self] in
+            let current = callLifecycleSnapshot
+            return current.callID == answeringCall.callID && current.callUUID == answeringCall.callUUID
+                && current.generation == answeringCall.generation
+                && current.state.representsCall && current.state != .ending
+        }
         beginCallTransitionProtection()
         // CallKit may already own the shared session at this point. Stopping the
         // ringtone must not setActive(false) or iOS deactivates CallKit audio
@@ -4333,6 +4359,7 @@ extension AppModel: CallKitActionHandling {
         do {
             if currentCallTransport == .bluetooth {
                 try await vobleCalls.answer()
+                guard isCurrent() else { throw CancellationError() }
                 currentCallTransport = .bluetooth
                 return
             }
@@ -4361,6 +4388,7 @@ extension AppModel: CallKitActionHandling {
             if vowlanRoute == nil, selectedMode != .cloud {
                 vowlanRoute = await waitForLocalIncomingRoute()
             }
+            guard isCurrent() else { throw CancellationError() }
             let transport = CallTransportPolicy.preferred(
                 mode: selectedMode,
                 vowlanReady: vowlanRoute != nil,
@@ -4374,16 +4402,19 @@ extension AppModel: CallKitActionHandling {
                 }
                 try audio.prepareForCallKit()
                 try await vowlanAPI.answerCall(callID: localAPICallID)
+                guard isCurrent() else { throw CancellationError() }
                 lockLocalTransport(.vowlan, api: vowlanAPI, pcmRoute: pcmRoute)
             case .bluetooth:
                 guard vobleCalls.currentIdentity != nil else {
                     throw CallKitBridgeError.noReachableTransport
                 }
                 try await vobleCalls.answer()
+                guard isCurrent() else { throw CancellationError() }
                 currentCallTransport = .bluetooth
             case .cloud:
                 guard let pushedCall else { throw CallKitBridgeError.noReachableTransport }
                 try await IPhoneCloudCallSession.shared.answer(pushedCall)
+                guard isCurrent() else { throw CancellationError() }
                 currentLocalAPI = nil
                 currentPCMRoute = nil
                 currentCallTransport = .cloud
@@ -4398,6 +4429,7 @@ extension AppModel: CallKitActionHandling {
                 }
                 throw CallKitBridgeError.noReachableTransport
             }
+            guard isCurrent() else { throw CancellationError() }
             await CallAnswerCompletionCoordinator.complete(
                 transport: currentCallTransport,
                 confirmActive: {
@@ -4410,7 +4442,7 @@ extension AppModel: CallKitActionHandling {
                 startAudio: { await self.startCallAudioIfReady() }
             )
         } catch {
-            backgroundStandby.resumeAfterCall()
+            if isCurrent() || !callLifecycleSnapshot.state.representsCall { backgroundStandby.resumeAfterCall() }
             throw error
         }
     }
@@ -4605,6 +4637,7 @@ extension AppModel: CallKitActionHandling {
             state: .ringing, source: .relay, timestamp: Date(),
             traceID: "pushkit-\(call.uuid.uuidString.lowercased())", failure: nil
         )) else { return }
+        pushedCallIdentity = call
         remoteCall = Self.remoteCallRecord(from: call, state: "incoming")
         // 后台 PushKit 来电由系统界面接管；只有 App 本来就在前台时才准备 App 内来电页。
         callPresentationSurface = appIsActive ? .app : .system

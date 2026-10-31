@@ -140,6 +140,36 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertEqual(invalidation(), .callNotActive, "Actual call termination must still revoke startup")
     }
 
+    func testLocalFirstCallKeepsIdentityWhenPushArrivesBeforeAnswer() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.automatic)
+        defer { ConnectionModePreference.set(old) }
+        let backend = DeviceBackendProbe(id: "A"), controller = CallKitController()
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in backend }, callKitController: controller)
+        defer { model.stop() }
+        controller.setEnabled(false)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "same-call", state: .ringing,
+            transport: .bluetooth, transportEpoch: 1, backendGeneration: 3))
+        let key = try XCTUnwrap(model.deviceCalls.key(agentID: "A", callID: "same-call"))
+        let route = try XCTUnwrap(model.deviceCallRouter.route(for: key))
+        let localID = model.callLifecycleSnapshot.callID
+        model.callKitDidReceiveIncoming(.init(bluetoothCallID: "same-call", uuid: UUID(),
+            generation: 3, number: nil, agentID: "A"))
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, route.systemUUID)
+        try await model.callKitAnswer(uuid: route.systemUUID, origin: .system)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "same-call", state: .active,
+            transport: .bluetooth, transportEpoch: 1, backendGeneration: 3))
+        XCTAssertEqual(model.deviceCallContext.media.owner, key)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "same-call", state: .ended,
+            transport: .bluetooth, transportEpoch: 1, backendGeneration: 3))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
+        XCTAssertEqual(model.callLifecycleSnapshot.callID, localID)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, route.systemUUID)
+        XCTAssertNil(model.deviceCalls.active)
+        XCTAssertNil(model.deviceCallContext.media.owner)
+        XCTAssertEqual(backend.commands, ["answer:same-call"])
+    }
+
     func testOtherLaneEventCannotInvalidateProvenBLEAliasBeforeACK() async throws {
         let backend = DeviceBackendProbe(id: "A")
         backend.provisionalReply = true

@@ -4,6 +4,8 @@
 
 本版包含 [APNs 接听后的本地音频启动竞态修正](docs/vowlan-first-call-startup.md)。前后台重启轮询不再撤销同一通话的音频启动，真正挂断、媒体归属／锁定路由变化和 CallKit 停用仍会使其失效；TestFlight 上传与真机验收状态见发布说明。
 
+工作区未发布修复：APNs 与本地通话终态按认证身份收尾原 CallKit／PCM，补齐跨通道事件先后顺序与冷启动接管；保留过期事件隔离和本通传输锁定。[实现与验证边界](iOS/README.md#apns-来电的远端挂断未发布)。
+
 [![Android Standalone](https://img.shields.io/badge/Android-Standalone%20APK-3DDC84?logo=android&logoColor=white)](android-standalone/README.md)
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
