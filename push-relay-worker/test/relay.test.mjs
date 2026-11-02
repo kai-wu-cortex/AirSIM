@@ -1701,3 +1701,108 @@ test("relay shortens long SMS until the APNs payload fits 4096 bytes", async () 
     assert.equal(captured.at(-1).payload.content_truncated, false);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+const ENVELOPE = { v: 1, kid: "3f9c1a7e", n: "AAECAwQFBgcICQoL", ct: "Y2lwaGVydGV4dC1hbmQtdGFnLWZvci10ZXN0cw" };
+
+async function withCapturedPushes(run) {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const pushes = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    pushes.push({ body: options.body, bytes: new TextEncoder().encode(options.body).byteLength });
+    return new Response("", { status: 200 });
+  };
+  const sms = (fields) => worker.fetch(post("/v1/events/sms", {
+    event: "incoming_sms", device_id: registration.device_id, device_secret: registration.device_secret,
+    agent_id: "android-A", delivery_id: "e2e-1", timestamp: new Date().toISOString(), ...fields,
+  }), env);
+  try { await run(sms, pushes); } finally { globalThis.fetch = originalFetch; }
+}
+
+test("healthz advertises end-to-end encrypted SMS support", async () => {
+  const health = await worker.fetch(new Request("https://relay.example/healthz"), testEnvironment());
+  const body = await health.json();
+  assert.deepEqual(body.capabilities, { agent_command_routing: 1, e2e_sms: 1 });
+  assert.equal(body.version, "0.2.1");
+});
+
+test("encrypted SMS reaches iPhone without any plaintext", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const response = await sms({
+      e2e: { ...ENVELOPE, extra: "x" }, sender: "95588", content: "验证码 123456", code: "123456",
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { pushed: true });
+    assert.equal(pushes.length, 1);
+    const payload = JSON.parse(pushes[0].body);
+    assert.deepEqual(payload.aps.alert, { title: "AirSIM", body: "新短信" });
+    assert.equal(payload.aps["mutable-content"], 1);
+    assert.equal(payload.aps["content-available"], 1);
+    assert.equal(payload.aps["thread-id"], "airsim-sms-agent-android-A");
+    assert.equal(payload.event, "incoming_sms");
+    assert.equal(payload.delivery_id, "e2e-1");
+    assert.equal(payload.agent_id, "android-A");
+    assert.equal(typeof payload.timestamp, "string");
+    assert.deepEqual(payload.e2e, ENVELOPE);
+    for (const key of ["sender", "content", "content_truncated", "code"]) {
+      assert.equal(key in payload, false, `${key} is not pushed`);
+    }
+    for (const text of ["95588", "123456", "验证码"]) {
+      assert.equal(pushes[0].body.includes(text), false, `${text} is not pushed`);
+    }
+  });
+});
+
+test("encrypted SMS needs no plaintext fields", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const response = await sms({ e2e: ENVELOPE });
+    assert.equal(response.status, 202);
+    assert.equal(pushes.length, 1);
+  });
+});
+
+test("malformed encryption envelopes are rejected before any push", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const { ct: _ct, ...withoutCiphertext } = ENVELOPE;
+    const malformed = [
+      null, "x", { ...ENVELOPE, v: 2 }, { ...ENVELOPE, v: "1" },
+      { ...ENVELOPE, kid: "3F9C1A7E" }, { ...ENVELOPE, kid: "3f9c1a7" },
+      { ...ENVELOPE, n: "AAECAwQFBgcICQo" }, { ...ENVELOPE, n: "AAECAwQFBgcICQo+" },
+      { ...ENVELOPE, ct: "A".repeat(22) }, { ...ENVELOPE, ct: "Y2lwaGVy=" + "A".repeat(20) },
+      withoutCiphertext,
+    ];
+    for (const [index, e2e] of malformed.entries()) {
+      const response = await sms({ e2e, delivery_id: `bad-${index}` });
+      assert.equal(response.status, 400, `envelope ${index}`);
+      assert.deepEqual(await response.json(), { error: "invalid encrypted SMS" }, `envelope ${index}`);
+    }
+    assert.equal(pushes.length, 0);
+  });
+});
+
+test("an envelope at Android's plaintext cap still fits the APNs limit", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    // 2,400 bytes of plaintext plus the 16-byte GCM tag, base64url-encoded.
+    const response = await sms({
+      e2e: { ...ENVELOPE, ct: "A".repeat(3222) },
+      agent_id: "android-" + "a".repeat(56), delivery_id: "android-sms-" + "f".repeat(64),
+    });
+    assert.equal(response.status, 202);
+    assert.equal(pushes.length, 1);
+    assert.ok(pushes[0].bytes <= 4096, `payload is ${pushes[0].bytes} bytes`);
+  });
+});
+
+test("an oversized envelope is a final 400 and does not burn its delivery id", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const big = await sms({ e2e: { ...ENVELOPE, ct: "A".repeat(4000) }, delivery_id: "big-1" });
+    assert.equal(big.status, 400);
+    assert.deepEqual(await big.json(), { error: "encrypted SMS too large" });
+    assert.equal(pushes.length, 0);
+    const retry = await sms({ e2e: ENVELOPE, delivery_id: "big-1" });
+    assert.equal(retry.status, 202);
+    assert.deepEqual(await retry.json(), { pushed: true });
+    assert.equal(pushes.length, 1);
+  });
+});

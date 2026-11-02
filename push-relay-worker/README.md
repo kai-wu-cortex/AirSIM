@@ -391,6 +391,12 @@ npx wrangler tail
 - Dashboard token 与设备 Secret 分离，设备不能调用 Dashboard 管理 API。
 - Worker 只保存设备 Secret 哈希；媒体连接还会校验 call UUID、角色、generation 和单次 call secret。
 - APNs payload 在本实现中统一限制为 4096 字节。短信正文在推送里出现两次（`aps.alert.body` 与 `content`），超长时截到仍能放进 4096 字节的最长前缀（最多 700 个码点，末尾加「…」），并标记 `content_truncated: true`；中文大约 600 字以上就会被截断。
+- 端到端加密短信（`/v1/events/sms` 带 `e2e` 信封，见 issue #24）：
+  - 信封格式：`v` 为数字 `1`；`kid` 为 8 位小写十六进制；`n` 为无填充 base64url，恰好 16 个字符（12 字节 nonce）；`ct` 为无填充 base64url，23–8192 个字符（密文加 16 字节 GCM tag）。其他键丢弃。
+  - 推送只含顶层 `event`、`delivery_id`、`agent_id`、`timestamp`、`e2e`。`aps` 为占位文案「AirSIM／新短信」，带 `mutable-content: 1`、`content-available: 1`，`thread-id` 为 `airsim-sms-agent-<agent_id>`（最多 64 字符），由 iPhone 解密后替换。请求里即使带了 `sender`、`content` 或 `code`，也不会放进推送。
+  - 信封格式不对返回 `400 {"error":"invalid encrypted SMS"}`；推送超过 4096 字节（Relay 无法截断密文）返回 `400 {"error":"encrypted SMS too large"}`。两者都在记录去重之前处理，修正后用同一 `delivery_id` 重发仍会推送。
+  - 这两个正文是与安卓的接口，字面量不能改：安卓只在 Relay 返回确切的规范正文时放弃一条短信（`CloudSMSUploader.rejected()`），支持加密的安卓版本必须把它们加入放弃名单，否则会一直重试。
+  - `/healthz` 的 `capabilities.e2e_sms` 表示 Relay 支持该格式。
 - 发布前保留上一 Worker version。故障时优先回滚 Worker version，不要删除 KV namespace 或 Durable Object migration。
 - Worker、Agent、iOS/watchOS 的 JSON 和媒体协议变更必须兼容旧客户端或同步发布。
 

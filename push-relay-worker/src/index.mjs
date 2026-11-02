@@ -135,7 +135,7 @@ async function routeRequest(request, env) {
     }
   }
   if (request.method === "GET" && url.pathname === "/healthz") {
-    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.1", capabilities:{agent_command_routing:1} });
+    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.1", capabilities:{agent_command_routing:1,e2e_sms:1} });
   }
   const callConnect = url.pathname.match(/^\/v1\/calls\/([0-9a-f-]+)\/connect$/i);
   if (request.method === "GET" && callConnect) {
@@ -1432,10 +1432,15 @@ async function receiveSMS(request, env) {
     return jsonResponse(409, { error: "alert token unavailable" });
   }
 
+  // An end-to-end encrypted SMS carries only an envelope; the Relay never sees its text.
+  const encrypted = message.e2e !== undefined;
+  const envelope = encrypted ? parseE2EEnvelope(message.e2e) : null;
+  if (encrypted && !envelope) return jsonResponse(400, { error: "invalid encrypted SMS" });
+
   const timestamp = Date.parse(message.timestamp);
   const now = Date.now();
   if (message.event !== "incoming_sms" || !nonEmpty(message.delivery_id) ||
-      !nonEmpty(message.content) || !Number.isFinite(timestamp) ||
+      (!encrypted && !nonEmpty(message.content)) || !Number.isFinite(timestamp) ||
       timestamp > now + 300_000) {
     return jsonResponse(400, { error: "invalid incoming SMS" });
   }
@@ -1446,6 +1451,17 @@ async function receiveSMS(request, env) {
   const deliveryTimestamp = timestamp < now - 7 * 24 * 60 * 60 * 1000
     ? new Date(now).toISOString()
     : message.timestamp;
+  const encryptedPayload = envelope && encryptedSMSPayload({
+    agentID: stringValue(message.agent_id), deliveryID: message.delivery_id,
+    timestamp: deliveryTimestamp, envelope,
+  });
+  // The Relay cannot shorten ciphertext, so an envelope that can never fit is rejected here,
+  // before its delivery ID is marked as seen. Android drops an SMS only on the Relay's exact
+  // 400 bodies (CloudSMSUploader.rejected), so both e2e error strings are an interface: keep them.
+  if (encryptedPayload &&
+      encoder.encode(JSON.stringify(encryptedPayload)).byteLength > MAX_APNS_PAYLOAD_BYTES) {
+    return jsonResponse(400, { error: "encrypted SMS too large" });
+  }
 
   const dedupeKey = `dedupe:sms:${authenticated.device.device_id}:${stringValue(message.agent_id)}:${message.delivery_id}`;
   if (await bestEffortReadRelayState(env, dedupeKey)) {
@@ -1453,7 +1469,7 @@ async function receiveSMS(request, env) {
   }
   await bestEffortWriteRelayState(env, dedupeKey, "1", 7 * 24 * 60 * 60);
 
-  const payload = fittedSMSPayload(message.content, (content, truncated) => ({
+  const payload = encryptedPayload || fittedSMSPayload(message.content, (content, truncated) => ({
     aps: {
       alert: { title: sender, body: content },
       sound: "default",
@@ -2045,6 +2061,36 @@ function fittedSMSPayload(content, build) {
   }
   // Only an absurdly long sender can miss even at zero; sendAPNs then reports it as before.
   return fitted ?? build(...truncateCodePoints(content, 0));
+}
+
+/** The four fields of an end-to-end encrypted SMS envelope (issue #24), or null when malformed. */
+function parseE2EEnvelope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { v, kid, n, ct } = value;
+  if (v !== 1 || typeof kid !== "string" || !/^[0-9a-f]{8}$/.test(kid) ||
+      typeof n !== "string" || !/^[A-Za-z0-9_-]{16}$/.test(n) ||
+      typeof ct !== "string" || !/^[A-Za-z0-9_-]{23,8192}$/.test(ct)) {
+    return null;
+  }
+  return { v, kid, n, ct };
+}
+
+/** Placeholder text for the iPhone's Notification Service Extension to replace after decrypting. */
+function encryptedSMSPayload({ agentID, deliveryID, timestamp, envelope }) {
+  return {
+    aps: {
+      alert: { title: "AirSIM", body: "新短信" },
+      sound: "default",
+      "thread-id": `airsim-sms-agent-${agentID}`.slice(0, 64),
+      "content-available": 1,
+      "mutable-content": 1,
+    },
+    event: "incoming_sms",
+    delivery_id: deliveryID,
+    agent_id: agentID,
+    timestamp,
+    e2e: envelope,
+  };
 }
 
 function truncateCodePoints(value, maximum) {
