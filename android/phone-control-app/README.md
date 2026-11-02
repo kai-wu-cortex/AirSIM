@@ -150,6 +150,15 @@ Shizuku 发信在 UserService 内清除传入的 Binder 调用身份，并在 `f
 - 旧版 AirSIM 保存的 `:7575` 地址会迁移到 `:8575`；`7575` 可能属于同机 DJOneHub，不再视为 AirSIM 在线证据。未发布端口迁移版 Agent 前，不能用旧版在线包做共存安装。
 - Android 管理端只提交签名的 `airsim-avf-agent_*_arm64.deb`，芯片厂商差异由 App 的能力探测处理，不选择不同 Debian 包。
 - “检查并安装最新 Agent”从 `kai-wu-cortex/AirSIM` 的最新 GitHub Release 选择唯一的 `airsim-avf-agent_*_arm64.deb` 及同名 `.sig`；Release 缺包、缺签名、多包或非 HTTPS 下载都会被拒绝。
+
+## 端到端加密云端短信（Standalone，issue #24）
+
+- 配对：Standalone 在 `GET /pair/v1/info` 返回 `capabilities.e2e_sms: 1`，Bonjour TXT 带 `e2e=1`。新版 iPhone 只在安卓和 Relay 都声明支持时，才把 32 字节的 `e2e_key` 放进加密的配对包。安卓在任何模式下都会在 `registerPairing` 之前删掉它；只有 Standalone 会按「iPhone 设备编号＋Relay 地址」把它存进单独的偏好文件 `e2e_sms_keys`。经 `/api/push/register` 等其他途径带来的 `e2e_key` 一律丢弃。AVF 模式不声明、不保存。
+- 上传：当前云端注册有钥匙时，`/v1/events/sms` 只带 `event`、`delivery_id`、`timestamp` 和 `e2e` 信封（AES-256-GCM，附加数据绑定设备、Agent 和去重编号），不带发件人和正文。明文超过 2,400 字节时按码点截断，并标记 `truncated`。无法加密的短信留在队列里，绝不改发明文。Relay 返回 `{"error":"invalid encrypted SMS"}` 或 `{"error":"encrypted SMS too large"}` 时视为最终拒绝。
+- 去重编号：有钥匙时改为 `HMAC-SHA256(delivery-id 子密钥, 发件人\0时间\0正文)`，Relay 无法拿常见验证码去比对反推。广播、收件箱扫描和通知读取三条路径用同一算法，云端和局域网两份副本的编号一致。没有钥匙时与之前完全相同。
+- 注册上传：不论是否加密，`/v1/devices/register` 都只上传 Relay 读取的 13 个字段；VoWLAN 和 E2E 钥匙、通知转发配置、Relay 地址和安卓身份信息不再离开手机。
+- 依赖 Relay 支持（`/healthz` 的 `capabilities.e2e_sms`）和新版 iPhone App。任何一端没更新，iPhone 都不会下发钥匙，短信照旧明文上传。`sh android/phone-control-app/test-e2e-sms.sh` 运行加密、配对钥匙、注册白名单和上传正文的 JVM 测试，加密结果与 Node 独立计算的向量逐字节对照。
+
 # 未发布：Relay 命令路由
 
 共享源码新增定向命令、严格关闭帧解析和可取消的重连代次；SIM / 名称 / token 更新不替换命令连接。[兼容与验收边界](../../docs/relay-agent-routing.md)。本轮未安装或发布。
