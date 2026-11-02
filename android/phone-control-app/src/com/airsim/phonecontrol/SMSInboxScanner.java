@@ -157,7 +157,7 @@ final class SMSInboxScanner {
     private static void queueIncoming(
             Context context, String sender, String content, long timestamp,
             int subscriptionID) throws Exception {
-        String deliveryID = SMSDeliveryIdentity.id(sender, content, timestamp);
+        String deliveryID = SMSDeliveryIdentity.id(StandaloneAgentStore.currentE2EKey(context), sender, content, timestamp);
         JSONObject event = new JSONObject(WireJson.smsEvent(UUID.randomUUID().toString(),
                 deliveryID, sender == null ? "" : sender, content,
                 Instant.ofEpochMilli(timestamp).toString(), simSlot(context, subscriptionID)));

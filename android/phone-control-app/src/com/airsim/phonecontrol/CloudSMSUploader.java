@@ -104,8 +104,14 @@ final class CloudSMSUploader {
         // Match the Worker's canonical JSON, not an arbitrary proxy/Cloudflare 400.
         // Unknown representations are safely retried rather than discarded.
         return error instanceof RelayHTTPException http && http.statusCode() == 400
-                && "{\"error\":\"invalid incoming SMS\"}".equals(http.detailBody().trim());
+                && FINAL_REJECTIONS.contains(http.detailBody().trim());
     }
+
+    // The Worker's own bodies for an SMS it can never push; the encrypted ones come from issue #24.
+    private static final List<String> FINAL_REJECTIONS = java.util.Arrays.asList(
+            "{\"error\":\"invalid incoming SMS\"}",
+            "{\"error\":\"invalid encrypted SMS\"}",
+            "{\"error\":\"encrypted SMS too large\"}");
 
     /** The Relay answers 400 to times over 5 min ahead; a carrier clock running fast must not cost the SMS. */
     static String uploadTimestamp(String stored, long nowMillis) {

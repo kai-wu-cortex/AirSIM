@@ -431,13 +431,14 @@ public final class StandaloneAgentService extends Service {
         StandaloneSMSStore smsStore = new StandaloneSMSStore(this);
         JSONArray smsPending = smsStore.cloudPending();
         Map<String, JSONObject> events = new LinkedHashMap<>();
+        // With an E2E key for this registration every SMS goes up sealed (issue #24), never in plaintext.
+        byte[] e2eKey = E2EKeyStore.forRegistration(this, registration);
+        E2ESMSCrypto.Keys keys = e2eKey == null ? null : E2ESMSCrypto.keys(e2eKey);
         for (int index = 0; index < smsPending.length(); index++) {
             if (!generation.isCurrent()) return;
             JSONObject source = smsPending.getJSONObject(index);
-            events.put(source.getString("delivery_id"), identity(registration).put("event", "incoming_sms")
-                    .put("delivery_id", source.optString("delivery_id"))
-                    .put("sender", source.optString("sender")).put("content", source.optString("content"))
-                    .put("timestamp", CloudSMSUploader.uploadTimestamp(source.optString("timestamp", ""), System.currentTimeMillis())));
+            String timestamp = CloudSMSUploader.uploadTimestamp(source.optString("timestamp", ""), System.currentTimeMillis());
+            events.put(source.getString("delivery_id"), CloudSMSEvent.body(identity(registration), source, timestamp, keys));
         }
         // One SMS the Relay refuses or cannot push must neither stall the others nor fail the agent cycle.
         smsUploader.flush(new ArrayList<>(events.keySet()),

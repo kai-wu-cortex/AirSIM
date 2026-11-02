@@ -188,6 +188,13 @@ public final class CloudSMSUploaderTests {
         check(!lifetime.attach(epoch, () -> {}), "stale epoch cannot attach a new connection");
         check(!CloudSMSUploader.rejected(new RelayHTTPException(400, "<html>Bad Request</html>")),
                 "proxy 400 must not discard SMS");
+        // The Relay's end-to-end encryption contract (issue #24): an envelope it can never push is final.
+        check(CloudSMSUploader.rejected(new RelayHTTPException(400, "{\"error\":\"invalid encrypted SMS\"}")),
+                "a malformed encrypted SMS is final");
+        check(CloudSMSUploader.rejected(new RelayHTTPException(400, "{\"error\":\"encrypted SMS too large\"}")),
+                "an encrypted SMS that cannot fit a push is final");
+        check(!CloudSMSUploader.rejected(new RelayHTTPException(502, "{\"error\":\"encrypted SMS too large\"}")),
+                "only a 400 is final");
         List<String> rejected = new ArrayList<>();
         uploader().flush(List.of("invalid"), id -> {
             throw new RelayHTTPException(400, "{\"error\":\"invalid incoming SMS\"}");
