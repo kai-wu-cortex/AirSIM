@@ -1,6 +1,6 @@
 package android.os;
 
-public class Binder {
+public class Binder implements IBinder {
     public static int callingUid = 10001;
     public static int clears, restores;
     public static long clearCallingIdentity() {

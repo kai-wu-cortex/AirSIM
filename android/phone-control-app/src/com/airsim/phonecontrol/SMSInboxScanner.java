@@ -23,6 +23,8 @@ final class SMSInboxScanner {
     private static final int CURRENT_SCANNER_VERSION = 3;
     private static final long INTERVAL_MS = 30_000;
     private static final int BATCH_SIZE = 100;
+    private static final String SHIZUKU_CAUGHT_UP = "shizuku_caught_up_v1";
+    private static final String SHIZUKU_CUTOFF = "shizuku_catch_up_cutoff_v1";
     private static long lastScanTime;
 
     private SMSInboxScanner() {}
@@ -51,14 +53,22 @@ final class SMSInboxScanner {
         SMSInboxCursor progress = new SMSInboxCursor(preferences.getLong(LAST_ID, -1));
         long cutoff = System.currentTimeMillis() - 15L * 60L * 1_000L;
         boolean firstScan = !progress.initialized();
+        SMSInboxCatchUp catchUp = new SMSInboxCatchUp(
+                preferences.getBoolean(SHIZUKU_CAUGHT_UP, false),
+                preferences.getLong(SHIZUKU_CUTOFF, 0), System.currentTimeMillis());
         // MIUI filters content://sms for non-default SMS apps, so the local
         // provider may only expose an old cursor. Prefer the authenticated
         // Shizuku shell view, which has READ_SMS and sees the real inbox.
         String privileged = ShizukuBridgeManager.get(context).recentSms(
-                firstScan ? -1 : progress.value(), cutoff, BATCH_SIZE);
+                firstScan ? -1 : progress.value(), catchUp.completed() ? cutoff : catchUp.cutoff(), BATCH_SIZE);
         if (privileged != null && privileged.startsWith("[")) {
             try {
                 JSONArray rows = new JSONArray(privileged);
+                // Freeze the cutoff across batches/restarts, including a failed delivery.
+                if (!catchUp.completed() && !preferences.edit()
+                        .putLong(SHIZUKU_CUTOFF, catchUp.cutoff()).commit()) {
+                    throw new IllegalStateException("SMS catch-up cutoff could not be saved");
+                }
                 int recent = 0;
                 for (int index = 0; index < rows.length(); index++) {
                     JSONObject row = rows.getJSONObject(index);
@@ -70,15 +80,20 @@ final class SMSInboxScanner {
                     long sentAt = row.optLong("date_sent", 0);
                     long timestamp = SMSDeliveryIdentity.providerTimestamp(sentAt, receivedAt);
                     if (timestamp <= 0) timestamp = System.currentTimeMillis();
-                    if (!content.isEmpty()) {
+                    if (!content.isEmpty() && catchUp.shouldForward(receivedAt, sentAt)) {
                         queueIncoming(context, sender, content, timestamp, row.optInt("sub_id", -1));
                         recent++;
                     }
                     progress.processed(rowID);
                 }
                 persist(preferences, progress);
-                BridgeLog.info((firstScan ? "sms_inbox_baseline_initialized" : "sms_inbox_scan")
-                        + " source=shizuku recent=" + recent + " latest=" + progress.value());
+                boolean finished = !catchUp.completed() && catchUp.drained(rows.length(), BATCH_SIZE);
+                if (finished && !preferences.edit().putBoolean(SHIZUKU_CAUGHT_UP, true).commit()) {
+                    throw new IllegalStateException("SMS catch-up completion could not be saved");
+                }
+                if (recent > 0 || finished) BridgeLog.info("sms_inbox_scan"
+                        + " source=shizuku recent=" + recent + " latest=" + progress.value()
+                        + " catch_up_complete=" + (catchUp.completed() || finished));
                 return;
             } catch (Exception error) {
                 BridgeLog.error("sms_inbox_privileged_parse_failed", error);
