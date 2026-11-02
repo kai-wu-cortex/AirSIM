@@ -135,7 +135,7 @@ Shizuku 发信在 UserService 内清除传入的 Binder 调用身份，并在 `f
 
 2026-10-21，该路径在一台红米（私有 Android build 103）上验证了锁屏、熄屏发信，无需操作确认弹窗，也未使用 root、关闭系统优化或更换默认短信 App。其他 ROM、双卡切换、长短信和重启恢复尚未完成真机验证。此修改不涉及 5G 消息／RCS 接收。`sh android/phone-control-app/test-privileged-sms.sh` 可单独运行身份、SIM 选择和失败路径的 JVM 回归测试；这些测试不代替厂商系统实测。
 
-Shizuku 读收件箱不经 `ContentResolver`。UserService 是 `app_process` 起的 shell／root 进程，没有 ActivityManager 的 App 记录，Context 的调用包名也不属于该 uid，用 `ContentResolver` 查询必然抛 `SecurityException`。现与 AOSP `content` 命令相同：用 `getContentProviderExternal` 取 SMS provider，以 shell（root 时为 `root`）身份查询（API 31+ 用 `AttributionSource`，API 29–30 用调用包名），用完 `removeContentProviderExternalAsUser` 释放。返回行带 `sub_id`，供卡槽标注。
+Shizuku 读收件箱不经 `ContentResolver`。UserService 是 `app_process` 起的 shell／root 进程，没有 ActivityManager 的 App 记录，Context 的调用包名也不属于该 uid，用 `ContentResolver` 查询必然抛 `SecurityException`。现与 AOSP `content` 命令相同：用 `getContentProviderExternal` 取 SMS provider，以 shell 身份查询（Shizuku 以 root 运行时为 `root`；API 31+ 用 `AttributionSource`，API 29–30 用调用包名），用完 `removeContentProviderExternalAsUser` 释放。返回行带 `sub_id`，供卡槽标注。AirSIM 自带的 root 通道仍未实现收件箱读取，只用本地视图。
 
 2026-11-02，该路径在一台小米 13 Pro（HyperOS 3.0 / Android 16）上验证：`shizuku_sms_inbox_failed` 不再出现，`sms_inbox_scan source=shizuku` 每 30 秒成功一次。该机此前从未走通这条路径，一直退回 App 自身被过滤的收件箱视图。真实来信经此路径转发、API 29–30 的接口形状尚未在真机验证。`sh android/phone-control-app/test-privileged-sms.sh` 同时运行该路径的 JVM 回归测试。
 
