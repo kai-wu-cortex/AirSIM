@@ -340,3 +340,4 @@ mkdir -p "$PCM_OUT"
 sh "$ROOT/test-audio-policy.sh"
 
 sh "$ROOT/test-privileged-sms.sh"
+sh "$ROOT/test-e2e-sms.sh"
