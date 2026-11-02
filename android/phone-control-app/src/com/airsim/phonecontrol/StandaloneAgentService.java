@@ -78,7 +78,7 @@ public final class StandaloneAgentService extends Service {
         if (snapshot.scope() == null || !active.store.cloudEnabled())
             throw new IllegalStateException("云端未开启或尚未配对，请先检查云端配置");
         active.relay.postJSON(snapshot.registration(), "/v1/devices/register",
-                new JSONObject(snapshot.registration().toString()), 15_000, generation);
+                RelayRegistrationPayload.forRelay(snapshot.registration()), 15_000, generation);
         if (!generation.isCurrent() || !active.commandConfiguration.isCurrent(snapshot))
             throw new IllegalStateException("连接配置已变更，请重新发送");
         try {
@@ -193,7 +193,8 @@ public final class StandaloneAgentService extends Service {
     }
 
     private void syncRegistration(JSONObject registration) throws Exception {
-        int hash = registration.toString().hashCode();
+        JSONObject payload = RelayRegistrationPayload.forRelay(registration);
+        int hash = payload.toString().hashCode();
         // A Relay 401 means the device record is gone; re-post the unchanged registration. The
         // signal is one-shot, so a failed re-post waits for the next back-off window instead of
         // retrying every cycle.
@@ -202,7 +203,7 @@ public final class StandaloneAgentService extends Service {
         } else if (hash == syncedRegistrationHash) {
             return;
         }
-        relay.postJSON(registration, "/v1/devices/register", new JSONObject(registration.toString()), 15_000);
+        relay.postJSON(registration, "/v1/devices/register", payload, 15_000);
         syncedRegistrationHash = hash;
         store.recordSuccess();
         BridgeLog.info("standalone_relay_registration_synced");

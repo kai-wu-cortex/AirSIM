@@ -25,6 +25,10 @@ assert_contains "$ROOT/../android/phone-control-app/src/com/airsim/phonecontrol/
 S="$ROOT/../android/phone-control-app/src/com/airsim/phonecontrol/StandaloneAgentService.java"
 assert_contains "$S" 'registrationRecovery.takeResync(' \
   'registration sync must honour relay 401 recovery'
+assert_contains "$S" 'relay.postJSON(registration, "/v1/devices/register", payload, 15_000);' \
+  'registration sync must upload only the fields the Relay reads'
+assert_contains "$S" 'RelayRegistrationPayload.forRelay(snapshot.registration())' \
+  'manual heartbeat must upload only the fields the Relay reads'
 assert_contains "$S" 'registrationRecovery.onFailure(heartbeatError' \
   'heartbeat 401 must request re-registration'
 assert_contains "$S" 'registrationRecovery.onFailure(error, android.os.SystemClock.elapsedRealtime());' \
