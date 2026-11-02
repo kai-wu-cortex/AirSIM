@@ -130,7 +130,7 @@ iOS/AirSIM.xcodeproj
 - 四阶段云端自检：本机 Push 凭据、Relay 身份、设备注册、Agent 心跳
 - 本地通话记录、单条滑动删除、详情删除、诊断和媒体健康状态
 
-VoWLAN 接听、拒接和挂断请求在已知当前通话时携带 `/api/calls/status` 返回的 `call_id`（JSON 字段 `call_id`）。Standalone 与新版 AVF Agent 会校验它，避免旧来电通知误操作后续通话；未取得通话 ID 时仍可发送兼容旧版 Agent 的空请求。
+VoWLAN 接听、拒接和挂断请求在已知当前通话时将 `/api/calls/status` 返回的 `active.id` 填入请求的 `call_id` 字段。Standalone 与新版 AVF Agent 校验该编号，避免旧来电通知误操作后续通话。操作 Android Telecom 时，由 Agent 解析对应的 `android_id`。未取得通话 ID 时仍可发送兼容旧版 Agent 的空请求。
 
 ### APNs 来电的远端挂断（未发布）
 

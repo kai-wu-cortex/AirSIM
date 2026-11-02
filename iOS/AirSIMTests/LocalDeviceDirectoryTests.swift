@@ -7,6 +7,48 @@ import WatchConnectivity
 
 @MainActor
 final class LocalDeviceDirectoryTests: XCTestCase {
+
+    func testSystemAnswerUsesPublishedBackendIDInsteadOfTelecomID() async throws {
+        let previousMode = ConnectionModePreference.selected()
+        let previousBinding = AndroidAgentBindingPreference.selected()
+        defer {
+            ConnectionModePreference.set(previousMode)
+            AndroidAgentBindingPreference.set(previousBinding)
+        }
+        ConnectionModePreference.set(.cloud)
+        AndroidAgentBindingPreference.set(nil)
+
+        let publishedID = "android-1700000000000"
+        let telecomID = UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret,
+                                               callID: telecomID, backendCallID: publishedID)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
+            healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: "A", endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+
+        let controller = CallKitController(observesSystemCallbacks: false)
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+                             localDirectory: directory, callKitController: controller)
+        defer { model.stop() }
+        let push = try IncomingVoIPCall(userInfo: ["event": "incoming_call", "call_id": publishedID,
+            "call_uuid": UUID().uuidString, "generation": 1, "agent_id": "A"])
+        let reported = expectation(description: "incoming system call reported")
+        controller.reportIncomingPush(push, systemReport: { _, _, completion in completion(nil) }) { error in
+            XCTAssertNil(error)
+            reported.fulfill()
+        }
+        await fulfillment(of: [reported], timeout: 2)
+        model.activeCall = CallRecord(id: publishedID, index: 1, direction: "incoming", state: "incoming",
+            number: nil, startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false, androidID: telecomID)
+        ConnectionModePreference.set(.vowlan)
+
+        try await model.callKitAnswer(uuid: push.uuid, origin: .system)
+        XCTAssertEqual(peer.commands.filter { $0.path == "/api/calls/answer" }.map(\.callID), [publishedID])
+    }
+
     func testOfflinePeerCannotDelayAnotherPeersAuthentication() async throws {
         let slowID = "slow-" + UUID().uuidString, fastID = "fast-" + UUID().uuidString
         let fast = try AuthenticatedHealthPeer(agentID: fastID, secret: aSecret)
@@ -990,9 +1032,12 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
         let expected = mac("\(method)\n\(target)\n\(digest)\n\(timestamp)\n\(nonce)")
         let valid = headers["x-airsim-vowlan-signature"] == expected && !nonce.isEmpty
             && lock.withLock { nonces.insert(nonce).inserted }
+        var responseStatus = valid ? 200 : 401
         if valid, method == "POST" {
             let input = (try? JSONSerialization.jsonObject(with: Data(rawBody.utf8))) as? [String: Any]
-            lock.withLock { commandLog.append(.init(path: path, callID: input?["call_id"] as? String)) }
+            let callID = input?["call_id"] as? String
+            lock.withLock { commandLog.append(.init(path: path, callID: callID)) }
+            if path == "/api/calls/answer", let callID, callID != backendCallID { responseStatus = 502 }
         }
         var json: [String: Any] = ["ok": valid, "agent_id": agentID, "canonical_call_ids": true]
         json["device_name"] = deviceName
@@ -1015,8 +1060,9 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
                     "history": state == "ended" ? [call] : [], "polling": true, "poll_interval_s": 2,
                     "last_poll_error": "", "revision": 1]
         }
+        if responseStatus == 502 { json = ["error": "active call id mismatch"] }
         let body = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
-        let head = "HTTP/1.1 \(valid ? 200 : 401) OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        let head = "HTTP/1.1 \(responseStatus) OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         connection.send(content: Data(head.utf8) + body, contentContext: .finalMessage, isComplete: true,
             completion: .contentProcessed { _ in connection.cancel() })
     }

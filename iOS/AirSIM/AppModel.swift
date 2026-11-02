@@ -2939,13 +2939,8 @@ final class AppModel: ObservableObject {
         throw CallKitBridgeError.noReachableTransport
     }
 
-    /// Android snapshots use an iOS-only "android-…" id plus the real Telecom id.
-    /// CallKit must send the Telecom id; sending the snapshot id causes
-    /// "active call id mismatch" and an automatic hangup.
-    private var localAPICallID: String? {
-        guard let call = activeCall else { return nil }
-        return call.androidID?.isEmpty == false ? call.androidID : call.id
-    }
+    /// The local agent validates its published record ID before resolving the Telecom ID.
+    private var localAPICallID: String? { activeCall?.id }
 
     private func hangupUsingAvailableTransport() async throws {
         if ConnectionModePreference.selected() == .cloud {
