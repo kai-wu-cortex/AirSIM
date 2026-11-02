@@ -154,6 +154,8 @@ final class StandaloneAgentStore {
     }
 
     static void validateRegistration(JSONObject value) throws Exception {
+        // The E2E SMS key arrives only in the sealed pairing claim, never in a stored registration.
+        value.remove("e2e_key");
         if (value.optBoolean("local_mode", false)) {
             if (value.optBoolean("cloud_enabled", false)) {
                 throw new IllegalArgumentException("本地模式不能启用云端模式");
