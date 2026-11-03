@@ -21,6 +21,19 @@ final class E2EKeyStore {
         return forRegistration(preferences(context), registration);
     }
 
+    static boolean remove(Context context, String deviceID, String relayURL) {
+        return remove(preferences(context), deviceID, relayURL);
+    }
+
+    /** Re-pairing without a key: the old one would seal SMS this iPhone no longer opens. */
+    static boolean remove(SharedPreferences preferences, String deviceID, String relayURL) {
+        if (deviceID == null || deviceID.trim().isEmpty()) return false;
+        String entry = entry(deviceID, relayURL);
+        if (preferences.getString(entry, null) == null) return false;
+        if (!preferences.edit().remove(entry).commit()) throw new IllegalStateException("E2E key could not be removed");
+        return true;
+    }
+
     static void save(SharedPreferences preferences, String deviceID, String relayURL, byte[] key) {
         if (key == null || key.length != 32 || deviceID == null || deviceID.trim().isEmpty()) {
             throw new IllegalArgumentException("invalid E2E key entry");

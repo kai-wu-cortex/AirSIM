@@ -18,6 +18,7 @@ public final class E2EPairingKeyTests {
         avfStripsAndIgnores();
         invalidKeyRejected();
         keyFollowsRegistration();
+        reparingWithoutKeyClears();
         capabilitiesAdvertiseE2E();
         System.out.println("E2E pairing key tests passed: " + cases + " cases");
     }
@@ -73,6 +74,21 @@ public final class E2EPairingKeyTests {
         equal(null, E2EKeyStore.forRegistration(preferences, null), "no registration");
         values.replaceAll((entry, stored) -> "not+base64");
         equal(null, E2EKeyStore.forRegistration(preferences, registration), "a corrupt entry is ignored");
+        cases++;
+    }
+
+    private static void reparingWithoutKeyClears() throws Exception {
+        Map<String, String> values = new HashMap<>();
+        SharedPreferences preferences = preferences(values);
+        E2EKeyStore.save(preferences, "iphone-air", "https://relay.example", KEY);
+        E2EKeyStore.save(preferences, "iphone-other", "https://relay.example", KEY);
+        equal(true, E2EKeyStore.remove(preferences, " iphone-air ", "https://relay.example/"), "the old key is removed");
+        equal(null, E2EKeyStore.key(preferences, "iphone-air", "https://relay.example"), "no key after re-pairing");
+        if (E2EKeyStore.key(preferences, "iphone-other", "https://relay.example") == null) {
+            throw new AssertionError("another iPhone's key must stay");
+        }
+        equal(false, E2EKeyStore.remove(preferences, "iphone-air", "https://relay.example"), "nothing left to remove");
+        equal(false, E2EKeyStore.remove(preferences, "", "https://relay.example"), "no device id, nothing removed");
         cases++;
     }
 

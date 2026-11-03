@@ -162,10 +162,16 @@ public final class PairingServer implements Closeable {
             JSONObject response = new JSONObject(agentResponse)
                     .put("agent_id", AndroidAgentIdentity.agentID(context));
             VoWLANPairingStore.saveEncoded(context, vowlanSecret);
-            if (e2eKey != null && !registration.optBoolean("local_mode", false)) {
-                E2EKeyStore.save(context, registration.optString("device_id", ""),
-                        registration.optString("relay_url", ""), e2eKey);
-                BridgeLog.info("e2e_sms_key_saved");
+            if (!registration.optBoolean("local_mode", false)) {
+                String deviceID = registration.optString("device_id", "");
+                String relayURL = registration.optString("relay_url", "");
+                if (e2eKey != null) {
+                    E2EKeyStore.save(context, deviceID, relayURL, e2eKey);
+                    BridgeLog.info("e2e_sms_key_saved");
+                } else if (E2EKeyStore.remove(context, deviceID, relayURL)) {
+                    // Each pairing replaces the key; a pairing without one turns encryption off.
+                    BridgeLog.info("e2e_sms_key_cleared");
+                }
             }
             BridgeLog.info("vowlan_pairing_client_saved clients="
                     + VoWLANPairingStore.records(context).size());
