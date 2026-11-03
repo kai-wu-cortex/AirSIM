@@ -275,14 +275,16 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         }
         if response.notification.request.content.userInfo["event"] as? String == "incoming_sms" {
             let userInfo = response.notification.request.content.userInfo
-            if let pushed = try? IncomingRemoteSMS(userInfo: userInfo) {
+            let pushed = try? IncomingRemoteSMS(userInfo: userInfo)
+            if let pushed {
                 SMSNotificationCoordinator.shared.markPush(agentID: pushed.agentID,
                                                             deliveryID: pushed.deliveryID)
+                if persistRemoteSMS(pushed) {
+                    NotificationCenter.default.post(name: .airsimRemoteSMSReceived, object: nil)
+                }
             }
-            if let pushed = try? IncomingRemoteSMS(userInfo: userInfo), persistRemoteSMS(pushed) {
-                NotificationCenter.default.post(name: .airsimRemoteSMSReceived, object: nil)
-            }
-            let sender = userInfo["sender"] as? String
+            // Encrypted pushes carry no plaintext sender; the decrypted one opens the conversation.
+            let sender = pushed?.sender ?? userInfo["sender"] as? String
             if let sender { IncomingSMSPresentationRequest.markPending(sender: sender) }
             NotificationCenter.default.post(
                 name: .airsimOpenSMSConversation,

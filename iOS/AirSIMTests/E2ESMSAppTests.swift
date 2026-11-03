@@ -66,6 +66,74 @@ final class E2ESMSAppTests: XCTestCase {
         XCTAssertEqual(E2EPairingKeyChange.remove.successSuffix(agentID: "android-A", store: stored), "")
     }
 
+    // MARK: - SMS pushes in the app
+
+    func testPushDecryptsVector() throws {
+        let pushed = try IncomingRemoteSMS(userInfo: E2ESMSFixture.push(), keyStore: E2ESMSFixture.store())
+        XCTAssertEqual(pushed.message.sender, "95588")
+        XCTAssertEqual(pushed.message.content, "【银行】验证码 123456")
+        XCTAssertEqual(pushed.message.sourceAgentID, "android-A")
+        XCTAssertEqual(pushed.message.deliveryID, E2ESMSFixture.delivery)
+        XCTAssertNil(pushed.message.code)
+        XCTAssertFalse(pushed.contentTruncated)
+        // The push's 2026-11-03T08:00:00Z (the Relay's arrival rule), not the sealed carrier time.
+        XCTAssertEqual(pushed.message.timestamp, Date(timeIntervalSince1970: 1_793_692_800))
+    }
+
+    func testPlaintextFromKeyedAgentRejected() {
+        XCTAssertThrowsError(try IncomingRemoteSMS(userInfo: E2ESMSFixture.plaintextPush(agentID: "android-A"),
+                                                   keyStore: E2ESMSFixture.store())) {
+            XCTAssertEqual($0 as? RemoteSMSPushError, .unencryptedFromEncryptedAgent)
+        }
+    }
+
+    func testPlaintextWithoutKeyUnchanged() throws {
+        let pushed = try IncomingRemoteSMS(userInfo: E2ESMSFixture.plaintextPush(agentID: "android-B"),
+                                           keyStore: E2ESMSFixture.store())
+        XCTAssertEqual(pushed.sender, "95588")
+        XCTAssertEqual(pushed.content, "【银行】验证码 123456")
+        XCTAssertEqual(pushed.agentID, "android-B")
+        XCTAssertEqual(pushed.deliveryID, "android-sms-plain")
+        XCTAssertFalse(pushed.contentTruncated)
+    }
+
+    func testUndecryptablePushRejected() throws {
+        XCTAssertThrowsError(try IncomingRemoteSMS(userInfo: E2ESMSFixture.push(), keyStore: MemoryE2EKeyStore())) {
+            XCTAssertEqual($0 as? RemoteSMSPushError, .undecryptable)
+        }
+    }
+
+    func testLockedPushRejected() throws {
+        let locked = MemoryE2EKeyStore(failure: .locked)
+        XCTAssertThrowsError(try IncomingRemoteSMS(userInfo: E2ESMSFixture.push(), keyStore: locked)) {
+            XCTAssertEqual($0 as? RemoteSMSPushError, .locked)
+        }
+        // Before the first unlock it is unknown whether the agent has a key, so plaintext is not stored either.
+        XCTAssertThrowsError(try IncomingRemoteSMS(userInfo: E2ESMSFixture.plaintextPush(agentID: "android-A"),
+                                                   keyStore: locked)) {
+            XCTAssertEqual($0 as? RemoteSMSPushError, .locked)
+        }
+    }
+
+    func testTruncatedFlagFromPlaintext() throws {
+        let push = try E2ESMSFixture.sealedPush(#"{"sender":"95588","content":"很长的短信…","timestamp":"2026-11-03T08:00:00Z","truncated":true}"#)
+        let pushed = try IncomingRemoteSMS(userInfo: push, keyStore: E2ESMSFixture.store())
+        XCTAssertTrue(pushed.contentTruncated)
+        XCTAssertEqual(pushed.content, "很长的短信…")
+    }
+
+    func testEmptyDecryptedContentIncomplete() throws {
+        let push = try E2ESMSFixture.sealedPush(#"{"sender":"95588","content":" ","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
+        XCTAssertThrowsError(try IncomingRemoteSMS(userInfo: push, keyStore: E2ESMSFixture.store())) {
+            XCTAssertEqual($0 as? RemoteSMSPushError, .incomplete)
+        }
+    }
+
+    func testDecryptedEmptySenderIsUnknown() throws {
+        let push = try E2ESMSFixture.sealedPush(#"{"sender":"","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
+        XCTAssertEqual(try IncomingRemoteSMS(userInfo: push, keyStore: E2ESMSFixture.store()).sender, "未知号码")
+    }
+
     func testRegistrationNeverEncodesE2EKey() throws {
         // The same registration is later sent unsealed to /api/push/register and the Relay.
         let cloud = AgentPushRegistration(cloudModeEnabled: true, deviceID: "iphone-air", deviceSecret: "device-secret",

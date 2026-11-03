@@ -2,30 +2,29 @@ import CryptoKit
 import XCTest
 @testable import AirSIM
 
-/// End-to-end encrypted SMS (issue #24). The vectors were computed independently with Node's
-/// `crypto` and are pinned in the Android tests too, so both ends agree byte for byte.
+/// End-to-end encrypted SMS (issue #24): crypto, key store and push classification, i.e. the
+/// sources the Notification Service Extension compiles too. App-side behavior is in E2ESMSAppTests.
 final class E2ESMSTests: XCTestCase {
-    private let vectorKey = SymmetricKey(data: Data(0..<32))
-    private let vectorCT = "G1bqIzAQqg49db6t2KX7AlFUmc4-J3ZRnP7zb16Y_jFW4Cr0qQSX_TCq8X4GU6j4XMzwmOCjBcJ5K1JRWBhrTEZXOH73vi8utyUL4PvZeT18QcVa6VhqzCsLIG94qPMrIVx_7zyWui8P6JZ2uWzOwJznSOxpekWaZ8mRet4v9oo"
-    private let vectorDelivery = "android-sms-ff317720dfc84a7be3125b7af8e2f3f5a0351aba73f515b48d111eb126fc0394"
-    private let vectorPlaintext = E2ESMS.Plaintext(sender: "95588", content: "【银行】验证码 123456",
-                                                   timestamp: "2024-10-27T03:33:20Z", truncated: false)
+    private let failureCopy = E2ESMSPush.Notification(
+        title: "AirSIM", body: "收到一条加密短信，但无法解密，请在同一 Wi-Fi 下重新配对", threadIdentifier: nil)
 
     func testSubkeyAndKidMatchNode() {
-        let smsIn = E2ESMS.subkey(vectorKey, purpose: "sms-in").withUnsafeBytes { Data($0) }
-        XCTAssertEqual(hex(smsIn), "51df33def69dff3879fd25f082b96f4c53edbf4bf66ca06d9c29da22d0bddd59")
-        XCTAssertEqual(E2ESMS.kid(of: vectorKey), "3946e215")
+        let smsIn = E2ESMS.subkey(E2ESMSFixture.key, purpose: "sms-in").withUnsafeBytes { Data($0) }
+        XCTAssertEqual(smsIn.map { String(format: "%02x", $0) }.joined(),
+                       "51df33def69dff3879fd25f082b96f4c53edbf4bf66ca06d9c29da22d0bddd59")
+        XCTAssertEqual(E2ESMS.kid(of: E2ESMSFixture.key), "3946e215")
     }
 
     func testOpensNodeVector() throws {
-        XCTAssertEqual(try open(vectorEnvelope()), vectorPlaintext)
+        XCTAssertEqual(try open(vectorEnvelope()), E2ESMSFixture.plaintext)
     }
 
     func testAADBindsDeviceAgentAndDelivery() throws {
         let envelope = try vectorEnvelope()
-        let others = [("iphone-b", "android-A", vectorDelivery),
-                      ("iphone-air", "android-B", vectorDelivery),
-                      ("iphone-air", "android-A", vectorDelivery + "0")]
+        let delivery = E2ESMSFixture.delivery
+        let others = [("iphone-b", "android-A", delivery),
+                      ("iphone-air", "android-B", delivery),
+                      ("iphone-air", "android-A", delivery + "0")]
         for (device, agent, delivery) in others {
             XCTAssertThrowsError(try open(envelope, deviceID: device, agentID: agent, deliveryID: delivery)) {
                 XCTAssertEqual($0 as? E2ESMS.Failure, .undecryptable)
@@ -34,53 +33,52 @@ final class E2ESMSTests: XCTestCase {
     }
 
     func testKidMismatch() throws {
-        let otherKid = try XCTUnwrap(E2ESMS.Envelope(json(envelopeJSON(kid: "00000000"))))
+        let otherKid = try envelope(E2ESMSFixture.envelopeJSON(kid: "00000000"))
         XCTAssertThrowsError(try open(otherKid)) { XCTAssertEqual($0 as? E2ESMS.Failure, .keyMismatch) }
         // After a re-pair on one side only, the iPhone's key no longer matches the envelope's kid.
         XCTAssertThrowsError(try E2ESMS.open(vectorEnvelope(), key: SymmetricKey(data: Data(1...32)),
                                              deviceID: "iphone-air", agentID: "android-A",
-                                             deliveryID: vectorDelivery)) {
+                                             deliveryID: E2ESMSFixture.delivery)) {
             XCTAssertEqual($0 as? E2ESMS.Failure, .keyMismatch)
         }
     }
 
     func testFlippedCiphertextUndecryptable() throws {
         // "G" → "H" flips one bit of the first ciphertext byte; the encoding stays canonical.
-        let flipped = try XCTUnwrap(E2ESMS.Envelope(json(envelopeJSON(ct: "H" + String(vectorCT.dropFirst())))))
+        let flipped = try envelope(E2ESMSFixture.envelopeJSON(ct: "H" + String(E2ESMSFixture.ct.dropFirst())))
         XCTAssertThrowsError(try open(flipped)) { XCTAssertEqual($0 as? E2ESMS.Failure, .undecryptable) }
     }
 
     func testShortenedCiphertextUndecryptable() throws {
         // Four characters are exactly three bytes, so the shorter text is still canonical.
-        let shortened = try XCTUnwrap(E2ESMS.Envelope(json(envelopeJSON(ct: String(vectorCT.dropFirst(4))))))
+        let shortened = try envelope(E2ESMSFixture.envelopeJSON(ct: String(E2ESMSFixture.ct.dropFirst(4))))
         XCTAssertThrowsError(try open(shortened)) { XCTAssertEqual($0 as? E2ESMS.Failure, .undecryptable) }
     }
 
     func testNonJSONPlaintextUndecryptable() throws {
-        let sealed = try sealedEnvelopeJSON("not json", key: vectorKey, deviceID: "iphone-air",
-                                            agentID: "android-A", deliveryID: vectorDelivery)
-        let envelope = try XCTUnwrap(E2ESMS.Envelope(json(sealed)))
-        XCTAssertThrowsError(try open(envelope)) { XCTAssertEqual($0 as? E2ESMS.Failure, .undecryptable) }
+        let sealed = try envelope(E2ESMSFixture.sealedEnvelopeJSON("not json", deliveryID: E2ESMSFixture.delivery))
+        XCTAssertThrowsError(try open(sealed)) { XCTAssertEqual($0 as? E2ESMS.Failure, .undecryptable) }
     }
 
     func testMalformedEnvelopeRejected() throws {
         let rejected = [
             "null", #""x""#, "{}",
-            envelopeJSON(v: "true"), envelopeJSON(v: "2"), envelopeJSON(v: #""1""#),
-            envelopeJSON(kid: "3946E215"), envelopeJSON(kid: "3946e21"),
-            envelopeJSON(n: "oKGio6Slpqeoqaq"), envelopeJSON(n: "oKGio6Slpqeoqaqrs"), envelopeJSON(n: "oKGio6Sl+qeoqaqr"),
-            envelopeJSON(ct: String(repeating: "A", count: 22)),
+            E2ESMSFixture.envelopeJSON(v: "true"), E2ESMSFixture.envelopeJSON(v: "2"), E2ESMSFixture.envelopeJSON(v: #""1""#),
+            E2ESMSFixture.envelopeJSON(kid: "3946E215"), E2ESMSFixture.envelopeJSON(kid: "3946e21"),
+            E2ESMSFixture.envelopeJSON(n: "oKGio6Slpqeoqaq"), E2ESMSFixture.envelopeJSON(n: "oKGio6Slpqeoqaqrs"),
+            E2ESMSFixture.envelopeJSON(n: "oKGio6Sl+qeoqaqr"),
+            E2ESMSFixture.envelopeJSON(ct: String(repeating: "A", count: 22)),
             // 4n+1 characters cannot encode whole bytes.
-            envelopeJSON(ct: String(repeating: "A", count: 25)),
+            E2ESMSFixture.envelopeJSON(ct: String(repeating: "A", count: 25)),
             // "B" leaves a nonzero unused bit, so this is not the canonical encoding of its bytes.
-            envelopeJSON(ct: String(repeating: "A", count: 22) + "B"),
-            envelopeJSON(ct: String(repeating: "A", count: 8193)),
+            E2ESMSFixture.envelopeJSON(ct: String(repeating: "A", count: 22) + "B"),
+            E2ESMSFixture.envelopeJSON(ct: String(repeating: "A", count: 8193)),
         ]
         for text in rejected {
-            XCTAssertNil(E2ESMS.Envelope(try json(text)), String(text.prefix(80)))
+            XCTAssertNil(E2ESMS.Envelope(try E2ESMSFixture.json(text)), String(text.prefix(80)))
         }
-        XCTAssertNotNil(E2ESMS.Envelope(try json(envelopeJSON(ct: String(repeating: "A", count: 23)))))
-        XCTAssertNotNil(E2ESMS.Envelope(try json(envelopeJSON(ct: String(repeating: "A", count: 8192)))))
+        XCTAssertNotNil(E2ESMS.Envelope(try E2ESMSFixture.json(E2ESMSFixture.envelopeJSON(ct: String(repeating: "A", count: 23)))))
+        XCTAssertNotNil(E2ESMS.Envelope(try E2ESMSFixture.json(E2ESMSFixture.envelopeJSON(ct: String(repeating: "A", count: 8192)))))
     }
 
     func testNewKeyIs32BytesAndBase64URLRoundTrips() {
@@ -98,12 +96,9 @@ final class E2ESMSTests: XCTestCase {
 
     // MARK: - Push classification and notification text
 
-    private let failureCopy = E2ESMSPush.Notification(
-        title: "AirSIM", body: "收到一条加密短信，但无法解密，请在同一 Wi-Fi 下重新配对", threadIdentifier: nil)
-
     func testOpenDecryptsVectorPush() throws {
-        let outcome = E2ESMSPush.open(try vectorPush(), store: vectorStore())
-        XCTAssertEqual(outcome, .decrypted(vectorPlaintext))
+        let outcome = E2ESMSPush.open(try E2ESMSFixture.push(), store: E2ESMSFixture.store())
+        XCTAssertEqual(outcome, .decrypted(E2ESMSFixture.plaintext))
         XCTAssertEqual(E2ESMSPush.notification(for: outcome),
                        E2ESMSPush.Notification(title: "95588", body: "【银行】验证码 123456",
                                                threadIdentifier: "airsim-sms-95588"))
@@ -111,8 +106,8 @@ final class E2ESMSTests: XCTestCase {
 
     func testEmptySenderShowsUnknown() throws {
         for sender in ["", "  "] {
-            let push = try sealedPush(#"{"sender":"\#(sender)","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
-            XCTAssertEqual(E2ESMSPush.notification(for: E2ESMSPush.open(push, store: vectorStore())),
+            let push = try E2ESMSFixture.sealedPush(#"{"sender":"\#(sender)","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
+            XCTAssertEqual(E2ESMSPush.notification(for: E2ESMSPush.open(push, store: E2ESMSFixture.store())),
                            E2ESMSPush.Notification(title: "未知号码", body: "正文", threadIdentifier: "airsim-sms-未知号码"))
         }
     }
@@ -122,8 +117,8 @@ final class E2ESMSTests: XCTestCase {
         let cases = [(String(repeating: "9", count: 60), "airsim-sms-" + String(repeating: "9", count: 53)),
                      (String(repeating: "中", count: 60), "airsim-sms-" + String(repeating: "中", count: 53))]
         for (sender, thread) in cases {
-            let push = try sealedPush(#"{"sender":"\#(sender)","content":"x","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
-            let notification = E2ESMSPush.notification(for: E2ESMSPush.open(push, store: vectorStore()))
+            let push = try E2ESMSFixture.sealedPush(#"{"sender":"\#(sender)","content":"x","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
+            let notification = E2ESMSPush.notification(for: E2ESMSPush.open(push, store: E2ESMSFixture.store()))
             XCTAssertEqual(notification?.threadIdentifier, thread)
             XCTAssertEqual(notification?.title, sender)
         }
@@ -131,31 +126,31 @@ final class E2ESMSTests: XCTestCase {
 
     func testLockedStoreOutcomes() throws {
         let locked = MemoryE2EKeyStore(failure: .locked)
-        let encrypted = E2ESMSPush.open(try vectorPush(), store: locked)
+        let encrypted = E2ESMSPush.open(try E2ESMSFixture.push(), store: locked)
         XCTAssertEqual(encrypted, .locked(encrypted: true))
         XCTAssertEqual(E2ESMSPush.notification(for: encrypted),
                        E2ESMSPush.Notification(title: "AirSIM", body: "解锁 iPhone 后，在 AirSIM 中查看这条短信",
                                                threadIdentifier: nil))
-        let plaintext = E2ESMSPush.open(plaintextPush(agentID: "android-A"), store: locked)
+        let plaintext = E2ESMSPush.open(E2ESMSFixture.plaintextPush(agentID: "android-A"), store: locked)
         XCTAssertEqual(plaintext, .locked(encrypted: false))
         XCTAssertNil(E2ESMSPush.notification(for: plaintext))
     }
 
     func testUndecryptableOutcomes() throws {
-        var malformed = try vectorPush()
+        var malformed = try E2ESMSFixture.push()
         malformed["e2e"] = ["v": 1]
-        var noAgent = try vectorPush()
+        var noAgent = try E2ESMSFixture.push()
         noAgent["agent_id"] = nil
-        var noDelivery = try vectorPush()
+        var noDelivery = try E2ESMSFixture.push()
         noDelivery["delivery_id"] = ""
         let otherDevice = MemoryE2EKeyStore(["android-A": E2EKeyRecord(key: Data(0..<32), deviceID: "iphone-other")])
         let cases: [(String, [AnyHashable: Any], MemoryE2EKeyStore)] = [
-            ("no record", try vectorPush(), MemoryE2EKeyStore()),
-            ("other device_id", try vectorPush(), otherDevice),
-            ("malformed envelope", malformed, vectorStore()),
-            ("missing agent_id", noAgent, vectorStore()),
-            ("empty delivery_id", noDelivery, vectorStore()),
-            ("keychain unavailable", try vectorPush(), MemoryE2EKeyStore(failure: .unavailable)),
+            ("no record", try E2ESMSFixture.push(), MemoryE2EKeyStore()),
+            ("other device_id", try E2ESMSFixture.push(), otherDevice),
+            ("malformed envelope", malformed, E2ESMSFixture.store()),
+            ("missing agent_id", noAgent, E2ESMSFixture.store()),
+            ("empty delivery_id", noDelivery, E2ESMSFixture.store()),
+            ("keychain unavailable", try E2ESMSFixture.push(), MemoryE2EKeyStore(failure: .unavailable)),
         ]
         for (name, push, store) in cases {
             let outcome = E2ESMSPush.open(push, store: store)
@@ -165,7 +160,7 @@ final class E2ESMSTests: XCTestCase {
     }
 
     func testPlaintextFromKeyedAgentIsForged() {
-        let outcome = E2ESMSPush.open(plaintextPush(agentID: "android-A"), store: vectorStore())
+        let outcome = E2ESMSPush.open(E2ESMSFixture.plaintextPush(agentID: "android-A"), store: E2ESMSFixture.store())
         XCTAssertEqual(outcome, .unencryptedFromEncryptedAgent)
         XCTAssertEqual(E2ESMSPush.notification(for: outcome),
                        E2ESMSPush.Notification(title: "AirSIM", body: "收到一条未加密的短信推送，已忽略",
@@ -174,21 +169,23 @@ final class E2ESMSTests: XCTestCase {
 
     func testUnavailableKeychainKeepsPlaintextPath() {
         // Builds without the shared group never sent a key, so their plaintext stays as today.
-        let outcome = E2ESMSPush.open(plaintextPush(agentID: "android-A"), store: MemoryE2EKeyStore(failure: .unavailable))
+        let outcome = E2ESMSPush.open(E2ESMSFixture.plaintextPush(agentID: "android-A"),
+                                      store: MemoryE2EKeyStore(failure: .unavailable))
         XCTAssertEqual(outcome, .plaintext)
         XCTAssertNil(E2ESMSPush.notification(for: outcome))
     }
 
     func testPlaintextWithoutAgentOrKeyIsLegacy() {
-        XCTAssertEqual(E2ESMSPush.open(plaintextPush(agentID: nil), store: vectorStore()), .plaintext)
-        XCTAssertEqual(E2ESMSPush.open(plaintextPush(agentID: "android-B"), store: vectorStore()), .plaintext)
+        XCTAssertEqual(E2ESMSPush.open(E2ESMSFixture.plaintextPush(agentID: nil), store: E2ESMSFixture.store()), .plaintext)
+        XCTAssertEqual(E2ESMSPush.open(E2ESMSFixture.plaintextPush(agentID: "android-B"), store: E2ESMSFixture.store()),
+                       .plaintext)
     }
 
     func testOtherEventsIgnored() throws {
-        var call = try vectorPush()
+        var call = try E2ESMSFixture.push()
         call["event"] = "incoming_call"
-        XCTAssertEqual(E2ESMSPush.open(call, store: vectorStore()), .notSMS)
-        XCTAssertEqual(E2ESMSPush.open([:], store: vectorStore()), .notSMS)
+        XCTAssertEqual(E2ESMSPush.open(call, store: E2ESMSFixture.store()), .notSMS)
+        XCTAssertEqual(E2ESMSPush.open([:], store: E2ESMSFixture.store()), .notSMS)
         XCTAssertNil(E2ESMSPush.notification(for: .notSMS))
     }
 
@@ -219,35 +216,61 @@ final class E2ESMSTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func vectorEnvelope() throws -> E2ESMS.Envelope {
-        try XCTUnwrap(E2ESMS.Envelope(json(envelopeJSON())))
+    private func envelope(_ text: String) throws -> E2ESMS.Envelope {
+        try XCTUnwrap(E2ESMS.Envelope(E2ESMSFixture.json(text)))
     }
 
-    private func vectorStore() -> MemoryE2EKeyStore {
+    private func vectorEnvelope() throws -> E2ESMS.Envelope {
+        try envelope(E2ESMSFixture.envelopeJSON())
+    }
+
+    private func open(_ envelope: E2ESMS.Envelope, deviceID: String = "iphone-air",
+                      agentID: String = "android-A", deliveryID: String? = nil) throws -> E2ESMS.Plaintext {
+        try E2ESMS.open(envelope, key: E2ESMSFixture.key, deviceID: deviceID, agentID: agentID,
+                        deliveryID: deliveryID ?? E2ESMSFixture.delivery)
+    }
+}
+
+/// The issue #24 Node vector and Relay-shaped pushes (13f0c41 `push-relay-worker/src/index.mjs`),
+/// shared by the E2E SMS test classes.
+enum E2ESMSFixture {
+    static let key = SymmetricKey(data: Data(0..<32))
+    static let ct = "G1bqIzAQqg49db6t2KX7AlFUmc4-J3ZRnP7zb16Y_jFW4Cr0qQSX_TCq8X4GU6j4XMzwmOCjBcJ5K1JRWBhrTEZXOH73vi8utyUL4PvZeT18QcVa6VhqzCsLIG94qPMrIVx_7zyWui8P6JZ2uWzOwJznSOxpekWaZ8mRet4v9oo"
+    static let delivery = "android-sms-ff317720dfc84a7be3125b7af8e2f3f5a0351aba73f515b48d111eb126fc0394"
+    static let plaintext = E2ESMS.Plaintext(sender: "95588", content: "【银行】验证码 123456",
+                                            timestamp: "2024-10-27T03:33:20Z", truncated: false)
+
+    /// A store holding the vector key for android-A, bound to iphone-air.
+    static func store() -> MemoryE2EKeyStore {
         MemoryE2EKeyStore(["android-A": E2EKeyRecord(key: Data(0..<32), deviceID: "iphone-air")])
     }
 
-    /// The Relay's encrypted SMS push (13f0c41 `encryptedSMSPayload`) carrying the Node vector.
-    private func vectorPush() throws -> [AnyHashable: Any] {
+    /// Raw JSON text of an envelope; `v` is inserted as JSON, the other fields as string contents.
+    static func envelopeJSON(v: String = "1", kid: String = "3946e215", n: String = "oKGio6Slpqeoqaqr",
+                             ct: String? = nil) -> String {
+        #"{"v":\#(v),"kid":"\#(kid)","n":"\#(n)","ct":"\#(ct ?? Self.ct)"}"#
+    }
+
+    /// The Relay's encrypted SMS push (`encryptedSMSPayload`) carrying the Node vector.
+    static func push() throws -> [AnyHashable: Any] {
         [
             "aps": ["alert": ["title": "AirSIM", "body": "新短信"], "sound": "default",
                     "thread-id": "airsim-sms-agent-android-A", "content-available": 1, "mutable-content": 1],
-            "event": "incoming_sms", "delivery_id": vectorDelivery, "agent_id": "android-A",
+            "event": "incoming_sms", "delivery_id": delivery, "agent_id": "android-A",
             "timestamp": "2026-11-03T08:00:00Z", "e2e": try json(envelopeJSON()),
         ]
     }
 
     /// An encrypted push for `plaintextJSON`, sealed with the vector key for iphone-air / android-A.
-    private func sealedPush(_ plaintextJSON: String) throws -> [AnyHashable: Any] {
-        var push = try vectorPush()
-        push["delivery_id"] = "android-sms-test"
-        push["e2e"] = try json(sealedEnvelopeJSON(plaintextJSON, key: vectorKey, deviceID: "iphone-air",
-                                                  agentID: "android-A", deliveryID: "android-sms-test"))
-        return push
+    static func sealedPush(_ plaintextJSON: String) throws -> [AnyHashable: Any] {
+        var sealed = try Self.push()
+        sealed["delivery_id"] = "android-sms-test"
+        sealed["e2e"] = try json(sealedEnvelopeJSON(plaintextJSON, deliveryID: "android-sms-test"))
+        return sealed
     }
 
     /// The Relay's plaintext SMS push; `agentID` nil leaves the field out like old agents.
-    private func plaintextPush(agentID: String?) -> [AnyHashable: Any] {
+    static func plaintextPush(agentID: String?) -> [AnyHashable: Any] {
         var push: [AnyHashable: Any] = [
             "aps": ["alert": ["title": "95588", "body": "【银行】验证码 123456"], "sound": "default",
                     "thread-id": "airsim-sms-95588", "content-available": 1],
@@ -259,22 +282,9 @@ final class E2ESMSTests: XCTestCase {
         return push
     }
 
-    private func open(_ envelope: E2ESMS.Envelope, deviceID: String = "iphone-air",
-                      agentID: String = "android-A", deliveryID: String? = nil) throws -> E2ESMS.Plaintext {
-        try E2ESMS.open(envelope, key: vectorKey, deviceID: deviceID, agentID: agentID,
-                        deliveryID: deliveryID ?? vectorDelivery)
-    }
-
-    /// Raw JSON text of an envelope; `v` is inserted as JSON, the other fields as string contents.
-    private func envelopeJSON(v: String = "1", kid: String = "3946e215", n: String = "oKGio6Slpqeoqaqr",
-                              ct: String? = nil) -> String {
-        #"{"v":\#(v),"kid":"\#(kid)","n":"\#(n)","ct":"\#(ct ?? vectorCT)"}"#
-    }
-
-    /// Seals `plaintext` the way Android does (issue #24), for cases the Node vector does not cover.
-    private func sealedEnvelopeJSON(_ plaintext: String, key: SymmetricKey, deviceID: String, agentID: String,
-                                    deliveryID: String) throws -> String {
-        let aad = Data("AirSIM-E2E/v1|incoming_sms|\(deviceID)|\(agentID)|\(deliveryID)".utf8)
+    /// Seals `plaintext` with the vector key the way Android does, for cases the vector does not cover.
+    static func sealedEnvelopeJSON(_ plaintext: String, deliveryID: String) throws -> String {
+        let aad = Data("AirSIM-E2E/v1|incoming_sms|iphone-air|android-A|\(deliveryID)".utf8)
         let nonce = Data(repeating: 7, count: 12)
         let box = try AES.GCM.seal(Data(plaintext.utf8), using: E2ESMS.subkey(key, purpose: "sms-in"),
                                    nonce: AES.GCM.Nonce(data: nonce), authenticating: aad)
@@ -285,12 +295,8 @@ final class E2ESMSTests: XCTestCase {
         return #"{"v":1,"kid":"\#(E2ESMS.kid(of: key))","n":"\#(url(nonce))","ct":"\#(url(box.ciphertext + box.tag))"}"#
     }
 
-    private func json(_ text: String) throws -> Any {
+    static func json(_ text: String) throws -> Any {
         try JSONSerialization.jsonObject(with: Data(text.utf8), options: .fragmentsAllowed)
-    }
-
-    private func hex(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined()
     }
 }
 

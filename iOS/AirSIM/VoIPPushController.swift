@@ -848,12 +848,19 @@ enum RemoteSMSPushError: LocalizedError {
     case unsupportedEvent
     case incomplete
     case invalidTimestamp
+    case undecryptable
+    case locked
+    /// A plaintext push naming an agent whose SMS arrive encrypted (issue #24).
+    case unencryptedFromEncryptedAgent
 
     var errorDescription: String? {
         switch self {
         case .unsupportedEvent: return "不是有效的新短信推送"
         case .incomplete: return "短信推送缺少必要字段"
         case .invalidTimestamp: return "短信推送时间无效"
+        case .undecryptable: return "加密短信无法解密"
+        case .locked: return "解锁前无法读取短信密钥"
+        case .unencryptedFromEncryptedAgent: return "已忽略未加密的短信推送"
         }
     }
 }
@@ -867,13 +874,22 @@ struct IncomingRemoteSMS: Equatable, Sendable {
     let timestamp: Date
     let contentTruncated: Bool
 
-    init(userInfo: [AnyHashable: Any]) throws {
-        guard userInfo["event"] as? String == "incoming_sms" else {
-            throw RemoteSMSPushError.unsupportedEvent
+    /// End-to-end encrypted pushes (issue #24) are opened with the agent's stored key; a plaintext
+    /// push from an agent that has a key is refused, since only a forger sends one.
+    init(userInfo: [AnyHashable: Any], keyStore: any E2EKeyStoring = KeychainE2EKeyStore.shared) throws {
+        let decrypted: E2ESMS.Plaintext?
+        switch E2ESMSPush.open(userInfo, store: keyStore) {
+        case .notSMS: throw RemoteSMSPushError.unsupportedEvent
+        case .plaintext: decrypted = nil
+        case .decrypted(let sms): decrypted = sms
+        case .locked: throw RemoteSMSPushError.locked
+        case .undecryptable: throw RemoteSMSPushError.undecryptable
+        case .unencryptedFromEncryptedAgent: throw RemoteSMSPushError.unencryptedFromEncryptedAgent
         }
         guard let deliveryID = Self.nonEmpty(userInfo["delivery_id"] as? String),
-              let sender = Self.nonEmpty(userInfo["sender"] as? String),
-              let content = Self.nonEmpty(userInfo["content"] as? String) else {
+              let sender = decrypted.map({ E2ESMSPush.displaySender($0.sender) })
+                ?? Self.nonEmpty(userInfo["sender"] as? String),
+              let content = Self.nonEmpty(decrypted?.content ?? (userInfo["content"] as? String)) else {
             throw RemoteSMSPushError.incomplete
         }
         guard let rawTimestamp = userInfo["timestamp"] as? String,
@@ -884,9 +900,10 @@ struct IncomingRemoteSMS: Equatable, Sendable {
         agentID = Self.nonEmpty(userInfo["agent_id"] as? String)
         self.sender = sender
         self.content = content
-        code = Self.nonEmpty(userInfo["code"] as? String)
+        // Only plaintext pushes carry an extracted code.
+        code = decrypted == nil ? Self.nonEmpty(userInfo["code"] as? String) : nil
         self.timestamp = timestamp
-        contentTruncated = userInfo["content_truncated"] as? Bool ?? false
+        contentTruncated = decrypted?.truncated ?? (userInfo["content_truncated"] as? Bool ?? false)
     }
 
     private static func parseTimestamp(_ value: String) -> Date? {
