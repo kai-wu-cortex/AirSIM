@@ -19,7 +19,7 @@
 见 [issue #24](https://github.com/kai-wu-cortex/AirSIM/issues/24) 第一阶段：Standalone 收到的短信经 Relay 推给 iPhone 时，Relay 和 APNs 只看到密文。需要 Relay（[#25](https://github.com/kai-wu-cortex/AirSIM/pull/25)，已合并，部署后生效）与安卓 Standalone（[#27](https://github.com/kai-wu-cortex/AirSIM/pull/27)）也支持；任何一端是旧版本时照旧明文。
 
 - **何时启用**：云端（非「本地模式配对」）配对时，Relay 的 `/healthz` 声明 `capabilities.e2e_sms: 1`、安卓在 Bonjour TXT（`e2e=1`）或 `/pair/v1/info` 中声明支持、且共享钥匙串组可写，iPhone 才为这次配对生成 32 字节钥匙，只放进六位码加密的配对包（`e2e_key`）。注册信息本身、之后的 `/api/push/register` 和 Relay 注册都不含它。已在用云端的用户需要在同一 Wi-Fi 下重新配对一次；成功提示带「云端短信已加密」。
-- **钥匙保存**：配对回执未经认证，钥匙与 VoWLAN 密钥一起暂存，安卓通过身份验证（手动地址的端口证明或签名健康检查）后才按 agentID 写入钥匙串组 `$(AppIdentifierPrefix)airsim.e2e-sms`，首次解锁后可读，不同步、不随备份迁到其他设备。每次云端配对换新钥匙；不带钥匙的云端配对删除旧钥匙；本地模式配对不改动；删除已配对设备不删除钥匙（下一次云端配对会替换或删除它）。
+- **钥匙保存**：配对回执未经认证，钥匙与 VoWLAN 密钥一起暂存，安卓通过身份验证（手动地址或 HTTPS 域名配对的端口证明，或签名健康检查）后才按 agentID 写入钥匙串组 `$(AppIdentifierPrefix)airsim.e2e-sms`，首次解锁后可读，不同步、不随备份迁到其他设备。每次云端配对换新钥匙；不带钥匙的云端配对删除旧钥匙；本地模式配对不改动；删除已配对设备不删除钥匙（下一次云端配对会替换或删除它）。
 - **通知**：Relay 推送占位文案「AirSIM／新短信」并带 `mutable-content`。`AirSIMNotificationService` 解密后换成真实发件人、正文和会话分组；无法解密时显示「收到一条加密短信，但无法解密，请在同一 Wi-Fi 下重新配对」，重启后首次解锁前显示「解锁 iPhone 后，在 AirSIM 中查看这条短信」。
 - **历史与防伪**：App 收到推送时同样解密后再写历史，截断标记的处理与明文推送的 `content_truncated` 相同。对已有钥匙的安卓，明文短信推送不写历史；推送若经过扩展，通知改为「收到一条未加密的短信推送，已忽略」。
 

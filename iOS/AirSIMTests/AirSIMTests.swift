@@ -609,6 +609,26 @@ final class RemoteDirectTests: XCTestCase {
         XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
     }
 
+    func testPublicPairingCommitsTheNegotiatedSMSKey() async throws {
+        let id = "public-e2e-" + UUID().uuidString
+        defer {
+            PairedAndroidDeviceStore.forget(id)
+            VoWLANPairingRecordStore.remove(agentID: id)
+            VoWLANManualRouteStore.remove(agentID: id)
+        }
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: RemoteTestCredentials(agentID: id, credential: credential),
+            e2eKeys: keys, healthTransport: { _ in throw URLError(.badServerResponse) })
+        let model = AppModel(localDirectory: directory,
+            callKitController: CallKitController(observesSystemCallbacks: false))
+        let endpoint = try VoWLANEndpoint(host: "phone.example.com", controlPort: 443, pcmPort: 17593, usesTLS: true)
+        let record = E2EKeyRecord(key: Data(repeating: 0x2E, count: 32), deviceID: "iphone-public")
+        try await model.completeLocalPairing(agentID: id,
+            registration: .local(vowlanSecret: credential.encodedSecret), endpoint: endpoint, e2e: .save(record))
+        // The claim's route proof authenticated this Android, as on the private-network path.
+        XCTAssertEqual(try keys.record(agentID: id), record)
+    }
+
     func testLegacyRouteDecodingAndRemoteCoexistenceRemoval() throws {
         let suite = "remote-routes-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

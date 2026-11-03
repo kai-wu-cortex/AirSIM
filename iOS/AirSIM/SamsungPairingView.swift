@@ -187,19 +187,21 @@ struct SamsungPairingView: View {
                 try await model.completeLocalPairing(agentID: result.route.agentID,
                     registration: registration, endpoint: result.route.endpoint,
                     clockOffset: result.clockOffset, e2e: e2e)
+                // completeLocalPairing has committed the key change on both paths.
+                let encryption = e2e?.resultSuffix(agentID: result.route.agentID, hadKey: hadKey) ?? ""
                 if address.usesTLS {
                     do {
                         try await model.configureRemoteDirect(agentID: result.route.agentID, route: result.route)
                     } catch is CancellationError { throw CancellationError() }
                     catch {
-                        return "安卓加密配对成功，但公网控制入口尚未通过设备身份验证，域名路由未保存。请检查控制端口转发，然后在‘自建域名直连’重试：\(error.localizedDescription)"
+                        return "安卓加密配对成功\(encryption)，但公网控制入口尚未通过设备身份验证，域名路由未保存。请检查控制端口转发，然后在‘自建域名直连’重试：\(error.localizedDescription)"
                     }
                     if !localPairingOnly { model.setCloudSignalingEnabled(true) }
-                    return "公网域名配对成功，控制入口与设备身份已验证。选择 VoWLAN 或自动模式并选中此设备后可使用；音频端口需在实际通话时验证。"
+                    return "公网域名配对成功\(encryption)，控制入口与设备身份已验证。选择 VoWLAN 或自动模式并选中此设备后可使用；音频端口需在实际通话时验证。"
                 }
                 try await model.vowlan.installManualRoute(result.route)
                 if !localPairingOnly { model.setCloudSignalingEnabled(true) }
-                let paired = "配对成功" + (e2e?.resultSuffix(agentID: result.route.agentID, hadKey: hadKey) ?? "")
+                let paired = "配对成功" + encryption
                 // Tailscale/5G can need a moment before the control port is
                 // reachable after the pairing window closes.
                 for attempt in 0..<3 {
