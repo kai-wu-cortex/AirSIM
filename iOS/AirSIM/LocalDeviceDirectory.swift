@@ -1,6 +1,26 @@
 import Combine
 import Foundation
 
+enum VoWLANAuthenticatedHealth {
+    static func fetch(agentID: String, endpoint: VoWLANEndpoint, credential: VoWLANCredential,
+                      transport: LocalDeviceDirectory.HealthTransport) async throws -> VoWLANHealthIdentity {
+        let signature = try VoWLANRequestSigner(credential: credential).sign(method: "GET", path: "/v1/health", body: Data())
+        var request = URLRequest(url: endpoint.controlBaseURL.appendingPathComponent("v1/health"))
+        // Tailscale/VPN round trips can exceed the old 4s budget even when the
+        // gateway is healthy; the encrypted route proof already bound this peer.
+        request.timeoutInterval = 8
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        VoWLANController.apply(signature, to: &request)
+        let response = try await transport(request)
+        guard response.statusCode == 200,
+              let identity = try? JSONDecoder().decode(VoWLANHealthIdentity.self, from: response.body),
+              identity.ok, identity.agentID == agentID,
+              VoWLANHealthProof.verify(identity.identityProof, nonce: signature.nonce,
+                agentID: agentID, credential: credential) else { throw VoWLANControllerError.authenticationFailed }
+        return identity
+    }
+}
+
 struct LocalDeviceRoutes: Equatable, Sendable {
     let agentID: String
     let vowlan: VoWLANEndpoint?
@@ -30,6 +50,7 @@ final class LocalDeviceDirectory: ObservableObject {
         let epoch: UInt64
         var metadata: VoWLANHealthIdentity
         var verified = true
+        var lastObservation = Date()
         var revision: UInt64 = AgentEventCursor.initial
         var poll: Task<Void, Never>?
         init(endpoint: VoWLANEndpoint, api: AirSIMAPI, credential: VoWLANCredential, epoch: UInt64,
@@ -63,6 +84,7 @@ final class LocalDeviceDirectory: ObservableObject {
         self.e2eKeys = e2eKeys
     }
     var agentIDs: [String] { Array(peers.keys).sorted() }
+    func lastObservation(for agentID: String) -> Date? { peers[agentID]?.lastObservation }
     func transportEpoch(for agentID: String) -> UInt64 { peers[agentID]?.epoch ?? 0 }
     func metadata(for agentID: String) -> VoWLANHealthIdentity? { peers[agentID]?.verified == true ? peers[agentID]?.metadata : nil }
     func routes(for agentID: String) -> LocalDeviceRoutes? {
@@ -121,9 +143,16 @@ final class LocalDeviceDirectory: ObservableObject {
         let mayMigrate = binding == nil || binding == agentID
         let staged = pendingCredentials[agentID]
         let credential = await Task.detached {
-            staged ?? store.load(agentID: agentID) ?? (mayMigrate ? store.legacy() : nil)
+            staged ?? store.load(agentID: agentID) ?? (mayMigrate && !endpoint.usesTLS ? store.legacy() : nil)
         }.value
         guard let credential else { throw VoWLANControllerError.notPaired }
+        // A directory refresh may still hold an old candidate after the user
+        // disabled/replaced its remote route while Keychain loading was in flight.
+        if endpoint.usesTLS {
+            guard VoWLANManualRouteStore.routes().contains(where: {
+                $0.agentID == agentID && $0.isRemote && $0.endpoint == endpoint
+            }) else { throw CancellationError() }
+        }
         try await verifyPairing(agentID: agentID, endpoint: endpoint, credential: credential)
     }
 
@@ -148,7 +177,9 @@ final class LocalDeviceDirectory: ObservableObject {
         let identity: VoWLANHealthIdentity
         do { identity = try await authenticatedHealth(agentID: agentID, endpoint: endpoint, credential: credential) }
         catch {
-            if verification[agentID] == token { peers[agentID]?.verified = false; objectWillChange.send() }
+            if !Task.isCancelled, verification[agentID] == token {
+                peers[agentID]?.verified = false; objectWillChange.send()
+            }
             throw error
         }
         try Task.checkCancellation()
@@ -162,7 +193,13 @@ final class LocalDeviceDirectory: ObservableObject {
         commitStagedE2E(agentID: agentID, credential: credential)
         pendingCredentials.removeValue(forKey: agentID)
         if let old = peers[agentID], old.endpoint == endpoint, old.credential == credential {
+            // The address can stay identical across VPN -> Wi-Fi. A successful
+            // new proof must supersede the old path's long poll as well, or its
+            // delayed failure can mark this freshly verified peer offline.
+            old.poll?.cancel(); old.poll = nil
+            old.revision = AgentEventCursor.initial
             old.metadata = identity; old.verified = true
+            old.lastObservation = Date()
         } else {
             peers[agentID]?.poll?.cancel()
             epoch &+= 1
@@ -174,6 +211,14 @@ final class LocalDeviceDirectory: ObservableObject {
         if let api = api(for: agentID) { onVerified?(api) }
         if enabled { subscribe(agentID: agentID) }
     }
+    func invalidateRemoteRoute(agentID: String) {
+        verification[agentID] = UUID()
+        if peers[agentID]?.endpoint.usesTLS == true {
+            peers.removeValue(forKey: agentID)?.poll?.cancel()
+            objectWillChange.send()
+        }
+    }
+
     func forget(agentID: String) async throws {
         forgotten.insert(agentID)
         verification[agentID] = UUID()
@@ -206,22 +251,26 @@ final class LocalDeviceDirectory: ObservableObject {
         }
     }
 
+    /// Re-authenticate every peer on the recovered network. Keep device/call
+    /// epochs intact: a network route change is not a new Android call session.
+    /// AppModel defers this while a call owns the route.
+    func refreshAfterNetworkRecovery() {
+        guard enabled else { return }
+        for (id, peer) in peers {
+            verification[id] = UUID()
+            peer.poll?.cancel()
+            peer.poll = nil
+            peer.verified = false
+            peer.revision = AgentEventCursor.initial
+            subscribe(agentID: id)
+        }
+        objectWillChange.send()
+    }
+
     private func authenticatedHealth(agentID: String, endpoint: VoWLANEndpoint,
                                      credential: VoWLANCredential) async throws -> VoWLANHealthIdentity {
-        let signature = try VoWLANRequestSigner(credential: credential).sign(method: "GET", path: "/v1/health", body: Data())
-        var request = URLRequest(url: endpoint.controlBaseURL.appendingPathComponent("v1/health"))
-        // Tailscale/VPN round trips can exceed the old 4s budget even when the
-        // gateway is healthy; the encrypted route proof already bound this peer.
-        request.timeoutInterval = 8
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        VoWLANController.apply(signature, to: &request)
-        let response = try await healthTransport(request)
-        guard response.statusCode == 200,
-              let identity = try? JSONDecoder().decode(VoWLANHealthIdentity.self, from: response.body),
-              identity.ok, identity.agentID == agentID,
-              VoWLANHealthProof.verify(identity.identityProof, nonce: signature.nonce,
-                agentID: agentID, credential: credential) else { throw VoWLANControllerError.authenticationFailed }
-        return identity
+        try await VoWLANAuthenticatedHealth.fetch(agentID: agentID, endpoint: endpoint,
+            credential: credential, transport: healthTransport)
     }
 
     private func subscribe(agentID: String) {
@@ -240,6 +289,7 @@ final class LocalDeviceDirectory: ObservableObject {
                             endpoint: peer.endpoint, credential: peer.credential)
                         guard self.peers[agentID] === peer, !Task.isCancelled else { return }
                         peer.metadata = identity; peer.verified = true
+                        peer.lastObservation = Date()
                         peer.revision = AgentEventCursor.initial
                         self.objectWillChange.send()
                         self.onVerified?(peer.api)
@@ -251,17 +301,18 @@ final class LocalDeviceDirectory: ObservableObject {
                     } catch APIError.http(404, _) { legacy = true; continue }
                     guard let self, self.peers[agentID] === peer, !Task.isCancelled else { return }
                     backoff = 2
+                    peer.lastObservation = Date()
                     peer.revision = AgentEventCursor.advanced(from: peer.revision, to: status.revision ?? 0)
-                    let history = (status.history ?? []).filter { $0.endedAt != nil && !acknowledged.contains($0.id) }
-                    let shouldAcknowledge = !history.isEmpty && self.onHistory?(history, agentID) == true
+                    let history = (status.history ?? []).filter { $0.isTerminal && !acknowledged.contains($0.id) }
                     if let call = status.active {
                         self.onCallEvent?(Self.event(agentID: agentID, call: call, epoch: peer.epoch))
                     }
-                    for call in status.history ?? [] where call.endedAt != nil && ended.insert(call.id).inserted {
+                    for call in status.history ?? [] where call.isTerminal && ended.insert(call.id).inserted {
                         self.onCallEvent?(Self.event(agentID: agentID, call: call, epoch: peer.epoch, terminal: true))
                     }
                     if ended.count > 256 { ended.removeAll() }
                     // Current call events must not wait for supplemental ACK I/O.
+                    let shouldAcknowledge = !history.isEmpty && self.onHistory?(history, agentID) == true
                     if shouldAcknowledge {
                         do {
                             try await peer.api.acknowledgeCallHistory(ids: history.map(\.id))

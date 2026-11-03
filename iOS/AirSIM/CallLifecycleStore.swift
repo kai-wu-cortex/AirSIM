@@ -134,7 +134,10 @@ struct CallLifecycleStore: Sendable {
         } else if event.generation < snapshot.generation {
             return false
         } else if event.generation == snapshot.generation, snapshot.generation > 0 {
-            if let timestamp = snapshot.timestamp, event.timestamp < timestamp { return false }
+            // Device clocks may precede the app's optimistic state. An explicit
+            // terminal for THIS identity is final; older nonterminal snapshots are not.
+            if let timestamp = snapshot.timestamp, event.timestamp < timestamp,
+               !(event.state.isTerminal && (event.source == .agent || event.source == .relay)) { return false }
             guard Self.allows(from: snapshot.state, to: event.state) else { return false }
         } else if event.state == .idle {
             return false
@@ -175,5 +178,28 @@ struct CallLifecycleStore: Sendable {
         case .ended, .failed:
             return false
         }
+    }
+}
+
+/// Admission survives a failed/unknown response: the same system action cannot
+/// acquire a new network operation. A new explicit tap gets a new UUID.
+struct OutgoingDialIntentGate {
+    private var claimed = Set<UUID>()
+    private var inFlight: UUID?
+    var isInFlight: Bool { inFlight != nil }
+    mutating func claim(_ id: UUID) -> Bool {
+        guard inFlight == nil, claimed.insert(id).inserted else { return false }
+        inFlight = id
+        return true
+    }
+    mutating func finish(_ id: UUID) { if inFlight == id { inFlight = nil } }
+}
+
+struct OutgoingEndFeedbackPolicy {
+    private var notified = Set<UUID>()
+    mutating func consume(uuid: UUID, previousState: CallLifecycleState,
+                          outgoing: Bool, locallyEnded: Bool, authoritative: Bool) -> Bool {
+        guard outgoing, previousState == .connecting, !locallyEnded, authoritative else { return false }
+        return notified.insert(uuid).inserted
     }
 }

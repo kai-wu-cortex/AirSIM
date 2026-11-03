@@ -748,6 +748,7 @@ struct AgentPushRegistration: Encodable, Equatable, Sendable {
         case watchVoIPToken = "watch_voip_token"
         case watchBundleID = "watch_bundle_id"
         case liveActivityPushToStartToken = "live_activity_push_to_start_token"
+        case liveActivityPresentation = "live_activity_presentation"
         case bundleID = "bundle_id"
         case environment
         case relayURL = "relay_url"
@@ -773,6 +774,9 @@ struct AgentPushRegistration: Encodable, Equatable, Sendable {
         try values.encode(watchVoIPToken, forKey: .watchVoIPToken)
         try values.encode(watchBundleID, forKey: .watchBundleID)
         try values.encode(liveActivityPushToStartToken, forKey: .liveActivityPushToStartToken)
+        // The island is a device-status surface, not a second call UI. Relay
+        // must not start another activity or replace its multi-device snapshot.
+        try values.encode("agent_status", forKey: .liveActivityPresentation)
         try values.encode(bundleID, forKey: .bundleID)
         try values.encode(environment, forKey: .environment)
         try values.encode(relayURL, forKey: .relayURL)
@@ -1485,10 +1489,11 @@ final class VoIPPushController: NSObject {
     func startCloudOutgoingCall(
         number: String,
         target: CloudCommandTarget,
+        operationID: UUID = UUID(),
         mediaTransport: CloudMediaTransport? = nil,
         timeout: TimeInterval = 6
     ) async throws -> IncomingVoIPCall {
-        let commandID = UUID()
+        let commandID = operationID
         guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
             target: target, registration: registration,

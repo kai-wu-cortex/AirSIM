@@ -7,6 +7,7 @@ import WidgetKit
 struct AirSIMLiveActivityBundle: WidgetBundle {
     var body: some Widget {
         AirSIMLiveActivityWidget()
+        AirSIMDeviceWidget()
     }
 }
 

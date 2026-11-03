@@ -49,6 +49,54 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(peer.commands.filter { $0.path == "/api/calls/answer" }.map(\.callID), [publishedID])
     }
 
+    func testSameAddressReverificationRejectsLateVPNPollFailure() async throws {
+        let id = "vpn-reverify-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: aSecret)
+        defer { peer.stop(); PairedAndroidDeviceStore.forget(id); PairedAndroidDeviceStore.allowPairing(id) }
+        let endpoint = try await peer.start()
+        let boundary = DelayedNetworkLossTransport(held: expectation(description: "VPN poll held"))
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: boundary) },
+            healthTransport: AuthenticatedHealthPeer.transport)
+        let credential = try VoWLANCredential(secret: aSecret)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: credential)
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [boundary.held], timeout: 2)
+        let epoch = directory.transportEpoch(for: id)
+        // Same 192.x endpoint, but the proof now travelled over direct Wi-Fi.
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: credential)
+        await boundary.gate.release()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotNil(directory.api(for: id), "The old VPN request must not invalidate the new Wi-Fi proof")
+        XCTAssertEqual(directory.transportEpoch(for: id), epoch)
+        XCTAssertGreaterThan(boundary.requests, 1, "A fresh subscription must replace the old long poll")
+    }
+
+    func testNetworkRecoveryReauthenticatesAndDiscardsOldPollFailure() async throws {
+        let id = "vpn-recovery-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: aSecret)
+        defer { peer.stop(); PairedAndroidDeviceStore.forget(id); PairedAndroidDeviceStore.allowPairing(id) }
+        let endpoint = try await peer.start()
+        let boundary = DelayedNetworkLossTransport(held: expectation(description: "old network poll held"))
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: boundary) },
+            healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [boundary.held], timeout: 2)
+        let epoch = directory.transportEpoch(for: id)
+        let reauthenticated = expectation(description: "fresh authenticated proof after route recovery")
+        directory.onVerified = { _ in reauthenticated.fulfill() }
+        directory.refreshAfterNetworkRecovery()
+        XCTAssertNil(directory.api(for: id), "Old network liveness is not proof of new network reachability")
+        await fulfillment(of: [reauthenticated], timeout: 2)
+        await boundary.gate.release()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotNil(directory.api(for: id))
+        XCTAssertEqual(directory.transportEpoch(for: id), epoch)
+        XCTAssertGreaterThan(boundary.requests, 1)
+    }
+
     func testOfflinePeerCannotDelayAnotherPeersAuthentication() async throws {
         let slowID = "slow-" + UUID().uuidString, fastID = "fast-" + UUID().uuidString
         let fast = try AuthenticatedHealthPeer(agentID: fastID, secret: aSecret)
@@ -899,6 +947,26 @@ private struct RecoveryTransport: AirSIMHTTPTransport {
     func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
         if boundary.failFirstStatus() { throw URLError(.networkConnectionLost) }
         return try await AuthenticatedHealthPeer.transport(request)
+    }
+}
+
+/// Deliberately ignores cancellation, modelling a late completion from the old
+/// interface. The directory must reject it, even if a transport cannot cancel.
+private final class DelayedNetworkLossTransport: AirSIMHTTPTransport, @unchecked Sendable {
+    let gate = ResponseGate()
+    let held: XCTestExpectation
+    private let lock = NSLock()
+    private var count = 0
+    var requests: Int { lock.withLock { count } }
+    init(held: XCTestExpectation) { self.held = held }
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        let first = lock.withLock { count += 1; return count == 1 }
+        if first {
+            held.fulfill()
+            await gate.wait()
+            throw URLError(.networkConnectionLost)
+        }
+        return WiredHTTPResponse(statusCode: 200, body: Data("{\"active\":null,\"history\":[],\"polling\":true,\"poll_interval_s\":2,\"last_poll_error\":\"\",\"revision\":1}".utf8))
     }
 }
 

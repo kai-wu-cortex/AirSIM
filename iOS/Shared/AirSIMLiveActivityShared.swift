@@ -382,6 +382,52 @@ struct HangUpAirSIMCallIntent: LiveActivityIntent {
     }
 }
 
+/// Background intents use the host's existing connection/binding paths. The
+/// extension never changes preferences or establishes a transport on its own.
+@MainActor
+enum AirSIMWidgetControlBridge {
+    static var handler: ((String, String, String) async -> Bool)?
+    /// Installed by the app entry point, without requiring a visible scene.
+    static var bootstrap: (() -> Void)?
+
+    static func perform(action: String, expected: String, target: String) async -> Bool {
+        for _ in 0..<50 {
+            guard !Task.isCancelled else { return false }
+            if handler == nil { bootstrap?() }
+            if let handler { return await handler(action, expected, target) }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+}
+
+@available(iOS 17.0, *)
+struct AirSIMWidgetSwitchIntent: LiveActivityIntent {
+    static var title: LocalizedStringResource = "切换 AirSIM 连接"
+    static var openAppWhenRun = false
+    @available(iOS 26.0, *)
+    static var supportedModes: IntentModes { .background }
+    @Parameter(title: "操作") var action: String
+    @Parameter(title: "当前值") var expected: String
+    @Parameter(title: "目标值") var target: String
+
+    init() { action = ""; expected = ""; target = "" }
+    init(action: String, expected: String, target: String) {
+        self.action = action; self.expected = expected; self.target = target
+    }
+    func perform() async throws -> some IntentResult {
+        guard await AirSIMWidgetControlBridge.perform(action: action, expected: expected, target: target) else {
+            throw AirSIMWidgetSwitchError.unavailable
+        }
+        return .result()
+    }
+}
+
+private enum AirSIMWidgetSwitchError: LocalizedError {
+    case unavailable
+    var errorDescription: String? { "当前不能切换。请结束通话或等待小组件刷新后重试。" }
+}
+
 private enum LiveActivityActionError: LocalizedError {
     case appUnavailable
 

@@ -201,6 +201,10 @@ private struct PureLocalSlideControl: View {
                 }
             }
 
+            // Keep instructions above the glass surface so material blending
+            // and the moving thumb cannot obscure them in either appearance.
+            slideInstruction
+
             GeometryReader { proxy in
                 let knob: CGFloat = 48
                 let inset: CGFloat = 4
@@ -222,8 +226,6 @@ private struct PureLocalSlideControl: View {
                                     )
                                     .glassEffectID("pure-local-track", in: glassNamespace)
 
-                                trackLabel
-
                                 sliderThumb(knob: knob)
                                     .glassEffect(
                                         .regular.tint(tint.opacity(enabled ? 0.72 : 0.58)).interactive(),
@@ -241,7 +243,6 @@ private struct PureLocalSlideControl: View {
                                     Capsule(style: .continuous)
                                         .fill(tint.opacity(0.12 + progress * 0.12))
                                 }
-                            trackLabel
                             sliderThumb(knob: knob)
                                 .background(tint, in: Circle())
                                 .shadow(color: .black.opacity(0.14), radius: 3, y: 1)
@@ -283,11 +284,12 @@ private struct PureLocalSlideControl: View {
         .accessibilityIdentifier("pureLocalModeSlider")
     }
 
-    private var trackLabel: some View {
-        Text(blockedByCall ? "请先结束当前通话" : (enabled ? "向左滑动关闭" : "向右滑动开启"))
+    private var slideInstruction: some View {
+        Text(busy ? "正在切换，请稍候" : blockedByCall ? "请先结束当前通话" : (enabled ? "向左滑动关闭" : "向右滑动开启"))
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity)
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
             .contentTransition(.opacity)
     }
 
@@ -303,6 +305,90 @@ private struct PureLocalSlideControl: View {
                         .foregroundStyle(.white)
                 }
             }
+    }
+}
+
+private struct RemoteDirectSettingsView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var agentID = ""
+    @State private var enabled = false
+    @State private var host = ""
+    @State private var controlPort = "443"
+    @State private var pcmPort = "7593"
+    @State private var message = ""
+    @State private var saving = false
+    @State private var saveTask: Task<Void, Never>?
+
+    var body: some View {
+        Form {
+            Section {
+                RemoteDirectGuideEntry(context: .existingDevice)
+            }
+
+            Section {
+                Picker("已配对设备", selection: $agentID) {
+                    Text("选择安卓手机").tag("")
+                    ForEach(model.pairedDeviceHistory) { device in
+                        Text(device.deviceName).tag(device.id)
+                    }
+                }
+                Toggle("启用自建域名直连", isOn: $enabled)
+                    .disabled(agentID.isEmpty)
+            } footer: {
+                Text("试验性功能，真实公网配对与双向音频仍待真机验收。为已通过私网或公网域名配对的手机配置 NAS 或软路由加密入口。验证后保存，不会自动开启 Relay。")
+            }
+            .disabled(saving)
+            if enabled {
+                Section("远程入口") {
+                    TextField("DDNS 域名，例如 phone.example.com", text: $host)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("HTTPS 控制端口", text: $controlPort).keyboardType(.numberPad)
+                    TextField("TLS 音频端口", text: $pcmPort).keyboardType(.numberPad)
+                }
+                .disabled(saving)
+            }
+            Section {
+                Button(enabled ? "验证并保存" : "保存关闭") {
+                    saving = true
+                    let target = agentID
+                    saveTask = Task { @MainActor in
+                        defer { saving = false }
+                        do {
+                            let route = enabled ? try RemoteDirectConfiguration.route(agentID: target,
+                                host: host, controlPort: controlPort, pcmPort: pcmPort) : nil
+                            try await model.configureRemoteDirect(agentID: target, route: route)
+                            message = route == nil ? "已关闭此设备的自建域名直连。" :
+                                "控制入口与设备身份验证通过，已保存。音频入口需在实际通话时验证。"
+                        } catch is CancellationError {
+                            message = "配置已取消，请重新验证。"
+                        } catch { message = error.localizedDescription }
+                    }
+                }
+                .disabled(agentID.isEmpty || saving || model.vowlan.callInProgress())
+                if saving { ProgressView("正在验证远程设备…") }
+                if !message.isEmpty { Text(message).font(.footnote) }
+            } footer: {
+                Text("选择 VoWLAN 或自动模式后，局域网优先，不可达时尝试自建域名。NAS 需为控制与音频分别提供有效证书的 TLS 转发；只有网页反向代理不足以传输音频。此选项不提供后台来电推送，通话中不能更改。")
+            }
+        }
+        .navigationTitle("自建域名直连（试验性）")
+        .onAppear {
+            if agentID.isEmpty { agentID = model.pairedDeviceHistory.first?.id ?? "" }
+            load()
+        }
+        .onChange(of: agentID) { _ in load() }
+        .onDisappear { saveTask?.cancel() }
+    }
+
+    private func load() {
+        let route = VoWLANManualRouteStore.routes().first { $0.agentID == agentID && $0.isRemote }
+        enabled = route != nil
+        host = route?.host ?? ""
+        controlPort = route.map { String($0.controlPort) } ?? "443"
+        pcmPort = route.map { String($0.pcmPort) } ?? "7593"
+        message = ""
     }
 }
 
@@ -480,6 +566,11 @@ struct AirSIMSettingsView: View {
                         SamsungPairingView()
                     } label: {
                         Label("配对安卓手机", systemImage: "personalhotspot")
+                    }
+                    NavigationLink {
+                        RemoteDirectSettingsView()
+                    } label: {
+                        Label("自建域名直连（试验性）", systemImage: "network.badge.shield.half.filled")
                     }
                     PairedAndroidDeviceRows(devices: model.pairedDeviceHistory, onDelete: { deletingDevice = $0 })
                         .disabled(deviceDeletionInProgress)

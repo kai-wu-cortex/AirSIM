@@ -41,7 +41,8 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
     private var pendingMenuAction: MenuAction?
     private var outsideTap: UITapGestureRecognizer?
     private var initializedPosition = false
-    private var previousSize: CGSize = .zero
+    private var previousCollectionSize: CGSize = .zero
+    private var applyingGeometryChange = false
     private var sizeAnchor: Anchor?
     private var restoringPosition = false
     private struct Anchor {
@@ -68,7 +69,6 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
         collection.backgroundColor = .systemBackground
         collection.alwaysBounceVertical = true
         collection.keyboardDismissMode = .interactive
-        collection.contentInsetAdjustmentBehavior = .never
         collection.allowsSelection = false
         collection.dataSource = self
         collection.delegate = self
@@ -76,10 +76,10 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
         collection.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(collection)
         NSLayoutConstraint.activate([
-            collection.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            collection.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            collection.topAnchor.constraint(equalTo: view.topAnchor),
-            collection.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            collection.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            collection.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            collection.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            collection.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
         ])
         let tap = UITapGestureRecognizer(target: self, action: #selector(tappedElsewhere(_:)))
         tap.cancelsTouchesInView = false
@@ -161,28 +161,44 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        if initializedPosition, view.bounds.size != previousSize, sizeAnchor == nil {
+        guard !applyingGeometryChange else { return }
+        // Capture before constraints resize the collection, including changes
+        // caused by a side bar with no change to the parent view's bounds.
+        if initializedPosition, sizeAnchor == nil {
             sizeAnchor = captureAnchor()
-        }
-        if view.bounds.width != previousSize.width {
-            heights.removeAll(keepingCapacity: true)
-            collection.collectionViewLayout.invalidateLayout()
         }
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        previousSize = view.bounds.size
-        guard view.bounds.width > 0, view.bounds.height > 0 else { return }
+        guard !applyingGeometryChange else { return }
+        let size = collection.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        let changed = size != previousCollectionSize
+        let widthChanged = size.width != previousCollectionSize.width
+        let anchor = sizeAnchor
+        previousCollectionSize = size
+        sizeAnchor = nil
+        guard !initializedPosition || changed else { return }
+
+        applyingGeometryChange = true
+        defer { applyingGeometryChange = false }
+        if widthChanged {
+            heights.removeAll(keepingCapacity: true)
+            collection.collectionViewLayout.invalidateLayout()
+        }
+        collection.layoutIfNeeded()
         if !initializedPosition {
             initializedPosition = true
-            collection.layoutIfNeeded()
             scrollToBottom()
-        } else if let anchor = sizeAnchor {
-            sizeAnchor = nil
-            collection.layoutIfNeeded()
+        } else if let anchor {
             restore(anchor)
         }
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        view.setNeedsLayout()
     }
 
     private func rebuildItems() {

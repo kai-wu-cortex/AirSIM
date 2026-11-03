@@ -17,9 +17,11 @@ public final class AgentClient {
     private final String endpoint;
     private final String token;
     private final StandaloneAgentGateway standalone;
+    private final Context appContext;
 
     public AgentClient(Context context) {
         Context appContext = context.getApplicationContext();
+        this.appContext = appContext;
         endpoint = AppConfig.endpoint(appContext);
         token = AppConfig.token(appContext);
         standalone = RuntimeMode.isStandalone(appContext) ? StandaloneAgentGateway.get(appContext) : null;
@@ -30,6 +32,7 @@ public final class AgentClient {
         this.endpoint = endpoint;
         this.token = token;
         this.standalone = null;
+        this.appContext = null;
     }
 
     public String status() throws Exception {
@@ -62,7 +65,13 @@ public final class AgentClient {
 
     public String nextCommand() throws Exception {
         if (standalone != null) return "";
-        return request("GET", "/api/android/commands/next?wait=25", null, 32_000);
+        org.json.JSONObject battery = appContext == null ? null : AndroidBatteryStatus.snapshot(appContext);
+        ForwardResponse response = requestRaw("GET", "/api/android/commands/next?wait=25", null, 32_000,
+                battery == null ? Map.of() : Map.of("X-AirSIM-Android-Battery", battery.toString()));
+        if (response.status < 200 || response.status >= 300) {
+            throw new IllegalStateException("Agent HTTP " + response.status + ": " + response.payload);
+        }
+        return response.payload;
     }
 
     public void sendEvent(String json) throws Exception {

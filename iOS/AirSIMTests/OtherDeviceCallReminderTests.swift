@@ -7,8 +7,10 @@ import UIKit
 @MainActor
 final class FixtureToneOutput: CallToneOutput {
     private(set) var isPlaying = false
+    private(set) var plays = 0
     private(set) var sessionConfigurations: [Bool] = []
     func play(_ data: Data, looping: Bool, volume: Float, configureSession: Bool) throws {
+        plays += 1
         isPlaying = true; sessionConfigurations.append(configureSession)
     }
     func stop(deactivateSession: Bool) { isPlaying = false }

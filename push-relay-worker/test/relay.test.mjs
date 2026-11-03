@@ -1628,6 +1628,53 @@ test("Agent call-state end returns the current Live Activity to cloud standby", 
   assert.equal(captured[0].payload.aps["content-state"].displayName, "公网中继已连接");
 });
 
+test("status-only clients keep CallKit delivery without starting or overwriting device activities", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", {
+    ...registration, live_activity_presentation: "agent_status",
+  }), env);
+  // An older Android/Agent re-registering tokens must not undo the iOS capability.
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const captured = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    captured.push(options.headers["apns-push-type"]);
+    return new Response("", { status: 200 });
+  };
+  try {
+    const now = Date.now();
+    const call = {
+      device_id: registration.device_id, device_secret: registration.device_secret,
+      call_id: "status-surface-call", call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9",
+    };
+    // No registered update token: the legacy implementation would push-to-start.
+    const incoming = await worker.fetch(post("/v1/events/call", {
+      ...call, event: "incoming_call", number: "10086",
+      issued_at: new Date(now).toISOString(), expires_at: new Date(now + 45000).toISOString(),
+    }), env);
+    assert.equal(incoming.status, 202);
+    assert.equal((await incoming.json()).voip_pushed, true);
+    assert.ok(captured.includes("voip"));
+    assert.ok(!captured.includes("liveactivity"));
+    // Existing status activity: neither ownership nor terminal events may erase
+    // its verified device rows or replace local availability with cloud standby.
+    await worker.fetch(post("/v1/live-activities/register", {
+      device_id: registration.device_id, device_secret: registration.device_secret,
+      activity_id: "status-card", call_id: "", update_token: "f".repeat(64),
+    }), env);
+    const owner = await worker.fetch(post("/v1/events/call-owner", {
+      ...call, event: "call_owner", phase: "active", owner: "iphone",
+    }), env);
+    assert.equal(owner.status, 202);
+    const ended = await worker.fetch(post("/v1/events/call-state", {
+      ...call, event: "call_state", phase: "ended",
+    }), env);
+    assert.equal(ended.status, 202);
+    assert.ok(captured.includes("background"));
+    assert.ok(!captured.includes("liveactivity"));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("call lifecycle reducer rejects stale and terminal resurrection events", () => {
   const base = {
     call_id: "call-state", call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9",
@@ -1700,6 +1747,20 @@ test("relay shortens long SMS until the APNs payload fits 4096 bytes", async () 
     assert.equal(captured.at(-1).payload.content, "余额提醒");
     assert.equal(captured.at(-1).payload.content_truncated, false);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("battery travels through authenticated heartbeat and disappears when the producer omits it", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const sample = { percent: 0, charging: true, observed_at_ms: Date.now() };
+  const base = { event: "agent_heartbeat", device_id: registration.device_id,
+    device_secret: registration.device_secret, agent_id: "battery-phone", at_ok: true, cellular_state: "registered" };
+  assert.equal((await worker.fetch(post("/v1/events/heartbeat", {...base, battery: sample}), env)).status, 202);
+  const status = async () => (await worker.fetch(post("/v1/devices/status", {
+    device_id: registration.device_id, device_secret: registration.device_secret }), env)).json();
+  assert.deepEqual((await status()).agents.find(a => a.agent_id === "battery-phone").battery, sample);
+  assert.equal((await worker.fetch(post("/v1/events/heartbeat", base), env)).status, 202);
+  assert.equal((await status()).agents.find(a => a.agent_id === "battery-phone").battery, undefined);
 });
 
 const ENVELOPE = { v: 1, kid: "3f9c1a7e", n: "AAECAwQFBgcICQoL", ct: "Y2lwaGVydGV4dC1hbmQtdGFnLWZvci10ZXN0cw" };

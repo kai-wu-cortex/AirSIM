@@ -9,6 +9,7 @@ import {
 } from "./dashboard.mjs";
 import { constantTimeEqual, sha256Hex } from "./auth-crypto.mjs";
 import { handleFeedback } from "./feedback.mjs";
+import { batteryStatus } from "./battery-status.mjs";
 import { RoutingError, parseAgentID, agentSocketKey, matchesTarget, resolveTarget, requestAgentID } from "./command-routing.mjs";
 import {
   authenticateAndReadAgentHeartbeats,
@@ -1138,6 +1139,10 @@ async function registerDevice(request, env) {
     watch_voip_token: (device.watch_voip_token || "").toLowerCase(),
     watch_bundle_id: stringValue(device.watch_bundle_id),
     live_activity_push_to_start_token: (device.live_activity_push_to_start_token || "").toLowerCase(),
+    // Older clients omit this capability and retain legacy call activities.
+    // Agent re-registration may omit newer iOS fields, so preserve the opt-in.
+    live_activity_presentation: device.live_activity_presentation === "agent_status"
+      ? "agent_status" : (existing?.live_activity_presentation || "call"),
     bundle_id: device.bundle_id,
     environment: device.environment,
     registered_at: new Date().toISOString(),
@@ -1248,8 +1253,8 @@ async function receiveCall(request, env) {
     env,
     `liveactivity:current:${authenticated.device.device_id}`,
   );
-  const activityToken = currentActivity?.update_token ||
-    authenticated.device.live_activity_push_to_start_token || "";
+  const activityToken = authenticated.device.live_activity_presentation === "agent_status" ? ""
+    : (currentActivity?.update_token || authenticated.device.live_activity_push_to_start_token || "");
   const activityDuplicate = !activityToken || Boolean(await bestEffortReadRelayState(env, activityDedupeKey));
   let activityPushed = false;
 
@@ -1520,8 +1525,10 @@ async function receiveAgentHeartbeat(request, env) {
     return jsonResponse(400, { error: "invalid agent heartbeat" });
   }
   const agentID = stringValue(heartbeat.agent_id) || "legacy";
+  const battery = batteryStatus(heartbeat.battery);
   const record = {
     received_at_ms: Date.now(),
+    ...(battery ? { battery } : {}),
     agent_id: agentID,
     ...(heartbeat.command_routing_version === 1 ? {command_routing_version:1} : {}),
     ...(nonEmpty(heartbeat.agent_kind) ? { agent_kind: heartbeat.agent_kind.trim() } : {}),
@@ -1654,7 +1661,7 @@ async function receiveCallOwner(request, env) {
       env,
       `liveactivity:current:${authenticated.device.device_id}`,
     );
-    if (currentActivity?.update_token) {
+    if (currentActivity?.update_token && authenticated.device.live_activity_presentation !== "agent_status") {
       await sendAPNs(env, authenticated.device, currentActivity.update_token, {
         topic: `${authenticated.device.bundle_id}.push-type.liveactivity`,
         pushType: "liveactivity",
@@ -1724,7 +1731,7 @@ async function receiveCallState(request, env) {
     env,
     `liveactivity:current:${authenticated.device.device_id}`,
   );
-  if (!currentActivity?.update_token) {
+  if (!currentActivity?.update_token || authenticated.device.live_activity_presentation === "agent_status") {
     await writeRelayState(env, dedupeKey, "1", 180);
     return jsonResponse(202, { accepted: true, lifecycle: transition.snapshot, live_activity_unavailable: true });
   }

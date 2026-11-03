@@ -4,6 +4,7 @@ import CryptoKit
 import Foundation
 import UIKit
 import UserNotifications
+import WidgetKit
 
 enum BackgroundStandbySuspensionPolicy {
     static func shouldStopAudio(isAlreadySuspended: Bool) -> Bool {
@@ -363,13 +364,34 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         guard !pushed.contentTruncated else { return false }
         guard !historyStore.visibleMessages([pushed.message]).isEmpty else { return false }
         var messages = historyStore.loadMessages()
-        guard !messages.contains(where: { $0.deliveryID == pushed.deliveryID }) else { return false }
+        guard !messages.contains(where: { $0.id == pushed.message.id }) else { return false }
         messages.append(pushed.message)
         messages.sort { $0.timestamp > $1.timestamp }
         if messages.count > 2_000 {
             messages = Array(messages.prefix(2_000))
         }
-        return historyStore.saveMessages(messages)
+        guard historyStore.saveMessages(messages) else { return false }
+        // A background notification need not create a SwiftUI scene/AppModel.
+        // Refresh counts from durable state without starting any connection.
+        let store = AirSIMWidgetStore()
+        var snapshot = store.load()
+        let stored = historyStore.loadMessages()
+        let unread = historyStore.unreadMessageIDs(in: stored)
+        snapshot.devices = snapshot.devices.map { device in
+            var updated = device
+            updated.unreadMessages = Set(stored.filter {
+                $0.sourceAgentID == device.id && unread.contains($0.id)
+            }.map(\.id)).count
+            return updated
+        }
+        let allowed = Set(snapshot.devices.map(\.id))
+        snapshot.messages = stored.filter { $0.sourceAgentID.map { allowed.contains($0) } ?? false }
+            .sorted { $0.timestamp > $1.timestamp }.prefix(6).map {
+                .init(agentID: $0.sourceAgentID, date: $0.timestamp, incoming: !$0.isOutgoing,
+                      contentPreview: AirSIMWidgetSnapshot.messagePreview($0.content))
+            }
+        if store.save(snapshot) { WidgetCenter.shared.reloadTimelines(ofKind: AirSIMWidgetSnapshot.kind) }
+        return true
     }
 }
 
@@ -411,8 +433,11 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
     }
 
     func callKitStart(number: String) async throws {
+        let intentID = CallKitController.shared.currentSystemCallUUID ?? UUID()
         guard let api = await availableSamsungAPI() else { throw CallKitBridgeError.noReachableTransport }
-        try await api.dial(number: number)
+        guard !Task.isCancelled,
+              CallKitController.shared.currentSystemCallUUID == intentID else { throw CancellationError() }
+        try await api.dial(number: number, operationID: intentID)
     }
     func callKitPrepareAudioSession() throws {
         if CloudModePreference.isEnabled(),

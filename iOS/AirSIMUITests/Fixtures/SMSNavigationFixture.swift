@@ -9,6 +9,15 @@ struct SMSNavigationFixture {
     let updates: AppUpdateController
     let defaults: UserDefaults
 
+    private static let previewStartedAt = Date()
+
+    static var previewCall: CallRecord? {
+        guard let phase = ProcessInfo.processInfo.environment["AIRSIM_UI_CALL"],
+              ["incoming", "active"].contains(phase) else { return nil }
+        return CallRecord(id: "layout-preview", index: 0, direction: "incoming", state: phase,
+            number: "+86 138 0000 0000", startedAt: previewStartedAt, updatedAt: previewStartedAt, endedAt: nil, missed: false)
+    }
+
     static func fromLaunchEnvironment() -> Self? {
         guard ProcessInfo.processInfo.environment["AIRSIM_UI_FIXTURE"] == "sms-navigation" else { return nil }
         var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
