@@ -27,7 +27,7 @@ Tailscale 地址的 HTTP 控制与 PCM 使用系统 VPN 路由，不强制绑定
 ## 协议与安全
 
 - 未发布回归修复：自动发现的加密配对连接可使用 Wi-Fi／热点接口上的 IPv6 链路本地地址；仅当 Socket 两端都是链路本地 IPv6，且安卓确认入站接口为 `wlan*`／`swlan*`／`ap*` 时允许。新增手动 IPv4 来源检查曾把这一旧路径误拒为 `403 private_network_required`。手动地址输入与后续控制／PCM 网关仍为 IPv4，不扩大到 IPv6 公网、ULA、蜂窝或 VPN 接口。iOS 将 403 显示为网络来源被拒，不再提示核对验证码。现有六位码加密、时限及重放保护不变。三星日志已确认网络来源拒绝，但历史日志未记录地址类型，IPv6 原因与两端成功配对仍需覆盖安装后真机确认。
-- 增量 `GET /pair/v1/info` 只在原两分钟窗口开放，返回 `product=airsim-pair`、`version=1`、`session_id`、`server_public_key` 和毫秒 `expires_at`，等同原 Bonjour TXT 的公开会话材料；不返回六位码、设备密钥或云端参数。
+- 增量 `GET /pair/v1/info` 只在原两分钟窗口开放，返回 `product=airsim-pair`、`version=1`、`session_id`、`server_public_key` 和毫秒 `expires_at`，等同原 Bonjour TXT 的公开会话材料；不返回六位码、设备密钥或云端参数。Standalone 另外返回 `capabilities: {"e2e_sms": 1}`（对应 TXT `e2e=1`，见 issue #24 与 `docs/samsung-hotspot-pairing-protocol.md`），AVF 模式不返回。
 - 复用 `POST /pair/v1/claim` 的 X25519、HKDF-SHA256、AES-GCM 加密。手动客户端带 `want_direct_route=true`；新安卓回传同一入站接口的实际 `control_port`、`pcm_port` 和 `route_proof`，不猜默认端口。旧版自动发现客户端可继续忽略新增字段。
 - 端口证明使用本次注册包中的 VoWLAN secret 做 HMAC-SHA256，base64url 无填充；规范串是 `AIRSIM-DIRECT1\nsession_id\nclient_public_key\nagent_id\ncontrol_port\npcm_port`。iOS 验证后才接受路由。
 - 直连网关仅绑定允许的 Wi-Fi／热点、指定 VPN IPv4 和回环地址，不使用公网通配监听。Tailscale userspace 入站 TCP 会被代理到回环（[上游实现](https://github.com/tailscale/tailscale/blob/main/wgengine/netstack/netstack.go)）；回环入口仍需 HMAC、时间戳、nonce 和 PCM 认证，不能以回环来源代替认证。
