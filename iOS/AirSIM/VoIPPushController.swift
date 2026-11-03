@@ -268,10 +268,18 @@ enum RelayHealthValidation {
         let ok: Bool
         let service: String
         let version: String
+        let capabilities: CapabilityFlags?
     }
 
     static func accepts(statusCode: Int, data: Data) -> Bool {
         version(statusCode: statusCode, data: data) != nil
+    }
+
+    /// The Relay forwards end-to-end encrypted SMS (`capabilities.e2e_sms: 1`, issue #24).
+    static func supportsE2ESMS(statusCode: Int, data: Data) -> Bool {
+        guard version(statusCode: statusCode, data: data) != nil,
+              let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return false }
+        return payload.capabilities?.e2eSMS == true
     }
 
     static func version(statusCode: Int, data: Data) -> String? {
@@ -1643,6 +1651,19 @@ final class VoIPPushController: NSObject {
         throw lastError ?? CloudAgentStatusError.invalidResponse
     }
 
+    /// Whether the Relay that a pairing registers with forwards encrypted SMS. `/healthz` needs no
+    /// registration, so this works before the first cloud pairing; any failure means no.
+    func relaySupportsE2ESMS(relayURL: String) async -> Bool {
+        guard let url = RelayEndpoint.url(base: relayURL, path: "healthz") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 6
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await RelayEgressGate.shared.send(request),
+              let http = response as? HTTPURLResponse else { return false }
+        return RelayHealthValidation.supportsE2ESMS(statusCode: http.statusCode, data: data)
+    }
+
     private static let selfTestSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 8
@@ -1727,15 +1748,22 @@ final class VoIPPushController: NSObject {
         )
     }
 
+    /// `offerE2E` tells the pairing client it may put an E2E SMS key into the claim (issue #24).
     func performAndroidPairing<T>(
         localOnly: Bool,
-        operation: (AgentPushRegistration) async throws -> T
+        operation: (AgentPushRegistration, _ offerE2E: Bool) async throws -> T
     ) async throws -> T {
         try await pairingGate.withPairing {
             guard let registration = self.pairingRegistration(localOnly: localOnly) else {
                 throw SamsungPairingClientError.registrationUnavailable
             }
-            return try await operation(registration)
+            var offerE2E = false
+            if !localOnly {
+                let relaySupports = await self.relaySupportsE2ESMS(relayURL: registration.relayURL)
+                offerE2E = E2EPairingPolicy.offer(localOnly: localOnly, relaySupports: relaySupports,
+                                                  keychainReady: relaySupports && KeychainE2EKeyStore.shared.canStore())
+            }
+            return try await operation(registration, offerE2E)
         }
     }
 

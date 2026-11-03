@@ -1176,10 +1176,11 @@ final class AppModel: ObservableObject {
 
     func completeLocalPairing(agentID: String, registration: AgentPushRegistration,
                               endpoint: VoWLANEndpoint? = nil,
-                              clockOffset: TimeInterval = 0) async throws {
+                              clockOffset: TimeInterval = 0,
+                              e2e: E2EPairingKeyChange? = nil) async throws {
         guard let encoded = registration.vowlanSecret else { throw VoWLANAuthError.invalidSecret }
         let credential = try VoWLANCredential(encodedSecret: encoded, clockOffset: clockOffset)
-        localDevices.stagePairing(agentID: agentID, credential: credential)
+        localDevices.stagePairing(agentID: agentID, credential: credential, e2e: e2e)
         if let endpoint {
             // The claim's route proof already authenticated this endpoint and
             // secret. Save it before the optional health probe so a slow

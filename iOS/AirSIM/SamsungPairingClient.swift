@@ -32,6 +32,8 @@ struct SamsungPairingService: Identifiable {
     let sessionID: String
     let serverPublicKey: Data
     let expiresAt: Date
+    /// Standalone accepts an end-to-end encrypted SMS key (TXT `e2e=1`, issue #24).
+    var supportsE2ESMS = false
 
     var id: String { sessionID }
     var displayName: String {
@@ -119,8 +121,12 @@ final class SamsungPairingBrowser: ObservableObject {
     }
 
     private nonisolated static func parse(_ result: NWBrowser.Result) -> SamsungPairingService? {
-        guard case let .bonjour(record) = result.metadata,
-              record["v"] == "1",
+        guard case let .bonjour(record) = result.metadata else { return nil }
+        return service(endpoint: result.endpoint, record: record)
+    }
+
+    nonisolated static func service(endpoint: NWEndpoint, record: NWTXTRecord) -> SamsungPairingService? {
+        guard record["v"] == "1",
               let sessionID = record["session"],
               let keyText = record["key"],
               let serverPublicKey = Data(base64URL: keyText),
@@ -128,10 +134,11 @@ final class SamsungPairingBrowser: ObservableObject {
               let expiresText = record["expires"],
               let expiresMillis = Double(expiresText) else { return nil }
         return SamsungPairingService(
-            endpoint: result.endpoint,
+            endpoint: endpoint,
             sessionID: sessionID,
             serverPublicKey: serverPublicKey,
-            expiresAt: Date(timeIntervalSince1970: expiresMillis / 1_000)
+            expiresAt: Date(timeIntervalSince1970: expiresMillis / 1_000),
+            supportsE2ESMS: record["e2e"] == "1"
         )
     }
 }
@@ -191,6 +198,8 @@ enum SamsungPairingClient {
         let route: VoWLANManualRoute
         /// Server clock minus local clock, captured while the pairing window is open.
         let clockOffset: TimeInterval
+        /// The E2E SMS key sealed into the claim, if both sides negotiated one.
+        let e2eKey: SymmetricKey?
     }
 
     private struct SessionInfo: Decodable {
@@ -200,10 +209,27 @@ enum SamsungPairingClient {
         let serverPublicKey: String
         let expiresAt: Double
         let serverTime: Double?
+        let capabilities: CapabilityFlags?
         enum CodingKeys: String, CodingKey {
             case product, version
             case sessionID = "session_id", serverPublicKey = "server_public_key", expiresAt = "expires_at"
             case serverTime = "server_time"
+            case capabilities
+        }
+    }
+
+    /// The claim's plaintext: the registration exactly as encoded elsewhere, plus `e2e_key`. The key
+    /// never becomes part of the registration, which is also sent unsealed after pairing.
+    private struct SealedRegistration: Encodable {
+        let registration: AgentPushRegistration
+        let e2eKey: SymmetricKey?
+        enum CodingKeys: String, CodingKey { case e2eKey = "e2e_key" }
+
+        func encode(to encoder: Encoder) throws {
+            try registration.encode(to: encoder)
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encodeIfPresent(e2eKey.map { key in E2ESMS.base64URL(key.withUnsafeBytes { Data($0) }) },
+                                       forKey: .e2eKey)
         }
     }
     private struct Claim: Encodable {
@@ -240,21 +266,25 @@ enum SamsungPairingClient {
     struct PairedDeviceResult {
         let agentID: String
         let message: String
+        /// The E2E SMS key sealed into the claim, if both sides negotiated one.
+        let e2eKey: SymmetricKey?
     }
     static func pairDevice(service: SamsungPairingService, code: String,
-                           registration: AgentPushRegistration) async throws -> PairedDeviceResult {
-        let (response, _) = try await claim(service: service, code: code, registration: registration, direct: false)
+                           registration: AgentPushRegistration, offerE2E: Bool = false) async throws -> PairedDeviceResult {
+        let e2eKey = offerE2E && service.supportsE2ESMS ? E2ESMS.newKey() : nil
+        let (response, _) = try await claim(service: service, code: code, registration: registration,
+                                            e2eKey: e2eKey, direct: false)
         guard let agentID = response.agentID, !agentID.isEmpty else { throw SamsungPairingClientError.directGatewayUnavailable }
         PairedAndroidDeviceStore.allowPairing(agentID)
         return PairedDeviceResult(agentID: agentID,
-            message: response.deviceIDHint.map { "配对成功（设备 …\($0)）" } ?? "配对成功")
+            message: response.deviceIDHint.map { "配对成功（设备 …\($0)）" } ?? "配对成功", e2eKey: e2eKey)
     }
     static func pair(service: SamsungPairingService, code: String, registration: AgentPushRegistration) async throws -> String {
         try await pairDevice(service: service, code: code, registration: registration).message
     }
 
     static func pairManually(address: SamsungManualPairingAddress, code: String,
-                             registration: AgentPushRegistration,
+                             registration: AgentPushRegistration, offerE2E: Bool = false,
                              transport: Transport = networkTransport) async throws -> ManualResult {
         let data = try await transport(address.endpoint, Data(), "GET", "/pair/v1/info", 8)
         let info: SessionInfo
@@ -264,8 +294,11 @@ enum SamsungPairingClient {
               info.sessionID.count <= 128, let publicKey = Data(base64URL: info.serverPublicKey), publicKey.count == 32,
               info.expiresAt.isFinite else { throw SamsungPairingClientError.manualUnsupported }
         let service = SamsungPairingService(endpoint: address.endpoint, sessionID: info.sessionID,
-            serverPublicKey: publicKey, expiresAt: Date(timeIntervalSince1970: info.expiresAt / 1_000))
-        let (response, clientKey) = try await claim(service: service, code: code, registration: registration, direct: true, transport: transport)
+            serverPublicKey: publicKey, expiresAt: Date(timeIntervalSince1970: info.expiresAt / 1_000),
+            supportsE2ESMS: info.capabilities?.e2eSMS == true)
+        let e2eKey = offerE2E && service.supportsE2ESMS ? E2ESMS.newKey() : nil
+        let (response, clientKey) = try await claim(service: service, code: code, registration: registration,
+                                                    e2eKey: e2eKey, direct: true, transport: transport)
         guard let agentID = response.agentID, !agentID.isEmpty,
               let controlPort = response.controlPort, let pcmPort = response.pcmPort,
               let proof = response.routeProof, let encodedSecret = registration.vowlanSecret,
@@ -282,17 +315,17 @@ enum SamsungPairingClient {
         // Do not persist an unverified server response or silently trust an old port.
         PairedAndroidDeviceStore.allowPairing(agentID)
         return ManualResult(message: "加密配对成功，正在验证直连通话网关…", route: route,
-                            clockOffset: clockOffset)
+                            clockOffset: clockOffset, e2eKey: e2eKey)
     }
 
     private static func claim(service: SamsungPairingService, code: String,
-                              registration: AgentPushRegistration, direct: Bool,
+                              registration: AgentPushRegistration, e2eKey: SymmetricKey?, direct: Bool,
                               transport: Transport = networkTransport) async throws -> (Response, String) {
         guard code.range(of: #"^[0-9]{6}$"#, options: .regularExpression) != nil else {
             throw SamsungPairingClientError.invalidCode
         }
         guard service.expiresAt > Date() else { throw SamsungPairingClientError.expired }
-        let registrationData = try JSONEncoder().encode(registration)
+        let registrationData = try JSONEncoder().encode(SealedRegistration(registration: registration, e2eKey: e2eKey))
         let sealed = try SamsungPairingCrypto.seal(
             registration: registrationData,
             serverPublicKey: service.serverPublicKey,

@@ -44,6 +44,7 @@
 		A1E2E0000000000000000001 /* E2ESMS.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000001 /* E2ESMS.swift */; };
 		A1E2E0000000000000000003 /* E2EKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000003 /* E2EKeyStore.swift */; };
 		A1E2E0000000000000000004 /* E2ESMSPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000004 /* E2ESMSPush.swift */; };
+		A1E2E0000000000000000006 /* E2EPairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000006 /* E2EPairing.swift */; };
 		A10000000000000000000008 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* RootView.swift */; };
 		A10000000000000000000009 /* PhoneViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* PhoneViews.swift */; };
 		A1000000000000000000000A /* AirSIMSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* AirSIMSetupView.swift */; };
@@ -94,6 +95,7 @@
 		A1000000000000000000002B /* CallLifecycleStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002B /* CallLifecycleStore.swift */; };
 		A30000000000000000000001 /* AirSIMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000001 /* AirSIMTests.swift */; };
 		A1E2E0000000000000000002 /* E2ESMSTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000002 /* E2ESMSTests.swift */; };
+		A1E2E0000000000000000005 /* E2ESMSAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000005 /* E2ESMSAppTests.swift */; };
 		A30000000000000000000002 /* VoBLEMediaSchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000003 /* VoBLEMediaSchedulingTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -185,6 +187,7 @@
 		B1E2E0000000000000000001 /* E2ESMS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2ESMS.swift; sourceTree = "<group>"; };
 		B1E2E0000000000000000003 /* E2EKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2EKeyStore.swift; sourceTree = "<group>"; };
 		B1E2E0000000000000000004 /* E2ESMSPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2ESMSPush.swift; sourceTree = "<group>"; };
+		B1E2E0000000000000000006 /* E2EPairing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2EPairing.swift; sourceTree = "<group>"; };
 		B10000000000000000000008 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		B10000000000000000000009 /* PhoneViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneViews.swift; sourceTree = "<group>"; };
 		B1000000000000000000000A /* AirSIMSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMSetupView.swift; sourceTree = "<group>"; };
@@ -235,6 +238,7 @@
 		B10000000000000000000041 /* VoBLEDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoBLEDiagnostics.swift; sourceTree = "<group>"; };
 		B30000000000000000000001 /* AirSIMTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMTests.swift; sourceTree = "<group>"; };
 		B1E2E0000000000000000002 /* E2ESMSTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2ESMSTests.swift; sourceTree = "<group>"; };
+		B1E2E0000000000000000005 /* E2ESMSAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2ESMSAppTests.swift; sourceTree = "<group>"; };
 		B30000000000000000000003 /* VoBLEMediaSchedulingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoBLEMediaSchedulingTests.swift; sourceTree = "<group>"; };
 		B30000000000000000000002 /* AirSIMTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AirSIMTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -322,6 +326,7 @@
 				B1E2E0000000000000000001 /* E2ESMS.swift */,
 				B1E2E0000000000000000003 /* E2EKeyStore.swift */,
 				B1E2E0000000000000000004 /* E2ESMSPush.swift */,
+				B1E2E0000000000000000006 /* E2EPairing.swift */,
 				B1000000000000000000002E /* SamsungPairingView.swift */,
 				B1000000000000000000002F /* VoWLANAuth.swift */,
 				B10000000000000000000030 /* VoWLANController.swift */,
@@ -399,6 +404,7 @@
 				BD000000000000000000000A,
 				B30000000000000000000003 /* VoBLEMediaSchedulingTests.swift */,
 				B1E2E0000000000000000002 /* E2ESMSTests.swift */,
+				B1E2E0000000000000000005 /* E2ESMSAppTests.swift */,
 			);
 			path = "AirSIMTests";
 			sourceTree = "<group>";
@@ -624,6 +630,7 @@
 				A1E2E0000000000000000001 /* E2ESMS.swift in Sources */,
 				A1E2E0000000000000000003 /* E2EKeyStore.swift in Sources */,
 				A1E2E0000000000000000004 /* E2ESMSPush.swift in Sources */,
+				A1E2E0000000000000000006 /* E2EPairing.swift in Sources */,
 				A1000000000000000000002E /* SamsungPairingView.swift in Sources */,
 				A1000000000000000000002F /* VoWLANAuth.swift in Sources */,
 				A10000000000000000000030 /* VoWLANController.swift in Sources */,
@@ -675,6 +682,7 @@
 				AD000000000000000000000A,
 				A30000000000000000000002 /* VoBLEMediaSchedulingTests.swift in Sources */,
 				A1E2E0000000000000000002 /* E2ESMSTests.swift in Sources */,
+				A1E2E0000000000000000005 /* E2ESMSAppTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

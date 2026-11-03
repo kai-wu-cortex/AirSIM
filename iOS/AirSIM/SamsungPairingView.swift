@@ -144,25 +144,29 @@ struct SamsungPairingView: View {
         defer { pairingServiceID = nil }
         do {
             let address = try SamsungManualPairingAddress(host: host, port: port)
-            message = try await VoIPPushController.shared.performAndroidPairing(localOnly: localPairingOnly) { registration in
-                let result = try await SamsungPairingClient.pairManually(address: address, code: code, registration: registration)
+            message = try await VoIPPushController.shared.performAndroidPairing(localOnly: localPairingOnly) { registration, offerE2E in
+                let result = try await SamsungPairingClient.pairManually(address: address, code: code,
+                    registration: registration, offerE2E: offerE2E)
                 try Task.checkCancellation()
+                let e2e = E2EPairingKeyChange.after(localOnly: localPairingOnly, sentKey: result.e2eKey,
+                                                    deviceID: registration.deviceID)
                 try await model.completeLocalPairing(agentID: result.route.agentID,
                     registration: registration, endpoint: result.route.endpoint,
-                    clockOffset: result.clockOffset)
+                    clockOffset: result.clockOffset, e2e: e2e)
                 try await model.vowlan.installManualRoute(result.route)
                 if !localPairingOnly { model.setCloudSignalingEnabled(true) }
+                let paired = "配对成功" + (e2e?.successSuffix(agentID: result.route.agentID) ?? "")
                 // Tailscale/5G can need a moment before the control port is
                 // reachable after the pairing window closes.
                 for attempt in 0..<3 {
                     if model.vowlan.availability.isOnlineForDisplay {
-                        return "配对成功，直连网关已通过认证。选择 VoWLAN 或自动连接模式后可用于通话与短信。"
+                        return "\(paired)，直连网关已通过认证。选择 VoWLAN 或自动连接模式后可用于通话与短信。"
                     }
                     guard attempt < 2 else { break }
                     try? await Task.sleep(for: .milliseconds(400))
                     await model.vowlan.probeNow()
                 }
-                return "配对成功，地址已保存，但直连网关暂不可达。请检查网络、Tailscale 访问规则与安卓 PCM 桥；不会回退写入 Relay。"
+                return "\(paired)，地址已保存，但直连网关暂不可达。请检查网络、Tailscale 访问规则与安卓 PCM 桥；不会回退写入 Relay。"
             }
         } catch is CancellationError {
             message = "已取消连接"
@@ -184,16 +188,20 @@ struct SamsungPairingView: View {
         do {
             message = try await VoIPPushController.shared.performAndroidPairing(
                 localOnly: localPairingOnly
-            ) { registration in
+            ) { registration, offerE2E in
                 let paired = try await SamsungPairingClient.pairDevice(
                         service: service,
                         code: code,
-                        registration: registration
+                        registration: registration,
+                        offerE2E: offerE2E
                     )
-                try await model.completeLocalPairing(agentID: paired.agentID, registration: registration)
+                let e2e = E2EPairingKeyChange.after(localOnly: localPairingOnly, sentKey: paired.e2eKey,
+                                                    deviceID: registration.deviceID)
+                try await model.completeLocalPairing(agentID: paired.agentID, registration: registration, e2e: e2e)
                 if !localPairingOnly { model.setCloudSignalingEnabled(true) }
                 return model.localDevices.api(for: paired.agentID) == nil
-                    ? "加密配对已写入安卓，正在等待通话网关身份验证；暂未建立可用路由。" : paired.message
+                    ? "加密配对已写入安卓，正在等待通话网关身份验证；暂未建立可用路由。"
+                    : paired.message + (e2e?.successSuffix(agentID: paired.agentID) ?? "")
             }
 #if DEBUG
             print("[AirSIM Pair] claim_completed session=\(service.sessionID)")
