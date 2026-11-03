@@ -354,6 +354,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         ignored -> VoBLECallController.Result.success("ready"));
             } else if ("device_info".equals(action)) {
                 result = VoBLECallController.Result.success(new JSONObject()
+                        .put("battery", com.airsim.phonecontrol.AndroidBatteryStatus.snapshot(this))
                         .put("agent_id", AndroidAgentIdentity.agentID(this))
                         .put("device_name", AndroidAgentIdentity.deviceName())
                         .put("agent_kind", RuntimeMode.isStandalone(this) ? "standalone" : "avf")

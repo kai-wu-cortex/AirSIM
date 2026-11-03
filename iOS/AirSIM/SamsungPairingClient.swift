@@ -5,14 +5,28 @@ import CryptoKit
 struct SamsungManualPairingAddress: Equatable, Sendable {
     let host: String
     let port: UInt16
-    init(host: String, port: String) throws {
-        let host = host.trimmingCharacters(in: .whitespacesAndNewlines)
+    let usesTLS: Bool
+    let remoteControlPort: UInt16?
+    let remotePCMPort: UInt16?
+    init(host: String, port: String, usesTLS: Bool = false,
+         controlPort: String? = nil, pcmPort: String? = nil) throws {
+        let host = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let portText = port.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard VoWLANEndpoint.permitsDirectIPv4(host), !portText.isEmpty,
+        guard (usesTLS ? RemoteDirectHost.isValid(host) : VoWLANEndpoint.permitsDirectIPv4(host)), !portText.isEmpty,
               portText.utf8.allSatisfy({ (48...57).contains($0) }),
               let port = UInt16(portText), port > 0 else { throw SamsungPairingClientError.invalidAddress }
         self.host = host
         self.port = port
+        self.usesTLS = usesTLS
+        if usesTLS {
+            let route = try RemoteDirectConfiguration.route(agentID: "pairing", host: host,
+                controlPort: controlPort ?? "", pcmPort: pcmPort ?? "")
+            remoteControlPort = route.controlPort
+            remotePCMPort = route.pcmPort
+        } else {
+            remoteControlPort = nil
+            remotePCMPort = nil
+        }
     }
     var endpoint: NWEndpoint { .hostPort(host: .init(host), port: .init(rawValue: port)!) }
 }
@@ -186,6 +200,29 @@ enum SamsungPairingClient {
     static let networkTransport: Transport = { endpoint, body, method, path, timeout in
         try await exchange(endpoint: endpoint, body: body, method: method, path: path, timeout: timeout)
     }
+    static let tlsNetworkTransport: Transport = { endpoint, body, method, path, timeout in
+        guard case let .hostPort(host, port) = endpoint,
+              RemoteDirectHost.isValid("\(host)"),
+              let url = URL(string: "https://\(host):\(port.rawValue)\(path)") else {
+            throw SamsungPairingClientError.invalidAddress
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.timeoutInterval = timeout
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Network.framework performs system trust/hostname validation. This
+        // transport neither follows redirects nor retries a TLS failure in HTTP.
+        let response = try await WiredHTTPTransport().send(request)
+        guard response.body.count <= 65_536 else { throw SamsungPairingClientError.responseTooLarge }
+        switch response.statusCode {
+        case 200: return response.body
+        case 403: throw SamsungPairingClientError.networkNotAllowed
+        case 410: throw SamsungPairingClientError.expired
+        case 404 where path == "/pair/v1/info": throw SamsungPairingClientError.manualUnsupported
+        default: throw SamsungPairingClientError.rejected
+        }
+    }
     struct ManualResult {
         let message: String
         let route: VoWLANManualRoute
@@ -255,7 +292,8 @@ enum SamsungPairingClient {
 
     static func pairManually(address: SamsungManualPairingAddress, code: String,
                              registration: AgentPushRegistration,
-                             transport: Transport = networkTransport) async throws -> ManualResult {
+                             transport: Transport? = nil) async throws -> ManualResult {
+        let transport = transport ?? (address.usesTLS ? tlsNetworkTransport : networkTransport)
         let data = try await transport(address.endpoint, Data(), "GET", "/pair/v1/info", 8)
         let info: SessionInfo
         do { info = try JSONDecoder().decode(SessionInfo.self, from: data) }
@@ -274,7 +312,12 @@ enum SamsungPairingClient {
                 clientKey: clientKey, agentID: agentID, controlPort: controlPort, pcmPort: pcmPort) else {
             throw SamsungPairingClientError.directGatewayUnavailable
         }
-        let route = VoWLANManualRoute(agentID: agentID, host: address.host, controlPort: controlPort, pcmPort: pcmPort)
+        // Verify the Android's signed *internal* ports above, then use the
+        // explicit external port mapping supplied by the gateway owner. Never
+        // persist Android's private ports as public endpoints by accident.
+        let route = VoWLANManualRoute(agentID: agentID, host: address.host,
+            controlPort: address.remoteControlPort ?? controlPort,
+            pcmPort: address.remotePCMPort ?? pcmPort, tls: address.usesTLS ? true : nil)
         guard route.endpoint != nil else { throw SamsungPairingClientError.directGatewayUnavailable }
         // Server clock lets the signer avoid 401 when the phone and the paired
         // Android are not time-synchronised (common across Tailscale carriers).
@@ -461,7 +504,7 @@ enum SamsungPairingClientError: LocalizedError, Equatable {
         case .connectionClosed: return "与三星的局域网连接已断开"
         case .registrationUnavailable: return "Relay／推送配置未就绪。请先在设置完成云端配置；若只需本地连接，请打开‘本地模式配对’。"
         case .pairingBusy: return "另一个配对正在进行，请稍后重试"
-        case .invalidAddress: return "请输入有效的局域网或 Tailscale IPv4 地址，以及 1–65535 的端口；不要填写 http:// 或路径。"
+        case .invalidAddress: return "请按所选方式填写私网 IPv4 或 HTTPS 域名，以及 1–65535 的端口；域名不含协议、路径或 IP 地址。"
         case .manualUnsupported: return "该地址未返回 AirSIM 配对信息。请更新安卓 App，并填写当前一次性配对端口，而非 ADB、Relay 或通话端口。"
         case .directGatewayUnavailable: return "配对已写入，但直连通话网关未就绪或认证失败。请检查安卓默认电话角色及 PCM 桥，再开启新的配对窗口重试。"
         case .timedOut: return "连接超时。请检查 IP、当前配对端口、局域网隔离或 Tailscale 两端连接及访问规则。"

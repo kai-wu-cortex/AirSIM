@@ -315,12 +315,12 @@ final class CallKitController: NSObject {
     }
 
     /// 先让系统接管呼出事务；真正的模块 ATD 只能在 CXProvider delegate 回调中执行。
-    func startOutgoingCall(number: String,
+    func startOutgoingCall(number: String, intentID: UUID = UUID(),
         systemStart: ((CXStartCallAction) async throws -> Void)? = nil) async throws {
         guard isAvailable else { throw CallKitBridgeError.unavailable }
         guard currentUUID == nil else { throw CallKitBridgeError.callInProgress }
 
-        let uuid = UUID()
+        let uuid = intentID
         currentUUID = uuid
         currentDirection = "outgoing"
         currentNumber = number

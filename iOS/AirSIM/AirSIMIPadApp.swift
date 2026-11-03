@@ -3,6 +3,9 @@ import SwiftUI
 /// AirSIM iPhone/iPad 入口：三星 VoWLAN 与独立云端 Relay。
 @main
 struct AirSIMIPadApp: App {
+    // One lazy instance for both scene presentation and background widget intents.
+    // Do not wait for onAppear, or create a second transport/CallKit owner.
+    private static let productionModel = AppModel()
     @UIApplicationDelegateAdaptor(AirSIMNotificationDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
     @StateObject private var settings = AppSettings()
@@ -13,14 +16,23 @@ struct AirSIMIPadApp: App {
     init() {
 #if DEBUG && targetEnvironment(simulator)
         let fixture = SMSNavigationFixture.fromLaunchEnvironment()
-        _model = StateObject(wrappedValue: fixture?.model ?? AppModel())
+        _model = StateObject(wrappedValue: fixture?.model ?? Self.productionModel)
         _appUpdates = StateObject(wrappedValue: fixture?.updates ?? AppUpdateController())
         uiTestDefaults = fixture?.defaults
 #else
-        _model = StateObject(wrappedValue: AppModel())
+        _model = StateObject(wrappedValue: Self.productionModel)
         _appUpdates = StateObject(wrappedValue: AppUpdateController())
         uiTestDefaults = nil
 #endif
+        if uiTestDefaults == nil {
+            AirSIMWidgetControlBridge.bootstrap = {
+                // A locked cold launch must not overwrite protected history or
+                // take ownership away from an incoming PushKit call handler.
+                guard UIApplication.shared.isProtectedDataAvailable,
+                      !CallKitController.shared.managesCurrentCall else { return }
+                _ = Self.productionModel
+            }
+        }
     }
 
     var body: some Scene {

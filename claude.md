@@ -2,6 +2,8 @@
 
 2026-10-31 发布准备：Apps `v0.9.8.20`，Android `0.9.8.20 (125)`、Apple `0.9.8 (152)`，见 `docs/releases/0.9.8.20.md`。本轮授权提交推送 VoBLE、GitHub Release 与 TestFlight 上传；不部署 Worker、不发布 Linux Agent、不改变现有 Latest 标记。TestFlight 使用 production APNs，上传／处理／外测可用分别核实。下文旧候选与授权仅为历史记录。
 
+未发布试验性功能：NAS／软路由自建域名 TLS 直连见 `docs/self-hosted-tls-direct.md`。支持 HTTPS 域名首次配对，以及已配对设备主动添加 HTTPS／PCM TLS 路由；沿用 Android 私网网关和 HMAC／身份验证。首次配对使用临时 TLS 入口，不直接暴露安卓明文配对或 AVF 内部端口，不新增后台推送。修改时同步 iPhone 与 Watch 的可选 `pcm_tls` 字段，保留旧路由解码、设备绑定、关闭／删除清理及通话路径固定。
+
 2026-10-19 发布准备：Apps `v0.9.8.1`，Android `0.9.8.1 (95)`、Apple `0.9.8 (95)`，见 `docs/releases/0.9.8.1.md`。本轮用户已授权提交推送、应用 Release和Xcode TestFlight上传；不部署 Relay／新增 workflow／发布新 Linux Agent，不设 Apps 为Latest。下文旧候选状态为历史记录。
 
 2026-10-18 应用发布准备：Apps `v0.9.8`，Android／Apple `0.9.8 (92)`，见 `docs/releases/0.9.8.md`。推荐 Android 10–13 安装 Standalone；本地双通道与设备归属、配对／Verbose 和云端挂断确认修复仍须按说明区分测试与真机验收。本次不部署 Relay、不新增 workflow、不发布新 Linux Agent 二进制；TestFlight 状态以 Apple 实际回执为准。以下旧基线保留追溯。

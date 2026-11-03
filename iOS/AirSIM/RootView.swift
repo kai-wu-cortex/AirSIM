@@ -63,6 +63,7 @@ struct RootView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var appUpdates: AppUpdateController
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appUpdatePresentation: AppUpdatePresentation?
     @AppStorage("airsim.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
     @State private var pendingSMSRecipient: String?
@@ -70,6 +71,14 @@ struct RootView: View {
     @State private var conversationSender: String?
     @State private var showingConversation = false
     @AppStorage("airsim.first-connection-complete") private var firstConnectionComplete = false
+
+    private var presentedCall: CallRecord? {
+#if DEBUG && targetEnvironment(simulator)
+        if ProcessInfo.processInfo.environment["AIRSIM_UI_FIXTURE"] == "sms-navigation",
+           let preview = SMSNavigationFixture.previewCall { return preview }
+#endif
+        return model.inAppPresentedCall
+    }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -81,26 +90,37 @@ struct RootView: View {
                     RecentsView(onCall: dial, onMessage: composeMessage)
                         .tag(PhoneTab.recents)
                         .tabItem { Label(L10n.t(PhoneTab.recents.tabTitle), systemImage: PhoneTab.recents.icon) }
+                        .badge(AirSIMWidgetSnapshot.badgeText(model.unseenMissedCallIDs.count))
 
-                    NavigationStack {
-                        MessagesView(
-                            pendingRecipient: $pendingSMSRecipient,
-                            state: $messageListState,
-                            openConversation: showSMSConversation
-                        )
-                        .navigationTitle(L10n.t("短信"))
-                        .navigationBarTitleDisplayMode(.large)
-                        .toolbar { SMSConversationListToolbar(state: $messageListState) }
-                        .navigationDestination(isPresented: $showingConversation) {
-                            if let sender = conversationSender {
-                                MessageThreadView(sender: sender)
-                                    .id(sender)
-                                    .toolbar(.hidden, for: .tabBar)
+                    Group {
+                        if #available(iOS 17.0, *) {
+                            AdaptiveMessagesView(pendingRecipient: $pendingSMSRecipient,
+                                state: $messageListState, sender: $conversationSender,
+                                showingConversation: $showingConversation,
+                                openConversation: showSMSConversation)
+                        } else {
+                            NavigationStack {
+                                MessagesView(
+                                    pendingRecipient: $pendingSMSRecipient,
+                                    state: $messageListState,
+                                    openConversation: showSMSConversation
+                                )
+                                .navigationTitle(L10n.t("短信"))
+                                .navigationBarTitleDisplayMode(.large)
+                                .toolbar { SMSConversationListToolbar(state: $messageListState) }
+                                .navigationDestination(isPresented: $showingConversation) {
+                                    if let sender = conversationSender {
+                                        MessageThreadView(sender: sender)
+                                            .id(sender)
+                                            .toolbar(.hidden, for: .tabBar)
+                                    }
+                                }
                             }
                         }
                     }
                         .tag(PhoneTab.messages)
                         .tabItem { Label(L10n.t(PhoneTab.messages.tabTitle), systemImage: PhoneTab.messages.icon) }
+                        .badge(AirSIMWidgetSnapshot.badgeText(model.unreadMessageIDs.count))
 
                     ContactsView(onCall: dial, onMessage: composeMessage)
                         .tag(PhoneTab.contacts)
@@ -110,19 +130,26 @@ struct RootView: View {
                         .tag(PhoneTab.settings)
                         .tabItem { Label(L10n.t(PhoneTab.settings.tabTitle), systemImage: PhoneTab.settings.icon) }
                 }
+                // Keep navigation state, but remove the underlying native tab
+                // chrome from rendering, hit testing and VoiceOver during calls.
+                // Duo promotes that chrome outside the SwiftUI content stack.
+                .opacity(presentedCall == nil ? 1 : 0)
+                .allowsHitTesting(presentedCall == nil)
+                .accessibilityHidden(presentedCall != nil)
                 .phoneTabBarMinimizeOnScroll()
                 .phoneTabSelectionFeedback(selectedTabRawValue)
                 .tint(.blue)
 
-            if let call = model.inAppPresentedCall {
+            if let call = presentedCall {
                 ActiveCallView(call: call)
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .zIndex(1)
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
             }
         }
         .background(PhoneBackdrop())
         .animation(.easeInOut(duration: 0.2), value: model.inAppPresentedCall?.id)
         .preferredColorScheme(settings.appearance.colorScheme)
-        .overlay(alignment: .top) {
+        .safeAreaInset(edge: .top, spacing: 0) {
             if let reminder = model.otherDeviceCallReminders.first {
                 Button {
                     _ = model.openOtherDeviceCallNotification(reminder.userInfo)
@@ -273,6 +300,24 @@ struct RootView: View {
     }
 
     private func handleSystemCommunicationURL(_ url: URL) {
+        if let target = AirSIMWidgetDestination.parse(url) {
+            // Widget links only navigate. Never treat a widget tap as a dial or
+            // SMS-send command, and never retarget an established call.
+            if let id = target.agentID,
+               !model.callLifecycleSnapshot.state.representsCall,
+               !IPhoneCloudCallSession.shared.hasActiveCall,
+               model.pairedAndroidAgents.contains(where: { $0.id == id }) {
+                model.bindAndroidAgent(id)
+            }
+            switch target.destination {
+            case .status: selectedTab = .settings
+            case .dial: selectedTab = .dial
+            case .messages: selectedTab = .messages
+            case .contacts: selectedTab = .contacts
+            case .recents: selectedTab = .recents
+            }
+            return
+        }
         switch SystemCommunicationURL.destination(for: url) {
         case let .call(number):
             dial(number)
@@ -378,7 +423,7 @@ private struct PhoneToolbarGlassMorph: ViewModifier {
                 content
                     .buttonStyle(.plain)
                     .padding(.horizontal, 10)
-                    .frame(minWidth: 40, minHeight: 40)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Capsule())
                     .glassEffect(.regular.interactive(), in: Capsule())
                     .glassEffectID(id, in: glassNamespace)
@@ -566,5 +611,48 @@ private struct PhoneTabBarNavigationFade: UIViewControllerRepresentable {
             bar.isUserInteractionEnabled = visible
             bar.accessibilityElementsHidden = !visible
         }
+    }
+}
+
+/// One split-view hierarchy survives folding/resizing without recreating the
+/// thread composer. Compact columns are managed by the system's back gesture.
+@available(iOS 17.0, *)
+private struct AdaptiveMessagesView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Binding var pendingRecipient: String?
+    @Binding var state: SMSConversationListState
+    @Binding var sender: String?
+    @Binding var showingConversation: Bool
+    let openConversation: (String) -> Void
+    @State private var compactColumn: NavigationSplitViewColumn = .sidebar
+
+    var body: some View {
+        NavigationSplitView(preferredCompactColumn: $compactColumn) {
+            MessagesView(pendingRecipient: $pendingRecipient, state: $state,
+                         openConversation: openConversation)
+                .navigationTitle(L10n.t("短信"))
+                .navigationBarTitleDisplayMode(.large)
+                .toolbar { SMSConversationListToolbar(state: $state) }
+                .navigationSplitViewColumnWidth(min: 280, ideal: 320, max: 400)
+        } detail: {
+            if let sender, showingConversation {
+                MessageThreadView(sender: sender)
+                    .id(sender)
+            } else {
+                ContentUnavailableView("选择一段对话", systemImage: "message",
+                    description: Text("从左侧选择短信，或新建一条短信。"))
+            }
+        }
+        .navigationSplitViewStyle(.balanced)
+        .toolbar(horizontalSizeClass == .compact && showingConversation ? .hidden : .automatic, for: .tabBar)
+        .onChange(of: showingConversation) { _, showing in
+            compactColumn = showing ? .detail : .sidebar
+        }
+        .onChange(of: compactColumn) { _, column in
+            if horizontalSizeClass == .compact && column == .sidebar {
+                showingConversation = false
+            }
+        }
+        .onAppear { compactColumn = showingConversation ? .detail : .sidebar }
     }
 }

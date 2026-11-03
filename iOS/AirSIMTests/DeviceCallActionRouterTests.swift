@@ -3,6 +3,195 @@ import XCTest
 
 @MainActor
 final class DeviceCallActionRouterTests: XCTestCase {
+    func testPreconnectPresentationNeverStartsConnectedClock() async throws {
+        let service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()), deviceBackend: { _, _ in service })
+        defer { model.stop() }
+        _ = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .vowlan)
+        XCTAssertNil(model.callConnectedAt)
+        XCTAssertFalse(model.callAudioIsActive)
+        model.callKitAudioSessionDidDeactivate()
+        await model.callKitAudioSessionDidActivate()
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+        XCTAssertNil(model.callConnectedAt)
+        XCTAssertEqual(service.commands, ["dial:fixture"])
+        for state in ["dialing", "alerting", "connecting"] {
+            let content = CallSurfaceContent(state: state)
+            XCTAssertEqual(content.phase, .outgoing)
+            XCTAssertFalse(content.showsDuration)
+            XCTAssertEqual(content.secondaryActions, [.speaker])
+        }
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "shared", state: .active,
+            transport: .vowlan, transportEpoch: 1, backendGeneration: 1, direction: "outgoing"))
+        let connectedAt = try XCTUnwrap(model.callConnectedAt)
+        XCTAssertTrue(CallSurfaceContent(state: "active").showsDuration)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "shared", state: .active,
+            transport: .vowlan, transportEpoch: 1, backendGeneration: 1, direction: "outgoing"))
+        XCTAssertEqual(model.callConnectedAt, connectedAt)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "shared", state: .ended,
+            transport: .vowlan, transportEpoch: 1, backendGeneration: 1, direction: "outgoing"))
+        XCTAssertNil(model.callConnectedAt)
+        XCTAssertEqual(service.commands, ["dial:fixture"])
+    }
+
+    func testAuthenticatedTerminalSurvivesUnavailableDiscoveryMetadata() async throws {
+        let tone = FixtureToneOutput(), service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: tone), deviceBackend: { _, _ in service })
+        defer { model.stop() }
+        let route = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .vowlan)
+        // No directory metadata: models the interval while health is reverified.
+        let ended = CallRecord(id: "shared", index: 0, direction: "outgoing", state: "ended",
+            number: nil, startedAt: Date(), updatedAt: Date(), endedAt: Date(), missed: false, androidID: "shared")
+        XCTAssertTrue(model.applyAgentCallRecord(ended, agentID: "A"))
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, route.systemUUID)
+        XCTAssertNil(model.deviceCalls.active)
+        XCTAssertNil(model.deviceCallContext.media.owner)
+        XCTAssertNil(model.inAppPresentedCall)
+        let beforeCue = tone.plays
+        await Task.yield()
+        XCTAssertEqual(tone.plays, beforeCue + 1)
+        let plays = tone.plays
+        _ = model.applyAgentCallRecord(ended, agentID: "A")
+        await Task.yield()
+        XCTAssertEqual(tone.plays, plays)
+        XCTAssertEqual(service.commands, ["dial:fixture"])
+        let next = try await model.deviceCallRouter.dial(agentID: "B", number: "fixture", mode: .vowlan)
+        _ = model.applyAgentCallRecord(ended, agentID: "A")
+        XCTAssertEqual(model.deviceCalls.active, next.key)
+    }
+
+    func testReceiptTerminalRequiresBothIDsAndAgentAndWLANOwnership() async throws {
+        for transport in [AirSIMConnectionMode.vowlan, .bluetooth] {
+            let service = DeviceBackendProbe(id: "A")
+            let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+                deviceBackend: { _, _ in service })
+            let route = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: transport)
+            for (agent, backend, canonical) in [("B", "shared", "shared"), ("A", "wrong", "shared"), ("A", "shared", "wrong")] {
+                let record = CallRecord(id: backend, index: 0, direction: "outgoing", state: "ended",
+                    number: nil, startedAt: Date(), updatedAt: Date(), endedAt: Date(), missed: false, androidID: canonical)
+                XCTAssertFalse(model.deviceCallRouter.ingestOwnedWLANClosure(record, agentID: agent, mode: transport))
+                XCTAssertEqual(model.deviceCalls.active, route.key)
+            }
+            let active = CallRecord(id: "shared", index: 0, direction: "outgoing", state: "active",
+                number: nil, startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false, androidID: "shared")
+            XCTAssertFalse(model.deviceCallRouter.ingestOwnedWLANClosure(active, agentID: "A", mode: transport))
+            let terminal = CallRecord(id: "shared", index: 0, direction: "outgoing", state: "ended",
+                number: nil, startedAt: Date(), updatedAt: Date(), endedAt: Date(), missed: false, androidID: "shared")
+            XCTAssertEqual(model.deviceCallRouter.ingestOwnedWLANClosure(terminal, agentID: "A", mode: transport), transport == .vowlan)
+            if transport == .bluetooth { XCTAssertEqual(model.deviceCalls.active, route.key) }
+            XCTAssertEqual(service.commands, ["dial:fixture"])
+            model.stop()
+        }
+    }
+
+    func testConnectedWLANClosureReleasesMediaWithoutFailureCue() async throws {
+        let tone = FixtureToneOutput(), service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: tone), deviceBackend: { _, _ in service })
+        defer { model.stop() }
+        _ = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .vowlan)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "shared", state: .active,
+            transport: .vowlan, transportEpoch: 1, backendGeneration: 1, direction: "outgoing", backendCallID: "shared"))
+        let before = tone.plays
+        let ended = CallRecord(id: "shared", index: 0, direction: "outgoing", state: "ended",
+            number: nil, startedAt: Date(), updatedAt: Date(), endedAt: Date(), missed: false, androidID: "shared")
+        XCTAssertTrue(model.applyAgentCallRecord(ended, agentID: "A"))
+        await Task.yield()
+        XCTAssertEqual(tone.plays, before)
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+        XCTAssertNil(model.deviceCallContext.media.owner)
+    }
+
+    func testOwnedPollSourceRequiresExactCapturedCredentialAndRoute() throws {
+        let endpoint = try VoWLANEndpoint(host: "192.168.2.90", controlPort: 18080, pcmPort: 18081)
+        let credential = try VoWLANCredential(secret: Data(repeating: 1, count: 32))
+        let api = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential))
+        let backend = WLANDeviceCallBackend(api: api, epoch: 1, agentID: "A")
+        let context = DeviceCallContext()
+        let router = DeviceCallActionRouter(context: context) { _, _ in backend }
+        let route = try XCTUnwrap(router.registerIncoming(.init(agentID: "A", callID: "fixture",
+            state: .ringing, transport: .vowlan, transportEpoch: 1), mode: .vowlan))
+        XCTAssertNil(router.ownedAgentID(for: api))
+        XCTAssertTrue(context.registry.activate(route.key))
+        XCTAssertEqual(router.ownedAgentID(for: api), "A")
+        let otherCredential = try VoWLANCredential(secret: Data(repeating: 2, count: 32))
+        XCTAssertNil(router.ownedAgentID(for: AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: otherCredential))))
+        let otherEndpoint = try VoWLANEndpoint(host: "192.168.2.91", controlPort: 18080, pcmPort: 18081)
+        XCTAssertNil(router.ownedAgentID(for: AirSIMAPI(route: .vowlan(endpoint: otherEndpoint, credential: credential))))
+        router.finished(route.key)
+        XCTAssertNil(router.ownedAgentID(for: api))
+    }
+
+    func testRecoveredEndedReceiptRetiresExactRouteWithoutAnotherBackendAction() async throws {
+        let tone = FixtureToneOutput(), service = DeviceBackendProbe(id: "A")
+        service.recoveredState = .ended
+        let model = AppModel(audioController: AudioSessionController(toneOutput: tone), deviceBackend: { _, _ in service })
+        defer { model.stop() }
+        let route = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .bluetooth)
+        await Task.yield()
+        XCTAssertNil(model.deviceCalls.active)
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, route.systemUUID)
+        XCTAssertEqual(service.commands, ["dial:fixture"])
+        XCTAssertEqual(model.errorMessage, "呼叫未接通，通话已结束。")
+    }
+    func testUnknownSubmissionCleanupDoesNotClaimRemoteEnd() async throws {
+        let tone = FixtureToneOutput(), service = DeviceBackendProbe(id: "A")
+        service.dialError = DialOperationRecoveryError.unknown
+        let model = AppModel(audioController: AudioSessionController(toneOutput: tone), deviceBackend: { _, _ in service })
+        defer { model.stop() }
+        let historyBefore = model.callHistory
+        do { _ = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .bluetooth); XCTFail("unknown") }
+        catch {}
+        let before = tone.plays
+        await Task.yield()
+        XCTAssertEqual(tone.plays, before)
+        XCTAssertNotEqual(model.errorMessage, "呼叫未接通，通话已结束。")
+        XCTAssertEqual(model.callLifecycleSnapshot.source, .app)
+        XCTAssertEqual(model.callHistory, historyBefore)
+    }
+
+    func testR18RemotePreconnectEndStopsPresentationAndCuesOnlyOnce() async throws {
+        let tone = FixtureToneOutput(), service = DeviceBackendProbe(id: "A")
+        let audio = AudioSessionController(toneOutput: tone)
+        let model = AppModel(audioController: audio, deviceBackend: { _, _ in service })
+        defer { model.stop() }
+        let route = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .bluetooth,
+                                                         operationID: "explicit-intent")
+        XCTAssertEqual(service.lastOperationID, "explicit-intent")
+        let before = tone.plays
+        let terminal = DeviceCallEvent(agentID: "A", callID: "shared", state: .ended,
+            transport: .bluetooth, transportEpoch: 1, backendGeneration: 1, direction: "outgoing")
+        _ = model.receiveOwnedCallEvent(terminal)
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+        XCTAssertNil(model.deviceCalls.active)
+        XCTAssertNil(model.deviceCallContext.media.owner)
+        XCTAssertFalse(audio.active)
+        await Task.yield()
+        XCTAssertEqual(tone.plays, before + 1)
+        XCTAssertEqual(model.errorMessage, "呼叫未接通，通话已结束。")
+        _ = model.receiveOwnedCallEvent(terminal)
+        await Task.yield()
+        XCTAssertEqual(tone.plays, before + 1)
+        XCTAssertEqual(service.commands, ["dial:fixture"], "No second backend dial or unsolicited hangup")
+        let replacement = try await model.deviceCallRouter.dial(agentID: "B", number: "fixture2", mode: .bluetooth)
+        _ = model.receiveOwnedCallEvent(terminal)
+        XCTAssertEqual(model.deviceCalls.active, replacement.key)
+        XCTAssertNotEqual(route.key, replacement.key)
+    }
+
+    func testR18LocalCancelDoesNotPlayFailureCue() async throws {
+        let tone = FixtureToneOutput(), service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: tone), deviceBackend: { _, _ in service })
+        defer { model.stop() }
+        let route = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .bluetooth)
+        let before = tone.plays
+        try await model.callKitEnd(uuid: route.systemUUID)
+        await Task.yield()
+        XCTAssertEqual(tone.plays, before)
+        XCTAssertEqual(service.commands, ["dial:fixture", "end:shared"])
+    }
+
     func testTerminalCleanupKeepsCapturedHangupBackendUntilReply() async throws {
         let gate = BackendReplyGate(), started = expectation(description: "end awaiting reply")
         var service: DeviceBackendProbe? = DeviceBackendProbe(id: "A")
@@ -459,12 +648,17 @@ private final class DeviceBackendProbe: DeviceCallBackend {
     var beforeEndReply: () async -> Void = {}
     var answerError: Error?
     var lastSimAccount: String?
+    var lastOperationID: String?
     var provisionalReply = false
+    var recoveredState: CallLifecycleState?
+    var dialError: Error?
     init(id: String) { self.id = id }
     func dial(number: String, operationID: String, systemUUID: UUID) async throws -> DeviceBackendCall {
+        lastOperationID = operationID
         commands.append("dial:\(number)"); await beforeDialReply()
+        if let dialError { throw dialError }
         return DeviceBackendCall(callID: provisionalReply ? operationID : "shared",
-            backendID: provisionalReply ? operationID : "shared", generation: 1)
+            backendID: provisionalReply ? operationID : "shared", generation: 1, recoveredState: recoveredState)
     }
     func dial(number: String, operationID: String, systemUUID: UUID,
               simAccount: String?) async throws -> DeviceBackendCall {

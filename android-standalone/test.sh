@@ -82,9 +82,9 @@ assert_contains "$M" 'try { event = new JSONObject(encoded); } catch (Exception 
 
 assert_contains "$MANIFEST" 'package="com.airsim.phonecontrol.standalone"' \
   'standalone package id is missing'
-assert_contains "$MANIFEST" 'android:versionCode="125"' \
+assert_contains "$MANIFEST" 'android:versionCode="126"' \
   'standalone version code does not match the current candidate build'
-assert_contains "$MANIFEST" 'android:versionName="0.9.8.20"' \
+assert_contains "$MANIFEST" 'android:versionName="0.9.8.21"' \
   'standalone version name does not match the current Android candidate'
 assert_contains "$MANIFEST" 'com.airsim.phonecontrol.STANDALONE_AGENT' \
   'standalone runtime flag is missing'

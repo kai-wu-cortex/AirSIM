@@ -1,6 +1,6 @@
 # AirSIM — Android 与 iPhone / Apple Watch 跨设备通话、短信和 VoWLAN
 
-[Apps v0.9.8.20 · Android 125 / iOS 152](docs/releases/0.9.8.20.md)：后台接听音频启动、VoWLAN 恢复、独立 Push 注册与 CallKit 号码显示修正。纯本地跨端协商及零 Relay 流量仍未完成端到端验收；请阅读发布限制。AVF Linux Agent 保持 v0.4.7。
+[Apps v0.9.8.21 · Android 126 / iOS 162](docs/releases/0.9.8.21.md)：U30Air 客户端支持、小组件、试验性 TLS 公网配对、未读／未接提醒与通话收尾修复。纯本地跨端协商及零 Relay 流量仍未完成端到端验收；请阅读发布限制。AVF Linux Agent 保持 v0.4.7。
 
 本版包含 [APNs 接听后的本地音频启动竞态修正](docs/vowlan-first-call-startup.md)。前后台重启轮询不再撤销同一通话的音频启动，真正挂断、媒体归属／锁定路由变化和 CallKit 停用仍会使其失效；TestFlight 上传与真机验收状态见发布说明。
 
@@ -10,7 +10,7 @@
 [![iOS](https://img.shields.io/badge/iOS-16.3%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![watchOS](https://img.shields.io/badge/watchOS-10%2B-000000?logo=apple&logoColor=white)](iOS/README.md)
 [![Android AVF](https://img.shields.io/badge/Android%20AVF-Linux%20arm64-FCC624?logo=linux&logoColor=black)](module/packaging/README.md)
-[![Apps release](https://img.shields.io/badge/Apps-v0.9.8.20-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.8.20)
+[![Apps release](https://img.shields.io/badge/Apps-v0.9.8.21-2563EB)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.8.21)
 [![AVF Agent release](https://img.shields.io/badge/AVF%20Agent-v0.4.7-0F766E)](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.7)
 [![Cloudflare Relay](https://img.shields.io/badge/Relay-airsim--push.remotepilot.site-F38020?logo=cloudflare&logoColor=white)](https://airsim-push.remotepilot.site/healthz)
 [![Project status](https://img.shields.io/badge/status-active%20development-1f6feb)](#项目状态)
@@ -47,6 +47,7 @@ https://t.me/+TRDazm-qnXlhNGRl
 - **小米短信辅助**：MIUI 非默认短信 App 无法读取完整 inbox 时，使用无障碍辅助确认“是否发送短信”，并可选择只转发 `com.android.mms` 新短信通知来回信；不要求默认短信角色，也不能绕过系统签名限制。
 - **VoBLE 蓝牙直连**：独立于 Wi-Fi、Relay、PushKit 的连接模式，通过认证 BLE GATT 承载电话控制与双向音频；控制消息支持分片，选中会话断线后按 1/2/4/8/16 秒退避自动重连。
 - **VoWLAN 本地直连与恢复**：同一局域网或 Android 热点内使用 HMAC 认证的控制与 PCM 链路；网络恢复时重新发现并认证，通话中不切换传输。
+- **自建域名直连（试验性）**：支持 HTTPS 域名首次加密配对；已配对设备也可添加 NAS／软路由的 HTTPS 控制与 TLS 音频入口。局域网优先，需主动配置，兼容现有安卓 VoWLAN 协议。[配置与边界](docs/self-hosted-tls-direct.md)。
 - **手动地址配对**：自动发现受限时可填写 Android IPv4 与配对端口，保留六位码加密认证；支持局域网及 Tailscale 地址。
 - **CallKit、PushKit 与 Live Activity**：iPhone 使用系统来电界面和 VoIP push；灵动岛/锁屏可切换 Android Agent，并显示通话与连接状态。
 - **单 APK Android 端**：内置 Agent 与 Bridge，安装后不再依赖 AVF Linux、Terminal、Debian 或 installer。
@@ -103,15 +104,15 @@ VoBLE 是与 VoWLAN、云端 Relay 并列的模式选项，不是现有 Wi-Fi �
 
 | 组件 | 当前版本或地址 |
 | --- | --- |
-| Android Standalone / AVF Bridge | [`v0.9.8.20 (125)`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.8.20)，推荐安装 Standalone |
-| iPhone / Apple Watch App | `0.9.8 (152)`，随 [v0.9.8.20](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.8.20) 提供 full／sideload unsigned IPA；TestFlight 状态见发布说明 |
+| Android Standalone / AVF Bridge | [`v0.9.8.21 (126)`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.8.21)，推荐安装 Standalone |
+| iPhone / Apple Watch App | `0.9.8 (162)`，随 [v0.9.8.21](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.8.21) 提供 full／sideload unsigned IPA；TestFlight 状态见发布说明 |
 | Android AVF Linux Agent | [`v0.4.7`](https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.4.7)（Debian 包版本 `0.4.7-1`） |
 | AirSIM Relay | `0.2.1` · [`https://airsim-push.remotepilot.site`](https://airsim-push.remotepilot.site/healthz) |
 | DJOneHub Relay | `https://push.remotepilot.site`（独立服务，AirSIM 不得使用） |
 
 ### 应用发布包
 
-当前版为 [Apps v0.9.8.20（Android 125 / iOS 152）](docs/releases/0.9.8.20.md)，重点包含：后台接听音频启动、VoWLAN 恢复、独立 Push 注册与号码显示修正。纯本地跨端功能仍属实验阶段。
+当前版为 [Apps v0.9.8.21（Android 126 / iOS 162）](docs/releases/0.9.8.21.md)，重点包含：小组件、试验性 TLS 公网直连、未读／未接提醒与通话安全修复。纯本地跨端功能仍属实验阶段。
 
 - `AirSIM-Android-Standalone-0.9.8.19-build124.apk`：推荐新安装，内置 Agent，不依赖 AVF Linux。
 - `AirSIM-Android-AVF-0.9.8.19-build124.apk`：旧 AVF 部署的 Android Bridge；不包含新的 Linux Agent。

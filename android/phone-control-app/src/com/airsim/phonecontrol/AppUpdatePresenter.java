@@ -50,15 +50,12 @@ final class AppUpdatePresenter {
     void showNotes(Runnable after) {
         Activity activity = liveOwner();
         if (activity == null || dialog != null) return;
-        String notes = "• 修复本地网关对来电推送 POST 路径的允许规则，配合新版 iPhone 改善云端来电注册。\n\n"
-                + "• 配套 iPhone build 152 改善后台接听与 VoWLAN 恢复，并避免无区号号码按手机地区误识别。\n\n"
-                + "• 新增全局后台静音音频保活开关，默认关闭以降低耗电。\n\n"
-                + "• 反馈改为手动上传：填写描述与备注后点击上传，不会自动提交。\n\n"
-                + "• VoWLAN 在 Wi-Fi/DHCP 换址后丢弃旧地址并重新验证。\n\n"
-                + "• 所有厂商统一使用最低非零音量，兼容小米等机型通话下行采集。\n\n"
-                + "• 改善 DTMF 按键音和挂断兜底；VoBLE 新增短信下行。\n\n"
-                + "• 来电事件优先 Relay，迟到来电不再拉起 CallKit；iPhone 被划掉后 Android 宽限自动挂断。\n\n"
-                + "• 优化云端弱网音频：短丢包隐藏、jitter 上限提高；iOS 接听后立即启动云端音频。";
+        String notes = "• 修复 Android 10 的 SIM 订阅监听兼容性，避免启动 Service 时调用高版本接口崩溃。\n\n"
+                + "• 上报设备电量，供兼容的 iPhone 小组件显示；无有效采样时不会伪造电量。\n\n"
+                + "• 配套 iPhone build 162 新增小组件、未读短信／未接来电标记与试验性 TLS 公网配对教程。\n\n"
+                + "• 改善 Shizuku 短信收件箱兼容性；首次追平只补转近 15 分钟短信，旧短信仅推进游标。\n\n"
+                + "• U30Air 客户端与通话收尾改进需要兼容设备端；本 APK 不安装或更新 U30Air 固件。\n\n"
+                + "• 反馈仍由用户手动上传；配对和已有数据保留。";
         AlertDialog next = new AlertDialog.Builder(activity).setTitle("当前版本更新内容 · " + version + "（" + build + "）")
                 .setMessage(notes).setPositiveButton("知道了", (ignored, which) -> {
                     preferences.edit().putString(NOTES_SEEN, version + "#" + build).apply();

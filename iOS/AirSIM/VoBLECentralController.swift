@@ -304,6 +304,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     private let peripheralPreferenceKey = "airsim.voble.peripheral-id"
     private var explicitPairingPeripheral: UUID?
     private var deviceInformationRevision: UInt64 = 0
+    private var deviceInformationRefreshTask: Task<Void, Never>?
     private var applicationIsBackground = UIApplication.shared.applicationState == .background
     private var systemReconnecting = false
     /// Set only when this side asks CoreBluetooth to cancel. It is diagnostic,
@@ -377,12 +378,12 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
         connect(selected, restored: false)
     }
 
-    func refreshDeviceInformation() async {
+    func refreshDeviceInformation(preserveCachedUntilResponse: Bool = false) async {
         guard state == .ready, let identity = authenticatedIdentity else { return }
         let session = sessionID
         deviceInformationRevision &+= 1
         let revision = deviceInformationRevision
-        deviceInformation = nil
+        if !preserveCachedUntilResponse { deviceInformation = nil }
         do {
             let response = try await send(command: "device_info")
             guard response.success, state == .ready, authenticatedIdentity == identity, sessionID == session,
@@ -701,6 +702,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     }
 
     private func resetConnection(keepingPeripheral: Bool = false) {
+        deviceInformationRefreshTask?.cancel(); deviceInformationRefreshTask = nil
         connectionRevision &+= 1
         pairingTask?.cancel(); pairingTask = nil; queuedPairingMessages = 0
         systemReconnecting = false
@@ -737,7 +739,20 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
         let message: String?
         if case let .failed(value) = state { message = value } else { message = nil }
         if errorMessage != message { errorMessage = message }
-        if state == .ready, previous != .ready { onReady?() }
+        if state == .ready, previous != .ready {
+            onReady?()
+            deviceInformationRefreshTask?.cancel()
+            deviceInformationRefreshTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                    guard let self, self.state == .ready else { return }
+                    // No background keepalive or competition with call control/audio.
+                    if UIApplication.shared.applicationState == .active, !CallKitController.shared.managesCurrentCall {
+                        await self.refreshDeviceInformation(preserveCachedUntilResponse: true)
+                    }
+                }
+            }
+        }
         if case .disconnected = event, enabled, reconnectBarrier.permitsConnection {
             radio.restartDiscoveryAfterDisconnect()
         }

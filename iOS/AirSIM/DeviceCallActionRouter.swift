@@ -32,6 +32,7 @@ struct DeviceBackendCall: Sendable {
     let callID: String
     let backendID: String
     let generation: UInt64?
+    var recoveredState: CallLifecycleState? = nil
 }
 
 @MainActor
@@ -82,19 +83,23 @@ final class DeviceCallActionRouter {
     var hasPendingTermination: Bool { !pendingTerminations.isEmpty }
     var systemUUID: () -> UUID = { UUID() }
     var onActivate: ((LockedDeviceCallRoute) -> Void)?
-    var onFinish: ((DeviceCallKey) -> Void)?
+    var onFinish: ((DeviceCallKey, Bool) -> Void)?
     var onAnswerFailed: ((DeviceCallKey) -> Void)?
     var onTerminationSettled: (() -> Void)?
     init(context: DeviceCallContext,
          backend: @escaping (String, CallTransport) -> (any DeviceCallBackend)?) {
         self.context = context; self.backend = backend
     }
+    func hasDialReceipt(for key: DeviceCallKey) -> Bool {
+        targets[key] != nil && !pendingDials.contains(key) && context.registry.latestEvent(for: key)?.state.representsCall == true
+    }
     func dial(agentID: String, number: String, mode: AirSIMConnectionMode,
-              reservationID: UUID? = nil, simAccount: String? = nil) async throws -> LockedDeviceCallRoute {
+              reservationID: UUID? = nil, simAccount: String? = nil,
+              operationID: String = UUID().uuidString.lowercased()) async throws -> LockedDeviceCallRoute {
         guard context.registry.active == nil, context.media.owner == nil,
               context.admissionReservation == nil || context.admissionReservation == reservationID else { throw DeviceCallRoutingError.busy }
         guard let (transport, service) = preferred(agentID: agentID, mode: mode) else { throw DeviceCallRoutingError.unavailable }
-        let operation = UUID().uuidString.lowercased(), uuid = systemUUID()
+        let operation = operationID, uuid = systemUUID()
         _ = context.registry.apply(.init(agentID: agentID, callID: operation, state: .connecting,
             transport: transport, transportEpoch: service.epoch, number: number, direction: "outgoing"))
         guard let key = context.registry.key(agentID: agentID, callID: operation),
@@ -111,7 +116,9 @@ final class DeviceCallActionRouter {
                   context.registry.latestEvent(for: key)?.state.isTerminal == false else {
                 // A hangup may beat this reply. Clean up this exact source only;
                 // never send the late result to the newly selected/default phone.
-                try? await service.end(callID: reply.backendID, generation: reply.generation, reject: false)
+                if reply.recoveredState?.isTerminal != true {
+                    try? await service.end(callID: reply.backendID, generation: reply.generation, reject: false)
+                }
                 throw CancellationError()
             }
             // An authenticated same-lane alias can be delivered after the BLE
@@ -138,6 +145,16 @@ final class DeviceCallActionRouter {
             }
             guard context.registry.latestEvent(for: key)?.callID == reply.callID else { throw DeviceCallRoutingError.stale }
             targets[key] = Target(backend: service, identity: reply)
+            if let recovered = reply.recoveredState {
+                // Signed terminal recovery cannot create a fresh connecting call.
+                // Apply before replaying buffered events so their terminal wins.
+                pendingDials.remove(key)
+                _ = context.registry.apply(.init(agentID: agentID, callID: reply.callID,
+                    state: recovered, transport: transport, transportEpoch: service.epoch,
+                    backendGeneration: reply.generation, number: number, direction: "outgoing",
+                    backendCallID: reply.backendID))
+                if recovered.isTerminal { finished(key, authoritative: true); return route }
+            }
             // BLE ACK may acknowledge only the provisional operation. Keep
             // other-lane events buffered until BLE supplies its Telecom alias.
             if reply.callID != operation {
@@ -151,6 +168,25 @@ final class DeviceCallActionRouter {
             throw error
         }
     }
+    /// The authenticated poll's source and BOTH receipt IDs must match a
+    /// captured WLAN target. Discovery health is not the authority for ending
+    /// an already owned call. Never infer ownership from a number or idle list.
+    @discardableResult
+    func ingestOwnedWLANClosure(_ call: CallRecord, agentID: String,
+                                mode: AirSIMConnectionMode) -> Bool {
+        guard call.isTerminal, let canonicalID = call.androidID,
+              let key = context.registry.key(agentID: agentID, callID: canonicalID),
+              let route = routes[key], route.transport == .vowlan,
+              let target = targets[key], !pendingDials.contains(key),
+              target.identity.callID == canonicalID, target.identity.backendID == call.id else { return false }
+        _ = ingest(.init(agentID: agentID, callID: canonicalID,
+            state: call.state == "failed" ? .failed : .ended,
+            transport: .vowlan, transportEpoch: target.backend.epoch,
+            backendGeneration: target.identity.generation,
+            number: call.number, direction: call.direction, backendCallID: call.id), mode: mode)
+        return context.registry.latestEvent(for: key)?.state.isTerminal == true
+    }
+
     @discardableResult
     func ingest(_ event: DeviceCallEvent, mode: AirSIMConnectionMode) -> [DeviceCallEffect] {
         defer { pruneRetiredCalls() }
@@ -177,7 +213,7 @@ final class DeviceCallActionRouter {
         // Update the locked lane's backend target before replaying another
         // lane, whose revision/generation must not replace that target.
         defer { for delayed in buffered { _ = ingest(delayed, mode: mode) } }
-        if latest.state.isTerminal { finished(key); return effects }
+        if latest.state.isTerminal { finished(key, authoritative: true); return effects }
         guard latest.callID == event.callID, latest.state == event.state,
               latest.transport == event.transport, latest.transportEpoch == event.transportEpoch,
               latest.backendGeneration == event.backendGeneration else { return effects }
@@ -221,6 +257,14 @@ final class DeviceCallActionRouter {
         guard context.registry.active == nil, context.registry.latestEvent(for: key)?.state == .ringing,
               let route = routes[key] else { throw DeviceCallRoutingError.stale }
         routes[key] = .init(key: key, transport: route.transport, systemUUID: UUID())
+    }
+    /// Capture the source before awaiting a long poll. Matching the full route
+    /// includes its pairing credential, not just an advertised IP address.
+    func ownedAgentID(for api: AirSIMAPI) -> String? {
+        guard let key = context.registry.active, routes[key]?.transport == .vowlan,
+              let service = targets[key]?.backend as? WLANDeviceCallBackend,
+              service.api.route == api.route else { return nil }
+        return key.agentID
     }
     func wlanTarget(for uuid: UUID, agentID: String? = nil)
         -> (route: LockedDeviceCallRoute, api: AirSIMAPI, backendID: String)? {
@@ -269,11 +313,11 @@ final class DeviceCallActionRouter {
               let target = targets[key] else { throw DeviceCallRoutingError.stale }
         try await target.backend.dtmf(digits, callID: target.identity.backendID, generation: target.identity.generation)
     }
-    func finished(_ key: DeviceCallKey) {
+    func finished(_ key: DeviceCallKey, authoritative: Bool = false) {
         pendingDials.remove(key); earlyEvents.removeValue(forKey: key)
         context.registry.finish(key)
         context.media.release(key)
-        onFinish?(key)
+        onFinish?(key, authoritative)
         pruneRetiredCalls()
     }
     private func pruneRetiredCalls() {
@@ -296,14 +340,17 @@ final class DeviceCallActionRouter {
 final class WLANDeviceCallBackend: DeviceCallBackend {
     let epoch: UInt64
     let api: AirSIMAPI
-    init(api: AirSIMAPI, epoch: UInt64) { self.api = api; self.epoch = epoch }
+    let agentID: String?
+    init(api: AirSIMAPI, epoch: UInt64, agentID: String? = nil) {
+        self.api = api; self.epoch = epoch; self.agentID = agentID
+    }
     func dial(number: String, operationID: String, systemUUID: UUID) async throws -> DeviceBackendCall {
         try await dial(number: number, operationID: operationID, systemUUID: systemUUID, simAccount: nil)
     }
     func dial(number: String, operationID: String, systemUUID: UUID,
               simAccount: String?) async throws -> DeviceBackendCall {
         try? await api.warmAudioHost()
-        return try await api.dialOwnedCall(number: number, operationID: operationID, simAccount: simAccount)
+        return try await api.dialOwnedCall(number: number, operationID: operationID, simAccount: simAccount, expectedAgentID: agentID)
     }
     func answer(callID: String, generation: UInt64?) async throws {
         try? await api.warmAudioHost()
