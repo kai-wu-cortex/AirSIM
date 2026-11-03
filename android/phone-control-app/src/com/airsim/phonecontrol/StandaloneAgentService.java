@@ -455,7 +455,7 @@ public final class StandaloneAgentService extends Service {
                     }
                 }, this::smsFailure, android.os.SystemClock::elapsedRealtime,
                 () -> running && generation.isCurrent() && commandConfiguration.isCurrent(snapshot.configuration())
-                        && smsTransport.isCurrent(snapshot.epoch()));
+                        && smsTransport.isCurrent(snapshot.epoch()), keys != null);
     }
 
     private void smsFailure(Throwable smsError, CloudSMSUploader.Verdict verdict, int attempt, long pauseMillis) {

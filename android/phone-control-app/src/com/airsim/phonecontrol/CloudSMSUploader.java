@@ -57,6 +57,12 @@ final class CloudSMSUploader {
 
     synchronized void flush(List<String> pending, Sender sender, Ledger ledger, Listener listener,
                             LongSupplier clock, BooleanSupplier current) throws Exception {
+        flush(pending, sender, ledger, listener, clock, current, false);
+    }
+
+    /** sealed: the bodies are E2E envelopes (issue #24), final only on the Relay's e2e rejections. */
+    synchronized void flush(List<String> pending, Sender sender, Ledger ledger, Listener listener,
+                            LongSupplier clock, BooleanSupplier current, boolean sealed) throws Exception {
         long nowMillis = clock.getAsLong();
         if (!current.getAsBoolean()) return;
         retries.keySet().retainAll(new HashSet<>(pending));
@@ -73,7 +79,7 @@ final class CloudSMSUploader {
                 sender.send(id);
             } catch (Exception error) {
                 if (!current.getAsBoolean()) return;
-                if (rejected(error)) {
+                if (rejected(error, sealed)) {
                     retries.remove(id);
                     listener.failed(error, Verdict.DROP, attempts(retry) + 1, 0);
                     ledger.rejected(id);
@@ -101,15 +107,21 @@ final class CloudSMSUploader {
 
     /** The Relay refused this SMS itself; every other status, Cloudflare's included, can clear up. */
     static boolean rejected(Throwable error) {
+        return rejected(error, false);
+    }
+
+    static boolean rejected(Throwable error, boolean sealed) {
         // Match the Worker's canonical JSON, not an arbitrary proxy/Cloudflare 400.
         // Unknown representations are safely retried rather than discarded.
         return error instanceof RelayHTTPException http && http.statusCode() == 400
-                && FINAL_REJECTIONS.contains(http.detailBody().trim());
+                && (sealed ? SEALED_REJECTIONS : PLAINTEXT_REJECTIONS).contains(http.detailBody().trim());
     }
 
-    // The Worker's own bodies for an SMS it can never push; the encrypted ones come from issue #24.
-    private static final List<String> FINAL_REJECTIONS = java.util.Arrays.asList(
-            "{\"error\":\"invalid incoming SMS\"}",
+    // The Worker's own bodies for an SMS it can never push. A sealed SMS that meets "invalid incoming
+    // SMS" reached a Relay without e2e support (old or rolled back): it waits instead (issue #24).
+    private static final List<String> PLAINTEXT_REJECTIONS =
+            java.util.Arrays.asList("{\"error\":\"invalid incoming SMS\"}");
+    private static final List<String> SEALED_REJECTIONS = java.util.Arrays.asList(
             "{\"error\":\"invalid encrypted SMS\"}",
             "{\"error\":\"encrypted SMS too large\"}");
 
