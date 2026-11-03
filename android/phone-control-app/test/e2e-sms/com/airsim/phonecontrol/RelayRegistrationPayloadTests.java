@@ -11,6 +11,7 @@ public final class RelayRegistrationPayloadTests {
                 .put("voip_token", "aa".repeat(32)).put("alert_token", "bb".repeat(32))
                 .put("watch_voip_token", "cc".repeat(32)).put("watch_bundle_id", "com.example.airsim.watchkitapp")
                 .put("live_activity_push_to_start_token", "dd".repeat(32))
+                .put("live_activity_presentation", "agent_status")
                 .put("bundle_id", "com.example.airsim").put("environment", "production")
                 .put("media_transport", "legacy_pcm")
                 .put("app_media_capabilities", new JSONArray().put("legacy_pcm").put("opus"))
@@ -24,7 +25,8 @@ public final class RelayRegistrationPayloadTests {
                 .put("android_phone_number", "+8613800000000").put("android_agent_kind", "standalone");
         JSONObject payload = RelayRegistrationPayload.forRelay(stored);
         equal("[agent_media_capabilities, alert_token, app_media_capabilities, bundle_id, device_id, device_secret, "
-                + "environment, force_legacy_pcm, live_activity_push_to_start_token, media_transport, voip_token, "
+                + "environment, force_legacy_pcm, live_activity_presentation, live_activity_push_to_start_token, "
+                + "media_transport, voip_token, "
                 + "watch_bundle_id, watch_voip_token]", new TreeSet<>(payload.keySet()).toString(), "only the Relay's fields");
         for (String key : payload.keySet()) {
             equal(stored.get(key).toString(), payload.get(key).toString(), key + " keeps its value");

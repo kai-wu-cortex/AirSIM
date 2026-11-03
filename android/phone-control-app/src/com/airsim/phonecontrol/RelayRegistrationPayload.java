@@ -10,8 +10,8 @@ import org.json.JSONObject;
 final class RelayRegistrationPayload {
     static final String[] FIELDS = {
             "device_id", "device_secret", "voip_token", "alert_token", "watch_voip_token", "watch_bundle_id",
-            "live_activity_push_to_start_token", "bundle_id", "environment", "media_transport",
-            "app_media_capabilities", "agent_media_capabilities", "force_legacy_pcm"};
+            "live_activity_push_to_start_token", "live_activity_presentation", "bundle_id", "environment",
+            "media_transport", "app_media_capabilities", "agent_media_capabilities", "force_legacy_pcm"};
 
     private RelayRegistrationPayload() {}
 
