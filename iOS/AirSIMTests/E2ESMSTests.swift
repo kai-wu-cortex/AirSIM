@@ -96,10 +96,167 @@ final class E2ESMSTests: XCTestCase {
         }
     }
 
+    // MARK: - Push classification and notification text
+
+    private let failureCopy = E2ESMSPush.Notification(
+        title: "AirSIM", body: "收到一条加密短信，但无法解密，请在同一 Wi-Fi 下重新配对", threadIdentifier: nil)
+
+    func testOpenDecryptsVectorPush() throws {
+        let outcome = E2ESMSPush.open(try vectorPush(), store: vectorStore())
+        XCTAssertEqual(outcome, .decrypted(vectorPlaintext))
+        XCTAssertEqual(E2ESMSPush.notification(for: outcome),
+                       E2ESMSPush.Notification(title: "95588", body: "【银行】验证码 123456",
+                                               threadIdentifier: "airsim-sms-95588"))
+    }
+
+    func testEmptySenderShowsUnknown() throws {
+        for sender in ["", "  "] {
+            let push = try sealedPush(#"{"sender":"\#(sender)","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
+            XCTAssertEqual(E2ESMSPush.notification(for: E2ESMSPush.open(push, store: vectorStore())),
+                           E2ESMSPush.Notification(title: "未知号码", body: "正文", threadIdentifier: "airsim-sms-未知号码"))
+        }
+    }
+
+    func testThreadIdentifierCutsAt64UTF16Units() throws {
+        // The Relay cuts "airsim-sms-<sender>" to 64 UTF-16 units for plaintext pushes.
+        let cases = [(String(repeating: "9", count: 60), "airsim-sms-" + String(repeating: "9", count: 53)),
+                     (String(repeating: "中", count: 60), "airsim-sms-" + String(repeating: "中", count: 53))]
+        for (sender, thread) in cases {
+            let push = try sealedPush(#"{"sender":"\#(sender)","content":"x","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
+            let notification = E2ESMSPush.notification(for: E2ESMSPush.open(push, store: vectorStore()))
+            XCTAssertEqual(notification?.threadIdentifier, thread)
+            XCTAssertEqual(notification?.title, sender)
+        }
+    }
+
+    func testLockedStoreOutcomes() throws {
+        let locked = MemoryE2EKeyStore(failure: .locked)
+        let encrypted = E2ESMSPush.open(try vectorPush(), store: locked)
+        XCTAssertEqual(encrypted, .locked(encrypted: true))
+        XCTAssertEqual(E2ESMSPush.notification(for: encrypted),
+                       E2ESMSPush.Notification(title: "AirSIM", body: "解锁 iPhone 后，在 AirSIM 中查看这条短信",
+                                               threadIdentifier: nil))
+        let plaintext = E2ESMSPush.open(plaintextPush(agentID: "android-A"), store: locked)
+        XCTAssertEqual(plaintext, .locked(encrypted: false))
+        XCTAssertNil(E2ESMSPush.notification(for: plaintext))
+    }
+
+    func testUndecryptableOutcomes() throws {
+        var malformed = try vectorPush()
+        malformed["e2e"] = ["v": 1]
+        var noAgent = try vectorPush()
+        noAgent["agent_id"] = nil
+        var noDelivery = try vectorPush()
+        noDelivery["delivery_id"] = ""
+        let otherDevice = MemoryE2EKeyStore(["android-A": E2EKeyRecord(key: Data(0..<32), deviceID: "iphone-other")])
+        let cases: [(String, [AnyHashable: Any], MemoryE2EKeyStore)] = [
+            ("no record", try vectorPush(), MemoryE2EKeyStore()),
+            ("other device_id", try vectorPush(), otherDevice),
+            ("malformed envelope", malformed, vectorStore()),
+            ("missing agent_id", noAgent, vectorStore()),
+            ("empty delivery_id", noDelivery, vectorStore()),
+            ("keychain unavailable", try vectorPush(), MemoryE2EKeyStore(failure: .unavailable)),
+        ]
+        for (name, push, store) in cases {
+            let outcome = E2ESMSPush.open(push, store: store)
+            XCTAssertEqual(outcome, .undecryptable, name)
+            XCTAssertEqual(E2ESMSPush.notification(for: outcome), failureCopy, name)
+        }
+    }
+
+    func testPlaintextFromKeyedAgentIsForged() {
+        let outcome = E2ESMSPush.open(plaintextPush(agentID: "android-A"), store: vectorStore())
+        XCTAssertEqual(outcome, .unencryptedFromEncryptedAgent)
+        XCTAssertEqual(E2ESMSPush.notification(for: outcome),
+                       E2ESMSPush.Notification(title: "AirSIM", body: "收到一条未加密的短信推送，已忽略",
+                                               threadIdentifier: nil))
+    }
+
+    func testUnavailableKeychainKeepsPlaintextPath() {
+        // Builds without the shared group never sent a key, so their plaintext stays as today.
+        let outcome = E2ESMSPush.open(plaintextPush(agentID: "android-A"), store: MemoryE2EKeyStore(failure: .unavailable))
+        XCTAssertEqual(outcome, .plaintext)
+        XCTAssertNil(E2ESMSPush.notification(for: outcome))
+    }
+
+    func testPlaintextWithoutAgentOrKeyIsLegacy() {
+        XCTAssertEqual(E2ESMSPush.open(plaintextPush(agentID: nil), store: vectorStore()), .plaintext)
+        XCTAssertEqual(E2ESMSPush.open(plaintextPush(agentID: "android-B"), store: vectorStore()), .plaintext)
+    }
+
+    func testOtherEventsIgnored() throws {
+        var call = try vectorPush()
+        call["event"] = "incoming_call"
+        XCTAssertEqual(E2ESMSPush.open(call, store: vectorStore()), .notSMS)
+        XCTAssertEqual(E2ESMSPush.open([:], store: vectorStore()), .notSMS)
+        XCTAssertNil(E2ESMSPush.notification(for: .notSMS))
+    }
+
+    func testKeyRecordJSONRoundTrip() throws {
+        // Stored in the keychain, so the format must survive app updates.
+        let record = E2EKeyRecord(key: Data(0..<32), deviceID: "iphone-air")
+        let encoded = try JSONEncoder().encode(record)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["device_id"] as? String, "iphone-air")
+        XCTAssertEqual(object["key"] as? String, "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+        XCTAssertEqual(try JSONDecoder().decode(E2EKeyRecord.self, from: encoded), record)
+    }
+
+    func testKeychainStoreWithoutGroupIsUnavailable() {
+        // Unsigned or re-signed builds without Keychain Sharing: never offer a key.
+        for group in [nil, ""] as [String?] {
+            let store = KeychainE2EKeyStore(accessGroup: group)
+            XCTAssertFalse(store.canStore())
+            XCTAssertThrowsError(try store.record(agentID: "android-A")) {
+                XCTAssertEqual($0 as? E2EKeyStoreError, .unavailable)
+            }
+            XCTAssertThrowsError(try store.save(E2EKeyRecord(key: Data(0..<32), deviceID: "iphone-air"),
+                                                agentID: "android-A")) {
+                XCTAssertEqual($0 as? E2EKeyStoreError, .unavailable)
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func vectorEnvelope() throws -> E2ESMS.Envelope {
         try XCTUnwrap(E2ESMS.Envelope(json(envelopeJSON())))
+    }
+
+    private func vectorStore() -> MemoryE2EKeyStore {
+        MemoryE2EKeyStore(["android-A": E2EKeyRecord(key: Data(0..<32), deviceID: "iphone-air")])
+    }
+
+    /// The Relay's encrypted SMS push (13f0c41 `encryptedSMSPayload`) carrying the Node vector.
+    private func vectorPush() throws -> [AnyHashable: Any] {
+        [
+            "aps": ["alert": ["title": "AirSIM", "body": "新短信"], "sound": "default",
+                    "thread-id": "airsim-sms-agent-android-A", "content-available": 1, "mutable-content": 1],
+            "event": "incoming_sms", "delivery_id": vectorDelivery, "agent_id": "android-A",
+            "timestamp": "2026-11-03T08:00:00Z", "e2e": try json(envelopeJSON()),
+        ]
+    }
+
+    /// An encrypted push for `plaintextJSON`, sealed with the vector key for iphone-air / android-A.
+    private func sealedPush(_ plaintextJSON: String) throws -> [AnyHashable: Any] {
+        var push = try vectorPush()
+        push["delivery_id"] = "android-sms-test"
+        push["e2e"] = try json(sealedEnvelopeJSON(plaintextJSON, key: vectorKey, deviceID: "iphone-air",
+                                                  agentID: "android-A", deliveryID: "android-sms-test"))
+        return push
+    }
+
+    /// The Relay's plaintext SMS push; `agentID` nil leaves the field out like old agents.
+    private func plaintextPush(agentID: String?) -> [AnyHashable: Any] {
+        var push: [AnyHashable: Any] = [
+            "aps": ["alert": ["title": "95588", "body": "【银行】验证码 123456"], "sound": "default",
+                    "thread-id": "airsim-sms-95588", "content-available": 1],
+            "event": "incoming_sms", "delivery_id": "android-sms-plain", "sender": "95588",
+            "content": "【银行】验证码 123456", "content_truncated": false, "code": "",
+            "timestamp": "2026-11-03T08:00:00Z",
+        ]
+        push["agent_id"] = agentID
+        return push
     }
 
     private func open(_ envelope: E2ESMS.Envelope, deviceID: String = "iphone-air",
@@ -135,4 +292,35 @@ final class E2ESMSTests: XCTestCase {
     private func hex(_ data: Data) -> String {
         data.map { String(format: "%02x", $0) }.joined()
     }
+}
+
+/// In-memory `E2EKeyStoring`. `failure` makes every call throw, like a keychain that is locked
+/// before the first unlock or has no shared group.
+final class MemoryE2EKeyStore: E2EKeyStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: [String: E2EKeyRecord]
+    private let failure: E2EKeyStoreError?
+
+    init(_ records: [String: E2EKeyRecord] = [:], failure: E2EKeyStoreError? = nil) {
+        self.records = records
+        self.failure = failure
+    }
+
+    var all: [String: E2EKeyRecord] { lock.withLock { records } }
+
+    func record(agentID: String) throws -> E2EKeyRecord? {
+        if let failure { throw failure }
+        return lock.withLock { records[agentID] }
+    }
+
+    func save(_ record: E2EKeyRecord, agentID: String) throws {
+        if let failure { throw failure }
+        lock.withLock { records[agentID] = record }
+    }
+
+    func remove(agentID: String) {
+        lock.withLock { records[agentID] = nil }
+    }
+
+    func canStore() -> Bool { failure == nil }
 }

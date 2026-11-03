@@ -47,6 +47,8 @@
 	<string>$(AIRSIM_PUSH_RELAY_URL)</string>
 	<key>AirSIMAPNSEnvironment</key>
 	<string>$(AIRSIM_APNS_ENVIRONMENT)</string>
+	<key>AirSIME2EKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)airsim.e2e-sms</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSRequiresIPhoneOS</key>

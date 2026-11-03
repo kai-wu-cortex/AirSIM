@@ -42,6 +42,8 @@
 		A10000000000000000000006 /* AudioSessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* AudioSessionController.swift */; };
 		A10000000000000000000007 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* AppModel.swift */; };
 		A1E2E0000000000000000001 /* E2ESMS.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000001 /* E2ESMS.swift */; };
+		A1E2E0000000000000000003 /* E2EKeyStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000003 /* E2EKeyStore.swift */; };
+		A1E2E0000000000000000004 /* E2ESMSPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1E2E0000000000000000004 /* E2ESMSPush.swift */; };
 		A10000000000000000000008 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* RootView.swift */; };
 		A10000000000000000000009 /* PhoneViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* PhoneViews.swift */; };
 		A1000000000000000000000A /* AirSIMSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* AirSIMSetupView.swift */; };
@@ -181,6 +183,8 @@
 		B10000000000000000000006 /* AudioSessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioSessionController.swift; sourceTree = "<group>"; };
 		B10000000000000000000007 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		B1E2E0000000000000000001 /* E2ESMS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2ESMS.swift; sourceTree = "<group>"; };
+		B1E2E0000000000000000003 /* E2EKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2EKeyStore.swift; sourceTree = "<group>"; };
+		B1E2E0000000000000000004 /* E2ESMSPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = E2ESMSPush.swift; sourceTree = "<group>"; };
 		B10000000000000000000008 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		B10000000000000000000009 /* PhoneViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneViews.swift; sourceTree = "<group>"; };
 		B1000000000000000000000A /* AirSIMSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMSetupView.swift; sourceTree = "<group>"; };
@@ -316,6 +320,8 @@
 				B1000000000000000000002C /* SamsungPairingCrypto.swift */,
 				B1000000000000000000002D /* SamsungPairingClient.swift */,
 				B1E2E0000000000000000001 /* E2ESMS.swift */,
+				B1E2E0000000000000000003 /* E2EKeyStore.swift */,
+				B1E2E0000000000000000004 /* E2ESMSPush.swift */,
 				B1000000000000000000002E /* SamsungPairingView.swift */,
 				B1000000000000000000002F /* VoWLANAuth.swift */,
 				B10000000000000000000030 /* VoWLANController.swift */,
@@ -616,6 +622,8 @@
 				A1000000000000000000002C /* SamsungPairingCrypto.swift in Sources */,
 				A1000000000000000000002D /* SamsungPairingClient.swift in Sources */,
 				A1E2E0000000000000000001 /* E2ESMS.swift in Sources */,
+				A1E2E0000000000000000003 /* E2EKeyStore.swift in Sources */,
+				A1E2E0000000000000000004 /* E2ESMSPush.swift in Sources */,
 				A1000000000000000000002E /* SamsungPairingView.swift in Sources */,
 				A1000000000000000000002F /* VoWLANAuth.swift in Sources */,
 				A10000000000000000000030 /* VoWLANController.swift in Sources */,
