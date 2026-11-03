@@ -168,7 +168,7 @@ App 仅复制命令，必须在 Debian Terminal 中粘贴执行。安装器只�
 open iOS/AirSIM.xcodeproj
 ```
 
-使用自己的 Apple Developer Team，为主 App、Watch App 和 Live Activity Extension 设置唯一 Bundle ID，并重新生成 provisioning profile。仓库中的 `com.example.airsim` 只是占位符，不能直接用于发布或 APNs。签名、CallKit、PushKit 与 APNs topic 的对应关系见 [iOS / watchOS 文档](iOS/README.md)。
+使用自己的 Apple Developer Team，为主 App、Watch App、Live Activity Extension 和 Notification Service Extension 设置唯一 Bundle ID，并重新生成 provisioning profile。仓库中的 `com.example.airsim` 只是占位符，不能直接用于发布或 APNs。签名、CallKit、PushKit 与 APNs topic 的对应关系见 [iOS / watchOS 文档](iOS/README.md)。
 
 ### 5. 可选：部署 Cloudflare Relay
 
@@ -202,7 +202,7 @@ npx wrangler deploy --dry-run --config wrangler.toml
 AirSIM 不附带原作者的 Apple Developer Team、App ID、证书或 provisioning profile。每位使用者必须：
 
 1. 将主 App 的 `com.example.airsim` 替换为自己控制的唯一 Bundle ID。
-2. 将 Watch App 和 Live Activity Extension 分别设置为主 Bundle ID 加 `.watchkitapp` 与 `.liveactivity`。
+2. 将 Watch App、Live Activity Extension 和 Notification Service Extension 分别设置为主 Bundle ID 加 `.watchkitapp`、`.liveactivity` 与 `.notificationservice`。主 App 与 Notification Service Extension 需开启 Keychain Sharing，共用 `$(AppIdentifierPrefix)airsim.e2e-sms`，用于端到端加密云端短信（[iOS 文档](iOS/README.md)）。
 3. 使用自己的 Apple Developer Team、开发/分发证书与 provisioning profile 重新签名。
 4. 在 Relay 中把 `ALLOWED_BUNDLE_ID` 设置为同一个主 App Bundle ID。
 5. 分别验证 APNs sandbox 与 production 环境中的 PushKit、通知、Watch 和 Live Activity topic。

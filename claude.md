@@ -66,6 +66,7 @@ v0.4.5 是一次签名信任根迁移：v0.4.4 的私钥未留存，旧 installe
 - 主 App：部署者的唯一 Bundle ID。
 - Watch App：主 Bundle ID 加 `.watchkitapp`。
 - Live Activity：主 Bundle ID 加 `.liveactivity`。
+- Notification Service Extension：主 Bundle ID 加 `.notificationservice`，与主 App 共用钥匙串组 `$(AppIdentifierPrefix)airsim.e2e-sms`（端到端加密云端短信）。
 - 测试 Target：主 Bundle ID 加 `.tests`。
 - Watch companion 标识：等于主 App Bundle ID。
 - Relay `ALLOWED_BUNDLE_ID`：等于主 App Bundle ID。
