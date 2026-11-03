@@ -76,6 +76,18 @@ final class StandaloneAgentStore {
         return value;
     }
 
+    synchronized void restoreSnapshot(String encoded) throws Exception {
+        if (encoded == null || encoded.isBlank()) {
+            if (!preferences.edit().remove(REGISTRATION).commit()) throw new IllegalStateException("registration_restore_failed");
+            return;
+        }
+        JSONObject value = new JSONObject(encoded);
+        validateRegistration(value);
+        if (!preferences.edit().putString(REGISTRATION, value.toString()).commit()) {
+            throw new IllegalStateException("registration_restore_failed");
+        }
+    }
+
     boolean configured() {
         JSONObject value = registration();
         if (value != null && value.optBoolean("local_mode", false)) return true;
@@ -85,12 +97,14 @@ final class StandaloneAgentStore {
     }
 
     boolean cloudEnabled() {
+        if (RelayEgressGate.shared.isBlocked()) return false;
         JSONObject value = registration();
         return value != null && !value.optBoolean("local_mode", false)
                 && value.optBoolean("cloud_enabled", true);
     }
 
     synchronized JSONObject setCloudEnabled(boolean enabled) throws Exception {
+        if (enabled && RelayEgressGate.shared.isBlocked()) throw new IllegalStateException("纯本地模式禁止云端连接");
         JSONObject value = registration();
         if (value == null) throw new IllegalStateException("尚未完成配对");
         if (enabled && value.optBoolean("local_mode", false)) {
@@ -123,7 +137,7 @@ final class StandaloneAgentStore {
         boolean localMode = configured && registration.optBoolean("local_mode", false);
         JSONObject result = new JSONObject()
                 .put("local_mode", localMode)
-                .put("cloud_enabled", configured && !localMode
+                .put("cloud_enabled", !RelayEgressGate.shared.isBlocked() && configured && !localMode
                         && registration.optBoolean("cloud_enabled", true))
                 .put("configured", configured)
                 .put("call_push_ready", configured && (!registration.optString("voip_token", "").isEmpty()

@@ -6,7 +6,7 @@ public final class LocalOutputMuteControllerTests {
     public static void main(String[] args) throws Exception {
         captureCoupledDeviceNeverMutesOrUsesZeroVolume();
         captureSafeFailuresRestoreOriginalState();
-        unrelatedVendorsKeepExistingOutputBehavior();
+        allVendorsUseCaptureSafeMinimumVolume();
         minimumVolumeIsAppliedAndRestored();
         minimumVolumePreservesExistingMuteAndRejectsIgnoredWrites();
         Platform audio = new Platform();
@@ -94,16 +94,14 @@ public final class LocalOutputMuteControllerTests {
                 "capture-safe restoration retry must restore the first snapshot and mute bit last");
     }
 
-    private static void unrelatedVendorsKeepExistingOutputBehavior() throws Exception {
-        for (String vendor : new String[]{null, "", "other", "UNISOC", "samsung"}) {
+    private static void allVendorsUseCaptureSafeMinimumVolume() throws Exception {
+        for (String vendor : new String[]{null, "", "other", "UNISOC", "samsung", "Xiaomi", "Redmi", "OPPO"}) {
             Platform audio = new Platform(); audio.minimum = 0;
             LocalOutputMuteController controller = new LocalOutputMuteController(audio,
                     LocalOutputMuteController.strategyForManufacturer(vendor));
             controller.setMuted(true);
-            if ("samsung".equals(vendor)) check(!audio.muted && audio.volume == 1,
-                    "Samsung must use the lowest NONZERO index: 0 silences VOICE_DOWNLINK capture");
-            else check(audio.muted && audio.volume == 4,
-                    "one reported OEM must not change the mute policy of every chipset/vendor");
+            check(!audio.muted && audio.volume == 1,
+                    vendor + " must use the lowest NONZERO index: mute/0 silences VOICE_DOWNLINK capture");
             controller.setMuted(false);
         }
     }

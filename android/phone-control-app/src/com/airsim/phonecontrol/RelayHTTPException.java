@@ -21,6 +21,11 @@ final class RelayHTTPException extends IOException {
     int statusCode() { return statusCode; }
     long retryAfterMillis() { return retryAfterMillis; }
     String detailBody() { return detail; }
+    static long heartbeatRetryDelay(Exception error) {
+        long requested = error instanceof RelayHTTPException
+                ? ((RelayHTTPException) error).retryAfterMillis() : 0;
+        return Math.max(30_000, Math.min(3_600_000, requested));
+    }
     static long parseRetryAfter(String value, long wallTimeMillis) {
         if (value == null) return 0;
         try {

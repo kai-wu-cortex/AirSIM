@@ -36,10 +36,16 @@ public final class WireJson {
 	}
 
 	public static String smsEvent(String eventId, String deliveryId, String sender, String content, String timestamp) {
+		return smsEvent(eventId, deliveryId, sender, content, timestamp, "");
+	}
+
+	public static String smsEvent(String eventId, String deliveryId, String sender, String content,
+								 String timestamp, String simSlot) {
 		String displaySender = sender == null || sender.isBlank() ? "未知号码" : sender;
 		return "{" + field("event", "incoming_sms") + "," + field("event_id", eventId) + ","
 				+ field("delivery_id", deliveryId) + "," + field("sender", displaySender) + ","
-				+ field("content", content) + "," + field("timestamp", timestamp) + "}";
+				+ field("content", content) + "," + field("timestamp", timestamp) + ","
+				+ field("sim_slot", simSlot) + "}";
 	}
 
     private static String field(String key, String value) {

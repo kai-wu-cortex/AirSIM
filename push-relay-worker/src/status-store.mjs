@@ -4,6 +4,15 @@ const HEARTBEAT_PREFIX = "heartbeat:";
 const DEVICE_PREFIX = "device:";
 const DASHBOARD_EVENT_PREFIX = "dashboard:event:";
 const REGISTRY_NAME = "agent-heartbeats";
+// A degraded DO/KV path can fail on every request. Keep one diagnostic per
+// minute so a status outage does not burn the Workers Logs event quota.
+const degradedWarnAt = new Map();
+function warnDegraded(key, message, error) {
+  const now = Date.now();
+  if (now - (degradedWarnAt.get(key) || 0) < 60_000) return;
+  degradedWarnAt.set(key, now);
+  console.warn(message, error ? safeError(error) : undefined);
+}
 
 export class AgentStatusRegistry {
   constructor(state) {
@@ -122,6 +131,14 @@ export class AgentStatusRegistry {
           ? Response.json(record)
           : Response.json({ error: "not found" }, { status: 404 });
       }
+      if (request.method === "DELETE") {
+        await this.storage.delete(key);
+        const heartbeats = await this.storage.list({
+          prefix: `heartbeat:${decodeURIComponent(deviceMatch[1])}`,
+        });
+        for (const heartbeatKey of heartbeats.keys()) await this.storage.delete(heartbeatKey);
+        return new Response(null, { status: 204 });
+      }
       return new Response("method not allowed", { status: 405 });
     }
 
@@ -215,13 +232,24 @@ export async function authenticateAndWriteAgentHeartbeat(env, heartbeat, agentID
 export async function authenticateAndReadAgentHeartbeats(env, query) {
   const stub = registryStub(env);
   if (!stub) return null;
-  return stub.fetch("https://status.internal/authenticated-status", {
+  return withTimeout(stub.fetch("https://status.internal/authenticated-status", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       device_id: query.device_id,
       device_secret: query.device_secret,
     }),
+  }), 2_500);
+}
+
+function withTimeout(promise, timeoutMS) {
+  let timer;
+  return new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("status registry timed out")), timeoutMS);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
   });
 }
 
@@ -264,7 +292,7 @@ export async function readAgentHeartbeats(env, deviceID) {
         if (Array.isArray(records) && records.length > 0) return records;
       }
     } catch (error) {
-      console.warn("status registry roster read failed; using KV mirrors", safeError(error));
+      warnDegraded("roster", "status registry roster read failed; using KV mirrors", error);
     }
   }
   const mirrored = await readKVAgentRoster(env, deviceID);
@@ -288,7 +316,7 @@ async function readKVAgentRoster(env, deviceID) {
     const available = records.filter(Boolean);
     if (available.length > 0) return available;
   } catch (error) {
-    console.warn("KV heartbeat roster read failed; using latest heartbeat", safeError(error));
+    warnDegraded("kv-roster", "KV heartbeat roster read failed; using latest heartbeat", error);
   }
   return [];
 }
@@ -297,15 +325,15 @@ export async function readAgentHeartbeat(env, deviceID) {
   const stub = registryStub(env);
   if (!stub) return readKVRecord(env.DEVICES, `${HEARTBEAT_PREFIX}${deviceID}`);
   try {
-    const response = await stub.fetch(
+    const response = await withTimeout(stub.fetch(
       `https://status.internal/heartbeat/${encodeURIComponent(deviceID)}`,
-    );
+    ), 1_500);
     if (response.ok) return response.json();
     if (response.status !== 404) {
-      console.warn(`status registry returned HTTP ${response.status}; using KV heartbeat mirror`);
+      warnDegraded("status-http", `status registry returned HTTP ${response.status}; using KV heartbeat mirror`);
     }
   } catch (error) {
-    console.warn("status registry heartbeat read failed; using KV mirror", safeError(error));
+    warnDegraded("heartbeat-read", "status registry heartbeat read failed; using KV mirror", error);
   }
   return readKVRecord(env.DEVICES, `${HEARTBEAT_PREFIX}${deviceID}`);
 }
@@ -326,7 +354,7 @@ export async function writeDeviceRecord(env, deviceID, record) {
   } catch (error) {
     // Registration and APNs tokens must survive a Durable Objects quota/outage.
     // KV remains the authoritative fallback for the push path.
-    console.warn("device registry write failed; using KV mirror", safeError(error));
+    warnDegraded("device-write", "device registry write failed; using KV mirror", error);
   }
   await bestEffortKVPut(env.DEVICES, `${DEVICE_PREFIX}${deviceID}`, record);
 }
@@ -335,41 +363,64 @@ export async function readDeviceRecord(env, deviceID) {
   const stub = registryStub(env);
   if (stub) {
     try {
-      const response = await stub.fetch(`https://status.internal/device/${encodeURIComponent(deviceID)}`);
+      const response = await withTimeout(
+        stub.fetch(`https://status.internal/device/${encodeURIComponent(deviceID)}`), 2_500);
       if (response.ok) return response.json();
       if (response.status !== 404) throw new Error(`device registry returned HTTP ${response.status}`);
     } catch (error) {
-      console.warn("device registry read failed; using KV mirror", safeError(error));
+      warnDegraded("device-read", "device registry read failed; using KV mirror", error);
     }
   }
   return readKVRecord(env.DEVICES, `${DEVICE_PREFIX}${deviceID}`);
 }
 
-export async function listDeviceRecords(env) {
-  const records = new Map();
+export async function readDeviceRecordFromKV(env, deviceID) {
+  return readKVRecord(env.DEVICES, DEVICE_PREFIX + deviceID);
+}
+
+export async function deleteDeviceRecord(env, deviceID) {
+  const id = String(deviceID || "").trim();
+  if (!id) return false;
   const stub = registryStub(env);
-  let registryAvailable = false;
   if (stub) {
-    try {
-      const response = await stub.fetch("https://status.internal/devices");
-      if (!response.ok) throw new Error(`device registry returned HTTP ${response.status}`);
-      registryAvailable = true;
-      for (const record of await response.json()) {
-        if (record?.device_id) records.set(record.device_id, record);
-      }
-    } catch (error) {
-      console.warn("device registry list failed; using KV mirrors", safeError(error));
+    await stub.fetch("https://status.internal/device/" + encodeURIComponent(id), { method: "DELETE" });
+  }
+  if (env.DEVICES) {
+    await env.DEVICES.delete(DEVICE_PREFIX + id);
+    if (typeof env.DEVICES.list === "function") {
+      const keys = await env.DEVICES.list({ prefix: "heartbeat:" + id, limit: 500 });
+      for (const item of keys?.keys || []) await env.DEVICES.delete(item.name);
     }
   }
-  if (!registryAvailable && typeof env.DEVICES?.list === "function") {
+  return true;
+}
+
+export async function listDeviceRecords(env) {
+  const records = new Map();
+  if (typeof env.DEVICES?.list === "function") {
     try {
       const keys = await env.DEVICES.list({ prefix: DEVICE_PREFIX, limit: 500 });
       for (const item of keys?.keys || []) {
         const record = await readKVRecord(env.DEVICES, item.name);
-        if (record?.device_id && !records.has(record.device_id)) records.set(record.device_id, record);
+        if (record?.device_id) records.set(record.device_id, record);
       }
     } catch (error) {
-      console.warn("KV device mirror list failed; using status registry records", safeError(error));
+      warnDegraded("kv-device-list", "KV device mirror list failed; using status registry records", error);
+    }
+  }
+  if (records.size === 0) {
+    const stub = registryStub(env);
+    if (stub) {
+      try {
+        const response = await withTimeout(
+          stub.fetch("https://status.internal/devices"), 2_500);
+        if (!response.ok) throw new Error(`device registry returned HTTP ${response.status}`);
+        for (const record of await response.json()) {
+          if (record?.device_id) records.set(record.device_id, record);
+        }
+      } catch (error) {
+        warnDegraded("device-list", "device registry list failed", error);
+      }
     }
   }
   return [...records.values()];
@@ -403,7 +454,7 @@ export async function listDashboardEvents(env, limit = 60) {
       if (!response.ok) throw new Error(`dashboard event registry returned HTTP ${response.status}`);
       return await response.json();
     } catch (error) {
-      console.warn("dashboard event registry unavailable; using KV fallback", safeError(error));
+      warnDegraded("event-registry", "dashboard event registry unavailable; using KV fallback", error);
     }
   }
   if (typeof env.DEVICES?.list !== "function") return [];
@@ -416,7 +467,7 @@ export async function listDashboardEvents(env, limit = 60) {
     }
     return records;
   } catch (error) {
-    console.warn("KV dashboard events unavailable", safeError(error));
+    warnDegraded("kv-events", "KV dashboard events unavailable", error);
     return [];
   }
 }

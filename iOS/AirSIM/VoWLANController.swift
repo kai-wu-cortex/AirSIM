@@ -5,17 +5,21 @@ struct VoWLANEndpoint: Equatable, Hashable, Sendable {
     let host: String
     let controlPort: UInt16
     let pcmPort: UInt16
+    let usesTLS: Bool
 
-    init(host: String, controlPort: UInt16, pcmPort: UInt16) throws {
-        guard Self.permitsDirectIPv4(host), controlPort >= 1024, pcmPort >= 1024 else {
+    init(host: String, controlPort: UInt16, pcmPort: UInt16, usesTLS: Bool = false) throws {
+        let validHost = usesTLS ? RemoteDirectHost.isValid(host) : Self.permitsDirectIPv4(host)
+        let minimumPort: UInt16 = usesTLS ? 1 : 1024
+        guard validHost, controlPort >= minimumPort, pcmPort >= minimumPort else {
             throw VoWLANControllerError.invalidAdvertisement
         }
         self.host = host
         self.controlPort = controlPort
         self.pcmPort = pcmPort
+        self.usesTLS = usesTLS
     }
 
-    var controlBaseURL: URL { URL(string: "http://\(host):\(controlPort)/")! }
+    var controlBaseURL: URL { URL(string: "\(usesTLS ? "https" : "http")://\(host):\(controlPort)/")! }
 
     static func permitsDirectIPv4(_ host: String) -> Bool {
         VoWLANNetworkRoutePolicy.permitsDirectIPv4(host)
@@ -27,7 +31,39 @@ struct VoWLANManualRoute: Codable, Equatable, Sendable {
     let host: String
     let controlPort: UInt16
     let pcmPort: UInt16
-    var endpoint: VoWLANEndpoint? { try? .init(host: host, controlPort: controlPort, pcmPort: pcmPort) }
+    // Optional for compatibility with routes saved by older releases.
+    var tls: Bool? = nil
+    var isRemote: Bool { tls == true }
+    var endpoint: VoWLANEndpoint? {
+        try? .init(host: host, controlPort: controlPort, pcmPort: pcmPort, usesTLS: isRemote)
+    }
+}
+
+enum RemoteDirectConfiguration {
+    static func route(agentID: String, host: String, controlPort: String, pcmPort: String) throws -> VoWLANManualRoute {
+        let host = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        func port(_ text: String) -> UInt16? {
+            let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }),
+                  let result = UInt16(value), result > 0 else { return nil }
+            return result
+        }
+        guard !agentID.isEmpty, RemoteDirectHost.isValid(host),
+              let control = port(controlPort), let pcm = port(pcmPort) else {
+            throw RemoteDirectError.invalidAddress
+        }
+        return VoWLANManualRoute(agentID: agentID, host: host, controlPort: control, pcmPort: pcm, tls: true)
+    }
+}
+
+enum RemoteDirectError: LocalizedError {
+    case invalidAddress, callInProgress
+    var errorDescription: String? {
+        switch self {
+        case .invalidAddress: return "请填写有效域名（不含 https:// 或路径）及 1–65535 的控制、音频端口"
+        case .callInProgress: return "请先结束当前通话，再更改自建域名直连"
+        }
+    }
 }
 
 enum VoWLANManualRouteStore {
@@ -39,7 +75,7 @@ enum VoWLANManualRouteStore {
     }
     static func save(_ route: VoWLANManualRoute, defaults: UserDefaults = .standard) throws {
         guard !route.agentID.isEmpty, route.endpoint != nil else { throw VoWLANControllerError.invalidAdvertisement }
-        var values = routes(defaults: defaults).filter { $0.agentID != route.agentID }
+        var values = routes(defaults: defaults).filter { $0.agentID != route.agentID || $0.isRemote != route.isRemote }
         values.append(route)
         defaults.set(try JSONEncoder().encode(values), forKey: key)
     }
@@ -47,11 +83,16 @@ enum VoWLANManualRouteStore {
         let values = routes(defaults: defaults).filter { $0.agentID != agentID }
         defaults.set(try? JSONEncoder().encode(values), forKey: key)
     }
+    static func removeRemote(agentID: String, defaults: UserDefaults = .standard) {
+        let values = routes(defaults: defaults).filter { $0.agentID != agentID || !$0.isRemote }
+        defaults.set(try? JSONEncoder().encode(values), forKey: key)
+    }
     static func selected(defaults: UserDefaults = .standard) -> VoWLANManualRoute? {
         let bound = AndroidAgentBindingPreference.selected(defaults: defaults)
-        return routes(defaults: defaults).last {
+        let candidates = routes(defaults: defaults).filter {
             PairedAndroidDeviceStore.permits($0.agentID, defaults: defaults) && (bound == nil || $0.agentID == bound)
         }
+        return candidates.last(where: { !$0.isRemote }) ?? candidates.last
     }
 }
 
@@ -92,6 +133,7 @@ struct VoWLANDiscoveredAgent: Equatable, Identifiable, Sendable {
 }
 
 struct VoWLANHealthIdentity: Decodable {
+    var battery: AndroidBatteryReading? = nil
     let ok: Bool
     let agentID: String?
     let agentKind: String?
@@ -104,6 +146,7 @@ struct VoWLANHealthIdentity: Decodable {
     var simSlots: [AndroidSIMSlot]? = nil
 
     enum CodingKeys: String, CodingKey {
+        case battery
         case ok
         case agentID = "agent_id"
         case agentKind = "agent_kind"
@@ -116,26 +159,69 @@ struct VoWLANHealthIdentity: Decodable {
     }
 }
 
+enum VoWLANNetworkChangePolicy {
+    /// A PushKit ringing notification is not a locked media route. Recovery
+    /// must still discover/authenticate the gateway before the user can answer.
+    static func preservesCallRoute(state: CallLifecycleState, transportLocked: Bool, cloudCallActive: Bool) -> Bool {
+        state == .active || (transportLocked && state.representsCall) || cloudCallActive
+    }
+
+    /// A network change invalidates cached LAN liveness, not saved pairing
+    /// candidates: RFC1918 addresses can also belong to a VPN.
+    static func discardsLocalRoute(host: String, isLocalSubnet: Bool, callInProgress: Bool) -> Bool {
+        // After DHCP changes subnet, the old 192.168/10 address is no longer in
+        // the current local subnet; usesSystemRouting would call it a "system"
+        // route and preserve a dead LAN IP. Only 100.64/10 overlay routes are
+        // recognisable as overlay routes without additional route metadata.
+        // All other direct routes need their cached liveness invalidated.
+        !callInProgress && !VoWLANNetworkRoutePolicy.isOverlayHost(host)
+    }
+
+    /// Invalidating online state must not delete a paired route candidate. Other
+    /// VPNs use RFC1918 addresses too; there may be no Bonjour on the new path.
+    /// Every restored candidate still needs a fresh signed identity check.
+    static func manualCandidates(_ routes: [VoWLANManualRoute]) -> [VoWLANManualRoute] {
+        routes.filter { !$0.agentID.isEmpty && $0.endpoint != nil }
+    }
+}
+
+struct VoWLANProbeAttempts {
+    private var visited = Set<VoWLANEndpoint>()
+
+    mutating func begin(_ endpoint: VoWLANEndpoint) -> Bool {
+        visited.insert(endpoint).inserted
+    }
+
+    func permits(_ endpoint: VoWLANEndpoint) -> Bool { !visited.contains(endpoint) }
+}
+
 enum VoWLANRouteCandidates {
     /// A saved route for the same phone at a different address (typically Tailscale)
     /// is the fallback when the current LAN route stops responding.
     static func alternateManualRoute(
-        _ routes: [VoWLANManualRoute], agentID: String?, failed: VoWLANEndpoint
+        _ routes: [VoWLANManualRoute], agentID: String?, failed: VoWLANEndpoint,
+        attempted: Set<VoWLANEndpoint> = []
     ) -> VoWLANManualRoute? {
         guard let agentID else { return nil }
         return routes.first {
             $0.agentID == agentID && $0.endpoint != nil && $0.endpoint != failed
+                && $0.endpoint.map { !attempted.contains($0) } == true
         }
     }
 
     static func merge(discovered: [VoWLANDiscoveredAgent], manual: [VoWLANManualRoute],
                       live: [VoWLANDiscoveredAgent], preferred: VoWLANEndpoint?) -> [VoWLANDiscoveredAgent] {
         var agents = Dictionary(discovered.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        for route in manual {
+        for route in manual.sorted(by: { !$0.isRemote && $1.isRemote }) {
             guard let endpoint = route.endpoint else { continue }
             // Keep a healthy active endpoint stable; once unavailable, a fresh
             // advertisement for this identity takes precedence over a saved address.
-            if agents[route.agentID] != nil && preferred != endpoint { continue }
+            // An explicitly saved tailnet address remains a candidate while its
+            // signed probe is in flight. A stale LAN advertisement must not
+            // redirect it on every browser restart. Keep an already active LAN
+            // route stable; failed VPN probes can still try Bonjour below.
+            let prefersOverlay = preferred == nil && VoWLANNetworkRoutePolicy.isOverlayHost(endpoint.host)
+            if agents[route.agentID] != nil && preferred != endpoint && !prefersOverlay { continue }
             agents[route.agentID] = live.first { $0.id == route.agentID && $0.endpoint == endpoint }
                 ?? VoWLANDiscoveredAgent(id: route.agentID, endpoint: endpoint, deviceName: "Android 手动直连",
                     manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)
@@ -148,6 +234,37 @@ struct VoWLANProbeGeneration {
     private var value: UInt64 = 0
     mutating func begin() -> UInt64 { value &+= 1; return value }
     func accepts(_ generation: UInt64) -> Bool { generation == value }
+}
+
+/// Owns a health-probe operation independently of its UI/watchdog caller.
+@MainActor
+final class VoWLANProbeFlight {
+    private struct Active {
+        let id: UUID
+        let epoch: UInt64
+        let endpoint: VoWLANEndpoint
+        let task: Task<Void, Never>
+    }
+    private var active: Active?
+    var isRunning: Bool { active != nil }
+
+    func cancel() {
+        active?.task.cancel()
+        active = nil
+    }
+
+    func run(epoch: UInt64, endpoint: VoWLANEndpoint, operation: @escaping @MainActor () async -> Void) async {
+        if let active, active.epoch == epoch, active.endpoint == endpoint {
+            await active.task.value
+            return
+        }
+        cancel()
+        let id = UUID()
+        let task = Task { @MainActor in await operation() }
+        active = Active(id: id, epoch: epoch, endpoint: endpoint, task: task)
+        await task.value
+        if active?.id == id { active = nil }
+    }
 }
 
 enum VoWLANAvailability: Equatable, Sendable {
@@ -398,7 +515,19 @@ struct VoWLANNetworkRecoveryPlan {
 final class VoWLANController: ObservableObject {
     @Published private(set) var availability: VoWLANAvailability =
         !VoWLANCredentialStore.hasAny() ? .unpaired : .discovering {
-        didSet { onAvailabilityChange?(availability) }
+        didSet {
+            onAvailabilityChange?(availability)
+            switch availability {
+            case let .discovered(endpoint, _):
+                let resetsAttempts = watchdogEndpoint != endpoint
+                watchdogEndpoint = endpoint
+                armVerificationWatchdog(for: endpoint, resetAttempts: resetsAttempts)
+            case .verified:
+                cancelVerificationWatchdog()
+            default:
+                cancelVerificationWatchdog()
+            }
+        }
     }
 
     var onAvailabilityChange: ((VoWLANAvailability) -> Void)?
@@ -417,16 +546,66 @@ final class VoWLANController: ObservableObject {
     private var discoveredEndpoint: VoWLANEndpoint?
     private var latestBonjourAgents: [VoWLANDiscoveredAgent] = []
     private var disappearanceTask: Task<Void, Never>?
-    private var identityEpoch: UInt64 = 0
+    private var identityEpoch: UInt64 = 0 {
+        didSet { probeFlight.cancel() }
+    }
     private var probeGeneration = VoWLANProbeGeneration()
+    private let probeFlight = VoWLANProbeFlight()
     private var networkMonitor: NWPathMonitor?
     private var networkRecoveryTask: Task<Void, Never>?
     private var networkRecoveryPlan = VoWLANNetworkRecoveryPlan()
     private var networkPathGate = VoWLANNetworkPathGate()
     private var samePathProbeTask: Task<Void, Never>?
+    private var verificationWatchdogTask: Task<Void, Never>?
+    private var verificationWatchdogAttempts = 0
+    private var watchdogEndpoint: VoWLANEndpoint?
+    private var remoteConfigurationGeneration: UInt64 = 0
+
+    /// Validate without changing the active peer. Persist only after TLS and the
+    /// existing nonce-bound Android identity proof both succeed.
+    func configureRemoteRoute(agentID: String, route: VoWLANManualRoute?,
+                              credentials: any LocalDeviceCredentialStoring = KeychainLocalDeviceCredentials(),
+                              transport: LocalDeviceDirectory.HealthTransport? = nil) async throws {
+        remoteConfigurationGeneration &+= 1
+        let generation = remoteConfigurationGeneration
+        guard !callInProgress() else { throw RemoteDirectError.callInProgress }
+        if let route {
+            guard route.agentID == agentID, route.isRemote, let endpoint = route.endpoint else {
+                throw RemoteDirectError.invalidAddress
+            }
+            let credential = await Task.detached { credentials.load(agentID: agentID) }.value
+            guard let credential, PairedAndroidDeviceStore.permits(agentID) else {
+                throw VoWLANControllerError.notPaired
+            }
+            _ = try await VoWLANAuthenticatedHealth.fetch(agentID: agentID, endpoint: endpoint,
+                credential: credential, transport: transport ?? { try await WiredHTTPTransport().send($0) })
+            try Task.checkCancellation()
+            guard generation == remoteConfigurationGeneration,
+                  PairedAndroidDeviceStore.permits(agentID),
+                  credentials.load(agentID: agentID) == credential else { throw CancellationError() }
+            guard !callInProgress() else { throw RemoteDirectError.callInProgress }
+            // Automatic Bonjour pairing has no manual LAN entry. Preserve its
+            // last authenticated local address before adding the remote fallback.
+            if !VoWLANManualRouteStore.routes().contains(where: { $0.agentID == agentID && !$0.isRemote }),
+               let local = VoWLANPairingRecordStore.records().first(where: { $0.agentID == agentID })?
+                .endpoints.compactMap({ $0.endpoint }).last(where: { !$0.usesTLS }) {
+                try VoWLANManualRouteStore.save(.init(agentID: agentID, host: local.host,
+                    controlPort: local.controlPort, pcmPort: local.pcmPort))
+            }
+            try VoWLANManualRouteStore.save(route)
+        } else {
+            VoWLANManualRouteStore.removeRemote(agentID: agentID)
+        }
+        // Configuring a secondary phone must not change the user's binding or
+        // start local networking in explicit Cloud/Bluetooth modes.
+        if ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsVoWLAN {
+            restartBrowsing()
+        }
+    }
 
     func forget(_ agentID: String) {
         identityEpoch &+= 1
+        remoteConfigurationGeneration &+= 1
         VoWLANManualRouteStore.remove(agentID: agentID)
         let removingActive = discoveredAgents.contains { $0.id == agentID && $0.endpoint == discoveredEndpoint }
         discoveredAgents.removeAll { $0.id == agentID }
@@ -639,19 +818,34 @@ final class VoWLANController: ObservableObject {
     }
 
     private func mergingManualRoutes(with discovered: [VoWLANDiscoveredAgent]) -> [VoWLANDiscoveredAgent] {
-        VoWLANRouteCandidates.merge(discovered: discovered,
-            manual: VoWLANManualRouteStore.routes().filter { PairedAndroidDeviceStore.permits($0.agentID) },
+        let manual = VoWLANNetworkChangePolicy.manualCandidates(VoWLANManualRouteStore.routes()).filter { route in
+            PairedAndroidDeviceStore.permits(route.agentID)
+        }
+        return VoWLANRouteCandidates.merge(discovered: discovered,
+            manual: manual,
             live: discoveredAgents,
             // A cached pairing-time IP is not a healthy route. Let fresh Bonjour
             // for the same paired agent replace it until it actually verifies.
             // Keep an established call's route stable; never mid-call hand over.
-            preferred: (availability.isOnlineForDisplay || callInProgress()) ? discoveredEndpoint : nil)
+            preferred: (availability.isOnlineForDisplay || callInProgress() || probeFlight.isRunning) ? discoveredEndpoint : nil)
     }
 
     private func restoreManualRoutes() {
-        discoveredAgents = mergingManualRoutes(with: discoveredAgents)
+        let routes = VoWLANNetworkChangePolicy.manualCandidates(VoWLANManualRouteStore.routes()).filter { route in
+            PairedAndroidDeviceStore.permits(route.agentID)
+        }
+        discoveredAgents = VoWLANRouteCandidates.merge(
+            discovered: [], manual: routes, live: discoveredAgents, preferred: nil)
+        // A newly saved remote record is usually last; restoration must still
+        // try the device's local route first, just like the discovery merge.
         let route = VoWLANManualRouteStore.selected()
-        if let endpoint = route?.endpoint { discoveredEndpoint = endpoint }
+        if let endpoint = route?.endpoint {
+            discoveredEndpoint = endpoint
+            availability = .discovered(endpoint, at: Date())
+        } else if discoveredEndpoint != nil {
+            discoveredEndpoint = nil
+            availability = .discovering
+        }
     }
 
     /// Called by the existing local status loop when no verified route remains.
@@ -683,6 +877,7 @@ final class VoWLANController: ObservableObject {
             // Equal status can still describe a different local gateway/interface.
             let route = path.availableInterfaces.map { "\($0.index):\($0.name)" }.sorted().joined(separator: ",")
                 + "|" + path.gateways.map { String(describing: $0) }.sorted().joined(separator: ",")
+                + "|local:" + LocalWiFiSubnet.localIPv4Addresses().joined(separator: ",")
             Task { @MainActor [weak self, weak monitor] in
                 guard let self, let monitor, self.networkMonitor === monitor else { return }
                 self.networkChanged(wifiAvailable: available, route: route)
@@ -704,8 +899,19 @@ final class VoWLANController: ObservableObject {
         samePathProbeTask = nil
         // Reject probes begun on the previous network, including an old successful response.
         identityEpoch &+= 1
+        // Invalidate cached LAN liveness, not the saved pairing. A private IP
+        // can also be a remote VPN peer; keep it as an unverified candidate.
+        if let endpoint = discoveredEndpoint,
+           VoWLANNetworkChangePolicy.discardsLocalRoute(
+                host: endpoint.host,
+                isLocalSubnet: LocalWiFiSubnet.contains(endpoint.host),
+                callInProgress: callInProgress()) {
+            discoveredEndpoint = nil
+            discoveredAgents.removeAll { $0.endpoint == endpoint }
+            availability = .discovering
+        }
         if !callInProgress(), let endpoint = discoveredEndpoint,
-           !VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host) {
+           VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host) {
             availability = .discovered(endpoint, at: Date())
         }
         networkRecoveryTask = Task { @MainActor [weak self] in
@@ -715,7 +921,19 @@ final class VoWLANController: ObservableObject {
             await AgentVerboseTraceRecorder.shared.recordEvent(source: "ios", category: "vowlan",
                 phase: "network_changed", title: "VoWLAN 网络变化",
                 fields: ["wifi_available": String(wifiAvailable), "revision": String(token)])
-            guard wifiAvailable else { return }
+            if !wifiAvailable {
+                // Cellular + VPN has no Wi-Fi/Bonjour event to restore a saved
+                // route. Probe once, without changing an established call.
+                guard let self, !self.callInProgress(),
+                      self.networkRecoveryPlan.isCurrent(token),
+                      ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsVoWLAN else { return }
+                self.restoreManualRoutes()
+                await self.probeNow()
+                guard !Task.isCancelled, self.networkRecoveryPlan.isCurrent(token),
+                      !self.callInProgress(), self.availability.isOnlineForDisplay else { return }
+                self.onNetworkRecoveryVerified?()
+                return
+            }
             do {
                 try await Task.sleep(for: .seconds(1))
                 // A cloud call remains cloud. Recovery can proceed after it ends, not through handover.
@@ -774,21 +992,70 @@ final class VoWLANController: ObservableObject {
             paired: VoWLANCredentialStore.hasAny(), callInProgress: callInProgress())
     }
 
+    private func armVerificationWatchdog(for endpoint: VoWLANEndpoint, resetAttempts: Bool) {
+        guard !callInProgress() else { return }
+        verificationWatchdogTask?.cancel()
+        if resetAttempts { verificationWatchdogAttempts = 0 }
+        verificationWatchdogTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(6)) } catch { return }
+            guard let self, !Task.isCancelled,
+                  self.discoveredEndpoint == endpoint,
+                  self.availability.endpoint == endpoint,
+                  !self.availability.isOnlineForDisplay,
+                  !self.callInProgress(),
+                  ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsVoWLAN
+            else { return }
+            self.verificationWatchdogAttempts += 1
+            await self.probeNow()
+            guard !Task.isCancelled,
+                  self.discoveredEndpoint == endpoint,
+                  self.availability.endpoint == endpoint,
+                  !self.availability.isOnlineForDisplay else { return }
+            if self.verificationWatchdogAttempts >= 3 {
+                self.availability = .unavailable("VoWLAN 验证超时，请确认 iPhone 与安卓处于同一 Wi-Fi")
+                self.verificationWatchdogTask = nil
+                return
+            }
+            self.armVerificationWatchdog(for: endpoint, resetAttempts: false)
+        }
+    }
+
+    private func cancelVerificationWatchdog() {
+        verificationWatchdogTask?.cancel()
+        verificationWatchdogTask = nil
+        verificationWatchdogAttempts = 0
+        watchdogEndpoint = nil
+    }
+
     func probeNow() async {
+        guard let endpoint = availability.endpoint ?? discoveredEndpoint, !Task.isCancelled else { return }
+        await probeFlight.run(epoch: identityEpoch, endpoint: endpoint) { [weak self] in
+            await self?.probeNow(attempts: VoWLANProbeAttempts(), expectedAgentID: nil)
+        }
+    }
+
+    private func probeNow(attempts: VoWLANProbeAttempts, expectedAgentID: String?) async {
         guard let endpoint = availability.endpoint ?? discoveredEndpoint else { return }
-        let expectedID = discoveredAgents.first { $0.endpoint == endpoint }?.id
+        var attempts = attempts
+        guard !Task.isCancelled, attempts.begin(endpoint) else { return }
+        let epoch = identityEpoch
+        let expectedID = expectedAgentID ?? discoveredAgents.first { $0.endpoint == endpoint }?.id
+            ?? manualRoute(for: endpoint)?.agentID
         let credential = await Task.detached {
-            expectedID.flatMap { VoWLANCredentialStore.load(agentID: $0) } ?? VoWLANCredentialStore.load()
+            let scoped = expectedID.flatMap { VoWLANCredentialStore.load(agentID: $0) }
+            // A remote gateway must never fall back to another device's legacy key.
+            return scoped ?? (endpoint.usesTLS ? nil : VoWLANCredentialStore.load())
         }.value
+        guard !Task.isCancelled, epoch == identityEpoch, discoveredEndpoint == endpoint else { return }
         guard let credential else {
             availability = .unpaired
             return
         }
-        let epoch = identityEpoch
         let probe = probeGeneration.begin()
         do {
             let (data, status, nonce) = try await VoWLANProbeRecovery.run {
-                let signed = try VoWLANRequestSigner(credential: credential).sign(
+                let signer = VoWLANRequestSigner(credential: credential)
+                var signed = try signer.sign(
                     method: "GET", path: "/v1/health", body: Data()
                 )
                 var request = URLRequest(url: endpoint.controlBaseURL.appendingPathComponent("v1/health"))
@@ -800,7 +1067,20 @@ final class VoWLANController: ObservableObject {
                 Self.apply(signed, to: &request)
                 // NWConnection-based transport: ATS does not apply to the
                 // 100.64/10 tailnet address, and the system route is used.
-                let response = try await WiredHTTPTransport().send(request)
+                var response = try await WiredHTTPTransport().send(request)
+                if response.statusCode == 401 {
+                    // First probe after a Tailscale/route wake can be signed just
+                    // outside Android's 30s window. Re-sign once before declaring
+                    // the pairing/recovery failed.
+                    signed = try signer.sign(
+                        method: "GET", path: "/v1/health", body: Data()
+                    )
+                    request = URLRequest(url: endpoint.controlBaseURL.appendingPathComponent("v1/health"))
+                    request.timeoutInterval = 6
+                    request.cachePolicy = .reloadIgnoringLocalCacheData
+                    Self.apply(signed, to: &request)
+                    response = try await WiredHTTPTransport().send(request)
+                }
                 return (response.body, response.statusCode, signed.nonce)
             }
             guard status == 200,
@@ -808,8 +1088,24 @@ final class VoWLANController: ObservableObject {
                   identity.ok else {
                 throw VoWLANControllerError.authenticationFailed
             }
-            guard epoch == identityEpoch, discoveredEndpoint == endpoint, probeGeneration.accepts(probe) else { return }
-            if let expectedID, VoWLANCredentialStore.load(agentID: expectedID) != nil {
+            guard !Task.isCancelled, epoch == identityEpoch, discoveredEndpoint == endpoint, probeGeneration.accepts(probe) else {
+                // A successful health response can become stale when a newer
+                // browser/network probe starts. Do not leave the UI in
+                // "discovered, verifying" forever; the watchdog will issue a
+                // fresh probe if this endpoint is still the active one.
+                if discoveredEndpoint == endpoint, availability.endpoint == endpoint,
+                   !availability.isOnlineForDisplay {
+                    await AgentVerboseTraceRecorder.shared.recordEvent(
+                        source: "ios", category: "vowlan", phase: "probe_stale",
+                        title: "VoWLAN 验证结果已过期，等待新探针",
+                        fields: ["host": endpoint.host,
+                                 "generation": String(probe),
+                                 "epoch": String(epoch)]
+                    )
+                }
+                return
+            }
+            if let expectedID, endpoint.usesTLS || VoWLANCredentialStore.load(agentID: expectedID) != nil {
                 guard identity.agentID == expectedID,
                       VoWLANHealthProof.verify(identity.identityProof, nonce: nonce,
                         agentID: expectedID, credential: credential) else { throw VoWLANControllerError.authenticationFailed }
@@ -823,6 +1119,7 @@ final class VoWLANController: ObservableObject {
                 availability = .discovering
                 return
             }
+            if endpoint.usesTLS && expectedID == nil { throw VoWLANControllerError.authenticationFailed }
             if let index = discoveredAgents.firstIndex(where: { $0.endpoint == endpoint }) {
                 let previous = discoveredAgents[index]
                 discoveredAgents[index] = previous.refreshed(with: identity)
@@ -834,13 +1131,20 @@ final class VoWLANController: ObservableObject {
                 fields: ["host": endpoint.host, "control_port": String(endpoint.controlPort)]
             )
         } catch {
-            guard epoch == identityEpoch, discoveredEndpoint == endpoint, probeGeneration.accepts(probe) else { return }
+            guard !Task.isCancelled, epoch == identityEpoch, discoveredEndpoint == endpoint, probeGeneration.accepts(probe) else { return }
             availability = .unavailable(VoWLANProbeRecovery.userFacingMessage(for: error))
+            await AgentVerboseTraceRecorder.shared.recordEvent(
+                source: "ios", category: "vowlan", phase: "probe_failed",
+                title: "VoWLAN 端点验证失败", detail: error.localizedDescription,
+                fields: ["host": endpoint.host, "control_port": String(endpoint.controlPort),
+                         "pcm_port": String(endpoint.pcmPort)], isFailure: true)
+            guard !Task.isCancelled, epoch == identityEpoch, discoveredEndpoint == endpoint,
+                  probeGeneration.accepts(probe), !callInProgress() else { return }
             // LAN Bonjour discovery does not cross networks; when it stops responding,
             // use another saved direct address for the SAME phone (Tailscale/VPN).
             let failedAgent = discoveredAgents.first(where: { $0.endpoint == endpoint })
-            let agentID = failedAgent?.id ?? AndroidAgentBindingPreference.selected()
-            if let advertised = failedAgent?.alternateEndpoint, advertised != endpoint {
+            let agentID = expectedID ?? failedAgent?.id ?? AndroidAgentBindingPreference.selected()
+            if let advertised = failedAgent?.alternateEndpoint, attempts.permits(advertised) {
                 // Persist the advertised Tailscale listener so the choice survives the
                 // next Bonjour result and a cold start without the LAN advertisement.
                 if let agentID, PairedAndroidDeviceStore.permits(agentID) {
@@ -848,38 +1152,44 @@ final class VoWLANController: ObservableObject {
                         agentID: agentID, host: advertised.host,
                         controlPort: advertised.controlPort, pcmPort: advertised.pcmPort))
                 }
-                discoveredEndpoint = advertised
+                selectFallback(advertised)
                 availability = .discovered(advertised, at: Date())
                 await AgentVerboseTraceRecorder.shared.recordEvent(
                     source: "ios", category: "vowlan", phase: "fallback",
                     title: "VoWLAN 切换到 Android 通告的 Tailscale 地址",
                     fields: ["host": advertised.host, "control_port": String(advertised.controlPort)]
                 )
-                await probeNow()
+                guard !Task.isCancelled, epoch == identityEpoch, discoveredEndpoint == advertised,
+                      probeGeneration.accepts(probe), !callInProgress() else { return }
+                await probeNow(attempts: attempts, expectedAgentID: agentID)
                 return
             }
             if let alternate = VoWLANRouteCandidates.alternateManualRoute(
-                VoWLANManualRouteStore.routes().filter { PairedAndroidDeviceStore.permits($0.agentID) },
+                VoWLANManualRouteStore.routes().filter {
+                    PairedAndroidDeviceStore.permits($0.agentID)
+                        && $0.endpoint.map { attempts.permits($0) } == true
+                },
                 agentID: agentID, failed: endpoint
-            )?.endpoint {
-                discoveredEndpoint = alternate
+            )?.endpoint, attempts.permits(alternate) {
+                selectFallback(alternate)
                 availability = .discovered(alternate, at: Date())
                 await AgentVerboseTraceRecorder.shared.recordEvent(
                     source: "ios", category: "vowlan", phase: "fallback",
                     title: "VoWLAN 切换到已保存直连地址",
                     fields: ["host": alternate.host, "control_port": String(alternate.controlPort)]
                 )
-                await probeNow()
+                guard !Task.isCancelled, epoch == identityEpoch, discoveredEndpoint == alternate,
+                      probeGeneration.accepts(probe), !callInProgress() else { return }
+                await probeNow(attempts: attempts, expectedAgentID: agentID)
                 return
             }
             if let saved = manualRoute(for: endpoint),
-               let alternate = latestBonjourAgents.first(where: { $0.id == saved.agentID && $0.endpoint != endpoint }) {
+               let alternate = latestBonjourAgents.first(where: { $0.id == saved.agentID && attempts.permits($0.endpoint) }) {
                 // Change preferred route before merging, so the saved old-IP
                 // manual route cannot hide this agent's newly discovered endpoint.
-                discoveredEndpoint = alternate.endpoint
-                discoveredAgents = mergingManualRoutes(with: latestBonjourAgents)
+                selectFallback(alternate.endpoint)
                 availability = .discovered(alternate.endpoint, at: Date())
-                await probeNow()
+                await probeNow(attempts: attempts, expectedAgentID: agentID)
                 return
             }
             await AgentVerboseTraceRecorder.shared.recordEvent(
@@ -888,6 +1198,15 @@ final class VoWLANController: ObservableObject {
                 isFailure: true
             )
         }
+    }
+
+    private func selectFallback(_ endpoint: VoWLANEndpoint) {
+        discoveredEndpoint = endpoint
+        // Keep the candidate's device/key and LocalDeviceDirectory in sync with the
+        // selected route, even before its asynchronous health probe completes.
+        discoveredAgents = VoWLANRouteCandidates.merge(discovered: latestBonjourAgents,
+            manual: VoWLANManualRouteStore.routes().filter { PairedAndroidDeviceStore.permits($0.agentID) },
+            live: discoveredAgents, preferred: endpoint)
     }
 
     nonisolated static func apply(_ signed: VoWLANSignedRequest, to request: inout URLRequest) {

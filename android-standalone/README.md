@@ -1,5 +1,9 @@
 # AirSIM Android Standalone
 
+2026-10-31 发布准备：[Apps v0.9.8.20](../docs/releases/0.9.8.20.md)，Android `0.9.8.20 (125)`，配套 iPhone build 152。包含认证网关 Push POST 允许规则修正；正式包沿用原签名，后台接听与 OEM 音频仍需真机验证。下文旧候选说明保留历史追溯。
+
+反馈仅支持用户在设置页面主动点击上传，不支持自动上传。客户端在收集日志及进入上传队列前拒绝非手动触发；Relay 接收端也拒绝非手动反馈。本轮为未发布改动，需安装新版并部署 Worker 后生效。[手动反馈策略](../docs/manual-feedback-policy.md)。
+
 2026-10-20 发布：[Apps v0.9.8.8](../docs/releases/0.9.8.8.md)，Android `0.9.8.8 (102)`。推荐 Android 10–13 用户升级；包含配对时钟校正、双卡短信/卡槽、KernelSU Root 通道、私有网段与可配置端口、VoBLE 静音修复。双 SIM、Root 与问题设备双向声音仍待实测；下文旧候选记录为历史依据。
 
 0.9.8.1 新增应用更新入口：首次安装／升级启动展示离线版本说明；「设置 → 关于」可重看并检查 Standalone APK 新版。前台每日最多自动检查一次（失败也限频），与 Linux Agent 更新分开，不自动下载或安装、不修改配对或通话。[说明与验证边界](../docs/app-updates.md)。
@@ -44,6 +48,49 @@ Standalone 复用 [`android/phone-control-app`](../android/phone-control-app/REA
 - 默认电话角色的来电提供独立锁屏通话界面及接听/拒接通知动作；通话中可从通知返回界面挂断。Android 端保持静音转送策略，不因显示界面而自动切回本机听筒。
 
 VoWLAN 的 `/api/calls/answer`、`/api/calls/reject`、`/api/calls/hangup` 接受可选 JSON `call_id`，值应为 `/api/calls/status` 中当前通话的 `id`。携带 ID 时只操作该通话；ID 过期或不匹配时拒绝执行，不会改选另一通。未携带 ID 的旧客户端保留当前通话兼容路径。
+
+## Relay 设备记录被删除后的自动恢复
+
+Relay 上的设备记录可能被删除（Dashboard「删除设备记录」、批量清理或每日清理离线设备）。之后心跳、命令拉取或命令通道收到 HTTP 401 时，内置 Agent 会在下一轮重新提交同一份注册（`/v1/devices/register`），不需要重启 App 或重新配对：
+
+- 只有 HTTP 401 触发；429、5xx 和断网仍走原有重试。
+- 第一次立即重新注册；之后两次之间至少间隔 1、2、4……分钟，封顶 60 分钟；任一次心跳成功后复位。重新注册请求失败时不会每轮重试，而是等下一个窗口。
+- 日志事件为 `standalone_relay_reregister reason=unauthorized`，成功后接着出现 `standalone_relay_registration_synced`。
+- 查看状态，或在真机上模拟一次 401（只有具备 DUMP 权限的 adb/shell 能调用）：
+
+```sh
+adb shell dumpsys activity service com.airsim.phonecontrol.standalone/com.airsim.phonecontrol.StandaloneAgentService
+adb shell dumpsys activity service com.airsim.phonecontrol.standalone/com.airsim.phonecontrol.StandaloneAgentService simulate-unauthorized
+```
+
+输出为一行 `relay_recovery pending=… resyncs=… delay_ms=… next_allowed_in_ms=…`。
+
+## 云端通话事件被 Relay 拒绝时
+
+内置 Agent 按顺序把来电、接通、挂断等通话状态提交给 Relay。某条事件提交失败时：
+
+- Relay 返回 4xx（401、408、429 除外）表示它不会接受这条事件（通话已结束或过期、生命周期顺序不合法等），立即丢弃，继续处理后面的事件。
+- 断网、超时、5xx、401、408、429 继续重试，但同一条事件最多占住队首 60 秒，之后丢弃，避免挡住后面的挂断和下一通电话。
+- 被丢弃的是「挂断」时，仍会关闭同一通 Android 通话对应的云端媒体会话（按 Android 通话 ID 匹配，不会关掉另一通）。
+- 云端会话只接受它自己那通 Android 电话的事件。外呼在执行拨号前开始记录新建 Telecom 通话，只绑定之后新增、号码匹配且唯一的通话；即使它在事件队列处理前已结束或移除，仍保留创建身份以正确清理会话。不能仅凭队列里的 `outgoing` 事件认领 ID。观察窗口为 15 秒，最多记录 64 通，超限或匹配有歧义时不猜测。呼叫等待中的第二通电话、或上一通电话迟到的事件不提交给 Relay，也不会结束当前通话。仍在缓存中的重复云端拨号命令返回缓存结果，不重新拨号或重建已结束的媒体会话；该缓存不跨进程重启持久化。
+- 云端媒体握手遇到 401 时保留同一描述符和密钥，按既有退避重试，每个会话从第一次 401 起最多 60 秒，兼容 KV 部署的暂时不可见；成功握手重置窗口。期间交替出现断网或 5xx 不延长窗口。410 和其他 4xx（401、408、429 除外）立即停止。重试不新建 VoIP 推送；失败后 Android 电话仍在时保留会话位置，待该通电话结束后释放。此恢复不绕过鉴权，也不保证所有 KV 传播延迟都能在窗口内恢复。
+
+自动化覆盖实际媒体管理器的旧事件隔离、独立通话归属、重复拨号缓存、丢弃挂断清理、401 重试/耗尽/成功重置。Standalone 测试同时构建 APK 并运行这些测试；并不代表真实来电、双向音频、弱网或各厂商系统已完成验收。本次仅合并代码，不随之部署 Relay 或发布 APK。
+
+日志事件：`standalone_call_event_retry`、`standalone_call_event_dropped`、`standalone_call_event_drop_failed`、`standalone_call_event_other_call`、`standalone_cloud_call_closed_unconfirmed`、`standalone_cloud_media_abandoned`。重试、丢弃和放弃带异常类型、HTTP 状态和 Relay 返回的原因（只保留字母，不含号码等数字）；本地关闭和放弃还带 `call_uuid`，便于对上是哪一通云端通话。关闭被丢弃事件对应的通话时出错，只记 `standalone_call_event_drop_failed`，队列照常继续。
+
+## 云端短信被 Relay 拒绝时
+
+内置 Agent 将短信提交给 Relay（`/v1/events/sms`），优先处理未失败的短信。队列不因断网时长主动丢弃，但本地最多保留 512 条，不能保证无限积压不丢失：
+
+- 只有 Relay 返回 400 且正文为明确的 `invalid incoming SMS` JSON 错误时，这条短信标为 `cloud_rejected`（不是已送达），退出云端队列，同一轮继续提交后面的。未知/代理 400 仍重试。未被本地确认的短信保留供本地读取，仍受存储容量限制。
+- 其他任何失败（5xx、401、409「iPhone 尚无通知 token」、429、Cloudflare 的 403/404，以及断网、超时）都不放弃：本轮立即停止，整个队列按命令通道同一套冷却暂停（无响应 3 秒起、最长 60 秒；429/5xx 15 秒起、最长 300 秒；遵守 `Retry-After`，带抖动，任何一条成功即复位）。失败的那条自己再退避 5 秒起、翻倍、最长 5 分钟；暂停结束后先提交从未失败过的短信，所以一条坏短信不会把后面的饿死。
+- 短信使用独立串行任务，每轮最多提交 10 条，不占用心跳或 HTTP 命令轮询线程。冷却从请求失败时开始计时，而非发送前。
+- 关闭云端、切换设备身份或停止服务会取消短信请求；旧配置代际的回执不能继续处理后续短信或标记送达。未提交的纯本地功能集成时仍须保留进程级 Relay 出口门禁，不能用此配置校验替代它。
+- 短信中心时间比本机快时，上传前改成本机当前时间（Relay 拒绝超前 5 分钟以上的时间）；去重编号不受影响。
+- 短信提交失败不再让 Agent 主循环进入「正在重连」：心跳、命令拉取照常进行；401 仍会触发设备记录重新注册。重试状态只在内存里，App 重启后从头计时。
+
+日志事件：`standalone_sms_upload_retry verdict=retry|stop attempt=… pause_ms=…`（`retry` 表示 Relay 有响应，`stop` 表示连不上）和 `standalone_sms_upload_dropped`，都带异常类型、HTTP 状态和 Relay 返回的原因，不含发件人、正文或短信编号。
 
 ## 运行架构
 

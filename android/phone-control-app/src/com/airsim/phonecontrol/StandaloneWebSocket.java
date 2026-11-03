@@ -33,12 +33,15 @@ final class StandaloneWebSocket implements Closeable {
     private final SSLSocket socket;
     private final BufferedInputStream input;
     private final OutputStream output;
+    private final RelayEgressGate.Lease relayLease;
     private final SecureRandom random = new SecureRandom();
 
-    private StandaloneWebSocket(SSLSocket socket, BufferedInputStream input, OutputStream output) {
+    private StandaloneWebSocket(SSLSocket socket, BufferedInputStream input, OutputStream output,
+                               RelayEgressGate.Lease relayLease) {
         this.socket = socket;
         this.input = input;
         this.output = output;
+        this.relayLease = relayLease;
     }
 
     static StandaloneWebSocket connect(URI target, String bearerToken) throws Exception {
@@ -54,7 +57,10 @@ final class StandaloneWebSocket implements Closeable {
         int port = target.getPort() < 0 ? 443 : target.getPort();
         SSLSocket socket = factory.create();
         boolean transferred = false;
+        RelayEgressGate.Lease lease = null;
         try {
+        lease = RelayEgressGate.shared.acquire(socket::close);
+        lease.checkCurrent();
         if (!owner.test(socket)) throw new IOException("Command connection cancelled");
         SSLParameters parameters = socket.getSSLParameters();
         parameters.setEndpointIdentificationAlgorithm("HTTPS");
@@ -99,13 +105,20 @@ final class StandaloneWebSocket implements Closeable {
             throw new IOException("WebSocket 握手校验失败");
         }
         socket.setSoTimeout(0);
+        lease.checkCurrent();
         transferred = true;
-        return new StandaloneWebSocket(socket, input, output);
-        } finally { if (!transferred) try { socket.close(); } catch (IOException ignored) {} }
+        return new StandaloneWebSocket(socket, input, output, lease);
+        } finally {
+            if (!transferred) {
+                try { socket.close(); } catch (IOException ignored) {}
+                if (lease != null) lease.close();
+            }
+        }
     }
 
     Message read() throws Exception {
         while (true) {
+            relayLease.checkCurrent();
             int first = input.read();
             int second = input.read();
             if (first < 0 || second < 0) throw new EOFException("WebSocket closed");
@@ -124,7 +137,10 @@ final class StandaloneWebSocket implements Closeable {
             if (opcode == 10) continue;
             if (opcode >= 8 && ((first & 0x80) == 0 || length > 125)) throw new IOException("Invalid control frame");
             if (opcode == 8) throw WebSocketPeerClose.decode(payload);
-            if (opcode == 1 || opcode == 2) return new Message(opcode, payload);
+            if (opcode == 1 || opcode == 2) {
+                relayLease.checkCurrent();
+                return new Message(opcode, payload);
+            }
         }
     }
 
@@ -139,6 +155,7 @@ final class StandaloneWebSocket implements Closeable {
     void setReadTimeout(int timeoutMillis) throws IOException { socket.setSoTimeout(timeoutMillis); }
 
     private void write(int opcode, byte[] payload) throws Exception {
+        relayLease.checkCurrent();
         if (payload.length > MAX_FRAME) throw new IOException("WebSocket frame too large");
         ByteArrayOutputStream header = new ByteArrayOutputStream();
         header.write(0x80 | opcode);
@@ -156,6 +173,7 @@ final class StandaloneWebSocket implements Closeable {
         output.write(header.toByteArray());
         output.write(encoded);
         output.flush();
+        relayLease.checkCurrent();
     }
 
     private static String readHeaders(InputStream input) throws IOException {
@@ -186,5 +204,6 @@ final class StandaloneWebSocket implements Closeable {
 
     @Override public void close() {
         try { socket.close(); } catch (IOException ignored) {}
+        finally { relayLease.close(); }
     }
 }

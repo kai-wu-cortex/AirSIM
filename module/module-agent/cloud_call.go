@@ -210,6 +210,10 @@ func (a *agent) retireCloudCallDescriptor(descriptor cloudCallDescriptor) {
 }
 
 func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor) {
+	if a.push == nil || a.push.relayGate == nil {
+		return
+	}
+	relayEpoch := a.push.relayGate.generation()
 	descriptor.MediaTransport = resolveCloudMediaTransport(
 		descriptor.MediaTransport,
 		[]string{cloudMediaTransportLegacyPCM},
@@ -222,8 +226,8 @@ func (a *agent) runCloudCall(ctx context.Context, descriptor cloudCallDescriptor
 	}
 	health := newCloudMediaHealthTracker(time.Now(), descriptor)
 	deadline := time.Now().Add(3 * time.Minute)
-	for ctx.Err() == nil && time.Now().Before(deadline) && a.cloudCallDescriptorAlive(descriptor) {
-		socket, err := dialCloudWebSocket(ctx, endpoint)
+	for ctx.Err() == nil && a.push.relayGate.current(relayEpoch) && time.Now().Before(deadline) && a.cloudCallDescriptorAlive(descriptor) {
+		socket, err := a.dialRelayWebSocket(ctx, endpoint, "", relayEpoch)
 		if err != nil {
 			a.debug.add("cloud-call", "error", "连接公网媒体失败", err.Error(), cloudCallTraceFields(descriptor, cloudCallAction{}))
 			if !health.beginRebuild(cloudMediaRebuildConnectionLost, time.Now()) {
@@ -1080,10 +1084,11 @@ const (
 )
 
 type cloudWebSocket struct {
-	conn      net.Conn
-	reader    *bufio.Reader
-	writeMu   sync.Mutex
-	closeOnce sync.Once
+	conn         net.Conn
+	reader       *bufio.Reader
+	writeMu      sync.Mutex
+	closeOnce    sync.Once
+	releaseRelay func()
 }
 
 func dialCloudWebSocket(ctx context.Context, endpoint string) (*cloudWebSocket, error) {
@@ -1266,6 +1271,10 @@ func (socket *cloudWebSocket) ReadMessage() (byte, []byte, error) {
 func (socket *cloudWebSocket) Close() error {
 	var err error
 	socket.closeOnce.Do(func() {
+		if socket.releaseRelay != nil {
+			defer socket.releaseRelay()
+		}
+		_ = socket.conn.SetWriteDeadline(time.Now().Add(time.Second))
 		_ = socket.writeMessage(cloudOpcodeClose, nil)
 		err = socket.conn.Close()
 	})

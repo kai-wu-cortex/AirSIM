@@ -31,6 +31,8 @@ final class WatchCallSession: NSObject, ObservableObject {
     private var activeDialRequestID: UUID?
 	private var pendingWatchToken: Data?
     private var endedCallIDs = Set<String>()
+    private var endedCallUUIDs = Set<UUID>()
+    private var latestMirrorUpdatedAt = [String: Date]()
     private let cloudMediaPreferenceKey = "airsim.watch.cloud-media-allowed"
 
     private var cloudMediaAllowed: Bool {
@@ -159,7 +161,7 @@ final class WatchCallSession: NSObject, ObservableObject {
             activeDialRequestID = requestID
             answered = false
             publishLocalPhase(.connecting)
-            let handle = CXHandle(type: .phoneNumber, value: outgoing.number ?? "AirSIM")
+            let handle = CallKitNumberPresentation.handle(number: outgoing.number, fallback: "AirSIM")
             let action = CXStartCallAction(call: outgoing.uuid, handle: handle)
             isSendingAction = true
             callController.request(CXTransaction(action: action)) { [weak self] error in
@@ -243,7 +245,7 @@ final class WatchCallSession: NSObject, ObservableObject {
 
     private func finishRemoteCall() {
         guard let current = voIPCall else { return }
-        recordEnded(current.callID)
+        recordEnded(current.callID, uuid: current.uuid)
         if case .local = current.media {
             requestLocalEnd(current)
         }
@@ -251,7 +253,12 @@ final class WatchCallSession: NSObject, ObservableObject {
         media.stop()
         publishLocalPhase(.ended)
         voIPCall = nil
+        resetAnswerState()
+    }
+
+    private func resetAnswerState() {
         answered = false
+        answering = false
         activeDialRequestID = nil
     }
 
@@ -262,9 +269,25 @@ final class WatchCallSession: NSObject, ObservableObject {
         guard let payload = WatchCallPayload(dictionary: dictionary) else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            let identityKeys = WatchCallMirrorPolicy.identityKeys(for: payload)
+            let stale = identityKeys.contains {
+                !WatchCallMirrorPolicy.isNewer(payload, than: self.latestMirrorUpdatedAt[$0])
+            }
+            guard !stale else { return }
+            for key in identityKeys {
+                self.latestMirrorUpdatedAt[key] = payload.updatedAt
+            }
+            if self.latestMirrorUpdatedAt.count > 128 {
+                self.latestMirrorUpdatedAt.removeAll(keepingCapacity: true)
+            }
+
+            let ended = WatchCallMirrorPolicy.isTombstoned(
+                payload, endedCallIDs: self.endedCallIDs, endedCallUUIDs: self.endedCallUUIDs
+            )
+            if ended { return }
             let age = Date().timeIntervalSince(payload.updatedAt)
+
             if payload.phase == .incoming, self.voIPCall == nil,
-               !self.endedCallIDs.contains(payload.callID),
                (-5...45).contains(age),
                let uuid = payload.callUUID,
                let incoming = try? WatchVoIPCall(userInfo: [
@@ -274,10 +297,10 @@ final class WatchCallSession: NSObject, ObservableObject {
                     "expires_at": Date().addingTimeInterval(45).timeIntervalSince1970,
                ]) {
                 self.voIPCall = incoming
+                self.resetAnswerState()
                 self.call = payload
-                let update = CXCallUpdate()
-                update.remoteHandle = CXHandle(type: .phoneNumber, value: incoming.number ?? "AirSIM")
-                update.localizedCallerName = incoming.callerName
+                let update = CallKitNumberPresentation.update(
+                    number: incoming.number, callerName: incoming.callerName, fallback: "AirSIM")
                 update.supportsHolding = false
                 update.supportsGrouping = false
                 update.supportsUngrouping = false
@@ -288,23 +311,34 @@ final class WatchCallSession: NSObject, ObservableObject {
                     }
                 }
             }
-            if let ownCall = voIPCall, payload.callID == ownCall.callID {
-                // Watch 呼出由自己的 CallKit/媒体会话管理，iPhone 状态镜像不能提前结束它。
-                if ownCall.isOutgoing, payload.phase != .ended { return }
-                if payload.phase == .active, !answered, !answering {
-                    provider.reportCall(with: ownCall.uuid, endedAt: Date(), reason: .answeredElsewhere)
-                    media.stop()
-                    voIPCall = nil
-                } else if payload.phase == .ended {
-                    self.recordEnded(ownCall.callID)
-                    provider.reportCall(with: ownCall.uuid, endedAt: Date(), reason: .remoteEnded)
-                    media.stop()
-                    voIPCall = nil
+
+            guard let ownCall = self.voIPCall else {
+                if payload.phase == .active || payload.phase == .ended {
+                    self.recordEnded(payload.callID, uuid: payload.callUUID, aliases: payload.aliases)
                 }
+                self.call = payload
+                return
             }
-            if voIPCall == nil { call = payload }
+            guard payload.matches(callID: ownCall.callID, callUUID: ownCall.uuid) else { return }
+            // Watch 呼出由自己的 CallKit/媒体会话管理，iPhone 状态镜像不能提前结束它。
+            if ownCall.isOutgoing, payload.phase != .ended { return }
+            if payload.phase == .active, !self.answered, !self.answering {
+                self.recordEnded(ownCall.callID, uuid: ownCall.uuid, aliases: payload.aliases)
+                self.provider.reportCall(with: ownCall.uuid, endedAt: Date(), reason: .answeredElsewhere)
+                self.media.stop()
+                self.voIPCall = nil
+                self.resetAnswerState()
+            } else if payload.phase == .ended {
+                self.recordEnded(ownCall.callID, uuid: ownCall.uuid, aliases: payload.aliases)
+                self.provider.reportCall(with: ownCall.uuid, endedAt: Date(), reason: .remoteEnded)
+                self.media.stop()
+                self.voIPCall = nil
+                self.resetAnswerState()
+            }
+            if self.voIPCall == nil { self.call = payload }
         }
     }
+
 
     private func sendWatchToken(_ token: Data) {
 		pendingWatchToken = token
@@ -346,9 +380,16 @@ final class WatchCallSession: NSObject, ObservableObject {
 #endif
     }
 
-    private func recordEnded(_ callID: String) {
-        if endedCallIDs.count >= 32 { endedCallIDs.removeAll() }
-        endedCallIDs.insert(callID)
+    private func recordEnded(_ callID: String, uuid: UUID? = nil, aliases: [String] = []) {
+        if endedCallUUIDs.count + endedCallIDs.count >= 64 {
+            endedCallIDs.removeAll(); endedCallUUIDs.removeAll()
+        }
+        if let uuid {
+            endedCallUUIDs.insert(uuid)
+        } else {
+            endedCallIDs.insert(callID)
+            aliases.forEach { endedCallIDs.insert($0) }
+        }
     }
 
     private func requestLocalEnd(_ call: WatchVoIPCall) {
@@ -403,21 +444,17 @@ extension WatchCallSession: PKPushRegistryDelegate {
         guard type == .voIP else { completion(); return }
         do {
             let incoming = try WatchVoIPCall(userInfo: payload.dictionaryPayload)
-            if voIPCall?.callID == incoming.callID || endedCallIDs.contains(incoming.callID) {
+            if voIPCall?.callID == incoming.callID || voIPCall?.uuid == incoming.uuid
+                || endedCallIDs.contains(incoming.callID) || endedCallUUIDs.contains(incoming.uuid) {
                 completion()
                 return
             }
             voIPCall = incoming
-            answered = false
+            resetAnswerState()
             errorMessage = nil
-            publishLocalPhase(.incoming)
 
-            let update = CXCallUpdate()
-            update.remoteHandle = CXHandle(
-                type: incoming.number == nil ? .generic : .phoneNumber,
-                value: incoming.number ?? incoming.displayName
-            )
-            update.localizedCallerName = incoming.callerName
+            let update = CallKitNumberPresentation.update(
+                number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
             update.hasVideo = false
             update.supportsHolding = false
             update.supportsGrouping = false
@@ -958,7 +995,7 @@ private final class WatchLocalPCMTransport: @unchecked Sendable {
         let connection = NWConnection(
             host: NWEndpoint.Host(endpoint.host),
             port: NWEndpoint.Port(rawValue: endpoint.port)!,
-            using: NWParameters(tls: nil, tcp: tcp)
+            using: NWParameters(tls: endpoint.usesTLS ? NWProtocolTLS.Options() : nil, tcp: tcp)
         )
         self.connection = connection
         connection.stateUpdateHandler = { [weak self, weak connection] state in

@@ -19,6 +19,7 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     var historyEstimated: Bool? = nil
     var slotIndex: Int? = nil
     var slotID: Int? = nil
+    var isTerminal: Bool { endedAt != nil || state == "ended" || state == "failed" }
 
     enum CodingKeys: String, CodingKey {
         case id, index, direction, state, number, missed
@@ -95,6 +96,7 @@ struct AgentHealth: Codable, Sendable {
 
 /// Relay 最近一次收到的 Agent 心跳。该对象只包含可展示状态，不包含设备密钥。
 struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
+    var battery: AndroidBatteryReading? = nil
     var commandRoutingVersion: Int? = nil
     let agentID: String
     let agentKind: String?
@@ -108,6 +110,7 @@ struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
     var id: String { agentID }
 
     enum CodingKeys: String, CodingKey {
+        case battery
         case agentID = "agent_id"
         case agentKind = "agent_kind"
         case deviceName = "device_name"
@@ -206,6 +209,7 @@ struct AndroidSIMSlot: Codable, Equatable, Identifiable, Sendable {
 }
 
 struct AndroidAgentMetadata: Decodable, Equatable, Sendable {
+    var battery: AndroidBatteryReading? = nil
     let agentID: String
     let deviceName: String
     let phoneNumber: String?
@@ -213,11 +217,13 @@ struct AndroidAgentMetadata: Decodable, Equatable, Sendable {
     let callGeneration: UInt64?
     let simSlots: [AndroidSIMSlot]?
     init(agentID: String, deviceName: String, phoneNumber: String?, agentKind: String?,
-         callGeneration: UInt64? = nil, simSlots: [AndroidSIMSlot]? = nil) {
+         callGeneration: UInt64? = nil, simSlots: [AndroidSIMSlot]? = nil, battery: AndroidBatteryReading? = nil) {
         self.agentID = agentID; self.deviceName = deviceName; self.phoneNumber = phoneNumber
         self.agentKind = agentKind; self.callGeneration = callGeneration; self.simSlots = simSlots
+        self.battery = battery
     }
     enum CodingKeys: String, CodingKey {
+        case battery
         case agentID = "agent_id", deviceName = "device_name"
         case phoneNumber = "phone_number", agentKind = "agent_kind"
         case callGeneration = "call_generation"
@@ -229,7 +235,7 @@ struct AndroidAgentMetadata: Decodable, Equatable, Sendable {
         let number = value.phoneNumber?.trimmingCharacters(in: .whitespacesAndNewlines)
         return Self(agentID: value.agentID, deviceName: value.deviceName,
                     phoneNumber: number?.isEmpty == false ? number : nil, agentKind: value.agentKind,
-                    callGeneration: value.callGeneration, simSlots: value.simSlots ?? [])
+                    callGeneration: value.callGeneration, simSlots: value.simSlots ?? [], battery: value.battery)
     }
 }
 
@@ -325,6 +331,8 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
     var direction: SMSDirection? = nil
     /// Known authenticated producer. Legacy records remain explicitly unscoped.
     var sourceAgentID: String? = nil
+    /// Android subscription slot label ("SIM 1"/"SIM 2"); absent on legacy records.
+    var simSlot: String? = nil
 
     var isOutgoing: Bool { direction == .outgoing }
 
@@ -343,6 +351,7 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
         case sender, content, code, timestamp, direction
         case deliveryID = "delivery_id"
         case sourceAgentID = "source_agent_id"
+        case simSlot = "sim_slot"
     }
 }
 
@@ -870,6 +879,36 @@ struct ESIMPhonebookProbe: Codable, Sendable {
 
 // MARK: - 诊断与语音运行时
 
+struct AgentFeedbackSnapshot: Codable, Sendable {
+    let bridgeLog: String?
+    let runtimeProfile: String?
+    let manufacturer: String?
+    let model: String?
+    let sdk: Int?
+    let appVersion: String?
+    let audio: AgentFeedbackAudio?
+
+    enum CodingKeys: String, CodingKey {
+        case bridgeLog = "bridge_log"
+        case runtimeProfile = "runtime_profile"
+        case manufacturer, model, sdk
+        case appVersion = "app_version"
+        case audio
+    }
+}
+
+struct AgentFeedbackAudio: Codable, Sendable {
+    let telecomState: String?
+    let pcmClientClosed: Bool?
+    let pcmHealth: String?
+
+    enum CodingKeys: String, CodingKey {
+        case telecomState = "telecom_state"
+        case pcmClientClosed = "pcm_client_closed"
+        case pcmHealth = "pcm_health"
+    }
+}
+
 struct ModuleDebugSnapshot: Codable, Sendable {
     let debug: ModuleDebugBufferStatus
     let agent: ModuleDebugAgentStatus
@@ -1117,5 +1156,175 @@ struct VoicePCMStatistics: Codable, Sendable {
         case downlinkFrames = "downlink_frames"
         case downlinkPeak = "downlink_peak"
         case downlinkDroppedFrames = "downlink_dropped_frames"
+    }
+}
+
+/// Explicit opt-in grant. Unknown/missing protocol or an unsigned grant is not media permission.
+struct EarlyMediaGrant: Codable, Equatable, Sendable {
+    let version: Int
+    let agentID: String
+    let callID: String
+    let sessionID: String
+    let expiresAt: Int64
+    let state: String
+    let direction: String
+    let format: String
+    let proof: String
+    enum CodingKeys: String, CodingKey {
+        case version, state, direction, format, proof
+        case agentID = "agent_id", callID = "call_id", sessionID = "session_id", expiresAt = "expires_at"
+    }
+    func permits(agentID: String, callID: String, now: Int64) -> Bool {
+        version == 1 && self.agentID == agentID && self.callID == callID
+            && !sessionID.isEmpty && sessionID.utf8.count <= 128
+            && [agentID, callID, sessionID].allSatisfy { !$0.contains("\n") && !$0.contains("\r") }
+            && state == "early_media" && direction == "recvonly" && format == "s16le-8000-mono"
+            && expiresAt > now && expiresAt <= now + 30
+    }
+    func proofMessage(nonce: String) -> Data {
+        Data("AIRSIM-EARLY-MEDIA1\n\(nonce)\n\(agentID)\n\(callID)\n\(sessionID)\n\(expiresAt)\n\(state)\n\(direction)\n\(format)".utf8)
+    }
+}
+
+enum EarlyMediaProbeResult: Equatable, Sendable {
+    case ready(EarlyMediaGrant)
+    case pending
+    case unsupported
+    case revoked
+}
+
+/// Audio callbacks reconnect off the main actor. Keep the newest verified
+/// lease available to their handshake without sharing mutable call state.
+final class EarlyMediaLeaseState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var grant: EarlyMediaGrant
+    init(_ grant: EarlyMediaGrant) { self.grant = grant }
+    func current() -> EarlyMediaGrant {
+        lock.lock(); defer { lock.unlock() }
+        return grant
+    }
+    func renew(_ next: EarlyMediaGrant, now: Int64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard next.permits(agentID: grant.agentID, callID: grant.callID, now: now),
+              next.sessionID == grant.sessionID, next.expiresAt >= grant.expiresAt else { return false }
+        grant = next
+        return true
+    }
+}
+
+/// Bounded control negotiation only. It never dials, answers or changes call
+/// state. Playback leases are independently enforced by the audio owner.
+@MainActor
+enum EarlyMediaNegotiator {
+    enum Outcome: String { case cancelled, unsupported, revoked, unavailable, timedOut }
+
+    static func run(
+        clockOffset: TimeInterval,
+        now: () -> TimeInterval = { Date().timeIntervalSince1970 },
+        uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+        isCurrent: () -> Bool,
+        onPending: () -> Void = {},
+        probe: () async throws -> EarlyMediaProbeResult,
+        accept: (EarlyMediaGrant) async -> Bool
+    ) async -> Outcome {
+        let deadline = uptime() + 120
+        var failures = 0
+        while !Task.isCancelled, isCurrent(), uptime() < deadline {
+            var delay: TimeInterval = 2
+            do {
+                let result = try await probe()
+                guard !Task.isCancelled, isCurrent() else { return .cancelled }
+                guard uptime() < deadline else { return .timedOut }
+                switch result {
+                case .ready(let grant):
+                    guard grant.expiresAt > Int64(now() + clockOffset),
+                          await accept(grant) else { return .unavailable }
+                    failures = 0
+                    // Renew before the independent playback deadline expires.
+                    delay = min(15, max(0.5, Double(grant.expiresAt) - now() - clockOffset - 8))
+                case .pending:
+                    failures = 0
+                    onPending()
+                case .unsupported: return .unsupported
+                case .revoked: return .revoked
+                }
+            } catch {
+                if Task.isCancelled || !isCurrent() { return .cancelled }
+                failures += 1
+                if failures >= 3 { return .unavailable }
+            }
+            guard !Task.isCancelled, isCurrent() else { return .cancelled }
+            do { try await sleep(max(0, min(delay, deadline - uptime()))) }
+            catch { return .cancelled }
+        }
+        return Task.isCancelled || !isCurrent() ? .cancelled : .timedOut
+    }
+}
+
+/// Read-only recovery receipt. Ownership and present state have separate proofs.
+struct DialOperationStatus: Codable, Equatable, Sendable {
+    let version: Int
+    let agentID: String
+    let operationID: String
+    let status: String
+    let androidID: String?
+    let backendID: String?
+    let callState: String
+    let endedAt: String?
+    let operationProof: String?
+    let statusProof: String
+    enum CodingKeys: String, CodingKey {
+        case version, status
+        case agentID = "agent_id", operationID = "operation_id", androidID = "android_id"
+        case backendID = "backend_id", callState = "call_state", endedAt = "ended_at"
+        case operationProof = "operation_proof", statusProof = "status_proof"
+    }
+    func matches(agentID: String, operationID: String) -> Bool {
+        func token(_ value: String) -> Bool {
+            !value.isEmpty && value.utf8.count <= 128 && !value.contains(where: { "\r\n\0".contains($0) })
+        }
+        guard version == 1, self.agentID == agentID, self.operationID == operationID,
+              token(agentID), token(operationID),
+              ["confirmed", "unknown", "rejected"].contains(status),
+              ["unknown", "dialing", "alerting", "active", "held", "ended"].contains(callState) else { return false }
+        let ended = endedAt ?? ""
+        guard ended.utf8.count <= 64, !ended.contains(where: { "\r\n\0".contains($0) }),
+              (callState == "ended") == !ended.isEmpty else { return false }
+        if callState == "ended" {
+            let date = ISO8601DateFormatter()
+            date.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if date.date(from: ended) == nil {
+                date.formatOptions = [.withInternetDateTime]
+                guard date.date(from: ended) != nil else { return false }
+            }
+        }
+        if status == "confirmed" { return token(androidID ?? "") && token(backendID ?? "") }
+        return (androidID ?? "").isEmpty && (backendID ?? "").isEmpty
+            && (operationProof ?? "").isEmpty && callState == "unknown" && ended.isEmpty
+    }
+    func proofMessage(nonce: String) -> Data {
+        Data(["AIRSIM-OPERATION1", nonce, agentID, operationID, status,
+              androidID ?? "", backendID ?? "", callState, endedAt ?? ""].joined(separator: "\n").utf8)
+    }
+    var lifecycleState: CallLifecycleState? {
+        guard status == "confirmed" else { return nil }
+        switch callState {
+        case "dialing", "alerting": return .connecting
+        case "active", "held": return .active
+        case "ended": return .ended
+        default: return nil
+        }
+    }
+}
+
+enum DialOperationRecoveryError: LocalizedError {
+    case unknown, rejected, invalidProof
+    var errorDescription: String? {
+        switch self {
+        case .unknown: return "拨号结果尚未确认。未自动重拨，请先检查设备通话状态。"
+        case .rejected: return "设备确认未执行本次拨号。请检查设备提示后手动重试。"
+        case .invalidProof: return "无法验证拨号状态回执，未恢复通话，也未自动重拨。"
+        }
     }
 }

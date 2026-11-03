@@ -34,6 +34,8 @@ final class NotificationForwarder {
     private NotificationForwarder() {}
 
     static void handle(Context context, JSONObject event) {
+        RelayEgressGate.Generation generation = RelayEgressGate.shared.generation();
+        if (!generation.isCurrent()) return;
         JSONObject config = ForwardingConfigStore.config(context);
         if (!config.optBoolean("enabled", false)) return;
         JSONArray destinations = config.optJSONArray("destinations");
@@ -69,12 +71,14 @@ final class NotificationForwarder {
             }
             final JSONObject target = destination;
             final JSONObject payload = event;
-            WORKERS.execute(() -> send(context, target, payload, sms, missed));
+            WORKERS.execute(() -> {
+                if (generation.isCurrent()) send(context, target, payload, sms, missed, generation);
+            });
         }
     }
 
     private static void send(Context context, JSONObject destination, JSONObject event,
-                             boolean sms, boolean missed) {
+                             boolean sms, boolean missed, RelayEgressGate.Generation generation) {
         try {
             String delivery = event.optString("delivery_id", "");
             if (delivery.isEmpty()) {
@@ -143,7 +147,9 @@ final class NotificationForwarder {
             if ("qq".equals(channel) && !destination.optString("token", "").isBlank()) {
                 // Authorization is passed separately below.
             }
-            post(url, body.toString(), destination, channel);
+            if (!generation.isCurrent()) return;
+            post(url, body.toString(), destination, channel, generation);
+            if (!generation.isCurrent()) return;
             markForwarded(context, destination, delivery);
             BridgeLog.info("notification_forwarded channel=" + channel);
         } catch (Exception error) {
@@ -201,13 +207,17 @@ final class NotificationForwarder {
     }
 
     private static void post(String endpoint, String body, JSONObject destination,
-                             String channel) throws Exception {
+                             String channel, RelayEgressGate.Generation generation) throws Exception {
         URL url = new URL(endpoint);
         if (!"https".equalsIgnoreCase(url.getProtocol())) {
             throw new IllegalArgumentException("forwarding webhook must use HTTPS");
         }
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        RelayEgressGate.Lease lease = null;
         try {
+            lease = RelayEgressGate.shared.acquire(generation, connection::disconnect);
+            lease.checkCurrent();
+            connection.setInstanceFollowRedirects(false);
             connection.setRequestMethod("POST");
             connection.setConnectTimeout(8_000);
             connection.setReadTimeout(10_000);
@@ -223,6 +233,7 @@ final class NotificationForwarder {
             int status = connection.getResponseCode();
             String responseBody = read(status >= 200 && status < 300
                     ? connection.getInputStream() : connection.getErrorStream());
+            lease.checkCurrent();
             if (status < 200 || status >= 300) {
                 throw new IllegalStateException("forwarding HTTP " + status);
             }
@@ -254,7 +265,8 @@ final class NotificationForwarder {
                 }
             }
         } finally {
-            connection.disconnect();
+            try { connection.disconnect(); }
+            finally { if (lease != null) lease.close(); }
         }
     }
 

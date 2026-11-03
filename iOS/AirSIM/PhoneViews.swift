@@ -1,5 +1,60 @@
 import SwiftUI
 import UIKit
+import LinkPresentation
+import UniformTypeIdentifiers
+
+enum DialPadPasteSanitizer {
+    static func sanitize(_ value: String) -> String {
+        let allowed = CharacterSet(charactersIn: "+*#0123456789")
+        var filtered = String(value.unicodeScalars.filter { allowed.contains($0) })
+        if filtered.dropFirst().contains("+") {
+            filtered = String(filtered.enumerated().compactMap { index, character in
+                character == "+" && index != 0 ? nil : character
+            })
+        }
+        return String(filtered.prefix(64))
+    }
+}
+
+enum SMSVerificationCodeClipboard {
+    static let enabledKey = "airsim.auto-copy-sms-code"
+
+    @MainActor
+    static func handle(_ messages: [SMSMessage]) {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.object(forKey: enabledKey) as? Bool ?? true
+        guard enabled else { return }
+        let recent = messages
+            .filter { !$0.isOutgoing && $0.timestamp > Date().addingTimeInterval(-300) }
+            .sorted { $0.timestamp < $1.timestamp }
+        guard let message = recent.last,
+              let code = SMSVerificationCodeExtractor.extract(from: message.content) else { return }
+        let delivery = message.deliveryID ?? message.id
+        guard defaults.string(forKey: "airsim.last-auto-copied-sms-code") != delivery else { return }
+        UIPasteboard.general.string = code
+        defaults.set(delivery, forKey: "airsim.last-auto-copied-sms-code")
+    }
+}
+
+enum SMSVerificationCodeExtractor {
+    static func extract(from text: String) -> String? {
+        let patterns = [
+            "(?:验证码|校验码|动态码|确认码|verification code|security code|code|otp)[^0-9]{0,24}([0-9]{4,8})",
+            "(?<![0-9])([0-9]{4,8})(?![0-9])",
+        ]
+        for pattern in patterns {
+            guard let expression = try? NSRegularExpression(
+                pattern: pattern, options: [.caseInsensitive]
+            ) else { continue }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            if let match = expression.firstMatch(in: text, options: [], range: range),
+               let codeRange = Range(match.range(at: 1), in: text) {
+                return String(text[codeRange])
+            }
+        }
+        return nil
+    }
+}
 
 enum RecentCallTimeFormatter {
     static func string(
@@ -105,7 +160,15 @@ private enum PhoneListMetrics {
     static let separatorLeading: CGFloat = horizontalInset + avatarSize + avatarSpacing
 }
 
-private struct DialPadLayoutMetrics {
+/// Window-based rules: regular-width phones and resizable windows are not iPads.
+/// Keep two usable columns; accessibility sizes retain a scrollable single column.
+enum PhoneWindowLayout {
+    static func usesTwoColumns(_ size: CGSize, accessibilitySize: Bool) -> Bool {
+        !accessibilitySize && size.width >= 700 && size.height >= 280
+    }
+}
+
+struct DialPadLayoutMetrics {
     let keySize: CGFloat
     let keySpacing: CGFloat
     let rowSpacing: CGFloat
@@ -121,16 +184,16 @@ private struct DialPadLayoutMetrics {
     var callIconSize: CGFloat { min(30, max(23, keySize * 0.33)) }
     var deleteIconSize: CGFloat { min(24, max(19, keySize * 0.27)) }
 
-    init(availableHeight: CGFloat, availableWidth: CGFloat, compactWidth: Bool) {
+    init(availableHeight: CGFloat, availableWidth: CGFloat, compactWidth: Bool, twoColumns: Bool = false) {
         let compactHeight = availableHeight < 700
         let desiredKeySize: CGFloat = compactWidth ? 84 : 90
         let desiredKeySpacing: CGFloat = compactWidth ? 28 : 34
-        let reservedHeight: CGFloat = compactHeight ? 205 : 220
+        let reservedHeight: CGFloat = twoColumns ? 64 : (compactHeight ? 205 : 220)
         let verticalKeySize = (availableHeight - reservedHeight) / 5
         let contentWidth = min(520, max(0, availableWidth - 32))
         let horizontalKeySize = (contentWidth - desiredKeySpacing * 2) / 3
 
-        keySize = min(desiredKeySize, max(56, min(verticalKeySize, horizontalKeySize)))
+        keySize = min(desiredKeySize, max(twoColumns ? 44 : 56, min(verticalKeySize, horizontalKeySize)))
         keySpacing = min(
             desiredKeySpacing,
             max(14, (contentWidth - keySize * 3) / 2)
@@ -149,6 +212,7 @@ private struct DialPadLayoutMetrics {
 struct DialPadView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var deleteRepeatTask: Task<Void, Never>?
     @State private var zeroWasLongPressed = false
     @State private var dialKeyFeedback = DialKeyFeedback()
@@ -170,107 +234,148 @@ struct DialPadView: View {
     var body: some View {
         NavigationStack {
             GeometryReader { proxy in
+                let twoColumns = PhoneWindowLayout.usesTwoColumns(proxy.size,
+                    accessibilitySize: dynamicTypeSize.isAccessibilitySize)
+                let layout = twoColumns
+                    ? AnyLayout(HStackLayout(alignment: .center, spacing: 32))
+                    : AnyLayout(VStackLayout(spacing: 12))
                 let metrics = DialPadLayoutMetrics(
                     availableHeight: proxy.size.height,
-                    availableWidth: proxy.size.width,
-                    compactWidth: isCompact
+                    availableWidth: twoColumns ? (proxy.size.width - 64) / 2 : proxy.size.width,
+                    compactWidth: isCompact,
+                    twoColumns: twoColumns
                 )
                 let pairedAgents = model.pairedAndroidAgents
                 let currentAgent = pairedAgents.first(where: \.isCurrent)
                 let agentSection = DialPadAgentSection.make(mode: ConnectionModePreference.selected(),
                     hasCurrent: currentAgent != nil, pairedCount: pairedAgents.count)
 
-                VStack(spacing: metrics.sectionSpacing) {
-                    VStack(spacing: 2) {
-                        Text(model.numberInput.isEmpty ? L10n.t("输入号码") : model.numberInput)
-                            .font(.system(
-                                size: metrics.numberFontSize,
-                                weight: .light,
-                                design: .rounded
-                            ))
-                            .monospacedDigit()
-                            .foregroundStyle(model.numberInput.isEmpty ? .secondary : .primary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.45)
-                            .frame(height: metrics.numberHeight)
+                ScrollView {
+                    layout {
+                        VStack(spacing: metrics.sectionSpacing) {
+                            VStack(spacing: 2) {
+                                Text(model.numberInput.isEmpty ? L10n.t("输入号码") : model.numberInput)
+                                    .font(
+                                        .system(
+                                            size: metrics.numberFontSize,
+                                            weight: .light,
+                                            design: .rounded
+                                        )
+                                    )
+                                    .monospacedDigit()
+                                    .foregroundStyle(model.numberInput.isEmpty ? .secondary : .primary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.45)
+                                    .frame(minHeight: metrics.numberHeight)
+                                    .accessibilityIdentifier("dialpad.number")
 
-                        Text(matchedName ?? " ")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.green)
-                            .frame(height: metrics.contactHeight)
-                    }
-                    .padding(.horizontal, 12)
+                                Text(matchedName ?? " ")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.green)
+                                    .frame(minHeight: metrics.contactHeight)
 
-                    if agentSection == .current, let currentAgent {
-                        DialPadCurrentAgentCard(
-                            agent: currentAgent,
-                            agentCount: pairedAgents.count,
-                            cloudModeEnabled: CloudModePreference.isEnabled(),
-                            simSlots: model.simSlots(for: currentAgent.id),
-                            selectedSIMSlotID: model.selectedSIMSlotID(for: currentAgent.id),
-                            selectSIMSlot: { slot in
-                                model.selectSIMSlot(slot.id, for: currentAgent.id)
                             }
-                        ) {
-                            pairedAgentListPresentation = PairedAgentListPresentation()
-                        }
-                    } else if agentSection == .bluetooth {
-                        HStack(spacing: 10) {
-                            Image(systemName: "wave.3.right")
-                                .foregroundStyle(model.voble.state == .ready ? .green : .orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("VoBLE 蓝牙模式")
-                                    .font(.subheadline.weight(.semibold))
-                                Text(model.voble.state == .ready
-                                     ? "已认证 · 通话不经过 Relay"
-                                     : "等待 Android 蓝牙 Agent")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                            .padding(.horizontal, 12)
+                            .contextMenu {
+                                Button {
+                                    UIPasteboard.general.string = model.numberInput
+                                } label: {
+                                    Label("复制号码", systemImage: "doc.on.doc")
+                                }
+                                .disabled(model.numberInput.isEmpty)
+                                Button {
+                                    guard let raw = UIPasteboard.general.string else { return }
+                                    model.numberInput = DialPadPasteSanitizer.sanitize(raw)
+                                } label: {
+                                    Label("粘贴号码", systemImage: "doc.on.clipboard")
+                                }
                             }
-                            Spacer()
-                            Text(model.voble.state == .ready ? "在线" : "连接中")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(model.voble.state == .ready ? .green : .orange)
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    } else if agentSection == .selection {
-                        Button {
-                            pairedAgentListPresentation = PairedAgentListPresentation()
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: ConnectionModePreference.selected() == .bluetooth ? "wave.3.right" : "smartphone")
-                                    .foregroundStyle(.secondary)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("已配对 Android Agent · \(pairedAgents.count)")
-                                        .font(.subheadline.weight(.semibold))
-                                    Text(pairedAgents.count > 1 ? "请选择拨号设备" : "选择设备并检查拨号链路")
+
+                            if agentSection == .current, let currentAgent {
+                                DialPadCurrentAgentCard(
+                                    agent: currentAgent,
+                                    agentCount: pairedAgents.count,
+                                    cloudModeEnabled: CloudModePreference.isEnabled(),
+                                    simSlots: model.simSlots(for: currentAgent.id),
+                                    selectedSIMSlotID: model.selectedSIMSlotID(for: currentAgent.id),
+                                    selectSIMSlot: { slot in
+                                        model.selectSIMSlot(slot.id, for: currentAgent.id)
+                                    }
+                                ) {
+                                    pairedAgentListPresentation = PairedAgentListPresentation()
+                                }
+                            } else if agentSection == .bluetooth {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "wave.3.right")
+                                        .foregroundStyle(model.voble.state == .ready ? .green : .orange)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("VoBLE 蓝牙模式")
+                                            .font(.subheadline.weight(.semibold))
+                                        Text(
+                                            model.voble.state == .ready
+                                                ? "已认证 · 通话不经过 Relay"
+                                                : "等待 Android 蓝牙 Agent"
+                                        )
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Text(model.voble.state == .ready ? "在线" : "连接中")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(model.voble.state == .ready ? .green : .orange)
                                 }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.tertiary)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(
+                                    .thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            } else if agentSection == .selection {
+                                Button {
+                                    pairedAgentListPresentation = PairedAgentListPresentation()
+                                } label: {
+                                    HStack(spacing: 10) {
+                                        Image(
+                                            systemName: ConnectionModePreference.selected() == .bluetooth
+                                                ? "wave.3.right" : "smartphone"
+                                        )
+                                        .foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("已配对 Android Agent · \(pairedAgents.count)")
+                                                .font(.subheadline.weight(.semibold))
+                                            Text(pairedAgents.count > 1 ? "请选择拨号设备" : "选择设备并检查拨号链路")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .padding(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(
+                                        .thinMaterial,
+                                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("dial-pad-device-selector")
                             }
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("dial-pad-device-selector")
-                    }
 
-                    dialKeyGrid(metrics: metrics)
-                    dialActions(metrics: metrics)
+                        }
+                        .frame(maxWidth: twoColumns ? 420 : 520)
+
+                        VStack(spacing: metrics.sectionSpacing) {
+                            dialKeyGrid(metrics: metrics)
+                            dialActions(metrics: metrics)
+                        }
+                    }
+                    .frame(maxWidth: twoColumns ? 1000 : 520)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, metrics.verticalPadding)
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height)
                 }
-                .frame(maxWidth: 520)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .padding(.horizontal, 16)
-                .padding(.vertical, metrics.verticalPadding)
+                .scrollDisabled(true)
+                .scrollIndicators(.hidden)
             }
-            .phoneReportsTabBarCompactState()
             .background(PhoneBackdrop())
             .toolbar(.hidden, for: .navigationBar)
             .sheet(item: $pairedAgentListPresentation) { _ in
@@ -313,7 +418,18 @@ struct DialPadView: View {
 
     private func dialActions(metrics: DialPadLayoutMetrics) -> some View {
         HStack(spacing: metrics.keySpacing) {
-            Color.clear.frame(width: metrics.keySize, height: metrics.keySize)
+            Button(action: clearNumber) {
+                Text(L10n.t("清空"))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(width: metrics.keySize, height: metrics.keySize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(model.numberInput.isEmpty)
+            .opacity(model.numberInput.isEmpty ? 0.4 : 1)
+            .accessibilityLabel(L10n.t("清空号码"))
+            .accessibilityIdentifier("dialpad.clear")
             Button {
                 Task { await model.dial() }
             } label: {
@@ -345,8 +461,15 @@ struct DialPadView: View {
                 .accessibilityLabel(L10n.t("删除"))
                 .accessibilityHint(L10n.t("轻点删除一位，长按连续删除"))
                 .accessibilityAddTraits(.isButton)
+                .accessibilityAction { deleteLastDigit() }
+                .accessibilityAction(named: Text(L10n.t("清空号码"))) { clearNumber() }
         }
         .frame(width: metrics.keypadWidth)
+    }
+
+    private func clearNumber() {
+        stopRepeatingDelete()
+        model.numberInput = ""
     }
 
     private func deleteLastDigit() {
@@ -681,11 +804,13 @@ struct RecentsView: View {
                                     return
                                 }
                                 if let number = RecentCallDialPolicy.numberToDial(call.number) {
+                                    model.markMissedCallsSeen([call])
                                     onCall(number)
                                 }
                             } label: {
                                 CallHistoryRow(
                                     call: call,
+                                    isUnseen: model.unseenMissedCallIDs.contains(call.id),
                                     contact: contact,
                                     displayName: contact?.name ?? contacts.displayName(for: call.number)
                                 )
@@ -697,6 +822,7 @@ struct RecentsView: View {
                                 LongPressGesture(minimumDuration: 0.38).onEnded { _ in
                                     guard call.number?.isEmpty == false else { return }
                                     suppressNextCallTap = true
+                                    model.markMissedCallsSeen([call])
                                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                                     withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
                                         selectedCall = call
@@ -714,6 +840,14 @@ struct RecentsView: View {
                             .alignmentGuide(.listRowSeparatorLeading) { _ in
                                 PhoneListMetrics.separatorLeading
                             }
+                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                if model.unseenMissedCallIDs.contains(call.id) {
+                                    Button { model.markMissedCallsSeen([call]) } label: {
+                                        Label(L10n.t("标为已读"), systemImage: "checkmark")
+                                    }
+                                    .tint(.blue)
+                                }
+                            }
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button(role: .destructive) {
                                     model.deleteCallHistory(ids: [call.id])
@@ -721,11 +855,17 @@ struct RecentsView: View {
                                     Label(L10n.t("删除"), systemImage: "trash")
                                 }
                                 if let number = call.number {
-                                    Button { onMessage(number) } label: {
+                                    Button {
+                                        model.markMissedCallsSeen([call])
+                                        onMessage(number)
+                                    } label: {
                                         Label(L10n.t("短信"), systemImage: "message.fill")
                                     }
                                     .tint(.blue)
-                                    Button { onCall(number) } label: {
+                                    Button {
+                                        model.markMissedCallsSeen([call])
+                                        onCall(number)
+                                    } label: {
                                         Label(L10n.t("拨号"), systemImage: "phone.fill")
                                     }
                                     .tint(.green)
@@ -740,6 +880,16 @@ struct RecentsView: View {
                 }
                 .background(PhoneBackdrop())
                 .navigationTitle(L10n.t("最近通话"))
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        if !model.unseenMissedCallIDs.isEmpty {
+                            Button { model.markMissedCallsSeen() } label: {
+                                Label(L10n.t("全部标为已读"), systemImage: "checkmark.circle")
+                            }
+                            .accessibilityIdentifier("recents.markAllSeen")
+                        }
+                    }
+                }
             }
             .allowsHitTesting(selectedCall == nil)
 
@@ -836,6 +986,7 @@ struct RecentsView: View {
 
     private struct CallHistoryRow: View {
         let call: CallRecord
+        let isUnseen: Bool
         let contact: ContactStore.Contact?
         let displayName: String
 
@@ -848,9 +999,21 @@ struct RecentsView: View {
                     size: PhoneListMetrics.avatarSize
                 )
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(displayName)
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(call.missed ? .red : .primary)
+                    HStack(spacing: 6) {
+                        Text(displayName)
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(call.missed ? .red : .primary)
+                        if isUnseen {
+                            Text(L10n.t("未查看"))
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.red)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.red.opacity(0.12), in: Capsule())
+                                .fixedSize()
+                                .accessibilityIdentifier("recentCall.unseen.\(call.id)")
+                        }
+                    }
                     HStack(spacing: 4) {
                         Image(systemName: call.direction == "incoming" ? "arrow.down.left" : "arrow.up.right")
                             .font(.caption2.weight(.semibold))
@@ -882,17 +1045,73 @@ struct RecentsView: View {
 
 // MARK: - 短信
 
+struct SMSConversationListState {
+    var showingComposer = false
+    var showingClearConfirmation = false
+    var editMode: EditMode = .inactive
+    var selectedConversations: Set<String> = []
+    var pendingDeletion: Set<String> = []
+    var showingDeleteConfirmation = false
+
+    mutating func requestDelete(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        pendingDeletion = ids
+        showingDeleteConfirmation = true
+    }
+}
+
+/// The TabView root owns the navigation bar; the list and toolbar share only
+/// presentation state so the title/actions cannot be swallowed by the tab.
+struct SMSConversationListToolbar: ToolbarContent {
+    @EnvironmentObject private var model: AppModel
+    @Binding var state: SMSConversationListState
+
+    var body: some ToolbarContent {
+        phoneMorphingToolbarItem(placement: .topBarLeading, id: "top-action-leading-more") {
+            Menu {
+                Button(L10n.t(state.editMode.isEditing ? "完成选择" : "选择会话")) {
+                    state.editMode = state.editMode.isEditing ? .inactive : .active
+                    state.selectedConversations = []
+                }
+                if state.editMode.isEditing {
+                    Button(L10n.t("删除所选会话"), role: .destructive) {
+                        state.requestDelete(Set(model.messages.filter {
+                            state.selectedConversations.contains($0.sender)
+                        }.map(\.id)))
+                    }
+                    .disabled(state.selectedConversations.isEmpty)
+                }
+                Button { Task { await model.refreshMessages() } } label: {
+                    Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
+                }
+                Button(role: .destructive) {
+                    state.pendingDeletion = Set(model.messages.map(\.id))
+                    state.showingClearConfirmation = true
+                } label: {
+                    Label(L10n.t("清空全部短信"), systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.body.weight(.semibold))
+            }
+            .accessibilityLabel(L10n.t("短信操作"))
+            .accessibilityIdentifier("sms-list-actions")
+        }
+        phoneMorphingToolbarItem(placement: .topBarTrailing, id: "top-action-trailing-primary") {
+            Button { state.showingComposer = true } label: {
+                Image(systemName: "square.and.pencil")
+            }
+            .accessibilityLabel(L10n.t("新信息"))
+            .accessibilityIdentifier("sms-compose")
+        }
+    }
+}
+
 struct MessagesView: View {
     @EnvironmentObject private var model: AppModel
     @Binding var pendingRecipient: String?
-    @Binding var pendingConversation: String?
-    @State private var conversationPath: [String] = []
-    @State private var showingComposer = false
-    @State private var showingClearConfirmation = false
-    @State private var editMode: EditMode = .inactive
-    @State private var selectedConversations: Set<String> = []
-    @State private var pendingDeletion: Set<String> = []
-    @State private var showingDeleteConfirmation = false
+    @Binding var state: SMSConversationListState
+    let openConversation: (String) -> Void
 
     private var conversations: [(sender: String, messages: [SMSMessage])] {
         Dictionary(grouping: model.messages, by: \.sender)
@@ -901,17 +1120,31 @@ struct MessagesView: View {
     }
 
     var body: some View {
-        NavigationStack(path: $conversationPath) {
+        Group {
             // Outside explicit deletion mode, row taps belong to navigation, not selection.
-            List(selection: editMode.isEditing ? $selectedConversations : nil) {
+            List(selection: state.editMode.isEditing ? $state.selectedConversations : nil) {
                 if conversations.isEmpty {
                     EmptyStateView(title: L10n.t("暂无短信"), systemImage: "message")
                         .listRowBackground(Color.clear)
                 } else {
                     ForEach(conversations, id: \.sender) { conversation in
-                        NavigationLink(value: conversation.sender) {
-                            MessageConversationRow(sender: conversation.sender, messages: conversation.messages)
-                                .contentShape(Rectangle())
+                        Group {
+                            if state.editMode.isEditing {
+                                MessageConversationRow(sender: conversation.sender, messages: conversation.messages)
+                            } else {
+                                Button {
+                                    openConversation(conversation.sender)
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        MessageConversationRow(sender: conversation.sender, messages: conversation.messages)
+                                        Image(systemName: "chevron.right")
+                                            .font(.footnote.weight(.semibold))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                         .listRowBackground(Color.clear)
                         .listRowInsets(.init(
@@ -926,104 +1159,49 @@ struct MessagesView: View {
                         .tag(conversation.sender)
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button(role: .destructive) {
-                                requestDelete(Set(conversation.messages.map(\.id)))
+                                state.requestDelete(Set(conversation.messages.map(\.id)))
                             } label: { Label("删除会话", systemImage: "trash") }
                         }
                     }
                 }
             }
             .listStyle(.plain)
-            .environment(\.editMode, $editMode)
+            .environment(\.editMode, $state.editMode)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, PhoneListMetrics.rowHeight)
             .phoneReportsTabBarCompactState()
             .background(PhoneBackdrop())
-            .navigationTitle(L10n.t("短信"))
-            .navigationDestination(for: String.self) { sender in
-                MessageThreadView(sender: sender)
-            }
-            .toolbar {
-                phoneMorphingToolbarItem(placement: .topBarLeading, id: "top-action-leading-more") {
-                    Menu {
-                        Button(editMode.isEditing ? "完成选择" : "选择会话") {
-                            editMode = editMode.isEditing ? .inactive : .active
-                            selectedConversations = []
-                        }
-                        if editMode.isEditing {
-                            Button("删除所选会话", role: .destructive) {
-                                requestDelete(Set(model.messages.filter {
-                                    selectedConversations.contains($0.sender)
-                                }.map(\.id)))
-                            }
-                            .disabled(selectedConversations.isEmpty)
-                        }
-                        Button { Task { await model.refreshMessages() } } label: {
-                            Label(L10n.t("刷新"), systemImage: "arrow.clockwise")
-                        }
-                        Button(role: .destructive) {
-                            pendingDeletion = Set(model.messages.map(\.id))
-                            showingClearConfirmation = true
-                        } label: {
-                            Label(L10n.t("清空全部短信"), systemImage: "trash")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.body.weight(.semibold))
-                    }
-                    .accessibilityLabel("短信操作")
-                }
-                phoneMorphingToolbarItem(placement: .topBarTrailing, id: "top-action-trailing-primary") {
-                    Button { showingComposer = true } label: {
-                        Image(systemName: "square.and.pencil")
-                    }
-                    .accessibilityLabel(L10n.t("新信息"))
-                }
-            }
             .task {
                 await model.loadMessagesFromAgent(silently: true)
             }
-            .onAppear { showPendingConversation() }
             .onChange(of: pendingRecipient) { recipient in
-                if recipient != nil { showingComposer = true }
+                if recipient != nil { state.showingComposer = true }
             }
-            .onChange(of: pendingConversation) { _ in showPendingConversation() }
-            .sheet(isPresented: $showingComposer, onDismiss: { pendingRecipient = nil }) {
+            .sheet(isPresented: $state.showingComposer, onDismiss: { pendingRecipient = nil }) {
                 MessageComposer(initialRecipient: pendingRecipient ?? "")
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
             }
-            .confirmationDialog(L10n.t("清空全部短信"), isPresented: $showingClearConfirmation, titleVisibility: .visible) {
+            .confirmationDialog(L10n.t("清空全部短信"), isPresented: $state.showingClearConfirmation, titleVisibility: .visible) {
                 Button(L10n.t("删除"), role: .destructive) {
-                    model.deleteMessages(ids: pendingDeletion)
-                    pendingDeletion = []
+                    model.deleteMessages(ids: state.pendingDeletion)
+                    state.pendingDeletion = []
                 }
                 Button(L10n.t("取消"), role: .cancel) {}
             } message: {
                 Text("仅删除此 iPhone 上 AirSIM 内的短信记录，不删除安卓系统短信，无法恢复。")
             }
-            .confirmationDialog("删除短信记录？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+            .confirmationDialog("删除短信记录？", isPresented: $state.showingDeleteConfirmation, titleVisibility: .visible) {
                 Button("删除", role: .destructive) {
-                    model.deleteMessages(ids: pendingDeletion)
-                    selectedConversations = []
-                    pendingDeletion = []
+                    model.deleteMessages(ids: state.pendingDeletion)
+                    state.selectedConversations = []
+                    state.pendingDeletion = []
                 }
-                Button("取消", role: .cancel) { pendingDeletion = [] }
+                Button("取消", role: .cancel) { state.pendingDeletion = [] }
             } message: {
                 Text("仅删除此 iPhone 上的所选记录，不删除安卓系统短信。新收到的短信不受影响。")
             }
         }
-    }
-
-    private func showPendingConversation() {
-        guard let sender = pendingConversation else { return }
-        conversationPath = [sender]
-        pendingConversation = nil
-    }
-
-    private func requestDelete(_ ids: Set<String>) {
-        guard !ids.isEmpty else { return }
-        pendingDeletion = ids
-        showingDeleteConfirmation = true
     }
 
     private struct MessageConversationRow: View {
@@ -1039,6 +1217,10 @@ struct MessagesView: View {
             contact?.name ?? model.contacts.displayName(for: sender)
         }
 
+        private var unreadCount: Int {
+            messages.filter { model.unreadMessageIDs.contains($0.id) }.count
+        }
+
         var body: some View {
             HStack(spacing: PhoneListMetrics.avatarSpacing) {
                 InitialAvatar(
@@ -1050,9 +1232,22 @@ struct MessagesView: View {
                     size: PhoneListMetrics.avatarSize
                 )
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(displayName)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Text(displayName)
+                            .font(.body.weight(.semibold))
+                            .lineLimit(1)
+                        if unreadCount > 0 {
+                            Text(unreadCount > 99 ? "99+" : String(unreadCount))
+                                .font(.caption2.weight(.bold).monospacedDigit())
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 6)
+                                .frame(minWidth: 20, minHeight: 20)
+                                .background(Color(uiColor: .systemBlue), in: Capsule())
+                                .fixedSize()
+                                .accessibilityLabel(String(format: L10n.t("%d 条未读短信"), unreadCount))
+                                .accessibilityIdentifier("smsConversation.unread.\(sender)")
+                        }
+                    }
                     Text(messages.last?.content ?? "")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -1071,12 +1266,26 @@ struct MessagesView: View {
     }
 }
 
-private struct MessageThreadView: View {
+struct MessageThreadView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var settings: AppSettings
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isVisible = false
     let sender: String
     @State private var reply = ""
-    @State private var pendingDeletion: String?
+    @State private var pendingDeletion: Set<String> = []
     @State private var showingDeleteConfirmation = false
+    @State private var copiedVerificationCode: String?
+    @State private var selection = SMSMessageSelection()
+    @FocusState private var composerFocused: Bool
+
+    private var dateLocale: Locale {
+        let language = settings.language == .system ? L10n.effectiveLanguage : settings.language
+        var components = Locale.Components(locale: .autoupdatingCurrent)
+        components.languageComponents.languageCode = language == .zh ? "zh" : "en"
+        components.languageComponents.script = language == .zh ? "Hans" : nil
+        return Locale(components: components)
+    }
 
     private var messages: [SMSMessage] {
         model.messages
@@ -1084,73 +1293,265 @@ private struct MessageThreadView: View {
             .sorted { $0.timestamp < $1.timestamp }
     }
 
+    private var latestVerificationCode: String? {
+        guard let message = messages.last(where: { !$0.isOutgoing }) else { return nil }
+        return SMSVerificationCodeExtractor.extract(from: message.content)
+    }
+
+    private var trimmedReply: String {
+        reply.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var replyBar: some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            TextField(L10n.t("短信"), text: $reply, axis: .vertical)
+                .accessibilityIdentifier("sms.reply")
+                .focused($composerFocused)
+                .textFieldStyle(.plain)
+                .lineLimit(1...5)
+                .padding(.leading, 14)
+                .padding(.trailing, trimmedReply.isEmpty ? 14 : 2)
+                .padding(.vertical, 8)
+            if !trimmedReply.isEmpty {
+                Button(action: sendReply) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                        .background(Circle().fill(Color.accentColor))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 5)
+                .padding(.bottom, 3)
+                .accessibilityLabel(L10n.t("发送"))
+            }
+        }
+        .smsComposerGlass()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(uiColor: .systemBackground))
+    }
+
+    private func sendReply() {
+        let body = trimmedReply
+        guard !body.isEmpty else { return }
+        reply = ""
+        Task { _ = await model.sendSMS(to: sender, content: body) }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 9) {
-                        ForEach(messages) { message in
-                            HStack {
-                                if message.isOutgoing { Spacer(minLength: 48) }
-                                VStack(
-                                    alignment: message.isOutgoing ? .trailing : .leading,
-                                    spacing: 3
-                                ) {
-                                    Text(message.content)
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 9)
-                                        .background(
-                                            message.isOutgoing
-                                                ? Color.blue
-                                                : Color(uiColor: .secondarySystemBackground),
-                                            in: RoundedRectangle(cornerRadius: 18)
-                                        )
-                                        .foregroundStyle(message.isOutgoing ? .white : .primary)
-                                    if message.isOutgoing {
-                                        Text(L10n.t("已发送"))
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                if !message.isOutgoing { Spacer(minLength: 48) }
-                            }
-                            .id(message.id)
-                            .contextMenu {
-                                Button("删除短信", role: .destructive) {
-                                    pendingDeletion = message.id
-                                    showingDeleteConfirmation = true
-                                }
-                            }
-                        }
+            if !selection.isSelecting, let code = latestVerificationCode {
+                HStack(spacing: 10) {
+                    Image(systemName: "number.square.fill")
+                        .foregroundStyle(.blue)
+                    Text("验证码 (code)")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                    Spacer()
+                    Button(copiedVerificationCode == code ? "已复制" : "复制验证码") {
+                        UIPasteboard.general.string = code
+                        copiedVerificationCode = code
                     }
-                    .padding()
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
                 }
-                .onAppear { if let id = messages.last?.id { proxy.scrollTo(id) } }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(.thinMaterial)
             }
-            Divider()
-            HStack(spacing: 10) {
-                TextField(L10n.t("短信内容"), text: $reply, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                Button {
-                    let body = reply
-                    reply = ""
-                    Task { _ = await model.sendSMS(to: sender, content: body) }
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.title2)
-                }
-                .disabled(reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .padding()
+
+            SMSConversationTimelineView(
+                messages: messages,
+                selection: selection,
+                locale: dateLocale,
+                onBeginSelection: { id in
+                    composerFocused = false
+                    selection.begin(with: id)
+                },
+                onToggleSelection: { selection.toggle($0) },
+                onBeginTextSelection: { composerFocused = false }
+            )
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(PhoneBackdrop())
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if selection.isSelecting { selectionBar } else { replyBar }
+        }
+        .onChange(of: messages) { selection.reconcile(with: $0); acknowledgeVisibleMessages() }
+        .onAppear { isVisible = true; acknowledgeVisibleMessages() }
+        .onDisappear { isVisible = false }
+        .onChange(of: scenePhase) { _ in acknowledgeVisibleMessages() }
+        .onChange(of: model.inAppPresentedCall?.id) { _ in acknowledgeVisibleMessages() }
         .navigationTitle(model.contacts.displayName(for: sender))
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog("删除这条短信？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
-            Button("删除", role: .destructive) {
-                if let id = pendingDeletion { model.deleteMessages(ids: [id]) }
-                pendingDeletion = nil
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if selection.isSelecting {
+                    Button {
+                        selection.cancel()
+                        composerFocused = false
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel(L10n.t("取消选择"))
+                } else {
+                    Menu {
+                        Button {
+                            if let latest = messages.last?.content {
+                                UIPasteboard.general.string = latest
+                            }
+                        } label: {
+                            Label(L10n.t("复制最新短信"), systemImage: "doc.on.doc")
+                        }
+                        .disabled(messages.isEmpty)
+
+                        Button {
+                            UIPasteboard.general.string = messages.map(\.content).joined(separator: "\n\n")
+                        } label: {
+                            Label(L10n.t("复制整段会话"), systemImage: "doc.on.doc.fill")
+                        }
+                        .disabled(messages.isEmpty)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .accessibilityLabel(L10n.t("复制短信"))
+                }
             }
-            Button("取消", role: .cancel) { pendingDeletion = nil }
-        } message: { Text("仅删除此 iPhone 上 AirSIM 内的记录，不删除安卓系统短信。") }
+        }
+        .confirmationDialog(
+            String(format: L10n.t("删除所选 %d 条短信？"), pendingDeletion.count),
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(L10n.t("删除"), role: .destructive) {
+                let ids = pendingDeletion
+                model.deleteMessages(ids: ids)
+                // Persistence failure leaves the records and selection intact.
+                if !model.messages.contains(where: { ids.contains($0.id) }) {
+                    selection.cancel()
+                }
+                pendingDeletion = []
+            }
+            Button(L10n.t("取消"), role: .cancel) { pendingDeletion = [] }
+        } message: { Text(L10n.t("仅删除此 iPhone 上 AirSIM 内的记录，不删除安卓系统短信。")) }
+    }
+
+    private func acknowledgeVisibleMessages() {
+        guard isVisible, scenePhase == .active, model.inAppPresentedCall == nil else { return }
+        model.markMessagesRead(messages)
+    }
+
+    private var selectionBar: some View {
+        HStack {
+            Button(role: .destructive) {
+                pendingDeletion = selection.selectedIDs
+                showingDeleteConfirmation = true
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 22))
+                    .frame(width: 44, height: 44)
+            }
+            .accessibilityLabel(L10n.t("删除所选短信"))
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .phoneGlassSurface(cornerRadius: 22, interactive: true)
+            .disabled(selection.selectedIDs.isEmpty)
+            Spacer()
+            Text(String(format: L10n.t("已选 %d 条"), selection.selectedIDs.count))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .accessibilityAddTraits(.updatesFrequently)
+            Spacer()
+            SMSMessageShareButton(texts: selection.selectedMessages(in: messages).map(\.content))
+                .frame(width: 44, height: 44)
+                .phoneGlassSurface(cornerRadius: 22, interactive: true)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+}
+
+/// Anchor iPad's native activity popover to the tapped sharing button.
+private struct SMSMessageShareButton: UIViewRepresentable {
+    let texts: [String]
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setImage(UIImage(systemName: "square.and.arrow.up"), for: .normal)
+        button.setPreferredSymbolConfiguration(
+            UIImage.SymbolConfiguration(pointSize: 22), forImageIn: .normal
+        )
+        button.tintColor = .label
+        button.addAction(UIAction { [weak button, weak coordinator = context.coordinator] _ in
+            guard let button else { return }
+            coordinator?.share(from: button)
+        }, for: .touchUpInside)
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {
+        context.coordinator.texts = texts
+        button.isEnabled = !texts.isEmpty
+        button.accessibilityLabel = L10n.t("共享所选短信")
+    }
+
+    final class Coordinator {
+        var texts: [String] = []
+
+        func share(from button: UIButton) {
+            guard !texts.isEmpty else { return }
+            var responder: UIResponder? = button
+            while let current = responder {
+                if let presenter = current as? UIViewController {
+                    guard presenter.presentedViewController == nil else { return }
+                    let title = texts.count == 1 ? L10n.t("1 条短信")
+                        : String(format: L10n.t("%d 条短信"), texts.count)
+                    let activity = UIActivityViewController(
+                        activityItems: texts.map { SMSMessageShareItem(text: $0, title: title) },
+                        applicationActivities: nil
+                    )
+                    if let popover = activity.popoverPresentationController {
+                        popover.sourceView = button
+                        popover.sourceRect = button.bounds
+                    }
+                    presenter.present(activity, animated: true)
+                    return
+                }
+                responder = current.next
+            }
+        }
+    }
+}
+
+private final class SMSMessageShareItem: NSObject, UIActivityItemSource {
+    private let text: String
+    private let title: String
+
+    init(text: String, title: String) {
+        self.text = text
+        self.title = title
+    }
+
+    func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any { text }
+
+    func activityViewController(_ activityViewController: UIActivityViewController,
+                                itemForActivityType activityType: UIActivity.ActivityType?) -> Any? { text }
+
+    func activityViewController(_ activityViewController: UIActivityViewController,
+                                dataTypeIdentifierForActivityType activityType: UIActivity.ActivityType?) -> String {
+        UTType.plainText.identifier
+    }
+
+    func activityViewControllerLinkMetadata(_ activityViewController: UIActivityViewController) -> LPLinkMetadata? {
+        let metadata = LPLinkMetadata()
+        metadata.title = title
+        return metadata
     }
 }
 
@@ -1212,7 +1613,7 @@ private struct MessageComposer: View {
                         .disabled(!canSend)
                 }
             }
-            .task { await model.contacts.loadIfAuthorized() }
+            .task { await model.contacts.loadIfAuthorized(force: true) }
             .sheet(isPresented: $showingContacts) {
                 MessageContactPicker { phone in
                     recipient = phone
@@ -1406,7 +1807,23 @@ private struct MessageContactPicker: View {
                     Button(L10n.t("取消")) { dismiss() }
                 }
             }
-            .task { await model.contacts.loadIfAuthorized() }
+            .task { await model.contacts.loadIfAuthorized(force: true) }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.contacts.isLimitedAccess {
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Label("通讯录为受限访问，只显示已授权联系人；点此选择更多联系人", systemImage: "person.crop.circle.badge.exclamationmark")
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(.thinMaterial)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
@@ -1500,12 +1917,44 @@ struct ContactsView: View {
                 prompt: L10n.t("搜索姓名或号码")
             )
             .refreshable { await model.contacts.requestAccessAndLoad() }
-            .task { await model.contacts.loadIfAuthorized() }
+            .task { await model.contacts.loadIfAuthorized(force: true) }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if model.contacts.isLimitedAccess {
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Label("通讯录为受限访问，只显示已授权联系人；点此选择更多联系人", systemImage: "person.crop.circle.badge.exclamationmark")
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(.thinMaterial)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 }
 
 private extension View {
+    /// iOS 26 起短信输入框使用原生 Liquid Glass；旧系统回退为系统填充色。
+    @ViewBuilder
+    func smsComposerGlass() -> some View {
+        if #available(iOS 26.0, *) {
+            glassEffect(.regular, in: Capsule(style: .continuous))
+        } else {
+            background(
+                Capsule(style: .continuous).fill(Color(uiColor: .secondarySystemBackground))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color(uiColor: .separator).opacity(0.45), lineWidth: 0.5)
+            )
+        }
+    }
+
     @ViewBuilder
     func dialKeySurface() -> some View {
         if #available(iOS 26.0, *) {
@@ -1715,6 +2164,7 @@ private struct EmptyStateView: View {
 
 enum CallSurfacePhase: Equatable {
     case incoming
+    case outgoing
     case connected
 }
 
@@ -1739,11 +2189,16 @@ struct CallSurfaceContent: Equatable {
             primaryActions = [.decline, .answer]
             secondaryActions = []
             showsDuration = false
-        } else {
+        } else if ["active", "held"].contains(state) {
             phase = .connected
             primaryActions = [.end]
             secondaryActions = [.mute, .keypad, .speaker]
             showsDuration = true
+        } else {
+            phase = .outgoing
+            primaryActions = [.end]
+            secondaryActions = [.speaker]
+            showsDuration = false
         }
     }
 }
@@ -1758,7 +2213,7 @@ enum CallProximityPolicy {
 struct ActiveCallView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let call: CallRecord
     @State private var showingKeypad = false
 
@@ -1786,19 +2241,32 @@ struct ActiveCallView: View {
     var body: some View {
         ZStack {
             CallBackdrop()
-            Group {
-                if content.phase == .incoming {
-                    incomingSurface
-                } else {
-                    connectedSurface
+            GeometryReader { proxy in
+                let twoColumns = PhoneWindowLayout.usesTwoColumns(proxy.size,
+                    accessibilitySize: dynamicTypeSize.isAccessibilitySize)
+                let layout = twoColumns
+                    ? AnyLayout(HStackLayout(alignment: .center, spacing: 32))
+                    : AnyLayout(VStackLayout(spacing: 32))
+                ScrollView {
+                    VStack(spacing: 24) {
+                        callHeader(title: content.phase == .incoming ? "AirSIM 来电" : "AirSIM 通话",
+                                   showsRecording: content.phase == .connected)
+                        layout {
+                            callIdentity(avatarDiameter: twoColumns ? 64 : avatarSize)
+                                .frame(maxWidth: .infinity)
+                            callActions
+                                .frame(maxWidth: .infinity)
+                        }
+                        .frame(maxWidth: 1000, maxHeight: .infinity)
+                    }
+                    .padding(24)
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height)
                 }
+                .scrollIndicators(.hidden)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, isCompact ? 20 : 32)
-            .padding(.vertical, isCompact ? 18 : 26)
         }
-        // 来电提醒与接通后的通话都是聚焦型全屏任务。保持固定画布，避免
-        // ScrollView 的拖动/回弹，也避免手势误触影响接听和挂断。
+        // The view identity and audio lifecycle survive window resizing. Overflow
+        // remains reachable in short windows and at accessibility text sizes.
         .contentShape(Rectangle())
         .sheet(isPresented: $showingKeypad) { DTMFKeypadView() }
         .environment(\.colorScheme, .dark)
@@ -1809,106 +2277,34 @@ struct ActiveCallView: View {
         .onDisappear { UIDevice.current.isProximityMonitoringEnabled = false }
     }
 
-    private var incomingSurface: some View {
-        VStack(spacing: 0) {
-            callHeader(title: "AirSIM 来电", showsRecording: false)
-
-            Spacer(minLength: isCompact ? 36 : 54)
-
-            InitialAvatar(
-                name: displayName,
-                photoData: contactPhotoData,
-                size: avatarSize
-            )
-            .overlay { Circle().strokeBorder(.white.opacity(0.20), lineWidth: 1) }
-            .shadow(color: .black.opacity(0.34), radius: 28, y: 16)
-            .accessibilityHidden(true)
-
-            VStack(spacing: 8) {
-                Text(displayName)
-                    .font(isCompact ? .system(size: 38, weight: .semibold) : .system(size: 44, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.68)
-                    .multilineTextAlignment(.center)
-
-                if let number = call.number, number != displayName {
-                    Text(number)
-                        .font(.title3.weight(.regular).monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.68))
-                        .textSelection(.enabled)
-                }
-                if let simLabel = callSIMLabel {
-                    Text(simLabel)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.62))
-                }
-
-                Text(L10n.t("等待接听"))
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.62))
-            }
-            .padding(.top, 24)
-
-            connectivityBadge
-                .padding(.top, 22)
-
-            Spacer(minLength: isCompact ? 52 : 76)
-
-            HStack {
-                CallDecisionButton(
-                    title: L10n.t("拒接"),
-                    icon: "phone.down.fill",
-                    color: .red
-                ) {
-                    Task { await model.reject() }
-                }
-
-                Spacer(minLength: 56)
-
-                CallDecisionButton(
-                    title: L10n.t("接听"),
-                    icon: "phone.fill",
-                    color: .green
-                ) {
-                    Task { await model.answer() }
-                }
-            }
-            .frame(maxWidth: 430)
-            .padding(.horizontal, isCompact ? 12 : 28)
-            .padding(.bottom, isCompact ? 16 : 28)
-        }
-        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.985)))
-    }
-
-    private var connectedSurface: some View {
-        VStack(spacing: 0) {
-            callHeader(title: "AirSIM 通话", showsRecording: true)
-
-            Spacer(minLength: isCompact ? 24 : 42)
-
-            InitialAvatar(name: displayName, photoData: contactPhotoData, size: avatarSize)
-                .overlay { Circle().strokeBorder(.white.opacity(0.18), lineWidth: 1) }
-                .shadow(color: .black.opacity(0.28), radius: 22, y: 12)
+    private func callIdentity(avatarDiameter: CGFloat) -> some View {
+        VStack(spacing: 16) {
+            InitialAvatar(name: displayName, photoData: contactPhotoData, size: avatarDiameter)
+                .overlay { Circle().strokeBorder(.white.opacity(0.20), lineWidth: 1) }
                 .accessibilityHidden(true)
-
-            VStack(spacing: 8) {
-                Text(displayName)
-                    .font(.largeTitle.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.7)
-                    .multilineTextAlignment(.center)
-                if let number = call.number, number != displayName {
-                    Text(number)
-                        .font(.title3.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.66))
-                        .textSelection(.enabled)
-                }
-                if let simLabel = callSIMLabel {
-                    Text(simLabel)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.60))
+            Text(displayName)
+                .font(.largeTitle.weight(.semibold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+            if let number = call.number, number != displayName {
+                Text(number)
+                    .font(.title3.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.68))
+                    .textSelection(.enabled)
+            }
+            if let simLabel = callSIMLabel {
+                Text(simLabel).font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.68))
+            }
+            if content.phase == .incoming {
+                Text(L10n.t("等待接听"))
+                    .font(.subheadline).foregroundStyle(.white.opacity(0.68))
+                connectivityBadge
+            } else {
+                if content.phase == .outgoing {
+                    Text("正在呼叫 · 尚未接通")
+                        .font(.subheadline).foregroundStyle(.white.opacity(0.68))
                 }
                 if content.showsDuration {
                     TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -1918,61 +2314,48 @@ struct ActiveCallView: View {
                             .contentTransition(.numericText())
                     }
                 }
-            }
-            .padding(.top, 22)
-
-            audioStatusBadge
-                .padding(.top, 20)
-
-            if let audioError = model.audio.errorMessage, !audioError.isEmpty {
-                Text(audioError)
-                    .font(.caption)
-                    .foregroundStyle(Color.red.opacity(0.92))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .padding(.top, 10)
-            }
-
-            Spacer(minLength: isCompact ? 34 : 54)
-
-            HStack(spacing: isCompact ? 20 : 34) {
-                CallCircleButton(
-                    title: model.isMuted ? L10n.t("取消静音") : L10n.t("静音"),
-                    icon: model.isMuted ? "mic.slash.fill" : "mic.fill",
-                    color: model.isMuted ? .orange : nil,
-                    foregroundColor: .white,
-                    size: controlSize
-                ) {
-                    Task { await model.toggleMute() }
+                audioStatusBadge
+                if let error = model.audio.errorMessage, !error.isEmpty {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
                 }
-                CallCircleButton(
-                    title: "键盘",
-                    icon: "circle.grid.3x3.fill",
-                    color: nil,
-                    foregroundColor: .white,
-                    size: controlSize
-                ) {
-                    showingKeypad = true
-                }
-                SpeakerRouteButton(
-                    audio: model.audio,
-                    size: controlSize,
-                    action: model.toggleSpeaker
-                )
             }
-            .frame(maxWidth: 430)
-
-            CallDecisionButton(
-                title: L10n.t("挂断"),
-                icon: "phone.down.fill",
-                color: .red
-            ) {
-                Task { await model.hangup() }
-            }
-            .padding(.top, isCompact ? 30 : 42)
-            .padding(.bottom, isCompact ? 8 : 18)
         }
-        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.985)))
+    }
+
+    @ViewBuilder
+    private var callActions: some View {
+        if content.phase == .incoming {
+            HStack(spacing: 48) {
+                CallDecisionButton(title: L10n.t("拒接"), icon: "phone.down.fill", color: .red) {
+                    Task { await model.reject() }
+                }
+                CallDecisionButton(title: L10n.t("接听"), icon: "phone.fill", color: .green) {
+                    Task { await model.answer() }
+                }
+            }
+        } else {
+            VStack(spacing: 28) {
+                HStack(spacing: 20) {
+                    if content.phase == .connected {
+                    CallCircleButton(
+                        title: model.isMuted ? L10n.t("取消静音") : L10n.t("静音"),
+                        icon: model.isMuted ? "mic.slash.fill" : "mic.fill",
+                        color: model.isMuted ? .orange : nil,
+                        foregroundColor: .white, size: controlSize
+                    ) { Task { await model.toggleMute() } }
+                    CallCircleButton(title: "键盘", icon: "circle.grid.3x3.fill", color: nil,
+                                     foregroundColor: .white, size: controlSize) {
+                        showingKeypad = true
+                    }
+                    }
+                    SpeakerRouteButton(audio: model.audio, size: controlSize, action: model.toggleSpeaker)
+                }
+                CallDecisionButton(title: L10n.t("挂断"), icon: "phone.down.fill", color: .red) {
+                    Task { await model.hangup() }
+                }
+            }
+        }
     }
 
     private func callHeader(title: String, showsRecording: Bool) -> some View {
@@ -2015,7 +2398,7 @@ struct ActiveCallView: View {
     }
 
     private var audioStatusBadge: some View {
-        let statusColor = model.callAudioIsActive ? Color.green : audioStatusColor
+        let statusColor = model.audio.receiveOnly ? Color.blue : (model.callAudioIsActive ? Color.green : audioStatusColor)
         return HStack(spacing: 7) {
             Circle()
                 .fill(statusColor)
@@ -2056,7 +2439,7 @@ struct ActiveCallView: View {
     }
 
     private func durationText(at date: Date) -> String {
-        let total = max(0, Int(date.timeIntervalSince(call.startedAt)))
+        let total = max(0, Int(date.timeIntervalSince(model.callConnectedAt ?? date)))
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
@@ -2209,7 +2592,8 @@ private struct DTMFKeypadView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
+            ScrollView {
+              VStack(spacing: 20) {
                 Text(enteredDigits.isEmpty ? "按键发送双音多频" : enteredDigits)
                     .font(.system(.title3, design: .rounded).monospacedDigit())
                     .foregroundStyle(enteredDigits.isEmpty ? .secondary : .primary)
@@ -2221,14 +2605,15 @@ private struct DTMFKeypadView: View {
                 } else {
                     keypad
                 }
+              }
+              .frame(maxWidth: .infinity)
+              .padding(24)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(24)
             .navigationTitle("通话键盘")
             .toolbar { Button(L10n.t("取消")) { dismiss() } }
         }
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.hidden)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     private var keypad: some View {

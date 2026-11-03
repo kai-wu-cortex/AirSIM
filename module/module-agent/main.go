@@ -77,6 +77,7 @@ type agent struct {
 	router               *routerManager
 	android              *androidControl
 	pairRegistrationSync func()
+	localModePath        string
 }
 
 func newAgent(atPath string) *agent {
@@ -96,8 +97,9 @@ func newAgent(atPath string) *agent {
 		voiceBackend:        voiceBackend,
 		voiceBackendErr:     voiceBackendErr,
 	}
+	service.localModePath = filepath.Join(agentDataDirectory, "push.json.local-mode")
 	service.at.setURCHandler(service.handleURC)
-	service.pairRegistrationSync = service.syncPushRegistration
+	service.pairRegistrationSync = func() { service.scheduleRelayJob(service.syncPushRegistrationContext) }
 	service.push.onCallDelivered = service.startCloudCall
 	service.at.setReopenHandler(service.handleATReopen)
 	service.at.setDebugHandler(func(direction, summary, payload string) {
@@ -290,6 +292,7 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 	mux.HandleFunc("/api/usb/faults", a.usbFaultStatus)
 	mux.HandleFunc("/api/platform", a.platform)
 	mux.HandleFunc("/api/android/status", a.androidStatus)
+	mux.HandleFunc("/api/android/local-mode", a.localMode)
 	mux.HandleFunc("/api/android/calls/event", a.androidCallEvent)
 	mux.HandleFunc("/api/android/sms/event", a.androidSMSEvent)
 	mux.HandleFunc("/api/android/pair/register", a.androidPairRegister)
@@ -299,6 +302,7 @@ func (a *agent) routes(logger *log.Logger) http.Handler {
 	mux.HandleFunc("/api/events", a.agentEvents)
 	mux.HandleFunc("/api/push/register", a.pushRegister)
 	mux.HandleFunc("/api/push/status", a.pushStatus)
+	mux.HandleFunc("/api/push/heartbeat", a.pushHeartbeat)
 	mux.HandleFunc("/api/push/mode", a.pushMode)
 	mux.HandleFunc("/api/calls/status", a.callStatus)
 	mux.HandleFunc("/api/calls/events", a.callEvents)

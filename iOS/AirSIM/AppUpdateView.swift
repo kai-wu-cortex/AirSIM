@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 enum AppUpdatePresentation: Identifiable {
     case notes
@@ -12,12 +13,14 @@ enum AppReleaseNotes {
     // Bundled: showing installed-version notes never needs GitHub, Relay or pairing.
     // Keep this summary in sync with the candidate's source and docs when publishing.
     static let items = [
-        "首次安装／升级后显示版本说明；设置中可随时重看，并手动检查应用更新。",
-        "本地双通道：拨号前优先 VoWLAN、其次 VoBLE；通话中不自动切换音频链路。",
-        "多安卓设备与通话来源绑定，改进短信会话、设备配对及详细日志。",
-        "优化蓝牙音频启动顺序与云端挂断状态；云端后台待机保留最近确认结果，不增加 Relay 定时查询。"
+        "支持连接运行兼容 AirSIM 设备端的 U30Air，在 iPhone 上使用通话与短信功能。",
+        "桌面与锁屏小组件展示设备状态；支持的桌面尺寸提供设备与连接模式切换、最近通话和短信内容摘要。",
+        "小组件支持后台切换，显示设备上报的电量；刷新由系统调度，无有效采样时显示未知。",
+        "试验性 TLS 公网域名配对与直连：通过自建 HTTPS／TLS 入口完成首次配对，或为已配对设备添加公网入口。",
+        "最近通话与短信的底部标签、小组件标题显示未接／未读数量，对应记录也有醒目标记。",
+        "呼出结束时按通话身份停止等待音与计时；网络波动不会自动重复拨号。"
     ]
-    static let limitations = "各机型双向声音、长时锁屏与多设备场景仍需分别真机验证；GitHub 发布不代表 TestFlight 已可更新。"
+    static let limitations = "U30Air 需运行兼容设备端。运营商早期媒体仅在临时候选中完成单次试听，尚未正式开放。TLS 公网功能为试验性，需要可入站的自建网关、有效证书及独立音频转发；不自动穿透 NAT，也不新增后台推送。小组件刷新由系统调度，模式切换不代表已连接。GitHub 发布不代表 TestFlight 已可更新。"
 }
 
 enum AppUpdateChannel {
@@ -34,15 +37,19 @@ struct AppUpdateSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            List {
-                switch presentation {
-                case .notes:
-                    Section("AirSIM \(AppInformation.version)") {
-                        ForEach(AppReleaseNotes.items, id: \.self) { Text($0) }
-                    }
-                    Section { Text(AppReleaseNotes.limitations).foregroundStyle(.secondary) }
-                case .result(let result):
+        Group {
+            switch presentation {
+        case .notes:
+            NewFeatureOnboardingView(
+                version: AppInformation.version,
+                onConfirm: {
+                    updates.acknowledgeNotes()
+                    dismiss()
+                }
+            )
+        case .result(let result):
+            NavigationStack {
+                List {
                     Section { Text(result.message) }
                     if let candidate = result.candidate {
                         Section("公开版本 \(candidate.version)（\(candidate.build)）") {
@@ -59,25 +66,351 @@ struct AppUpdateSheet: View {
                         }
                     }
                 }
-            }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("知道了") {
-                        switch presentation {
-                        case .notes: updates.acknowledgeNotes()
-                        case .result(let result): if let candidate = result.candidate { updates.acknowledgeUpdate(candidate) }
+                .navigationTitle("应用更新")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("知道了") {
+                            if let candidate = result.candidate { updates.acknowledgeUpdate(candidate) }
+                            dismiss()
                         }
-                        dismiss()
                     }
                 }
             }
         }
+        }
         .interactiveDismissDisabled()
     }
+}
 
-    private var title: String {
-        switch presentation { case .notes: return "当前版本更新内容"; case .result: return "应用更新" }
+private struct NewFeaturePage: Identifiable {
+    let id: Int
+    let kicker: String
+    let title: String
+    let body: String
+    let symbol: String
+    let accent: Color
+    let demo: NewFeatureDemo
+}
+
+private enum NewFeatureCatalog {
+    static let pages: [NewFeaturePage] = [
+        NewFeaturePage(
+            id: 0,
+            kicker: "U30Air 支持",
+            title: "连接 U30Air，\n电话短信随身用",
+            body: "连接运行兼容 AirSIM 设备端的 U30Air，在 iPhone 上拨打、接听电话和收发短信。请先更新设备端并完成配对。",
+            symbol: "phone.connection.fill",
+            accent: .cyan,
+            demo: .u30Air
+        ),
+        NewFeaturePage(
+            id: 1,
+            kicker: "桌面与锁屏小组件",
+            title: "不用打开 App，\n常用信息一眼可见",
+            body: "查看设备状态、电量、最近通话与短信内容；支持的桌面尺寸可直接切换设备和连接模式。刷新由系统调度，电量以设备有效上报为准。",
+            symbol: "rectangle.grid.2x2.fill",
+            accent: .green,
+            demo: .widgetSummary
+        ),
+        NewFeaturePage(
+            id: 2,
+            kicker: "TLS 公网 · 试验性",
+            title: "用自己的域名，\n在外也能配对直连",
+            body: "通过自建 HTTPS／TLS 网关完成首次配对，或为已有设备添加公网入口。需可入站网络、有效证书和独立音频转发；配置页内附使用教程。",
+            symbol: "lock.shield.fill",
+            accent: .blue,
+            demo: .publicTLS
+        ),
+        NewFeaturePage(
+            id: 3,
+            kicker: "未读短信 · 未接来电",
+            title: "没读的，没接的，\n都有醒目标记",
+            body: "底部标签与小组件显示未读／未接数字，对应短信和通话记录也有标记。打开记录，就能找到尚未查看的消息与来电。",
+            symbol: "app.badge.fill",
+            accent: .orange,
+            demo: .unreadBadges
+        ),
+    ]
+}
+
+struct NewFeatureOnboardingView: View {
+    let version: String
+    let onConfirm: () -> Void
+    @State private var page = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var selected: NewFeaturePage { NewFeatureCatalog.pages[page] }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.black,
+                    selected.accent.opacity(0.34),
+                    Color.black,
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.45), value: page)
+
+            TabView(selection: $page) {
+                ForEach(Array(NewFeatureCatalog.pages.enumerated()), id: \.element.id) { index, item in
+                    NewFeaturePageView(item: item, isActive: page == index)
+                        .tag(index)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: page)
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("AirSIM")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("版本 \(version)")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+                Spacer()
+                Button("确定") { onConfirm() }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+                    .background(.white, in: Capsule())
+                    .accessibilityLabel("确定并关闭新功能介绍")
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 12) {
+                HStack(spacing: 7) {
+                    ForEach(NewFeatureCatalog.pages.indices, id: \.self) { index in
+                        Capsule()
+                            .fill(index == page ? .white : .white.opacity(0.25))
+                            .frame(width: index == page ? 22 : 7, height: 7)
+                            .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.8), value: page)
+                    }
+                }
+                Text("左右滑动 · 查看全部新功能")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.bottom, 6)
+            }
+            .padding(.top, 4)
+        }
+        .preferredColorScheme(.dark)
+        .interactiveDismissDisabled()
     }
+}
+
+private struct NewFeaturePageView: View {
+    let item: NewFeaturePage
+    let isActive: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 12)
+
+            FeatureDemoView(demo: item.demo, isActive: isActive)
+                .accessibilityHidden(true)
+                .frame(height: 220)
+                .padding(.horizontal, 4)
+                .opacity(isActive ? 1 : 0.55)
+                .scaleEffect(isActive ? 1 : 0.94)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: isActive)
+                .padding(.bottom, 22)
+
+            Text(item.kicker.uppercased())
+                .font(.caption.weight(.bold))
+                .tracking(2.2)
+                .foregroundStyle(item.accent)
+
+            Text(item.title)
+                .font(.system(size: 36, weight: .bold, design: .rounded))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white)
+                .minimumScaleFactor(0.8)
+                .padding(.top, 8)
+
+            Text(item.body)
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.white.opacity(0.68))
+                .lineSpacing(4)
+                .padding(.top, 14)
+                .padding(.horizontal, 8)
+
+            Spacer(minLength: 18)
+        }
+        .padding(.horizontal, 28)
+        .opacity(isActive ? 1 : 0.55)
+        .scaleEffect(isActive ? 1 : 0.94)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: isActive)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+
+private enum NewFeatureDemo: String {
+    case u30Air, widgetSummary, publicTLS, unreadBadges
+}
+
+private struct FeatureDemoView: UIViewRepresentable {
+    let demo: NewFeatureDemo
+    let isActive: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var animationEnabled: Bool { isActive && !reduceMotion && scenePhase == .active }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.isOpaque = false
+        view.backgroundColor = .clear
+        view.scrollView.backgroundColor = .clear
+        view.scrollView.isScrollEnabled = false
+        view.isUserInteractionEnabled = false
+        load(view, coordinator: context.coordinator)
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {
+        load(view, coordinator: context.coordinator)
+    }
+
+    private func load(_ view: WKWebView, coordinator: Coordinator) {
+        let key = "\(demo.rawValue)-\(animationEnabled)"
+        guard coordinator.key != key else { return }
+        coordinator.key = key
+        view.loadHTMLString(FeatureDemoHTML.html(for: demo, animated: animationEnabled), baseURL: nil)
+    }
+
+    final class Coordinator { var key: String? }
+}
+
+private enum FeatureDemoHTML {
+    // Bundled, decorative illustrations. Never fetch resources or use real device data.
+    static func html(for demo: NewFeatureDemo, animated: Bool) -> String {
+        let illustration: String
+        switch demo {
+        case .u30Air: illustration = u30Air
+        case .widgetSummary: illustration = widgetSummary
+        case .publicTLS: illustration = publicTLS
+        case .unreadBadges: illustration = unreadBadges
+        }
+        return """
+        <!doctype html><html><head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+        <style>
+        html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
+        svg{display:block;width:100%;height:100%}
+        text{font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}
+        .route{stroke-dasharray:6 7;animation:flow 2s linear infinite}
+        .pulse{transform-box:fill-box;transform-origin:center;animation:pulse 3s ease-in-out infinite}
+        .reveal{animation:reveal 4s ease-in-out infinite}
+        .delayed{animation-delay:.5s}
+        .mode-a{animation:mode-a 6s ease-in-out infinite}
+        .mode-b{opacity:0;animation:mode-b 6s ease-in-out infinite}
+        @keyframes flow{to{stroke-dashoffset:-26}}
+        @keyframes pulse{0%,70%,100%{transform:scale(1)}82%{transform:scale(1.12)}90%{transform:scale(1)}}
+        @keyframes reveal{0%,100%{opacity:.5}25%,80%{opacity:1}}
+        @keyframes mode-a{0%,40%,100%{opacity:1}50%,90%{opacity:0}}
+        @keyframes mode-b{0%,40%,100%{opacity:0}50%,90%{opacity:1}}
+        body.still *{animation:none!important}
+        @media(prefers-reduced-motion:reduce){*{animation:none!important}}
+        </style></head><body class="\(animated ? "animated" : "still")">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 220" aria-hidden="true">
+        \(illustration)
+        </svg></body></html>
+        """
+    }
+
+    private static let u30Air = """
+    <rect x="20" y="51" width="104" height="122" rx="25" fill="#172A3B" stroke="#42738C"/>
+    <rect x="45" y="69" width="54" height="9" rx="4" fill="#304D63"/>
+    <circle class="pulse" cx="72" cy="109" r="8" fill="#55DBF6"/>
+    <text x="72" y="149" text-anchor="middle" fill="white" font-size="16" font-weight="700">U30Air</text>
+    <path class="route" d="M132 109H224" stroke="#55DBF6" stroke-width="2"/>
+    <rect x="151" y="91" width="54" height="35" rx="17" fill="#13394A"/>
+    <path d="M170 108l6 6 12-13" fill="none" stroke="#55DBF6" stroke-width="3" stroke-linecap="round"/>
+    <rect x="233" y="20" width="107" height="177" rx="23" fill="#182233" stroke="#54677C"/>
+    <rect x="269" y="31" width="35" height="7" rx="4" fill="#526178"/>
+    <text x="286" y="66" text-anchor="middle" fill="white" font-size="16" font-weight="700">AirSIM</text>
+    <g class="reveal"><rect x="247" y="83" width="79" height="37" rx="12" fill="#164458"/>
+    <text x="286" y="107" text-anchor="middle" fill="#69DFF5" font-size="14">通话</text></g>
+    <g class="reveal delayed"><rect x="247" y="129" width="79" height="37" rx="12" fill="#233D57"/>
+    <text x="286" y="153" text-anchor="middle" fill="#A9D3FF" font-size="14">短信</text></g>
+    <text x="125" y="211" text-anchor="middle" fill="#B5C5D8" font-size="11">连接示意 · 需兼容设备端</text>
+    """
+
+    private static let widgetSummary = """
+    <rect x="14" y="18" width="332" height="182" rx="28" fill="#F4F8FC"/>
+    <rect x="32" y="35" width="42" height="42" rx="13" fill="#DCEEFF"/>
+    <path d="M43 46q-4 12 17 22l6-7-8-5-4 4-6-7 3-4z" fill="#008BEE"/>
+    <text x="85" y="53" fill="#152238" font-size="17" font-weight="700">Galaxy</text>
+    <circle cx="89" cy="69" r="3" fill="#279D56"/>
+    <text x="99" y="73" fill="#5B697B" font-size="11">最近在线</text>
+    <rect x="272" y="43" width="23" height="12" rx="3" fill="#2AC466"/>
+    <rect x="296" y="47" width="2" height="4" rx="1" fill="#2AC466"/>
+    <text x="270" y="73" fill="#152238" font-size="12">82%</text>
+    <path d="M33 91H327" stroke="#D8E1EA"/>
+    <text x="33" y="112" fill="#64748B" font-size="10">设备</text>
+    <text x="33" y="132" fill="#0064CC" font-size="14" font-weight="600">Galaxy ↻</text>
+    <text x="195" y="112" fill="#64748B" font-size="10">连接模式</text>
+    <text class="mode-a" x="195" y="132" fill="#0064CC" font-size="14" font-weight="600">VoWLAN ↻</text>
+    <text class="mode-b" x="195" y="132" fill="#0064CC" font-size="14" font-weight="600">自动 ↻</text>
+    <text x="33" y="158" fill="#152238" font-size="11" font-weight="600">最近通话</text>
+    <text x="33" y="180" fill="#64748B" font-size="11">138 •••• 6028</text>
+    <text x="195" y="158" fill="#152238" font-size="11" font-weight="600">最近短信</text>
+    <text x="195" y="180" fill="#64748B" font-size="11">我已经到家了。</text>
+    <text x="180" y="216" text-anchor="middle" fill="#B5C5D8" font-size="10">示意数据 · 刷新由系统调度</text>
+    """
+
+    private static let publicTLS = """
+    <rect x="26" y="18" width="308" height="44" rx="15" fill="#193453" stroke="#4278AA"/>
+    <path d="M45 37v-5a5 5 0 0 1 10 0v5M43 37h14v12H43z" fill="none" stroke="#74BDFF" stroke-width="2"/>
+    <text x="69" y="45" fill="#D8EBFF" font-size="15">https://phone.example.com</text>
+    <rect x="18" y="101" width="78" height="58" rx="16" fill="#182A40" stroke="#42627F"/>
+    <text x="57" y="135" text-anchor="middle" fill="white" font-size="15">iPhone</text>
+    <path class="route" d="M101 130H134M226 130H259" stroke="#64B6FF" stroke-width="2"/>
+    <rect x="139" y="91" width="82" height="78" rx="18" fill="#163D66" stroke="#4D9FE8"/>
+    <text x="180" y="123" text-anchor="middle" fill="#A6D7FF" font-size="15" font-weight="700">TLS</text>
+    <text x="180" y="146" text-anchor="middle" fill="#D8EBFF" font-size="12">自建网关</text>
+    <rect x="264" y="101" width="78" height="58" rx="16" fill="#182A40" stroke="#42627F"/>
+    <text x="303" y="135" text-anchor="middle" fill="white" font-size="15">安卓</text>
+    <text x="180" y="191" text-anchor="middle" fill="#9DCFFF" font-size="12">首次配对 · 控制 · 音频</text>
+    <text x="180" y="214" text-anchor="middle" fill="#B5C5D8" font-size="10">试验性 · 需自行部署可入站网关</text>
+    """
+
+    private static let unreadBadges = """
+    <rect x="18" y="16" width="324" height="184" rx="25" fill="#182233" stroke="#3B485D"/>
+    <rect x="33" y="33" width="294" height="52" rx="13" fill="#243148"/>
+    <circle class="pulse" cx="47" cy="59" r="4" fill="#FF625A"/>
+    <text x="61" y="54" fill="white" font-size="14" font-weight="600">未接来电</text>
+    <text x="61" y="74" fill="#B8C6DA" font-size="11">138 •••• 6028</text>
+    <rect x="33" y="94" width="294" height="52" rx="13" fill="#243148"/>
+    <circle class="pulse delayed" cx="47" cy="120" r="4" fill="#FF625A"/>
+    <text x="61" y="115" fill="white" font-size="14" font-weight="600">未读短信</text>
+    <text x="61" y="135" fill="#B8C6DA" font-size="11">我已经到家了。</text>
+    <text x="98" y="182" text-anchor="middle" fill="#A5CFFF" font-size="14">最近</text>
+    <g class="pulse"><rect x="115" y="159" width="20" height="20" rx="10" fill="#FF453A"/>
+    <text x="125" y="173" text-anchor="middle" fill="white" font-size="12" font-weight="700">2</text></g>
+    <text x="244" y="182" text-anchor="middle" fill="#A5CFFF" font-size="14">短信</text>
+    <g class="pulse delayed"><rect x="261" y="159" width="20" height="20" rx="10" fill="#FF453A"/>
+    <text x="271" y="173" text-anchor="middle" fill="white" font-size="12" font-weight="700">3</text></g>
+    <text x="180" y="216" text-anchor="middle" fill="#B5C5D8" font-size="10">示意数据 · 数字角标与记录标记</text>
+    """
 }

@@ -7,9 +7,22 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        ACF310000000000000000001 = {isa = PBXBuildFile; fileRef = BCF310000000000000000001; };
+        ACF310000000000000000002 = {isa = PBXBuildFile; fileRef = BCF310000000000000000001; };
+        AE2000000000000000000004 = {isa = PBXBuildFile; fileRef = BE2000000000000000000004; };
+        AE2000000000000000000001 = {isa = PBXBuildFile; fileRef = BE2000000000000000000001; };
+        AE1000000000000000000001 = {isa = PBXBuildFile; fileRef = BE1000000000000000000001; };
+        AE1000000000000000000002 = {isa = PBXBuildFile; fileRef = BE1000000000000000000002; };
+        AE1000000000000000000003 = {isa = PBXBuildFile; fileRef = BE1000000000000000000003; };
+        AE1100000000000000000001 = {isa = PBXBuildFile; fileRef = BE1100000000000000000001; };
+        AE1100000000000000000002 = {isa = PBXBuildFile; fileRef = BE1100000000000000000002; };
         A1A990000000000000000001 /* AppReleasePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A990000000000000000001; };
         A1A990000000000000000002 /* AppUpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A990000000000000000002; };
         A1A990000000000000000003 /* AppUpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1A990000000000000000003; };
+        A5C0A1000000000000000001 /* SMSConversationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5C0A1000000000000000001; };
+        A5C0A1000000000000000002 /* SMSConversationTimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5C0A1000000000000000002; };
+        A5C0A1000000000000000003 /* SMSConversationPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5C0A1000000000000000003; };
+        A5C0A1000000000000000004 /* SMSConversationInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5C0A1000000000000000004; };
 		AD0000000000000000000008 = {isa = PBXBuildFile; fileRef = BD0000000000000000000008; };
 		AD0000000000000000000009 = {isa = PBXBuildFile; fileRef = BD0000000000000000000009; };
 		AD000000000000000000000A = {isa = PBXBuildFile; fileRef = BD000000000000000000000A; };
@@ -34,6 +47,7 @@
 		A1000000000000000000000E /* CallKitController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* CallKitController.swift */; };
 		A1000000000000000000000F /* WiredHTTPTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* WiredHTTPTransport.swift */; };
 		A10000000000000000000010 /* BackgroundStandbyController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012 /* BackgroundStandbyController.swift */; };
+		A10000000000000000000044 /* CrashDiagnosticsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000043 /* CrashDiagnosticsStore.swift */; };
 		A10000000000000000000011 /* AirSIMLiveActivityShared.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* AirSIMLiveActivityShared.swift */; };
 		A10000000000000000000012 /* LiveActivityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* LiveActivityController.swift */; };
 		A10000000000000000000013 /* AirSIMLiveActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000015 /* AirSIMLiveActivityWidget.swift */; };
@@ -77,9 +91,15 @@
 		A1000000000000000000002B /* CallLifecycleStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002B /* CallLifecycleStore.swift */; };
 		A30000000000000000000001 /* AirSIMTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000001 /* AirSIMTests.swift */; };
 		A30000000000000000000002 /* VoBLEMediaSchedulingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000003 /* VoBLEMediaSchedulingTests.swift */; };
+		A71100000000000000000000 /* AirSIMWidgetSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71100000000000000000000 /* AirSIMWidgetSnapshot.swift */; };
+		A71100000000000000000001 /* AirSIMWidgetSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71100000000000000000000 /* AirSIMWidgetSnapshot.swift */; };
+		A71100000000000000000100 /* AirSIMDeviceWidgetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71100000000000000000001 /* AirSIMDeviceWidgetView.swift */; };
+		A71100000000000000000101 /* AirSIMDeviceWidgetView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71100000000000000000001 /* AirSIMDeviceWidgetView.swift */; };
+		A71100000000000000000200 /* AirSIMDeviceWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B71100000000000000000002 /* AirSIMDeviceWidget.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+        GE2000000000000000000001 = {isa = PBXContainerItemProxy; containerPortal = E10000000000000000000002; proxyType = 1; remoteGlobalIDString = E10000000000000000000001; remoteInfo = AirSIM; };
 		G10000000000000000000001 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = E10000000000000000000002 /* Project object */;
@@ -129,9 +149,22 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+        BCF310000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallKitNumberPresentation.swift; sourceTree = "<group>"; };
+        BE2000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMUITests/Fixtures/SMSNavigationFixture.swift; sourceTree = SOURCE_ROOT; };
+        BE2000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMUITests/SMSNavigationUITests.swift; sourceTree = "<group>"; };
+        BE2000000000000000000002 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = AirSIMUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+        BE1000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PureLocalModePolicy.swift; sourceTree = "<group>"; };
+        BE1000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PureLocalModeProtocol.swift; sourceTree = "<group>"; };
+        BE1000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PureLocalModeTests.swift; sourceTree = "<group>"; };
+        BE1100000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayEgressGate.swift; sourceTree = "<group>"; };
+        BE1100000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RelayEgressGateTests.swift; sourceTree = "<group>"; };
         B1A990000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppReleasePolicy.swift; sourceTree = "<group>"; };
         B1A990000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateController.swift; sourceTree = "<group>"; };
         B1A990000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateView.swift; sourceTree = "<group>"; };
+        B5C0A1000000000000000001 /* SMSConversationPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMSConversationPresentation.swift; sourceTree = "<group>"; };
+        B5C0A1000000000000000002 /* SMSConversationTimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMSConversationTimelineView.swift; sourceTree = "<group>"; };
+        B5C0A1000000000000000003 /* SMSConversationPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMSConversationPresentationTests.swift; sourceTree = "<group>"; };
+        B5C0A1000000000000000004 /* SMSConversationInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SMSConversationInteractionTests.swift; sourceTree = "<group>"; };
 		BD0000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCallActionRouter.swift; sourceTree = "<group>"; };
 		BD0000000000000000000009 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCallActionRouterTests.swift; sourceTree = "<group>"; };
 		BD000000000000000000000A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OtherDeviceCallReminderTests.swift; sourceTree = "<group>"; };
@@ -159,6 +192,7 @@
 		B10000000000000000000011 /* WiredHTTPTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiredHTTPTransport.swift; sourceTree = "<group>"; };
 		B10000000000000000000042 /* NetworkRoutePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkRoutePreferences.swift; sourceTree = "<group>"; };
 		B10000000000000000000012 /* BackgroundStandbyController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundStandbyController.swift; sourceTree = "<group>"; };
+		B10000000000000000000043 /* CrashDiagnosticsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashDiagnosticsStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000013 /* AirSIMLiveActivityShared.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMLiveActivityShared.swift; sourceTree = "<group>"; };
 		B10000000000000000000014 /* LiveActivityController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityController.swift; sourceTree = "<group>"; };
 		B10000000000000000000015 /* AirSIMLiveActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMLiveActivityWidget.swift; sourceTree = "<group>"; };
@@ -200,6 +234,9 @@
 		B30000000000000000000001 /* AirSIMTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMTests.swift; sourceTree = "<group>"; };
 		B30000000000000000000003 /* VoBLEMediaSchedulingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoBLEMediaSchedulingTests.swift; sourceTree = "<group>"; };
 		B30000000000000000000002 /* AirSIMTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AirSIMTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B71100000000000000000000 /* AirSIMWidgetSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMWidgetSnapshot.swift; sourceTree = "<group>"; };
+		B71100000000000000000001 /* AirSIMDeviceWidgetView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMDeviceWidgetView.swift; sourceTree = "<group>"; };
+		B71100000000000000000002 /* AirSIMDeviceWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMDeviceWidget.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -242,6 +279,8 @@
 				D10000000000000000000005 /* AirSIMLiveActivityExtension */,
 				D10000000000000000000006 /* AirSIMWatchApp */,
 				D30000000000000000000001 /* AirSIMTests */,
+                BE2000000000000000000001,
+                BE2000000000000000000002,
 				D10000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -250,11 +289,13 @@
 			isa = PBXGroup;
 			children = (
 				B10000000000000000000001 /* AirSIMIPadApp.swift */,
+                BE2000000000000000000004,
 				B10000000000000000000002 /* APIModels.swift */,
 				B10000000000000000000003 /* AirSIMAPI.swift */,
 				B10000000000000000000011 /* WiredHTTPTransport.swift */,
 				B10000000000000000000042 /* NetworkRoutePreferences.swift */,
 				B10000000000000000000012 /* BackgroundStandbyController.swift */,
+				B10000000000000000000043 /* CrashDiagnosticsStore.swift */,
 				B10000000000000000000014 /* LiveActivityController.swift */,
 				B10000000000000000000004 /* AppSettings.swift */,
                 B1A990000000000000000001,
@@ -282,6 +323,9 @@
 				B1000000000000000000002F /* VoWLANAuth.swift */,
 				B10000000000000000000030 /* VoWLANController.swift */,
 				B10000000000000000000031 /* ConnectionModePreference.swift */,
+                BE1000000000000000000001,
+                BE1000000000000000000002,
+                BE1100000000000000000001,
 				B1C0A1000000000000000001 /* CloudAgentRouting.swift */,
 				B10000000000000000000032 /* VoBLEProtocol.swift */,
 				B10000000000000000000033 /* VoBLEPairing.swift */,
@@ -296,6 +340,8 @@
 				B1000000000000000000001D /* WatchCallCoordinator.swift */,
 				B10000000000000000000008 /* RootView.swift */,
 				B10000000000000000000009 /* PhoneViews.swift */,
+                B5C0A1000000000000000001 /* SMSConversationPresentation.swift */,
+                B5C0A1000000000000000002 /* SMSConversationTimelineView.swift */,
 				B1000000000000000000000A /* AirSIMSetupView.swift */,
 				B10000000000000000000018 /* LocalHistoryStore.swift */,
 				B10000000000000000000019 /* AppIcon.icon */,
@@ -319,6 +365,9 @@
 		D10000000000000000000004 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+                B71100000000000000000001 /* AirSIMDeviceWidgetView.swift */,
+                B71100000000000000000000 /* AirSIMWidgetSnapshot.swift */,
+                BCF310000000000000000001 /* CallKitNumberPresentation.swift */,
 				B10000000000000000000013 /* AirSIMLiveActivityShared.swift */,
 				B1000000000000000000001E /* WatchCallPayload.swift */,
 			);
@@ -328,6 +377,7 @@
 		D10000000000000000000005 /* AirSIMLiveActivityExtension */ = {
 			isa = PBXGroup;
 			children = (
+                B71100000000000000000002 /* AirSIMDeviceWidget.swift */,
 				B10000000000000000000015 /* AirSIMLiveActivityWidget.swift */,
 				B10000000000000000000016 /* Info.plist */,
 			);
@@ -338,6 +388,10 @@
 			isa = PBXGroup;
 			children = (
 				B30000000000000000000001 /* AirSIMTests.swift */,
+                BE1000000000000000000003,
+                BE1100000000000000000002,
+                B5C0A1000000000000000003 /* SMSConversationPresentationTests.swift */,
+                B5C0A1000000000000000004 /* SMSConversationInteractionTests.swift */,
 				BD0000000000000000000002 /* DeviceCallRegistryTests.swift */,
 				BD0000000000000000000005,
 				BD0000000000000000000007,
@@ -362,6 +416,16 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+        EE2000000000000000000001 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = FE2000000000000000000001;
+            buildPhases = (CE2000000000000000000001,);
+            buildRules = ();
+            dependencies = (HE2000000000000000000001,);
+            name = AirSIMUITests; productName = AirSIMUITests;
+            productReference = BE2000000000000000000002;
+            productType = "com.apple.product-type.bundle.ui-testing";
+        };
 		E10000000000000000000001 /* AirSIM */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = F10000000000000000000002 /* Build configuration list for PBXNativeTarget "AirSIM" */;
@@ -447,9 +511,11 @@
 				TargetAttributes = {
 					E10000000000000000000001 = {
 						CreatedOnToolsVersion = 26.0;
+                        SystemCapabilities = { com.apple.ApplicationGroups.iOS = { enabled = 1; }; };
 					};
 					E10000000000000000000003 = {
 						CreatedOnToolsVersion = 26.0;
+                        SystemCapabilities = { com.apple.ApplicationGroups.iOS = { enabled = 1; }; };
 					};
 					E10000000000000000000004 = {
 						CreatedOnToolsVersion = 26.0;
@@ -470,6 +536,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+                EE2000000000000000000001,
 				E10000000000000000000001 /* AirSIM */,
 				E10000000000000000000003 /* AirSIMLiveActivityExtension */,
 				E30000000000000000000001 /* AirSIMTests */,
@@ -512,16 +579,21 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+        CE2000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (AE2000000000000000000001,); runOnlyForDeploymentPostprocessing = 0; };
 		C10000000000000000000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+                A71100000000000000000100 /* AirSIMDeviceWidgetView.swift in Sources */,
+                A71100000000000000000000 /* AirSIMWidgetSnapshot.swift in Sources */,
 				A10000000000000000000001 /* AirSIMIPadApp.swift in Sources */,
+                AE2000000000000000000004,
 				A10000000000000000000002 /* APIModels.swift in Sources */,
 				A10000000000000000000003 /* AirSIMAPI.swift in Sources */,
 				A1000000000000000000000F /* WiredHTTPTransport.swift in Sources */,
 				A10000000000000000000042 /* NetworkRoutePreferences.swift in Sources */,
 				A10000000000000000000010 /* BackgroundStandbyController.swift in Sources */,
+				A10000000000000000000044 /* CrashDiagnosticsStore.swift in Sources */,
 				A10000000000000000000011 /* AirSIMLiveActivityShared.swift in Sources */,
 				A10000000000000000000012 /* LiveActivityController.swift in Sources */,
 				A10000000000000000000004 /* AppSettings.swift in Sources */,
@@ -539,8 +611,11 @@
 				AD000000000000000000000B,
 				A10000000000000000000008 /* RootView.swift in Sources */,
 				A10000000000000000000009 /* PhoneViews.swift in Sources */,
+                A5C0A1000000000000000001 /* SMSConversationPresentation.swift in Sources */,
+                A5C0A1000000000000000002 /* SMSConversationTimelineView.swift in Sources */,
 				A1000000000000000000000A /* AirSIMSetupView.swift in Sources */,
 				A1000000000000000000000E /* CallKitController.swift in Sources */,
+                ACF310000000000000000001 /* CallKitNumberPresentation.swift in Sources */,
 				A1000000000000000000001A /* VoIPPushController.swift in Sources */,
 				A10000000000000000000024 /* IPhoneCloudCallSession.swift in Sources */,
 				A1000000000000000000002B /* CallLifecycleStore.swift in Sources */,
@@ -553,6 +628,9 @@
 				A1000000000000000000002F /* VoWLANAuth.swift in Sources */,
 				A10000000000000000000030 /* VoWLANController.swift in Sources */,
 				A10000000000000000000031 /* ConnectionModePreference.swift in Sources */,
+                AE1000000000000000000001,
+                AE1000000000000000000002,
+                AE1100000000000000000001,
 				A1C0A1000000000000000001 /* CloudAgentRouting.swift in Sources */,
 				A10000000000000000000032 /* VoBLEProtocol.swift in Sources */,
 				A10000000000000000000033 /* VoBLEPairing.swift in Sources */,
@@ -574,6 +652,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+                A71100000000000000000200 /* AirSIMDeviceWidget.swift in Sources */,
+                A71100000000000000000101 /* AirSIMDeviceWidgetView.swift in Sources */,
+                A71100000000000000000001 /* AirSIMWidgetSnapshot.swift in Sources */,
 				A10000000000000000000013 /* AirSIMLiveActivityWidget.swift in Sources */,
 				A10000000000000000000014 /* AirSIMLiveActivityShared.swift in Sources */,
 				A10000000000000000000015 /* WiredHTTPTransport.swift in Sources */,
@@ -586,6 +667,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				A30000000000000000000001 /* AirSIMTests.swift in Sources */,
+                AE1000000000000000000003,
+                AE1100000000000000000002,
+                A5C0A1000000000000000003 /* SMSConversationPresentationTests.swift in Sources */,
+                A5C0A1000000000000000004 /* SMSConversationInteractionTests.swift in Sources */,
 				AD0000000000000000000002 /* DeviceCallRegistryTests.swift in Sources */,
 				AD0000000000000000000005,
 				AD0000000000000000000007,
@@ -602,6 +687,7 @@
 				A1000000000000000000001D /* WatchCallPayload.swift in Sources */,
 				A1000000000000000000001E /* AirSIMWatchApp.swift in Sources */,
 				A1000000000000000000001F /* WatchCallSession.swift in Sources */,
+                ACF310000000000000000002 /* CallKitNumberPresentation.swift in Sources */,
 				A10000000000000000000020 /* WatchCallView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -609,6 +695,7 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+        HE2000000000000000000001 = {isa = PBXTargetDependency; target = E10000000000000000000001; targetProxy = GE2000000000000000000001; };
 		H10000000000000000000001 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = E10000000000000000000003 /* AirSIMLiveActivityExtension */;
@@ -627,9 +714,20 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+        FE2000000000000000000002 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {
+            GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.uitests;
+            PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 16.3;
+            TEST_TARGET_NAME = AirSIM; TARGETED_DEVICE_FAMILY = "1,2";
+        }; };
+        FE2000000000000000000003 = {isa = XCBuildConfiguration; name = Release; buildSettings = {
+            GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.example.airsim.uitests;
+            PRODUCT_NAME = "$(TARGET_NAME)"; SWIFT_VERSION = 5.0; IPHONEOS_DEPLOYMENT_TARGET = 16.3;
+            TEST_TARGET_NAME = AirSIM; TARGETED_DEVICE_FAMILY = "1,2";
+        }; };
 		F20000000000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+                AIRSIM_WIDGET_APP_GROUP = group.com.example.airsim.widgets;
 				CLANG_ENABLE_MODULES = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
@@ -645,6 +743,7 @@
 		F20000000000000000000002 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+                AIRSIM_WIDGET_APP_GROUP = group.com.example.airsim.widgets;
 				CLANG_ENABLE_MODULES = YES;
 				COPY_PHASE_STRIP = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
@@ -662,7 +761,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "$(AIRSIM_PUSH_ENTITLEMENTS)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 141;
+				CURRENT_PROJECT_VERSION = 162;
 				DEVELOPMENT_TEAM = "";
 				AIRSIM_APNS_ENVIRONMENT = sandbox;
 				AIRSIM_PUSH_ENTITLEMENTS = "AirSIM/AirSIM.entitlements";
@@ -688,7 +787,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "$(AIRSIM_PUSH_ENTITLEMENTS)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 141;
+				CURRENT_PROJECT_VERSION = 162;
 				DEVELOPMENT_TEAM = "";
 				AIRSIM_APNS_ENVIRONMENT = production;
 				AIRSIM_PUSH_ENTITLEMENTS = "AirSIM/AirSIM.entitlements";
@@ -710,9 +809,10 @@
 		F20000000000000000000005 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = AirSIMLiveActivityExtension/AirSIMWidgets.entitlements;
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 141;
+				CURRENT_PROJECT_VERSION = 162;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AirSIMLiveActivityExtension/Info.plist;
@@ -736,9 +836,10 @@
 		F20000000000000000000006 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = AirSIMLiveActivityExtension/AirSIMWidgets.entitlements;
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 141;
+				CURRENT_PROJECT_VERSION = 162;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AirSIMLiveActivityExtension/Info.plist;
@@ -798,7 +899,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "AirSIMWatchApp/AirSIMWatchApp.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 141;
+				CURRENT_PROJECT_VERSION = 162;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -827,7 +928,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = "AirSIMWatchApp/AirSIMWatchApp.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 141;
+				CURRENT_PROJECT_VERSION = 162;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "AirSIMWatchApp/Info.plist";
@@ -852,6 +953,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+        FE2000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (FE2000000000000000000002, FE2000000000000000000003,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		F10000000000000000000001 /* Build configuration list for PBXProject "AirSIM" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

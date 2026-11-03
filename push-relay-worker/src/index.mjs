@@ -3,9 +3,13 @@ import {
   dashboardHTMLResponse,
   dashboardSummary,
   dashboardVirtualCall,
+  deleteDashboardDevice,
+  pruneDashboardDevices,
   recordDashboardEvent,
 } from "./dashboard.mjs";
 import { constantTimeEqual, sha256Hex } from "./auth-crypto.mjs";
+import { handleFeedback } from "./feedback.mjs";
+import { batteryStatus } from "./battery-status.mjs";
 import { RoutingError, parseAgentID, agentSocketKey, matchesTarget, resolveTarget, requestAgentID } from "./command-routing.mjs";
 import {
   authenticateAndReadAgentHeartbeats,
@@ -15,6 +19,7 @@ import {
   readAgentHeartbeats,
   readAgentHeartbeatsFromKV,
   readDeviceRecord,
+  readDeviceRecordFromKV,
   readRelayState,
   writeAgentHeartbeat,
   writeDeviceRecord,
@@ -41,11 +46,18 @@ export default {
   async fetch(request, env) {
     return handleRequest(request, env);
   },
+  async scheduled(event, env, ctx) {
+    // Keep the relay registration table small: remove devices that have not
+    // registered in 30 days and are not currently sending heartbeats.
+    const before = new Date(Date.now() - 30 * 24 * 60 * 60 * 1_000).toISOString();
+    ctx.waitUntil(pruneDashboardDevices(env, { before, onlyOffline: true }));
+  },
 };
 
 export async function handleRequest(request, env) {
   try { return await routeRequest(request, env); }
   catch (error) {
+    if (isDurableObjectQuotaError(error)) return durableObjectQuotaResponse();
     if (error instanceof RoutingError) return jsonResponse(error.status,{error:error.code});
     console.error("relay request failed", safeError(error));
     return jsonResponse(500,{error:"relay internal error"});
@@ -74,6 +86,33 @@ async function routeRequest(request, env) {
   if (request.method === "GET" && url.pathname === "/dashboard") {
     return dashboardHTMLResponse();
   }
+  if (request.method === "POST" && url.pathname === "/v1/feedback") {
+    return handleFeedback(request, env);
+  }
+  const dashboardDevice = url.pathname.match(/^\/dashboard\/api\/devices\/([0-9a-f]{32})$/);
+  if (request.method === "DELETE" && dashboardDevice) {
+    const auth = dashboardAuthorized(request, env);
+    if (!auth.configured) return jsonResponse(503, { error: "dashboard is not configured" });
+    if (!auth.authorized) return jsonResponse(401, { error: "unauthorized" });
+    try {
+      const deleted = await deleteDashboardDevice(env, dashboardDevice[1]);
+      return deleted ? jsonResponse(200, { deleted: true }) : jsonResponse(404, { error: "device not found" });
+    } catch {
+      return jsonResponse(500, { error: "device delete failed" });
+    }
+  }
+  if (request.method === "POST" && url.pathname === "/dashboard/api/devices/prune") {
+    const auth = dashboardAuthorized(request, env);
+    if (!auth.configured) return jsonResponse(503, { error: "dashboard is not configured" });
+    if (!auth.authorized) return jsonResponse(401, { error: "unauthorized" });
+    const value = await readJSON(request);
+    const result = await pruneDashboardDevices(env, {
+      keepControlIDs: Array.isArray(value.keep_control_ids) ? value.keep_control_ids : [],
+      before: typeof value.before === "string" ? value.before : null,
+      limit: Number(value.limit) || 500,
+    });
+    return jsonResponse(200, { ok: true, ...result });
+  }
   if (request.method === "GET" && url.pathname === "/dashboard/api/summary") {
     const auth = dashboardAuthorized(request, env);
     if (!auth.configured) return jsonResponse(503, { error: "dashboard is not configured" });
@@ -97,7 +136,7 @@ async function routeRequest(request, env) {
     }
   }
   if (request.method === "GET" && url.pathname === "/healthz") {
-    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.1", capabilities:{agent_command_routing:1} });
+    return jsonResponse(200, { ok: true, service: "airsim-push-relay", version: "0.2.1", capabilities:{agent_command_routing:1,e2e_sms:1} });
   }
   const callConnect = url.pathname.match(/^\/v1\/calls\/([0-9a-f-]+)\/connect$/i);
   if (request.method === "GET" && callConnect) {
@@ -159,6 +198,7 @@ async function routeRequest(request, env) {
     }
     return jsonResponse(404, { error: "not found" });
   } catch (error) {
+    if (isDurableObjectQuotaError(error)) return durableObjectQuotaResponse();
     if (error instanceof RoutingError) return jsonResponse(error.status,{error:error.code});
     console.error("relay request failed", safeError(error));
     return jsonResponse(500, { error: "relay internal error" });
@@ -1099,6 +1139,10 @@ async function registerDevice(request, env) {
     watch_voip_token: (device.watch_voip_token || "").toLowerCase(),
     watch_bundle_id: stringValue(device.watch_bundle_id),
     live_activity_push_to_start_token: (device.live_activity_push_to_start_token || "").toLowerCase(),
+    // Older clients omit this capability and retain legacy call activities.
+    // Agent re-registration may omit newer iOS fields, so preserve the opt-in.
+    live_activity_presentation: device.live_activity_presentation === "agent_status"
+      ? "agent_status" : (existing?.live_activity_presentation || "call"),
     bundle_id: device.bundle_id,
     environment: device.environment,
     registered_at: new Date().toISOString(),
@@ -1171,8 +1215,14 @@ async function receiveCall(request, env) {
     return jsonResponse(400, { error: "invalid incoming call" });
   }
 
-  const lifecycleKey = `call-lifecycle:${authenticated.device.device_id}`;
-  const lifecycle = applyCallLifecycle(await bestEffortReadRelayRecord(env, lifecycleKey), {
+  const existingCall = await bestEffortReadRelayRecord(env, `call:${call.call_uuid.toLowerCase()}`);
+  if (existingCall && (existingCall.device_id !== authenticated.device.device_id ||
+      !matchesTarget(existingCall.agent_id, agentID))) {
+    return jsonResponse(403, { error: "wrong_agent" });
+  }
+  const lifecycleKey = callLifecycleKey(authenticated.device.device_id, agentID, call.call_uuid);
+  const lifecycle = applyCallLifecycle(await readScopedCallLifecycle(env, lifecycleKey,
+    authenticated.device.device_id, call.call_uuid), {
     call_id: call.call_id.trim(),
     call_uuid: call.call_uuid.toLowerCase(),
     generation,
@@ -1184,6 +1234,7 @@ async function receiveCall(request, env) {
     failure: null,
   });
   if (!lifecycle.accepted) {
+    console.warn("incoming call lifecycle rejected", { reason: lifecycle.reason });
     return jsonResponse(409, { accepted: false, reason: lifecycle.reason, lifecycle: lifecycle.snapshot });
   }
   await bestEffortWriteRelayState(env, lifecycleKey, JSON.stringify(lifecycle.snapshot), 5 * 60 * 60);
@@ -1202,8 +1253,8 @@ async function receiveCall(request, env) {
     env,
     `liveactivity:current:${authenticated.device.device_id}`,
   );
-  const activityToken = currentActivity?.update_token ||
-    authenticated.device.live_activity_push_to_start_token || "";
+  const activityToken = authenticated.device.live_activity_presentation === "agent_status" ? ""
+    : (currentActivity?.update_token || authenticated.device.live_activity_push_to_start_token || "");
   const activityDuplicate = !activityToken || Boolean(await bestEffortReadRelayState(env, activityDedupeKey));
   let activityPushed = false;
 
@@ -1386,10 +1437,15 @@ async function receiveSMS(request, env) {
     return jsonResponse(409, { error: "alert token unavailable" });
   }
 
+  // An end-to-end encrypted SMS carries only an envelope; the Relay never sees its text.
+  const encrypted = message.e2e !== undefined;
+  const envelope = encrypted ? parseE2EEnvelope(message.e2e) : null;
+  if (encrypted && !envelope) return jsonResponse(400, { error: "invalid encrypted SMS" });
+
   const timestamp = Date.parse(message.timestamp);
   const now = Date.now();
   if (message.event !== "incoming_sms" || !nonEmpty(message.delivery_id) ||
-      !nonEmpty(message.content) || !Number.isFinite(timestamp) ||
+      (!encrypted && !nonEmpty(message.content)) || !Number.isFinite(timestamp) ||
       timestamp > now + 300_000) {
     return jsonResponse(400, { error: "invalid incoming SMS" });
   }
@@ -1400,6 +1456,17 @@ async function receiveSMS(request, env) {
   const deliveryTimestamp = timestamp < now - 7 * 24 * 60 * 60 * 1000
     ? new Date(now).toISOString()
     : message.timestamp;
+  const encryptedPayload = envelope && encryptedSMSPayload({
+    agentID: stringValue(message.agent_id), deliveryID: message.delivery_id,
+    timestamp: deliveryTimestamp, envelope,
+  });
+  // The Relay cannot shorten ciphertext, so an envelope that can never fit is rejected here,
+  // before its delivery ID is marked as seen. Android drops an SMS only on the Relay's exact
+  // 400 bodies (CloudSMSUploader.rejected), so both e2e error strings are an interface: keep them.
+  if (encryptedPayload &&
+      encoder.encode(JSON.stringify(encryptedPayload)).byteLength > MAX_APNS_PAYLOAD_BYTES) {
+    return jsonResponse(400, { error: "encrypted SMS too large" });
+  }
 
   const dedupeKey = `dedupe:sms:${authenticated.device.device_id}:${stringValue(message.agent_id)}:${message.delivery_id}`;
   if (await bestEffortReadRelayState(env, dedupeKey)) {
@@ -1407,8 +1474,7 @@ async function receiveSMS(request, env) {
   }
   await bestEffortWriteRelayState(env, dedupeKey, "1", 7 * 24 * 60 * 60);
 
-  const [content, truncated] = truncateCodePoints(message.content, 700);
-  const payload = {
+  const payload = encryptedPayload || fittedSMSPayload(message.content, (content, truncated) => ({
     aps: {
       alert: { title: sender, body: content },
       sound: "default",
@@ -1423,7 +1489,7 @@ async function receiveSMS(request, env) {
     content_truncated: truncated,
     code: stringValue(message.code),
     timestamp: deliveryTimestamp,
-  };
+  }));
   try {
     await sendAPNs(env, authenticated.device, authenticated.device.alert_token, {
       topic: authenticated.device.bundle_id,
@@ -1459,8 +1525,10 @@ async function receiveAgentHeartbeat(request, env) {
     return jsonResponse(400, { error: "invalid agent heartbeat" });
   }
   const agentID = stringValue(heartbeat.agent_id) || "legacy";
+  const battery = batteryStatus(heartbeat.battery);
   const record = {
     received_at_ms: Date.now(),
+    ...(battery ? { battery } : {}),
     agent_id: agentID,
     ...(heartbeat.command_routing_version === 1 ? {command_routing_version:1} : {}),
     ...(nonEmpty(heartbeat.agent_kind) ? { agent_kind: heartbeat.agent_kind.trim() } : {}),
@@ -1481,6 +1549,9 @@ async function receiveAgentHeartbeat(request, env) {
     ecm_carrier: stringValue(heartbeat.ecm_carrier),
     ...(Number.isFinite(heartbeat.signal_dbm) ? { signal_dbm: heartbeat.signal_dbm } : {}),
   };
+  // Heartbeat must stay on the Durable Object path. KV has a free daily
+  // put() limit; writing every heartbeat there exhausts it and breaks online
+  // status for all devices. KV remains a read-only fallback.
   const directResponse = await authenticateAndWriteAgentHeartbeat(env, heartbeat, agentID, record);
   if (directResponse) return directResponse;
   const authenticated = await authenticate(heartbeat, env);
@@ -1489,12 +1560,50 @@ async function receiveAgentHeartbeat(request, env) {
   return jsonResponse(202, { received: true });
 }
 
+function deviceStatusResponse(heartbeats) {
+  const now = Date.now();
+  const onlineWindowMS = 150_000;
+  const agents = heartbeats
+    .filter((item) => item && Number.isFinite(item.received_at_ms))
+    .sort((left, right) => right.received_at_ms - left.received_at_ms)
+    .map((item) => {
+      const { received_at_ms: receivedAtMS, ...status } = item;
+      return { ...status, cloud_online: now - receivedAtMS <= onlineWindowMS };
+    });
+  const heartbeat = heartbeats
+    .filter((item) => item && Number.isFinite(item.received_at_ms) && now - item.received_at_ms <= onlineWindowMS)
+    .sort((left, right) => right.received_at_ms - left.received_at_ms)[0];
+  if (!heartbeat) {
+    return jsonResponse(200, { cloud_online: false, agents, capabilities: { agent_command_routing: 1 } });
+  }
+  const { received_at_ms: _, ...publicStatus } = heartbeat;
+  return jsonResponse(200, {
+    cloud_online: true,
+    capabilities: { agent_command_routing: 1 },
+    ...publicStatus,
+    active_agent_id: publicStatus.agent_id || "legacy",
+    agents,
+  });
+}
+
 async function receiveDeviceStatus(request, env) {
   const query = await readJSON(request);
-  const directResponse = await authenticateAndReadAgentHeartbeats(env, query);
-  if (directResponse && !directResponse.ok) return directResponse;
+  const kvDeviceID = String(query.device_id || "").trim();
+  const kvDevice = await readDeviceRecordFromKV(env, kvDeviceID);
+  if (kvDevice && !constantTimeEqual(kvDevice.secret_hash,
+      await sha256Hex(String(query.device_secret || "")))) {
+    return jsonResponse(401, { error: "unauthorized" });
+  }
+  let directResponse = null;
+  try {
+    directResponse = await authenticateAndReadAgentHeartbeats(env, query);
+  } catch {
+    // The status Durable Object can time out while the rest of Relay stays
+    // healthy. Fall through to authenticated KV data below.
+  }
+  if (directResponse?.status === 401) return directResponse;
   let heartbeats;
-  if (directResponse) {
+  if (directResponse?.ok) {
     heartbeats = await directResponse.json();
     if (heartbeats.length === 0) {
       heartbeats = await readAgentHeartbeatsFromKV(env, query.device_id.trim());
@@ -1502,30 +1611,9 @@ async function receiveDeviceStatus(request, env) {
   } else {
     const authenticated = await authenticate(query, env);
     if (authenticated.response) return authenticated.response;
-    heartbeats = await readAgentHeartbeats(env, authenticated.device.device_id);
+    heartbeats = await readAgentHeartbeatsFromKV(env, authenticated.device.device_id);
   }
-  const now = Date.now();
-  const agents = heartbeats
-    .filter((item) => item && Number.isFinite(item.received_at_ms))
-    .sort((left, right) => right.received_at_ms - left.received_at_ms)
-    .map((item) => {
-      const { received_at_ms: receivedAtMS, ...status } = item;
-      return { ...status, cloud_online: now - receivedAtMS <= 90_000 };
-    });
-  const heartbeat = heartbeats
-    .filter((item) => item && Number.isFinite(item.received_at_ms) && now - item.received_at_ms <= 90_000)
-    .sort((left, right) => right.received_at_ms - left.received_at_ms)[0];
-  if (!heartbeat) {
-    return jsonResponse(200, { cloud_online: false, agents, capabilities:{agent_command_routing:1} });
-  }
-  const { received_at_ms: _, ...publicStatus } = heartbeat;
-  return jsonResponse(200, {
-    cloud_online: true,
-    capabilities:{agent_command_routing:1},
-    ...publicStatus,
-    active_agent_id: publicStatus.agent_id || "legacy",
-    agents,
-  });
+  return deviceStatusResponse(heartbeats);
 }
 
 async function receiveCallOwner(request, env) {
@@ -1573,7 +1661,7 @@ async function receiveCallOwner(request, env) {
       env,
       `liveactivity:current:${authenticated.device.device_id}`,
     );
-    if (currentActivity?.update_token) {
+    if (currentActivity?.update_token && authenticated.device.live_activity_presentation !== "agent_status") {
       await sendAPNs(env, authenticated.device, currentActivity.update_token, {
         topic: `${authenticated.device.bundle_id}.push-type.liveactivity`,
         pushType: "liveactivity",
@@ -1619,8 +1707,10 @@ async function receiveCallState(request, env) {
       !Number.isFinite(Date.parse(timestamp))) {
     return jsonResponse(400, { error: "invalid call state event" });
   }
-  const lifecycleKey = `call-lifecycle:${authenticated.device.device_id}`;
-  const currentLifecycle = await readRelayRecord(env, lifecycleKey);
+  const agentID = routingV2(request) ? parseAgentID(event.agent_id) : null;
+  const lifecycleKey = callLifecycleKey(authenticated.device.device_id, agentID, event.call_uuid);
+  const currentLifecycle = await readScopedCallLifecycle(env, lifecycleKey,
+    authenticated.device.device_id, event.call_uuid);
   const transition = applyCallLifecycle(currentLifecycle, {
     call_id: event.call_id.trim(),
     call_uuid: event.call_uuid.toLowerCase(),
@@ -1641,7 +1731,7 @@ async function receiveCallState(request, env) {
     env,
     `liveactivity:current:${authenticated.device.device_id}`,
   );
-  if (!currentActivity?.update_token) {
+  if (!currentActivity?.update_token || authenticated.device.live_activity_presentation === "agent_status") {
     await writeRelayState(env, dedupeKey, "1", 180);
     return jsonResponse(202, { accepted: true, lifecycle: transition.snapshot, live_activity_unavailable: true });
   }
@@ -1676,6 +1766,22 @@ const CALL_LIFECYCLE_PHASES = new Set([
   "idle", "ringing", "connecting", "active", "ending", "ended", "failed",
 ]);
 const CALL_LIFECYCLE_SOURCES = new Set(["app", "callkit", "agent", "relay"]);
+
+// A lost terminal event must never block every future call on an iPhone. Keep
+// ordering/tombstones per Agent AND call UUID; existing five-hour state TTL still
+// bounds retention. Different calls no longer need to overwrite an active call.
+function callLifecycleKey(deviceID, agentID, uuid) {
+  return `call-lifecycle:v2:${deviceID}:${encodeURIComponent(agentID ?? "legacy")}:${uuid.toLowerCase()}`;
+}
+
+async function readScopedCallLifecycle(env, key, deviceID, uuid) {
+  const scoped = await bestEffortReadRelayRecord(env, key);
+  if (scoped) return scoped;
+  // Migrate only the SAME call: preserve old terminal replay protection without
+  // importing an unrelated stale ringing/active record into a new call.
+  const legacy = await bestEffortReadRelayRecord(env, `call-lifecycle:${deviceID}`);
+  return legacy?.call_uuid?.toLowerCase() === uuid.toLowerCase() ? legacy : null;
+}
 
 export function applyCallLifecycle(current, candidate) {
   const generation = Number(candidate?.generation || 0);
@@ -1940,6 +2046,66 @@ async function boundedCollapseID(value) {
   return `airsim-${(await sha256Hex(text)).slice(0, 57)}`;
 }
 
+/**
+ * APNs rejects payloads over 4096 bytes and the SMS text appears twice (alert body and
+ * `content`). Keep the longest prefix, at most 700 code points, whose payload still fits.
+ */
+function fittedSMSPayload(content, build) {
+  const attempt = (limit) => {
+    const payload = build(...truncateCodePoints(content, limit));
+    return encoder.encode(JSON.stringify(payload)).byteLength <= MAX_APNS_PAYLOAD_BYTES ? payload : null;
+  };
+  let fitted = attempt(700);
+  if (fitted) return fitted;
+  // Every candidate below is cut and ends in "…", so the size grows with the limit.
+  let low = 0;
+  let high = Math.min([...content].length, 700) - 1;
+  fitted = attempt(low);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const payload = attempt(middle);
+    if (payload) { fitted = payload; low = middle; } else { high = middle - 1; }
+  }
+  // Only an absurdly long sender can miss even at zero; sendAPNs then reports it as before.
+  return fitted ?? build(...truncateCodePoints(content, 0));
+}
+
+/** The four fields of an end-to-end encrypted SMS envelope (issue #24), or null when malformed. */
+function parseE2EEnvelope(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { v, kid, n, ct } = value;
+  if (v !== 1 || typeof kid !== "string" || !/^[0-9a-f]{8}$/.test(kid) ||
+      typeof n !== "string" || !/^[A-Za-z0-9_-]{16}$/.test(n) ||
+      typeof ct !== "string" || !/^[A-Za-z0-9_-]{23,8192}$/.test(ct)) {
+    return null;
+  }
+  // Regex alone accepts impossible lengths and nonzero unused padding bits.
+  // Reject before deduplication so a corrected envelope can reuse the delivery ID.
+  try {
+    const decoded = Uint8Array.from(atob(ct.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+    if (decoded.length < 17 || base64url(decoded) !== ct) return null;
+  } catch { return null; }
+  return { v, kid, n, ct };
+}
+
+/** Placeholder text for the iPhone's Notification Service Extension to replace after decrypting. */
+function encryptedSMSPayload({ agentID, deliveryID, timestamp, envelope }) {
+  return {
+    aps: {
+      alert: { title: "AirSIM", body: "新短信" },
+      sound: "default",
+      "thread-id": `airsim-sms-agent-${agentID}`.slice(0, 64),
+      "content-available": 1,
+      "mutable-content": 1,
+    },
+    event: "incoming_sms",
+    delivery_id: deliveryID,
+    agent_id: agentID,
+    timestamp,
+    e2e: envelope,
+  };
+}
+
 function truncateCodePoints(value, maximum) {
   const points = [...value];
   if (points.length <= maximum) return [value, false];
@@ -1985,6 +2151,23 @@ function stringValue(value) {
 
 function safeError(error) {
   return error instanceof Error ? error.message.slice(0, 1024) : "unknown error";
+}
+
+function isDurableObjectQuotaError(error) {
+  return error instanceof Error &&
+    error.message.includes("Exceeded allowed volume of requests in Durable Objects free tier");
+}
+
+function durableObjectQuotaResponse() {
+  // Do not acknowledge a heartbeat that was never persisted, or switch the
+  // high-frequency stream to KV and exhaust a second storage quota.
+  const response = jsonResponse(503, {
+    error: "relay_capacity_exhausted",
+    message: "云端 Durable Objects 额度已耗尽，心跳未写入；请等待额度恢复或联系部署者调整套餐",
+    retry_after_seconds: 300,
+  });
+  response.headers.set("Retry-After", "300");
+  return response;
 }
 
 function jsonResponse(status, value) {

@@ -18,14 +18,71 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class CallRepository {
     private static final Map<String, Call> CALLS = new ConcurrentHashMap<>();
     private static final Map<Call, String> IDS = new ConcurrentHashMap<>();
+    private static final Object OUTGOING_LOCK = new Object();
+    private static final java.util.Set<OutgoingCallObservation> OUTGOING =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
     private CallRepository() {}
 
     public static String add(Call call) {
         String id = UUID.randomUUID().toString();
-        IDS.put(call, id);
-        CALLS.put(id, call);
+        synchronized (OUTGOING_LOCK) {
+            IDS.put(call, id);
+            CALLS.put(id, call);
+            var iterator = OUTGOING.iterator();
+            while (iterator.hasNext()) {
+                OutgoingCallObservation observation = iterator.next();
+                if (System.nanoTime() >= observation.deadline || observation.created.size() >= 64) {
+                    if (observation.created.size() >= 64) observation.overflow = true;
+                    iterator.remove();
+                } else observation.created.put(id, call);
+            }
+        }
         return id;
+    }
+
+    /** Capture creation identity before placeCall, independently of delayed network events. */
+    static OutgoingCallObservation observeOutgoing(String number) {
+        synchronized (OUTGOING_LOCK) {
+            var observation = new OutgoingCallObservation(number);
+            OUTGOING.add(observation);
+            return observation;
+        }
+    }
+
+    static final class OutgoingCallObservation implements AutoCloseable {
+        private final String number;
+        private final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        private final Map<String, Call> created = new java.util.LinkedHashMap<>();
+        private boolean closed;
+        private boolean overflow;
+
+        private OutgoingCallObservation(String number) { this.number = number == null ? "" : number; }
+
+        String matchingCallID() {
+            synchronized (OUTGOING_LOCK) {
+                if (System.nanoTime() >= deadline) OUTGOING.remove(this);
+                if (closed || overflow || number.isBlank()) return "";
+                String candidate = "";
+                for (Map.Entry<String, Call> entry : created.entrySet()) {
+                    Call.Details details = entry.getValue().getDetails();
+                    if (details == null || details.getCallDirection() != Call.Details.DIRECTION_OUTGOING
+                            || details.getHandle() == null || !android.telephony.PhoneNumberUtils.compare(
+                            details.getHandle().getSchemeSpecificPart(), number)) continue;
+                    if (!candidate.isEmpty()) return "";
+                    candidate = entry.getKey();
+                }
+                return candidate;
+            }
+        }
+
+        @Override public void close() {
+            synchronized (OUTGOING_LOCK) {
+                closed = true;
+                OUTGOING.remove(this);
+                created.clear();
+            }
+        }
     }
 
     public static String id(Call call) {
@@ -72,6 +129,17 @@ public final class CallRepository {
     public static int state(String callId) {
         Call call = CALLS.get(callId);
         return call == null ? -1 : call.getState();
+    }
+
+    /** Privacy-safe Telecom state for feedback diagnostics; never includes numbers or IDs. */
+    public static String diagnosticState() {
+        for (Call call : CALLS.values()) {
+            if (call.getState() == Call.STATE_ACTIVE) return "active";
+            if (call.getState() == Call.STATE_RINGING) return "ringing";
+            if (call.getState() == Call.STATE_DIALING) return "dialing";
+            if (call.getState() == Call.STATE_HOLDING) return "holding";
+        }
+        return CALLS.isEmpty() ? "idle" : "disconnecting";
     }
 
     public static String number(String callId) {
@@ -143,7 +211,12 @@ public final class CallRepository {
                     case "dtmf" -> {
                         if (command.number.length() != 1) throw new IllegalArgumentException("DTMF digit missing");
                         call.playDtmfTone(command.number.charAt(0));
-                        call.stopDtmfTone();
+                        // Some ColorOS/Telecom stacks cancel a DTMF tone when
+                        // stopDtmfTone() is called in the same main-thread turn.
+                        // Let the tone reach the network before stopping it.
+                        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                            try { call.stopDtmfTone(); } catch (RuntimeException ignored) {}
+                        }, 180);
                     }
                     default -> throw new IllegalArgumentException("unsupported action");
                 }
@@ -167,6 +240,27 @@ public final class CallRepository {
                     return ActionResult.success();
                 }
                 Thread.sleep(50);
+            }
+            // A few OEM Telecom implementations accept Call.disconnect() but
+            // never deliver the terminal callback. Ask Telecom to end the same
+            // call once before reporting failure; never reboot/restart audio.
+            if ("end".equals(command.action) && !IDS.containsKey(call)) return ActionResult.success();
+            if ("end".equals(command.action)) {
+                try {
+                    TelecomManager telecom = context.getSystemService(TelecomManager.class);
+                    if (telecom != null) {
+                        java.lang.reflect.Method endCall =
+                                TelecomManager.class.getMethod("endCall");
+                        endCall.invoke(telecom);
+                    }
+                } catch (Exception ignored) {}
+                long fallbackDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+                while (System.nanoTime() < fallbackDeadline) {
+                    if (!IDS.containsKey(call) || call.getState() == Call.STATE_DISCONNECTED) {
+                        return ActionResult.success();
+                    }
+                    Thread.sleep(50);
+                }
             }
             return ActionResult.failure("Telecom state confirmation timeout");
         } catch (Exception error) {

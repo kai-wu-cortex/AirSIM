@@ -170,7 +170,7 @@ extension AirSIMCallActivityAttributes.ContentState {
 }
 
 enum LiveActivityAgentPaging {
-    static let pageSize = 5
+    static let pageSize = 3
 
     static func pageCount(for total: Int) -> Int {
         max(1, (max(0, total) + pageSize - 1) / pageSize)
@@ -382,6 +382,52 @@ struct HangUpAirSIMCallIntent: LiveActivityIntent {
     }
 }
 
+/// Background intents use the host's existing connection/binding paths. The
+/// extension never changes preferences or establishes a transport on its own.
+@MainActor
+enum AirSIMWidgetControlBridge {
+    static var handler: ((String, String, String) async -> Bool)?
+    /// Installed by the app entry point, without requiring a visible scene.
+    static var bootstrap: (() -> Void)?
+
+    static func perform(action: String, expected: String, target: String) async -> Bool {
+        for _ in 0..<50 {
+            guard !Task.isCancelled else { return false }
+            if handler == nil { bootstrap?() }
+            if let handler { return await handler(action, expected, target) }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+}
+
+@available(iOS 17.0, *)
+struct AirSIMWidgetSwitchIntent: LiveActivityIntent {
+    static var title: LocalizedStringResource = "切换 AirSIM 连接"
+    static var openAppWhenRun = false
+    @available(iOS 26.0, *)
+    static var supportedModes: IntentModes { .background }
+    @Parameter(title: "操作") var action: String
+    @Parameter(title: "当前值") var expected: String
+    @Parameter(title: "目标值") var target: String
+
+    init() { action = ""; expected = ""; target = "" }
+    init(action: String, expected: String, target: String) {
+        self.action = action; self.expected = expected; self.target = target
+    }
+    func perform() async throws -> some IntentResult {
+        guard await AirSIMWidgetControlBridge.perform(action: action, expected: expected, target: target) else {
+            throw AirSIMWidgetSwitchError.unavailable
+        }
+        return .result()
+    }
+}
+
+private enum AirSIMWidgetSwitchError: LocalizedError {
+    case unavailable
+    var errorDescription: String? { "当前不能切换。请结束通话或等待小组件刷新后重试。" }
+}
+
 private enum LiveActivityActionError: LocalizedError {
     case appUnavailable
 
@@ -391,3 +437,47 @@ private enum LiveActivityActionError: LocalizedError {
         }
     }
 }
+
+enum LiveActivityNumberFormatter {
+    private static let twoDigitCountryCodes: Set<String> = [
+        "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47", "48", "49",
+        "51", "52", "53", "54", "55", "56", "57", "58", "60", "61", "62", "63", "64", "65", "66", "81", "82", "84",
+        "86", "90", "91", "92", "93", "94", "95", "98",
+    ]
+    private static let threeDigitCountryCodes: Set<String> = [
+        "211", "212", "213", "216", "218", "220", "221", "222", "223", "224", "225", "226", "227", "228", "229",
+        "230", "231", "232", "233", "234", "235", "236", "237", "238", "239", "240", "241", "242", "243", "244",
+        "245", "246", "247", "248", "249", "250", "251", "252", "253", "254", "255", "256", "257", "258", "260",
+        "261", "262", "263", "264", "265", "266", "267", "268", "269", "290", "291", "297", "298", "299",
+        "350", "351", "352", "353", "354", "355", "356", "357", "358", "359", "370", "371", "372", "373", "374",
+        "375", "376", "377", "378", "379", "380", "381", "382", "383", "385", "386", "387", "389",
+        "420", "421", "423", "500", "501", "502", "503", "504", "505", "506", "507", "508", "509",
+        "590", "591", "592", "593", "594", "595", "596", "597", "598", "599",
+        "670", "672", "673", "674", "675", "676", "677", "678", "679", "680", "681", "682", "683", "685",
+        "686", "687", "688", "689", "690", "691", "692", "850", "852", "853", "855", "856", "880", "886", "960",
+        "961", "962", "963", "964", "965", "966", "967", "968", "970", "971", "972", "973", "974", "975", "976",
+        "977", "992", "993", "994", "995", "996", "998",
+    ]
+
+    /// Show the full synced phone number. The Live Activity is the user's own
+    /// active-call surface, so a masked suffix is not useful and caused wrong
+    /// country-code/last-four displays.
+    static func display(_ raw: String?) -> String {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return "未配置" }
+        var digits = String(trimmed.filter(\.isNumber))
+        guard digits.count >= 7 else { return trimmed }
+        if trimmed.hasPrefix("00"), digits.hasPrefix("00") { digits.removeFirst(2) }
+        return trimmed.hasPrefix("+") || trimmed.hasPrefix("00") ? "+\(digits)" : digits
+    }
+
+    private static func countryCode(_ digits: String) -> String {
+        if digits.hasPrefix("1") || digits.hasPrefix("7") { return String(digits.prefix(1)) }
+        let two = String(digits.prefix(2))
+        if twoDigitCountryCodes.contains(two) { return two }
+        let three = String(digits.prefix(3))
+        if threeDigitCountryCodes.contains(three) { return three }
+        return two
+    }
+}
+

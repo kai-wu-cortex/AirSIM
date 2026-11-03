@@ -8,6 +8,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.UUID;
 
 public final class AgentClient {
     public record ForwardResponse(int status, String payload) {}
@@ -15,9 +17,11 @@ public final class AgentClient {
     private final String endpoint;
     private final String token;
     private final StandaloneAgentGateway standalone;
+    private final Context appContext;
 
     public AgentClient(Context context) {
         Context appContext = context.getApplicationContext();
+        this.appContext = appContext;
         endpoint = AppConfig.endpoint(appContext);
         token = AppConfig.token(appContext);
         standalone = RuntimeMode.isStandalone(appContext) ? StandaloneAgentGateway.get(appContext) : null;
@@ -28,6 +32,7 @@ public final class AgentClient {
         this.endpoint = endpoint;
         this.token = token;
         this.standalone = null;
+        this.appContext = null;
     }
 
     public String status() throws Exception {
@@ -49,6 +54,10 @@ public final class AgentClient {
         return request("GET", "/api/push/status", null, 5_000);
     }
 
+    public String sendHeartbeat() throws Exception {
+        return request("POST", "/api/push/heartbeat", "{}", 35_000);
+    }
+
     public String debugSnapshot() throws Exception {
         if (standalone != null) return standalone.debugSnapshot();
         return request("GET", "/api/debug?limit=100", null, 8_000);
@@ -56,7 +65,13 @@ public final class AgentClient {
 
     public String nextCommand() throws Exception {
         if (standalone != null) return "";
-        return request("GET", "/api/android/commands/next?wait=25", null, 32_000);
+        org.json.JSONObject battery = appContext == null ? null : AndroidBatteryStatus.snapshot(appContext);
+        ForwardResponse response = requestRaw("GET", "/api/android/commands/next?wait=25", null, 32_000,
+                battery == null ? Map.of() : Map.of("X-AirSIM-Android-Battery", battery.toString()));
+        if (response.status < 200 || response.status >= 300) {
+            throw new IllegalStateException("Agent HTTP " + response.status + ": " + response.payload);
+        }
+        return response.payload;
     }
 
     public void sendEvent(String json) throws Exception {
@@ -84,6 +99,30 @@ public final class AgentClient {
         return request("POST", "/api/android/pair/register", registrationJSON, 8_000);
     }
 
+    public PureLocalModeCoordinator.Status localModeStatus() throws Exception {
+        return localModeRequest("GET", null);
+    }
+
+    public PureLocalModeCoordinator.Status setLocalMode(PureLocalModeProof.Command command) throws Exception {
+        return localModeRequest("POST", PureLocalModeWire.command(command).toString());
+    }
+
+    private PureLocalModeCoordinator.Status localModeRequest(String method, String body) throws Exception {
+        if (standalone != null) throw new IllegalStateException("standalone_has_no_avf");
+        String nonce = UUID.randomUUID().toString();
+        ForwardResponse response = requestRaw(method, "/api/android/local-mode", body, 8_000,
+                Map.of("X-AirSIM-Local-Nonce", nonce));
+        if (response.status < 200 || response.status >= 300) {
+            throw new IllegalStateException("Agent HTTP " + response.status + ": " + response.payload);
+        }
+        org.json.JSONObject json = new org.json.JSONObject(response.payload);
+        byte[] secret = token.getBytes(StandardCharsets.UTF_8);
+        if (!PureLocalModeWire.verifyStatus(json, nonce, secret)) {
+            throw new SecurityException("invalid_local_mode_status_proof");
+        }
+        return PureLocalModeWire.status(json);
+    }
+
     public ForwardResponse forwardVoWLAN(String method, String path, String body) throws Exception {
         if (!VoWLANControlPolicy.allowed(method, path) || "/v1/health".equals(path)) {
             throw new IllegalArgumentException("VoWLAN route not allowed");
@@ -102,6 +141,11 @@ public final class AgentClient {
     }
 
     private ForwardResponse requestRaw(String method, String path, String body, int readTimeout) throws Exception {
+        return requestRaw(method, path, body, readTimeout, Map.of());
+    }
+
+    private ForwardResponse requestRaw(String method, String path, String body, int readTimeout,
+                                       Map<String, String> additionalHeaders) throws Exception {
         long started = System.nanoTime();
         String traceID = "android-" + System.currentTimeMillis();
         int requestBytes = body == null ? 0 : body.getBytes(StandardCharsets.UTF_8).length;
@@ -116,6 +160,9 @@ public final class AgentClient {
             connection.setUseCaches(false);
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setRequestProperty("X-AirSIM-Trace-ID", traceID);
+            for (Map.Entry<String, String> header : additionalHeaders.entrySet()) {
+                connection.setRequestProperty(header.getKey(), header.getValue());
+            }
             if (body != null) {
                 connection.setDoOutput(true);
                 connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");

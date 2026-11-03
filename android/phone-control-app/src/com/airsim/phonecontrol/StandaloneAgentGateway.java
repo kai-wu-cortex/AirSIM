@@ -61,9 +61,37 @@ final class StandaloneAgentGateway {
 
     String pushStatus() throws Exception { return store.pushStatus().toString(); }
 
+    String registrationSnapshot() { JSONObject value = store.registration(); return value == null ? "" : value.toString(); }
+    void restoreRegistrationSnapshot(String snapshot) throws Exception { store.restoreSnapshot(snapshot); }
+    void discardCloudBacklog() throws Exception { smsStore.discardCloudBacklog(); }
+
     String debugSnapshot() throws Exception {
         return new JSONObject().put("events", new JSONArray()).put("runtime_profile", "android-standalone")
                 .put("log_available_in_app", true).toString();
+    }
+
+    String feedbackSnapshot() throws Exception {
+        String log = BridgeLog.read();
+        return new JSONObject()
+                .put("runtime_profile", "android-standalone")
+                .put("bridge_log", log)
+                .put("manufacturer", android.os.Build.MANUFACTURER)
+                .put("model", android.os.Build.MODEL)
+                .put("sdk", android.os.Build.VERSION.SDK_INT)
+                .put("app_version", AppInformation.version(context))
+                .put("audio", new JSONObject()
+                        .put("telecom_state", CallRepository.diagnosticState())
+                        .put("pcm_client_closed", log.contains("pcm_event=client_closed"))
+                        .put("pcm_health", latestPcmHealth(log)))
+                .toString();
+    }
+
+    private static String latestPcmHealth(String log) {
+        String latest = "";
+        for (String line : log.split("\n")) {
+            if (line.contains("pcm_health")) latest = line;
+        }
+        return latest.length() > 1200 ? latest.substring(0, 1200) : latest;
     }
 
     String registerPairing(String registrationJSON) throws Exception {
@@ -92,6 +120,7 @@ final class StandaloneAgentGateway {
     void sendSMSEvent(String json) throws Exception {
         JSONObject event = new JSONObject(json);
         NotificationForwarder.handle(context, event);
+        com.airsim.phonecontrol.voble.VoBLEGatewayService.publishSMS(context, event);
         if (smsStore.add(event, store.configured() && store.cloudEnabled())) {
             agentEvents.advance();
             if (store.configured() && store.cloudEnabled()) StandaloneAgentService.start(context);
@@ -107,6 +136,7 @@ final class StandaloneAgentGateway {
                 case "/api/android/status", "/api/status" -> ok(status());
                 case "/api/push/status" -> ok(pushStatus());
                 case "/api/debug" -> ok(debugSnapshot());
+                case "/api/feedback" -> ok(feedbackSnapshot());
                 case "/api/calls/status" -> ok(callSnapshot().toString());
                 case "/api/calls/events" -> waitForCallEvent(pathAndQuery);
                 case "/api/events" -> waitForAgentEvent(pathAndQuery);
@@ -134,6 +164,25 @@ final class StandaloneAgentGateway {
             case "/api/calls/dtmf" -> command("dtmf", localCallTarget("dtmf", input), input.optString("digit", ""), "");
             case "/api/sms/send" -> command("send_sms", "", input.optString("phone", ""),
                     input.optString("message", ""), input.optString("sim_account", ""));
+            case "/api/calls/history/ack" -> {
+                JSONArray ids = input.optJSONArray("ids") == null ? new JSONArray() : input.getJSONArray("ids");
+                synchronized (callsLock) {
+                    for (int index = callHistory.length() - 1; index >= 0; index--) {
+                        JSONObject record = callHistory.optJSONObject(index);
+                        if (record == null) continue;
+                        for (int id = 0; id < ids.length(); id++) {
+                            String value = ids.optString(id, "");
+                            if (!value.isEmpty() && (value.equals(record.optString("id"))
+                                    || value.equals(record.optString("android_id"))
+                                    || value.equals(record.optString("backend_id")))) {
+                                callHistory.remove(index);
+                                break;
+                            }
+                        }
+                    }
+                }
+                yield ok("{\"accepted\":true}");
+            }
             case "/api/calls/audio/host/warmup" -> ok("{\"warming\":true}");
             case "/api/calls/audio/host/register" -> ok(new JSONObject()
                     .put("enabled", input.optBoolean("enabled", false)).toString());
@@ -158,6 +207,20 @@ final class StandaloneAgentGateway {
     }
 
     synchronized JSONObject executeCloudCommand(JSONObject command, java.util.function.BooleanSupplier stillCurrent) throws Exception {
+        RelayEgressGate.Lease lease;
+        try { lease = RelayEgressGate.shared.acquire(() -> {}); }
+        catch (java.io.IOException denied) {
+            return new JSONObject().put("command_id", command.optString("command_id", ""))
+                    .put("status", "failed").put("error", "pure_local_relay_disabled");
+        }
+        // Track the action as well as its HTTP/socket: an already dispatched operation
+        // must finish before Android can acknowledge that the old generation drained.
+        try (lease) {
+            return executeAdmittedCloudCommand(command, () -> lease.isCurrent() && stillCurrent.getAsBoolean());
+        }
+    }
+
+    private JSONObject executeAdmittedCloudCommand(JSONObject command, java.util.function.BooleanSupplier stillCurrent) throws Exception {
         String commandID = command.optString("command_id", "");
         if (!stillCurrent.getAsBoolean()) return new JSONObject().put("command_id",commandID)
                 .put("status","failed").put("error","command_configuration_changed");
@@ -204,21 +267,35 @@ final class StandaloneAgentGateway {
         AgentCommand local = new AgentCommand(commandID, action, callID,
                 command.optString("number", ""), command.optString("message", ""),
                 command.optString("sim_account", ""));
-        AgentCommandDispatcher.Result result = execute(local);
-        JSONObject output = new JSONObject().put("command_id", commandID)
-                .put("status", result.success() ? "completed" : "failed");
-        if (result.success()) {
-            JSONObject detail = new JSONObject();
-            if ("send_sms".equals(action)) detail.put("sent", true).put("segments", result.segments());
-            else if ("dial".equals(action)) detail.put("dialing", true).put("android_confirmed", true);
-            else if ("answer".equals(action)) detail.put("answered", true).put("android_confirmed", true);
-            else if ("end".equals(action) || "reject".equals(action)) detail.put("ended", true).put("android_confirmed", true);
-            else detail.put("sent", true);
-            output.put("result", detail);
-        } else {
-            output.put("error", result.error());
+        var outgoing = "dial".equals(action) ? CallRepository.observeOutgoing(command.optString("number", "")) : null;
+        boolean handedToMedia = false;
+        try {
+            if (!stillCurrent.getAsBoolean()) return new JSONObject().put("command_id", commandID)
+                    .put("status", "failed").put("error", "command_configuration_changed");
+            AgentCommandDispatcher.Result result = execute(local);
+            JSONObject output = new JSONObject().put("command_id", commandID)
+                    .put("status", result.success() ? "completed" : "failed");
+            if (result.success()) {
+                JSONObject detail = new JSONObject();
+                if ("send_sms".equals(action)) detail.put("sent", true).put("segments", result.segments());
+                else if ("dial".equals(action)) {
+                    detail.put("dialing", true).put("android_confirmed", true);
+                    // This uncached path runs once per command. Replayed completions must not
+                    // restart media, replace its ownership observation, or resurrect ended calls.
+                    StandaloneCloudMediaManager.get(context).startOutgoing(command.optJSONObject("call"), outgoing);
+                    handedToMedia = true;
+                }
+                else if ("answer".equals(action)) detail.put("answered", true).put("android_confirmed", true);
+                else if ("end".equals(action) || "reject".equals(action)) detail.put("ended", true).put("android_confirmed", true);
+                else detail.put("sent", true);
+                output.put("result", detail);
+            } else {
+                output.put("error", result.error());
+            }
+            return rememberCommand(commandKey, output);
+        } finally {
+            if (!handedToMedia && outgoing != null) outgoing.close();
         }
-        return rememberCommand(commandKey, output);
     }
 
     private JSONObject rememberCommand(String commandKey, JSONObject output) {

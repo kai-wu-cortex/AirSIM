@@ -81,6 +81,7 @@ func cloudCommandReconnectDelay(failures int) time.Duration {
 func (a *agent) cloudCommandLoop() {
 	failures := 0
 	for {
+		relayEpoch := a.push.relayGate.generation()
 		registration, ready := a.push.commandRegistration()
 		if !ready {
 			failures = 0
@@ -110,7 +111,7 @@ func (a *agent) cloudCommandLoop() {
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		socket, err := dialCloudWebSocketAuthorized(ctx, endpoint, registration.DeviceSecret)
+		socket, err := a.dialRelayWebSocket(ctx, endpoint, registration.DeviceSecret, relayEpoch)
 		if err != nil {
 			cancel()
 			a.debug.add("cloud-command", "error", "连接公网命令通道失败", err.Error(), nil)
@@ -120,9 +121,10 @@ func (a *agent) cloudCommandLoop() {
 		}
 		connectedAt := time.Now()
 		a.push.mu.Lock()
-		if !sameCommandRegistration(a.push.config, registration) || !a.push.cloudEnabledLocked() {
+		currentRegistration, ready := a.push.commandRegistrationLocked()
+		if !sameCommandRegistration(currentRegistration, registration) || !ready {
 			a.push.mu.Unlock()
-			_ = socket.conn.Close()
+			_ = socket.Close()
 			cancel()
 			continue
 		}
@@ -223,7 +225,7 @@ func (a *agent) serveCloudCommands(ctx context.Context, socket *cloudWebSocket, 
 }
 
 func sameCommandRegistration(a, b pushRegistration) bool {
-	return sameCommandIdentity(a, b) && a.commandEpoch == b.commandEpoch
+	return sameCommandIdentity(a, b) && a.commandEpoch == b.commandEpoch && a.relayEpoch == b.relayEpoch
 }
 
 func sameCommandIdentity(a, b pushRegistration) bool {
@@ -235,8 +237,24 @@ func (a *agent) executeCloudCommand(command cloudDeviceCommand) cloudCommandResu
 }
 
 func (a *agent) executeCloudCommandFor(command cloudDeviceCommand, origin *pushRegistration) cloudCommandResult {
+	ctx := context.Background()
+	if a.push != nil && a.push.relayGate != nil {
+		epoch := a.push.relayGate.generation()
+		if origin != nil {
+			epoch = origin.relayEpoch
+		}
+		operation, release, err := a.push.relayGate.acquire(ctx, epoch)
+		if err != nil {
+			return cloudCommandResult{CommandID: command.CommandID, Status: "failed", Error: "pure_local_relay_disabled"}
+		}
+		defer release()
+		ctx = operation
+	}
 	a.cloudCommandExecMu.Lock()
 	defer a.cloudCommandExecMu.Unlock()
+	if ctx.Err() != nil {
+		return cloudCommandResult{CommandID: command.CommandID, Status: "failed", Error: "pure_local_relay_disabled"}
+	}
 	if a.push != nil {
 		current, ready := a.push.commandRegistration()
 		if origin != nil && (!ready || !sameCommandRegistration(current, *origin)) {

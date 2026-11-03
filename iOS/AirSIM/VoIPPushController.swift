@@ -235,17 +235,31 @@ enum RelayConfiguration {
         buildSetting: String?,
         bundleID: String?
     ) -> String {
-        let stored = stored?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !stored.isEmpty {
-            let canonicalStored = stored.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if bundleID == maintainerBundleID, canonicalStored == legacyDJOneHubRelayURL {
-                return maintainerRelayURL
-            }
-            return stored
+        let isMaintainer = bundleID == maintainerBundleID
+        for raw in [stored, buildSetting] {
+            guard let value = usableURL(raw, isMaintainer: isMaintainer) else { continue }
+            return value
         }
-        let buildSetting = buildSetting?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !buildSetting.isEmpty { return buildSetting }
-        return bundleID == maintainerBundleID ? maintainerRelayURL : ""
+        return isMaintainer ? maintainerRelayURL : ""
+    }
+
+    /// Reject truncated xcconfig values such as "https:" and upgrade the
+    /// maintainer's known relay host from http:// to https://.
+    private static func usableURL(_ raw: String?, isMaintainer: Bool) -> String? {
+        let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !value.isEmpty,
+              let components = URLComponents(string: value),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty else { return nil }
+        if isMaintainer, host == "push.remotepilot.site" { return maintainerRelayURL }
+        let canonical = value.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if isMaintainer, canonical == legacyDJOneHubRelayURL { return maintainerRelayURL }
+        if isMaintainer, scheme == "http",
+           host == "airsim-push.remotepilot.site" || host == "push.remotepilot.site" {
+            return "https://" + host + (components.path == "/" ? "" : components.path)
+        }
+        return value
     }
 }
 
@@ -298,7 +312,7 @@ struct ConnectionModePresentation: Equatable, Sendable {
         )
         if selectedMode == .localDual {
             return .init(mode: selected == .vowlan ? .vowlan : (selected == .bluetooth ? .bluetooth : .offline),
-                title: "本地双通道",
+                title: "VoWLAN+VoBLE",
                 status: vowlanOnline && bluetoothReady ? "双链路就绪" : (vowlanOnline ? "仅 VoWLAN 在线" : (bluetoothReady ? "仅 VoBLE 在线" : "无可用本地路由")),
                 detail: "同一安卓优先 VoWLAN、其次 VoBLE；云端关闭，通话途中固定链路")
         }
@@ -330,7 +344,7 @@ struct ConnectionModePresentation: Equatable, Sendable {
         }
         switch selectedMode {
         case .localDual:
-            return .init(mode: .offline, title: "本地双通道", status: "无可用本地路由",
+            return .init(mode: .offline, title: "VoWLAN+VoBLE", status: "无可用本地路由",
                          detail: "等待所选安卓的 VoWLAN 或 VoBLE 认证；云端已关闭")
         case .vowlan:
             return .init(mode: .vowlan, title: "VoWLAN", status: "不可达",
@@ -392,7 +406,7 @@ struct CloudSelfTestReport: Equatable, Sendable {
             CloudSelfTestStep(id: .relayIdentity, title: "Relay 身份", state: .pending, detail: "等待检查"),
             CloudSelfTestStep(id: .deviceRegistration, title: "设备注册", state: .pending, detail: "等待检查"),
             CloudSelfTestStep(id: .agentDirectory, title: "Agent 记录", state: .pending, detail: "查询 Relay 已登记的 Android Agent"),
-            CloudSelfTestStep(id: .agentHeartbeat, title: "Agent 心跳", state: .pending, detail: "检查最近 90 秒心跳"),
+            CloudSelfTestStep(id: .agentHeartbeat, title: "Agent 心跳", state: .pending, detail: "检查最近 150 秒心跳"),
             CloudSelfTestStep(id: .commandRouting, title: "命令路由", state: .pending, detail: "检查 Agent 是否支持定向接听/挂断"),
         ],
         completedAt: nil
@@ -480,6 +494,53 @@ enum PushRegistrationAttemptPolicy {
         currentRoute: Route
     ) -> Bool {
         previousRoute != currentRoute
+    }
+}
+
+/// Registration and backoff belong to each authenticated gateway, not the last
+/// selected phone. One unavailable/old gateway must not starve another one.
+struct PushRegistrationLedger<Route: Equatable> {
+    private struct Entry {
+        let route: Route
+        let fingerprint: String
+        let succeeded: Bool
+        let retryAfter: Date
+    }
+    private var entries: [Entry] = []
+    func needsRegistration(_ route: Route, fingerprint: String) -> Bool {
+        !entries.contains { $0.route == route && $0.fingerprint == fingerprint && $0.succeeded }
+    }
+    func shouldAttempt(_ route: Route, fingerprint: String, now: Date = Date()) -> Bool {
+        guard let entry = entries.first(where: { $0.route == route && $0.fingerprint == fingerprint }) else { return true }
+        return !entry.succeeded && now >= entry.retryAfter
+    }
+    mutating func record(_ route: Route, fingerprint: String, succeeded: Bool, now: Date = Date()) {
+        entries.removeAll { $0.route == route }
+        entries.append(Entry(route: route, fingerprint: fingerprint, succeeded: succeeded,
+                             retryAfter: now.addingTimeInterval(30)))
+    }
+    mutating func retain(_ routes: [Route]) {
+        entries.removeAll { entry in !routes.contains(entry.route) }
+    }
+}
+
+enum PushDiagnostics {
+    // Never persist localizedDescription: HTTP bodies may contain credentials,
+    // telephone numbers or signed URLs. Release diagnostics are opt-in trace only.
+    static func record(_ title: String, error: Error? = nil, fields: [String: String] = [:]) {
+        var safe = fields
+        if let error {
+            let ns = error as NSError
+            safe["error_domain"] = ns.domain
+            safe["error_code"] = String(ns.code)
+            if case let APIError.http(status, _) = error { safe["http_status"] = String(status) }
+        }
+        let details = safe
+        Task {
+            await AgentVerboseTraceRecorder.shared.recordEvent(
+                source: "APP", category: "pushkit", phase: error == nil ? "state" : "failure",
+                title: title, fields: details)
+        }
     }
 }
 
@@ -679,6 +740,7 @@ struct AgentPushRegistration: Encodable, Equatable, Sendable {
         case watchVoIPToken = "watch_voip_token"
         case watchBundleID = "watch_bundle_id"
         case liveActivityPushToStartToken = "live_activity_push_to_start_token"
+        case liveActivityPresentation = "live_activity_presentation"
         case bundleID = "bundle_id"
         case environment
         case relayURL = "relay_url"
@@ -704,6 +766,9 @@ struct AgentPushRegistration: Encodable, Equatable, Sendable {
         try values.encode(watchVoIPToken, forKey: .watchVoIPToken)
         try values.encode(watchBundleID, forKey: .watchBundleID)
         try values.encode(liveActivityPushToStartToken, forKey: .liveActivityPushToStartToken)
+        // The island is a device-status surface, not a second call UI. Relay
+        // must not start another activity or replace its multi-device snapshot.
+        try values.encode("agent_status", forKey: .liveActivityPresentation)
         try values.encode(bundleID, forKey: .bundleID)
         try values.encode(environment, forKey: .environment)
         try values.encode(relayURL, forKey: .relayURL)
@@ -867,22 +932,23 @@ final class VoIPPushController: NSObject {
     }
 
     private var registry: PKPushRegistry?
-    private var lastRegisteredFingerprint: String?
-    private var lastRegisteredRoute: LocalAgentRoute?
+    private var agentRegistrations = PushRegistrationLedger<LocalAgentRoute>()
     private var lastRelayRegisteredFingerprint: String?
     private var registrationInFlight = false
     private let pairingGate = SamsungPairingRegistrationGate()
     private var registrationPending = false
-    private var nextRegistrationAttempt = Date.distantPast
     private var nextRelayRegistrationAttempt = Date.distantPast
     private var registrationRetryTask: Task<Void, Never>?
-    private var latestRegistrationAPI: AirSIMAPI?
+    /// Supplies only currently authenticated, non-forgotten gateways.
+    var registrationAPIs: (() -> [AirSIMAPI])?
+    private var pendingRegistrationAPIs: [AirSIMAPI] = []
+    private var registrationEpoch: UInt64 = 0
     private var activityKitRegistrationStarted = false
     private var activityKitRegistrationTasks: [Task<Void, Never>] = []
     private var observedActivityIDs = Set<String>()
 
     func start() {
-        guard CloudModePreference.isEnabled() else { return }
+        guard CloudSignalingPreference.isEnabled() else { return }
         startActivityKitRegistration()
         if let registry {
             // 重新赋值会让系统在授权或网络状态变化后再次核对现有凭据。
@@ -901,13 +967,18 @@ final class VoIPPushController: NSObject {
 #endif
     }
 
-    func setLocalModeEnabled(_ enabled: Bool) {
+    func setSignalingEnabled(_ enabled: Bool) {
         resetRegistrationBackoff()
         registrationRetryTask?.cancel()
         registrationRetryTask = nil
         registrationPending = false
 
         if enabled {
+            start()
+            UIApplication.shared.registerForRemoteNotifications()
+            Task { await syncRegistration() }
+        } else {
+            pendingRegistrationAPIs.removeAll()
             registry?.desiredPushTypes = []
             registry?.delegate = nil
             registry = nil
@@ -916,14 +987,14 @@ final class VoIPPushController: NSObject {
             activityKitRegistrationStarted = false
             observedActivityIDs.removeAll()
             UIApplication.shared.unregisterForRemoteNotifications()
-            Task { await IPhoneCloudCallSession.shared.end() }
 #if DEBUG
-            print("[AirSIM Local] 已停用 PushKit、APNs 与 Relay 注册")
+            print("[AirSIM Signaling] 已停用 PushKit/APNs")
 #endif
-        } else {
-            start()
-            UIApplication.shared.registerForRemoteNotifications()
         }
+    }
+
+    func setLocalModeEnabled(_ enabled: Bool) {
+        setSignalingEnabled(!enabled)
     }
 
     func setLiveActivityEnabled(_ enabled: Bool) {
@@ -939,13 +1010,13 @@ final class VoIPPushController: NSObject {
     }
 
     private func startActivityKitRegistration() {
-        guard CloudModePreference.isEnabled(), !activityKitRegistrationStarted else { return }
+        guard CloudSignalingPreference.isEnabled(), !activityKitRegistrationStarted else { return }
         if #available(iOS 17.2, *) {
             activityKitRegistrationStarted = true
             let pushToStartTask = Task { @MainActor [weak self] in
                 for await token in Activity<AirSIMCallActivityAttributes>.pushToStartTokenUpdates {
                     guard let self, !Task.isCancelled else { return }
-                    guard CloudModePreference.isEnabled(),
+                    guard CloudSignalingPreference.isEnabled(),
                           LiveActivityVisibilityPreference.isEnabled() else { continue }
                     UserDefaults.standard.set(
                         VoIPPushToken.hex(token),
@@ -974,7 +1045,7 @@ final class VoIPPushController: NSObject {
             Task { await activity.end(nil, dismissalPolicy: .immediate) }
             return
         }
-        guard CloudModePreference.isEnabled() else { return }
+        guard CloudSignalingPreference.isEnabled() else { return }
         guard observedActivityIDs.insert(activity.id).inserted else { return }
         Task { @MainActor [weak self] in
             for await token in activity.pushTokenUpdates {
@@ -993,7 +1064,7 @@ final class VoIPPushController: NSObject {
         activityID: String,
         callID: String
     ) async {
-        guard CloudModePreference.isEnabled(),
+        guard CloudSignalingPreference.isEnabled(),
               LiveActivityVisibilityPreference.isEnabled() else { return }
         guard let registration = currentRegistration(),
               let url = RelayEndpoint.url(
@@ -1026,7 +1097,7 @@ final class VoIPPushController: NSObject {
             updateToken: token
         ))
         let configuration = URLSessionConfiguration.ephemeral
-        _ = try? await URLSession(configuration: configuration).data(for: request)
+        _ = try? await RelayEgressGate.shared.send(request)
     }
 
     func storeAlertToken(_ token: Data) {
@@ -1051,7 +1122,11 @@ final class VoIPPushController: NSObject {
     }
 
     func updateRelayURL(_ value: String) {
-        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = RelayConfiguration.effectiveURL(
+            stored: value,
+            buildSetting: nil,
+            bundleID: Bundle.main.bundleIdentifier
+        )
         if normalized.isEmpty {
             UserDefaults.standard.removeObject(forKey: Keys.relayURL)
         } else {
@@ -1070,90 +1145,37 @@ final class VoIPPushController: NSObject {
     }
 
     func syncRegistration(with requestedAPI: AirSIMAPI? = nil) async {
-        guard CloudModePreference.isEnabled() else { return }
-        guard let api = requestedAPI ?? latestRegistrationAPI else { return }
-        if PushRegistrationAttemptPolicy.shouldResetBackoff(
-            previousRoute: latestRegistrationAPI?.route,
-            currentRoute: api.route
-        ) {
-            nextRegistrationAttempt = .distantPast
-            registrationRetryTask?.cancel()
-            registrationRetryTask = nil
+        guard CloudSignalingPreference.isEnabled(), !RelayEgressGate.shared.isBlocked else { return }
+        var routes = registrationAPIs?() ?? []
+        if let requestedAPI, !routes.contains(where: { $0.route == requestedAPI.route }) {
+            routes.append(requestedAPI)
         }
-        latestRegistrationAPI = api
-        let attemptedRoute = api.route
+        for api in routes where !pendingRegistrationAPIs.contains(where: { $0.route == api.route }) {
+            pendingRegistrationAPIs.append(api)
+        }
         if registrationInFlight {
             registrationPending = true
             return
         }
-        guard Date() >= nextRegistrationAttempt,
-              let registration = currentRegistration() else { return }
+        guard let registration = currentRegistration() else { return }
+        let epoch = registrationEpoch
         let fingerprint = [
             registration.token, registration.alertToken, registration.watchVoIPToken,
             registration.watchBundleID, registration.liveActivityPushToStartToken,
             registration.bundleID, registration.environment,
             registration.relayURL, registration.deviceID
         ].joined(separator: "|")
-        var agentRegistered = !PushRegistrationAttemptPolicy.shouldRegisterAgent(
-            fingerprint: fingerprint,
-            route: api.route,
-            lastFingerprint: lastRegisteredFingerprint,
-            lastRoute: lastRegisteredRoute
-        )
-        var relayRegistered = lastRelayRegisteredFingerprint == fingerprint
-        guard !agentRegistered || !relayRegistered else { return }
-
         registrationInFlight = true
         defer {
             registrationInFlight = false
             if registrationPending {
                 registrationPending = false
-                Task { await syncRegistration(with: latestRegistrationAPI) }
+                Task { await syncRegistration() }
             }
         }
-#if DEBUG
-        print(
-            "[AirSIM PushKit] 开始同步 Agent；VoIP=有，通知=\(registration.alertToken.isEmpty ? "无" : "有")，" +
-            "环境=\(registration.environment)，Relay=\(registration.relayURL.isEmpty ? "未配置" : "已配置")"
-        )
-#endif
-        if !agentRegistered, pairingGate.beginAgentWrite() {
-            defer { pairingGate.endAgentWrite() }
-            do {
-                guard case .vowlan = api.route else { throw CallKitBridgeError.noReachableTransport }
-                if try await api.pushStatus().preservesLocalPairing {
-                    // Preserve only this Agent's local choice; global Relay token
-                    // refresh for other paired devices remains independent below.
-                    agentRegistered = true
-                } else {
-                try await api.registerVoIPPush(registration)
-                lastRegisteredFingerprint = fingerprint
-                lastRegisteredRoute = api.route
-                agentRegistered = true
-#if DEBUG
-                print("[AirSIM PushKit] Agent 已接收设备注册")
-                Task {
-                    try? await Task.sleep(for: .seconds(8))
-                    do {
-                        let status = try await api.pushStatus()
-                        print(
-                            "[AirSIM PushKit] Agent 状态；配置=\(status.configured)，" +
-                            "来电=\(status.callPushReady)，短信=\(status.messagePushReady)，" +
-                            "错误=\(status.lastError?.isEmpty == false ? status.lastError! : "无")"
-                        )
-                    } catch {
-                        print("[AirSIM PushKit] 读取 Agent 推送状态失败：\(error.localizedDescription)")
-                    }
-                }
-#endif
-                }
-            } catch {
-#if DEBUG
-                print("[AirSIM PushKit] 向模块注册 token 失败：\(error.localizedDescription)")
-#endif
-            }
-        }
-
+        // Refresh APNs even without a reachable local gateway (e.g. Bluetooth
+        // mode or immediately after a TestFlight token/environment change).
+        var relayRegistered = lastRelayRegisteredFingerprint == fingerprint
         if !relayRegistered, PushRegistrationRetryPolicy.shouldAttemptRelay(
             now: Date(), retryAfter: nextRelayRegistrationAttempt
         ) {
@@ -1162,34 +1184,56 @@ final class VoIPPushController: NSObject {
                 lastRelayRegisteredFingerprint = fingerprint
                 relayRegistered = true
                 nextRelayRegistrationAttempt = .distantPast
-#if DEBUG
-                print("[AirSIM PushKit] Relay 已直接接收设备注册")
-#endif
+                PushDiagnostics.record("Relay 推送注册成功", fields: ["environment": registration.environment])
             } catch {
                 if case CloudAgentStatusError.requestLimitExceeded = error {
                     nextRelayRegistrationAttempt = PushRegistrationRetryPolicy.quotaRetryDate(now: Date())
+                } else {
+                    nextRelayRegistrationAttempt = Date().addingTimeInterval(30)
                 }
-#if DEBUG
-                print("[AirSIM PushKit] 直接同步 Relay 失败：\(error.localizedDescription)")
-#endif
+                PushDiagnostics.record("Relay 推送注册失败", error: error)
             }
         }
-        // Relay 成功但本地 Agent 仍不可达时继续低频重试，确保模块恢复后也持有同一组凭据。
-        let needsRetry = PushRegistrationRetryPolicy.needsRetry(
-            agentRegistered: agentRegistered,
-            relayRegistered: relayRegistered
-        )
-        let routeWasSuperseded = PushRegistrationAttemptPolicy.shouldResetBackoff(
-            previousRoute: attemptedRoute,
-            currentRoute: latestRegistrationAPI?.route
-        )
-        let retryDelay = agentRegistered
-            ? max(30, nextRelayRegistrationAttempt.timeIntervalSinceNow) : 30
-        nextRegistrationAttempt = agentRegistered && relayRegistered || routeWasSuperseded
-            ? .distantPast
-            : Date().addingTimeInterval(retryDelay)
-        if needsRetry, !routeWasSuperseded {
-            scheduleRegistrationRetry(after: retryDelay)
+        var needsAgentRetry = false
+        while !pendingRegistrationAPIs.isEmpty {
+            guard CloudSignalingPreference.isEnabled(), !RelayEgressGate.shared.isBlocked,
+                  epoch == registrationEpoch else { return }
+            let api = pendingRegistrationAPIs.removeFirst()
+            // A route can be revoked while another gateway's request awaits.
+            if let provider = registrationAPIs,
+               !provider().contains(where: { $0.route == api.route }) { continue }
+            guard agentRegistrations.needsRegistration(api.route, fingerprint: fingerprint) else { continue }
+            guard agentRegistrations.shouldAttempt(api.route, fingerprint: fingerprint),
+                  pairingGate.beginAgentWrite() else { needsAgentRetry = true; continue }
+            do {
+                let status = try await api.pushStatus()
+                guard CloudSignalingPreference.isEnabled(), !RelayEgressGate.shared.isBlocked,
+                      epoch == registrationEpoch else {
+                    pairingGate.endAgentWrite()
+                    return
+                }
+                if let provider = registrationAPIs,
+                   !provider().contains(where: { $0.route == api.route }) {
+                    pairingGate.endAgentWrite()
+                    continue
+                }
+                if status.preservesLocalPairing {
+                    PushDiagnostics.record("保留网关纯本地配对，未写入云端凭据")
+                } else {
+                    try await api.registerVoIPPush(registration)
+                    PushDiagnostics.record("网关推送注册成功", fields: ["environment": registration.environment])
+                }
+                agentRegistrations.record(api.route, fingerprint: fingerprint, succeeded: true)
+            } catch {
+                agentRegistrations.record(api.route, fingerprint: fingerprint, succeeded: false)
+                needsAgentRetry = true
+                PushDiagnostics.record("网关推送注册失败", error: error)
+            }
+            pairingGate.endAgentWrite()
+        }
+        if let provider = registrationAPIs { agentRegistrations.retain(provider().map(\.route)) }
+        if needsAgentRetry || !relayRegistered {
+            scheduleRegistrationRetry(after: needsAgentRetry ? 30 : max(30, nextRelayRegistrationAttempt.timeIntervalSinceNow))
         } else {
             registrationRetryTask?.cancel()
             registrationRetryTask = nil
@@ -1218,22 +1262,28 @@ final class VoIPPushController: NSObject {
     ) async -> CloudSelfTestReport {
         var report = CloudSelfTestReport.initial
 
-        report.update(.configuration, state: .running, detail: "云端开关 · 设备身份 · PushKit/通知 Token · Relay URL")
+        guard !RelayEgressGate.shared.isBlocked,
+              !UserDefaults.standard.bool(forKey: RelayEgressGate.persistenceKey) else {
+            report.fail(.configuration, detail: "纯本地模式已开启，禁止云端自检")
+            onUpdate(report)
+            return report
+        }
+
+        report.update(.configuration, state: .running, detail: "设备身份 · PushKit/通知 Token · Relay URL")
         onUpdate(report)
         let readiness = registrationReadiness()
         var missing: [String] = []
-        if !CloudModePreference.isEnabled() { missing.append("云端模式未开启") }
         if !readiness.relayURLReady { missing.append("Relay HTTPS 地址无效") }
         if !readiness.deviceIdentityReady { missing.append("设备身份未生成") }
         if !readiness.voIPTokenReady { missing.append("PushKit token 未就绪") }
         if !readiness.alertTokenReady { missing.append("通知 token 未就绪") }
-        guard missing.isEmpty, let registration = currentRegistration() else {
+        guard missing.isEmpty, let registration = currentRegistration(allowLocalMode: true) else {
             report.fail(.configuration, detail: missing.isEmpty ? "设备注册信息不完整" : missing.joined(separator: "；"))
             onUpdate(report)
             return report
         }
         var configDetail = [
-            "云端=开启",
+            "检查方式=手动自检（不改变连接模式）",
             "设备=\(readiness.deviceIDHint ?? "已生成")",
             "APNs=\(readiness.environment)",
             "PushKit=\(readiness.voIPTokenReady ? "就绪" : "缺失")",
@@ -1260,8 +1310,12 @@ final class VoIPPushController: NSObject {
         report.update(.deviceRegistration, state: .running, detail: "验证设备密钥与注册接口")
         onUpdate(report)
         do {
+            // Self-test must also repair reachable paired gateways after an APNs
+            // environment change; never enable a local-only pairing implicitly.
+            await syncRegistration()
             try await registerDirectlyWithRelay(registration)
-            report.update(.deviceRegistration, state: .passed, detail: "Relay 已接受设备注册")
+            report.update(.deviceRegistration, state: .passed,
+                detail: "Relay 已接受设备注册；已尝试同步可达网关。网关失败请查看 Verbose 的推送注册日志；此项不代表来电已送达。")
             onUpdate(report)
         } catch {
             report.fail(.deviceRegistration, detail: "注册被拒绝：\(error.localizedDescription)")
@@ -1273,9 +1327,17 @@ final class VoIPPushController: NSObject {
         onUpdate(report)
         let status: CloudAgentStatus
         do {
-            status = try await fetchCloudAgentStatusForDiagnostics()
+            do {
+                status = try await fetchCloudAgentStatusForDiagnostics(allowLocalMode: true)
+            } catch {
+                // One cold status-registry timeout must not turn this into a
+                // permanent cloud-offline verdict. Retry once before reporting.
+                try await Task.sleep(for: .milliseconds(500))
+                status = try await fetchCloudAgentStatusForDiagnostics(allowLocalMode: true)
+            }
         } catch {
-            report.fail(.agentDirectory, detail: "Relay 返回 Agent 记录失败：\(error.localizedDescription)")
+            report.fail(.agentDirectory,
+                detail: "Relay 状态查询超时：\(error.localizedDescription)\n云端拨号仍会按绑定/缓存的 Agent 尝试，以 enqueue 结果为准。")
             onUpdate(report)
             return report
         }
@@ -1296,7 +1358,7 @@ final class VoIPPushController: NSObject {
             detail: "已登记 \(status.agents.count) 台\n\(directory)\nactive=\(status.activeAgentID ?? "none")")
         onUpdate(report)
 
-        report.update(.agentHeartbeat, state: .running, detail: "检查最近 90 秒心跳与版本")
+        report.update(.agentHeartbeat, state: .running, detail: "检查最近 150 秒心跳与版本")
         onUpdate(report)
         guard status.cloudOnline else {
             let known = status.agents.map {
@@ -1336,13 +1398,13 @@ final class VoIPPushController: NSObject {
     }
 
     private func scheduleRegistrationRetry(after delay: TimeInterval) {
-        guard CloudModePreference.isEnabled() else { return }
+        guard CloudSignalingPreference.isEnabled() else { return }
         registrationRetryTask?.cancel()
         registrationRetryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self else { return }
             registrationRetryTask = nil
-            await syncRegistration(with: latestRegistrationAPI)
+            await syncRegistration()
         }
     }
 
@@ -1356,8 +1418,12 @@ final class VoIPPushController: NSObject {
     }
 
     /// 检查单即使在公网 PCM 关闭时也需要读取心跳，避免用户无法判断开启条件。
-    func fetchCloudAgentStatusForDiagnostics() async throws -> CloudAgentStatus {
-        guard let registration = currentRegistration() else {
+    func fetchCloudAgentStatusForDiagnostics(allowLocalMode: Bool = false) async throws -> CloudAgentStatus {
+        guard !RelayEgressGate.shared.isBlocked,
+              !UserDefaults.standard.bool(forKey: RelayEgressGate.persistenceKey) else {
+            throw RelayEgressError.disabled
+        }
+        guard let registration = currentRegistration(allowLocalMode: allowLocalMode) else {
             throw CloudAgentStatusError.unavailable
         }
         guard let url = RelayEndpoint.url(
@@ -1385,10 +1451,7 @@ final class VoIPPushController: NSObject {
             deviceSecret: registration.deviceSecret
         ))
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 5
-        configuration.timeoutIntervalForResource = 6
-        let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+        let (data, response) = try await RelayEgressGate.shared.send(request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw CloudAgentStatusError.invalidResponse
         }
@@ -1398,10 +1461,11 @@ final class VoIPPushController: NSObject {
     func startCloudOutgoingCall(
         number: String,
         target: CloudCommandTarget,
+        operationID: UUID = UUID(),
         mediaTransport: CloudMediaTransport? = nil,
         timeout: TimeInterval = 6
     ) async throws -> IncomingVoIPCall {
-        let commandID = UUID()
+        let commandID = operationID
         guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
             target: target, registration: registration,
@@ -1546,7 +1610,7 @@ final class VoIPPushController: NSObject {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
         configuration.timeoutIntervalForResource = 12
-        let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+        let (data, response) = try await RelayEgressGate.shared.send(request)
         guard let http = response as? HTTPURLResponse else { throw CloudCommandError.invalidResponse }
         guard (200..<300).contains(http.statusCode) else {
             let message = (try? JSONDecoder().decode(RelayErrorResponse.self, from: data).error)
@@ -1584,15 +1648,20 @@ final class VoIPPushController: NSObject {
         throw lastError ?? CloudAgentStatusError.invalidResponse
     }
 
+    private static let selfTestSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 12
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration)
+    }()
+
     private func fetchRelayHealthVersionOnce(url: URL) async throws -> String {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 6
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 6
-        configuration.timeoutIntervalForResource = 8
-        let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+        let (data, response) = try await RelayEgressGate.shared.send(request)
         guard let http = response as? HTTPURLResponse else {
             throw CloudAgentStatusError.invalidResponse
         }
@@ -1620,10 +1689,7 @@ final class VoIPPushController: NSObject {
         var relayRegistration = registration
         relayRegistration.notificationForwarding = nil
         request.httpBody = try JSONEncoder().encode(relayRegistration)
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 8
-        configuration.timeoutIntervalForResource = 10
-        let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+        let (data, response) = try await RelayEgressGate.shared.send(request)
 #if DEBUG
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             let detail = String(data: data.prefix(1_024), encoding: .utf8) ?? "<非文本响应>"
@@ -1648,10 +1714,9 @@ final class VoIPPushController: NSObject {
     }
 
     private func resetRegistrationBackoff() {
-        lastRegisteredFingerprint = nil
-        lastRegisteredRoute = nil
+        registrationEpoch &+= 1
+        agentRegistrations = PushRegistrationLedger()
         lastRelayRegisteredFingerprint = nil
-        nextRegistrationAttempt = .distantPast
         nextRelayRegistrationAttempt = .distantPast
     }
 
@@ -1679,7 +1744,7 @@ final class VoIPPushController: NSObject {
         }
     }
 
-    func pairingRegistration(localOnly: Bool = !CloudModePreference.isEnabled()) -> AgentPushRegistration? {
+    func pairingRegistration(localOnly: Bool = !CloudSignalingPreference.isEnabled()) -> AgentPushRegistration? {
         // A pairing transaction gets a new in-memory secret. It is committed
         // under its authenticated agentID only after the gateway proves identity.
         guard let secret = try? VoWLANCredentialStore.generate().encodedSecret else { return nil }
@@ -1691,7 +1756,7 @@ final class VoIPPushController: NSObject {
     }
 
     private func currentRegistration(allowLocalMode: Bool = false) -> AgentPushRegistration? {
-        guard allowLocalMode || CloudModePreference.isEnabled() else { return nil }
+        guard allowLocalMode || CloudSignalingPreference.isEnabled() else { return nil }
         guard let token = UserDefaults.standard.string(forKey: Keys.token), !token.isEmpty else {
 #if DEBUG
             print("[AirSIM PushKit] 暂无 VoIP token，跳过同步")
@@ -1807,9 +1872,14 @@ extension VoIPPushController: PKPushRegistryDelegate {
         }
         let userInfo = payload.dictionaryPayload
         Task { @MainActor in
+            PushDiagnostics.record("收到 PushKit 来电", fields: [
+                "app_state": String(UIApplication.shared.applicationState.rawValue)])
             do {
                 let call = try IncomingVoIPCall(userInfo: userInfo)
-                CallKitController.shared.reportRequiredVoIPPush(call) { _ in completion() }
+                CallKitController.shared.reportRequiredVoIPPush(call) { error in
+                    PushDiagnostics.record("PushKit 系统来电上报完成", error: error)
+                    completion()
+                }
                 guard CallKitController.shared.currentSystemCallUUID == call.uuid else { return }
                 WatchCallCoordinator.shared.publishIncoming(call)
                 if call.callerName == nil, let number = call.number {
@@ -1823,6 +1893,7 @@ extension VoIPPushController: PKPushRegistryDelegate {
                     }
                 }
             } catch {
+                PushDiagnostics.record("PushKit 来电解析失败", error: error)
 #if DEBUG
                 print("[AirSIM PushKit] 丢弃无效来电推送：\(error.localizedDescription)")
 #endif

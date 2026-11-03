@@ -1,5 +1,24 @@
 import Foundation
 
+enum CloudAgentTargetStore {
+    private static let key = "airsim.cloud.target-agent-id"
+
+    static func last(defaults: UserDefaults = .standard) -> String? {
+        guard let value = defaults.string(forKey: key),
+              CloudAgentRouting.validID(value) else { return nil }
+        return value
+    }
+
+    static func remember(_ agentID: String, defaults: UserDefaults = .standard) {
+        guard CloudAgentRouting.validID(agentID) else { return }
+        defaults.set(agentID, forKey: key)
+    }
+
+    static func forget(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key)
+    }
+}
+
 struct CloudCommandTarget: Equatable, Sendable {
     let agentID: String
     let routingVersion: Int
@@ -26,9 +45,10 @@ enum CloudAgentRouting {
         !id.isEmpty && id.utf8.count <= 128 && id == id.trimmingCharacters(in: .whitespacesAndNewlines)
             && !id.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
     }
-    static func select(boundAgentID: String?, agents: [CloudAndroidAgent], relayRoutingVersion: Int?) throws -> CloudCommandTarget {
+    static func select(boundAgentID: String?, agents: [CloudAndroidAgent], relayRoutingVersion: Int?,
+                       requireOnline: Bool = true) throws -> CloudCommandTarget {
         guard relayRoutingVersion == 1 else { throw CloudAgentRoutingError.updateRequired }
-        let candidates = agents.filter { $0.cloudOnline && validID($0.agentID) }
+        let candidates = agents.filter { validID($0.agentID) && (!requireOnline || $0.cloudOnline) }
         let agent: CloudAndroidAgent
         if let boundAgentID {
             guard let bound = candidates.first(where: { $0.agentID == boundAgentID }) else { throw CloudAgentRoutingError.unavailable }

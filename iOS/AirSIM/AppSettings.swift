@@ -109,7 +109,20 @@ enum L10n {
         "下载新 Profile": "Download New Profile", "通讯录检测": "Phonebook Check", "AT 指令": "AT Command",
         "发送 AT": "Send AT", "外观": "Appearance", "显示模式": "Display Mode", "语言": "Language", "跟随系统": "Follow System",
         "浅色": "Light", "深色": "Dark", "模块代理": "Module Agent", "在线": "Online", "离线": "Offline",
+        "未查看": "Unseen", "标为已读": "Mark as Read", "全部标为已读": "Mark All as Read",
+        "%d 条未读短信": "%d unread messages",
         "未接": "Missed", "呼入": "Incoming", "呼出": "Outgoing", "处理中": "Working", "保存": "Save",
-        "删除": "Delete", "切换": "Switch", "重命名": "Rename", "错误": "Error"
+        "删除": "Delete", "切换": "Switch", "重命名": "Rename", "错误": "Error",
+        "清空": "Clear", "清空号码": "Clear number",
+        "复制": "Copy", "选择文本": "Select", "更多…": "More…",
+        "选择短信": "Select Message", "取消选择": "Cancel Selection",
+        "删除所选短信": "Delete Selected Messages", "共享所选短信": "Share Selected Messages",
+        "已选 %d 条": "%d Selected", "删除所选 %d 条短信？": "Delete %d Messages?",
+        "复制最新短信": "Copy Latest Message", "复制整段会话": "Copy Conversation",
+        "复制短信": "Copy Messages",
+        "短信操作": "Message Actions", "选择会话": "Select Conversations",
+        "完成选择": "Done", "删除所选会话": "Delete Selected Conversations",
+        "1 条短信": "1 Message", "%d 条短信": "%d Messages",
+        "仅删除此 iPhone 上 AirSIM 内的记录，不删除安卓系统短信。": "Only deletes records in AirSIM on this iPhone, not SMS on Android."
     ]
 }

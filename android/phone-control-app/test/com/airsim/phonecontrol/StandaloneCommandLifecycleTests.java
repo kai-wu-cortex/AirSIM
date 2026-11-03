@@ -11,6 +11,15 @@ public final class StandaloneCommandLifecycleTests {
     static void check(boolean value,String reason) { if (!value) throw new AssertionError(reason); }
     static void await(CountDownLatch latch) throws Exception { check(latch.await(2,TimeUnit.SECONDS),"latch timeout"); }
     public static void main(String[] args) throws Exception {
+        var deniedSocket = new BlockingSocket("none");
+        try {
+            StandaloneWebSocket.connect(URI.create("wss://127.0.0.1/connect"), "test-only",
+                    value -> true, () -> deniedSocket);
+            throw new AssertionError("pure-local admitted a socket");
+        } catch (IOException expected) {
+            check(deniedSocket.connectTimeout == 0, "pure-local must reject before TCP/DNS");
+        }
+        RelayEgressGate.shared.enableAfterRestore();
         var config=new AtomicReference<String>("A");
         var retry=new RelayCommandRetryState();
         var owner=new RelayCommandConfiguration<String>(config::get,value->value,retry);

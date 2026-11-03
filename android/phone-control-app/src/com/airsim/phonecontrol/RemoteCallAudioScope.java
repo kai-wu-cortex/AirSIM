@@ -10,7 +10,14 @@ final class RemoteCallAudioScope {
         if (owner == null || confirmedCall == null || confirmedCall.isEmpty()) return;
         owners.putIfAbsent(owner, confirmedCall);
     }
-    synchronized void release(Object owner) { owners.remove(owner); }
+    synchronized String release(Object owner) { return owners.remove(owner); }
+    synchronized boolean ownsCall(String callID) {
+        if (callID == null) return false;
+        for (String confirmedCall : owners.values()) {
+            if (confirmedCall.equals(callID)) return true;
+        }
+        return false;
+    }
     synchronized boolean owns(List<String> liveCalls) {
         if (liveCalls.size() != 1) return false;
         // Owner keys use identity, but call IDs cross JSON/BLE boundaries and must

@@ -28,6 +28,13 @@ assert_not_contains() {
   fi
 }
 
+assert_contains "$ROOT/src/com/airsim/phonecontrol/PairingServer.java" \
+  'pairing_direct_gateway_unavailable state=' \
+  'manual pairing must diagnose missing live control/PCM listeners'
+assert_contains "$ROOT/src/com/airsim/phonecontrol/PairingServer.java" \
+  'listener.onFailed("密钥已保存，但直连网关未就绪，尚未完成手动配对。"' \
+  'missing direct gateway must not report complete pairing success on Android'
+
 assert_contains "$ROOT/AndroidManifest.xml" \
   'android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING' \
   'boot-safe watchdog permission is missing'
@@ -85,6 +92,12 @@ assert_contains "$ROOT/src/com/airsim/phonecontrol/MainActivity.java" \
 rm -rf "$OUT"
 mkdir -p "$OUT"
 "$JAVAC" --release 17 -d "$OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/FeedbackUploadPolicy.java \
+  "$ROOT"/test/com/airsim/phonecontrol/FeedbackUploadPolicyTests.java
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.FeedbackUploadPolicyTests
+assert_contains "$ROOT/src/com/airsim/phonecontrol/FeedbackUploader.java" \
+  '!FeedbackUploadPolicy.allows(trigger)' 'feedback upload must gate collection and network access'
+"$JAVAC" --release 17 -d "$OUT" \
   "$ROOT"/src/com/airsim/phonecontrol/AppUpdatePolicy.java \
   "$ROOT"/src/com/airsim/phonecontrol/AppUpdateSession.java \
   "$ROOT"/test/com/airsim/phonecontrol/AppUpdatePolicyTests.java \
@@ -97,6 +110,7 @@ mkdir -p "$OUT"
   "$ROOT"/src/com/airsim/phonecontrol/RelayCommandRetryState.java \
   "$ROOT"/src/com/airsim/phonecontrol/RelayCommandConfiguration.java \
   "$ROOT"/src/com/airsim/phonecontrol/StandaloneWebSocket.java \
+  "$ROOT"/src/com/airsim/phonecontrol/RelayEgressGate.java \
   "$ROOT"/test/android/util/Base64.java \
   "$ROOT"/test/com/airsim/phonecontrol/StandaloneCommandLifecycleTests.java \
   "$ROOT"/src/com/airsim/phonecontrol/WebSocketPeerClose.java \
@@ -106,12 +120,33 @@ mkdir -p "$OUT"
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.RelayCommandRetryTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.WebSocketPeerCloseTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.StandaloneCommandLifecycleTests
+"$JAVAC" --release 17 -d "$OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/RelayHTTPException.java \
+  "$ROOT"/src/com/airsim/phonecontrol/RelayRegistrationRecovery.java \
+  "$ROOT"/test/com/airsim/phonecontrol/RelayRegistrationRecoveryTests.java
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.RelayRegistrationRecoveryTests
+"$JAVAC" --release 17 -d "$OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/RelayHTTPException.java \
+  "$ROOT"/src/com/airsim/phonecontrol/CloudCallRetryPolicy.java \
+  "$ROOT"/test/com/airsim/phonecontrol/CloudCallRetryPolicyTests.java
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.CloudCallRetryPolicyTests
+"$JAVAC" --release 17 -d "$OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/RelayHTTPException.java \
+  "$ROOT"/src/com/airsim/phonecontrol/RelayCommandRetryState.java \
+  "$ROOT"/src/com/airsim/phonecontrol/WebSocketPeerClose.java \
+  "$ROOT"/src/com/airsim/phonecontrol/CloudSMSUploader.java \
+  "$ROOT"/test/com/airsim/phonecontrol/CloudSMSUploaderTests.java
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.CloudSMSUploaderTests
 "$JAVAC" --release 17 -cp "$CRYPTO_JAR" -d "$OUT" \
   "$ROOT"/test/android/Manifest.java \
   "$ROOT"/test/android/provider/Settings.java \
   "$ROOT"/test/android/content/SharedPreferences.java \
   "$ROOT"/test/android/content/ComponentName.java \
   "$ROOT"/test/android/content/Intent.java \
+  "$ROOT"/test/android/content/IntentFilter.java \
+  "$ROOT"/test/android/os/BatteryManager.java \
+  "$ROOT"/src/com/airsim/phonecontrol/AndroidBatteryStatus.java \
+  "$ROOT"/test/com/airsim/phonecontrol/AndroidBatteryStatusTests.java \
   "$ROOT"/test/android/content/pm/PackageManager.java \
   "$ROOT"/test/android/content/pm/PackageInfo.java \
   "$ROOT"/test/android/os/Bundle.java \
@@ -134,6 +169,12 @@ mkdir -p "$OUT"
   "$ROOT"/test/com/airsim/phonecontrol/BridgeLog.java \
 	"$ROOT"/test/com/airsim/phonecontrol/RuntimeMode.java \
 	"$ROOT"/test/com/airsim/phonecontrol/StandaloneAgentGateway.java \
+  "$ROOT"/test/org/json/JSONObject.java \
+  "$ROOT"/test/com/airsim/phonecontrol/PureLocalModeCoordinator.java \
+  "$ROOT"/test/com/airsim/phonecontrol/PureLocalModeProof.java \
+  "$ROOT"/test/com/airsim/phonecontrol/PureLocalModeWire.java \
+  "$ROOT"/src/com/airsim/phonecontrol/SIMSlotObserver.java \
+  "$ROOT"/test/com/airsim/phonecontrol/SIMSlotObserverTests.java \
   "$ROOT"/src/com/airsim/phonecontrol/AgentClient.java \
   "$ROOT"/src/com/airsim/phonecontrol/InstallerClient.java \
   "$ROOT"/src/com/airsim/phonecontrol/ReleaseAssetSelector.java \
@@ -187,6 +228,7 @@ mkdir -p "$OUT"
 	"$ROOT"/src/com/airsim/phonecontrol/VoWLANNetworkPolicy.java \
     "$ROOT"/src/com/airsim/phonecontrol/DirectGatewayRoutes.java \
     "$ROOT"/src/com/airsim/phonecontrol/DirectCallOwnership.java \
+    "$ROOT"/test/com/airsim/phonecontrol/RemoteCallHangupGuard.java \
     "$ROOT"/src/com/airsim/phonecontrol/RemoteCallAudioScope.java \
 	"$ROOT"/src/com/airsim/phonecontrol/StandaloneLongPoll.java \
 	"$ROOT"/src/com/airsim/phonecontrol/MainScreenPresentation.java \
@@ -219,6 +261,7 @@ mkdir -p "$OUT"
   "$ROOT"/test/com/airsim/phonecontrol/AndroidAgentIdentityTests.java
 sh "$ROOT/verify-io-api.sh" "$OUT"
 "$JAVA" -cp "$OUT:$CRYPTO_JAR" com.airsim.phonecontrol.CoreTests
+"$JAVA" -cp "$OUT:$CRYPTO_JAR" com.airsim.phonecontrol.SIMSlotObserverTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.PairingPeerPolicyTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.PrivateNetworkPolicyTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.HealthIdentityProofTests
@@ -229,6 +272,7 @@ sh "$ROOT/test-voble-gatt.sh"
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.CallRepositoryTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.DefaultCallAccountTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.AndroidAgentIdentityTests
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.AndroidBatteryStatusTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.ShizukuStartupPolicyTests
 
 # Keep the real diagnostics class ahead of the unrelated suite's BridgeLog test double.
@@ -275,7 +319,8 @@ mkdir -p "$SMS_OUT"
 "$JAVAC" --release 17 -cp "$ANDROID_JAR:$DIAGNOSTICS_OUT:$OUT" -d "$SMS_OUT" \
   "$ROOT"/src/com/airsim/phonecontrol/SMSResultCode.java \
   "$ROOT"/src/com/airsim/phonecontrol/SmsSendConfirmationGate.java \
-  "$ROOT"/src/com/airsim/phonecontrol/SMSCommandExecutor.java
+  "$ROOT"/src/com/airsim/phonecontrol/SMSCommandExecutor.java \
+  "$ROOT"/test/com/airsim/phonecontrol/FeedbackUploader.java
 "$JAVAC" --release 17 -cp "$SMS_OUT:$OUT:$ANDROID_JAR" -d "$SMS_OUT" \
   "$ROOT"/test/compat/android/telephony/SmsManager.java \
   "$ROOT"/test/com/airsim/phonecontrol/SMSCompatibilityTests.java
@@ -301,3 +346,5 @@ mkdir -p "$PCM_OUT"
 "$JAVA" -cp "$PCM_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.DirectPCMIntegrationTests
 
 sh "$ROOT/test-audio-policy.sh"
+
+sh "$ROOT/test-privileged-sms.sh"

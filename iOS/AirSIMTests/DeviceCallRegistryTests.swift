@@ -52,6 +52,33 @@ final class DeviceCallRegistryTests: XCTestCase {
         XCTAssertFalse(registry.activate(a))
     }
 
+    func testTerminalMappingKeepsLaneWatermarksAndDoesNotReopenOrEndTwice() throws {
+        var registry = DeviceCallRegistry()
+        _ = registry.apply(.init(agentID: "A", callID: "telecom-A", state: .ringing,
+            transport: .vowlan, transportEpoch: 9, backendCallID: "backend-A"))
+        _ = registry.apply(.init(agentID: "A", callID: "telecom-A", state: .ringing,
+            transport: .bluetooth, transportEpoch: 2, backendGeneration: 11))
+        let key = try XCTUnwrap(registry.key(agentID: "A", callID: "telecom-A"))
+        let first = registry.apply(.init(agentID: "A", callID: "telecom-A", state: .ended,
+            transport: .bluetooth, transportEpoch: 2, backendGeneration: 11))
+        XCTAssertEqual(first, [.dismiss(key), .ended(key)])
+        _ = registry.apply(.init(agentID: "A", callID: "telecom-A", state: .ended,
+            transport: .vowlan, transportEpoch: 8, backendCallID: "stale-backend"))
+        XCTAssertNil(registry.latestEvent(for: key)?.backendCallID)
+        let mapped = DeviceCallEvent(agentID: "A", callID: "telecom-A", state: .ended,
+            transport: .vowlan, transportEpoch: 9, backendCallID: "backend-A")
+        XCTAssertEqual(registry.apply(mapped), [], "The second terminal must not repeat lifecycle effects")
+        XCTAssertEqual(registry.latestEvent(for: key)?.backendCallID, "backend-A")
+        _ = registry.apply(.init(agentID: "A", callID: "telecom-A", state: .ended,
+            transport: .bluetooth, transportEpoch: 2, backendGeneration: 10))
+        XCTAssertEqual(registry.latestEvent(for: key)?.backendCallID, "backend-A")
+        _ = registry.apply(.init(agentID: "A", callID: "telecom-A", state: .active,
+            transport: .bluetooth, transportEpoch: 99, backendGeneration: 99))
+        XCTAssertEqual(registry.latestEvent(for: key)?.state, .ended)
+        XCTAssertFalse(registry.activate(key))
+        XCTAssertTrue(registry.ringing.isEmpty)
+    }
+
     func testProvisionalAliasCannotAdoptAnotherAgentsCall() throws {
         var registry = DeviceCallRegistry()
         _ = registry.apply(event("A", "temporary", .connecting, direction: "outgoing"))

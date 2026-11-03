@@ -11,6 +11,7 @@ enum WatchCallPhase: String, Codable, Sendable {
 struct WatchCallPayload: Equatable, Sendable {
     let callID: String
     let callUUID: UUID?
+    let aliases: [String]
     let phase: WatchCallPhase
     let number: String?
     let callerName: String?
@@ -25,6 +26,7 @@ struct WatchCallPayload: Equatable, Sendable {
             "phase": phase.rawValue,
             "updated_at": updatedAt.timeIntervalSince1970,
         ]
+        if !aliases.isEmpty { value["call_aliases"] = aliases }
         if let number, !number.isEmpty { value["number"] = number }
         if let callerName, !callerName.isEmpty { value["caller_name"] = callerName }
         if let transport, !transport.isEmpty { value["transport"] = transport }
@@ -34,6 +36,7 @@ struct WatchCallPayload: Equatable, Sendable {
     init(
         callID: String,
         callUUID: UUID?,
+        aliases: [String] = [],
         phase: WatchCallPhase,
         number: String?,
         callerName: String?,
@@ -42,11 +45,33 @@ struct WatchCallPayload: Equatable, Sendable {
     ) {
         self.callID = callID
         self.callUUID = callUUID
+        self.aliases = aliases.filter { !$0.isEmpty && $0 != callID }
         self.phase = phase
         self.number = number
         self.callerName = callerName
         self.transport = transport
         self.updatedAt = updatedAt
+    }
+
+    /// Identity and presentation fields, excluding the timestamp used only for
+    /// stale/ordering checks. Re-publishing the same state must not create a new
+    /// WatchConnectivity transfer on every update.
+    func isSamePresentation(as other: WatchCallPayload) -> Bool {
+        callID == other.callID
+            && callUUID == other.callUUID
+            && aliases == other.aliases
+            && phase == other.phase
+            && number == other.number
+            && callerName == other.callerName
+            && transport == other.transport
+    }
+
+    func matches(callID: String?, callUUID: UUID?) -> Bool {
+        let idMatches = callID.map { $0 == self.callID || aliases.contains($0) } ?? false
+        if let expectedUUID = self.callUUID, let candidateUUID = callUUID {
+            return expectedUUID == candidateUUID
+        }
+        return idMatches || callUUID != nil && callUUID == self.callUUID
     }
 
     init?(dictionary: [String: Any]) {
@@ -55,16 +80,40 @@ struct WatchCallPayload: Equatable, Sendable {
               let phase = WatchCallPhase(rawValue: phaseValue),
               let updatedAt = dictionary["updated_at"] as? TimeInterval else { return nil }
         let callID = dictionary["call_id"] as? String ?? ""
+        let aliases = dictionary["call_aliases"] as? [String] ?? []
         let uuidValue = dictionary["call_uuid"] as? String
         self.init(
             callID: callID,
             callUUID: uuidValue.flatMap(UUID.init(uuidString:)),
+            aliases: aliases,
             phase: phase,
             number: dictionary["number"] as? String,
             callerName: dictionary["caller_name"] as? String,
             transport: dictionary["transport"] as? String,
             updatedAt: Date(timeIntervalSince1970: updatedAt)
         )
+    }
+}
+enum WatchCallMirrorPolicy {
+    static func identityKeys(for payload: WatchCallPayload) -> Set<String> {
+        var keys = Set(payload.aliases.filter { !$0.isEmpty })
+        if !payload.callID.isEmpty { keys.insert(payload.callID) }
+        if let callUUID = payload.callUUID {
+            keys.insert("uuid:\(callUUID.uuidString.lowercased())")
+        }
+        return keys
+    }
+
+    static func isTombstoned(
+        _ payload: WatchCallPayload, endedCallIDs: Set<String>, endedCallUUIDs: Set<UUID>
+    ) -> Bool {
+        !endedCallIDs.isDisjoint(with: Set([payload.callID] + payload.aliases))
+            || payload.callUUID.map(endedCallUUIDs.contains) == true
+    }
+
+    static func isNewer(_ payload: WatchCallPayload, than timestamp: Date?) -> Bool {
+        guard let timestamp else { return true }
+        return payload.updatedAt >= timestamp
     }
 }
 
@@ -90,20 +139,43 @@ enum WatchVoIPPayloadError: LocalizedError {
     }
 }
 
+/// ASCII DNS names only; TLS always uses system certificate and hostname validation.
+/// Literal IPs, URLs, paths and numeric host aliases are deliberately excluded.
+enum RemoteDirectHost {
+    static func isValid(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard host.count <= 253, labels.count > 1,
+              let first = labels.last?.first, first.isASCII && first.isLetter else { return false }
+        return labels.allSatisfy { label in
+            !label.isEmpty && label.count <= 63 && label.first != "-" && label.last != "-"
+                && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
+    }
+}
+
 struct WatchLocalPCMEndpoint: Equatable, Sendable {
     let host: String
     let port: UInt16
     let secret: Data
+    let usesTLS: Bool
 
     init?(dictionary: [String: Any]) {
         guard let host = dictionary["pcm_host"] as? String,
               let rawPort = dictionary["pcm_port"] as? Int,
-              (1024...65535).contains(rawPort),
+              (1...65535).contains(rawPort),
               let encoded = dictionary["pcm_secret"] as? String else { return nil }
-        let octets = host.split(separator: ".").compactMap { UInt8($0) }
-        guard octets.count == 4,
-              octets[0] == 10 || (octets[0] == 172 && (16...31).contains(octets[1]))
-                || (octets[0] == 192 && octets[1] == 168) else { return nil }
+        if let flag = dictionary["pcm_tls"], !(flag is Bool) { return nil }
+        let usesTLS = dictionary["pcm_tls"] as? Bool ?? false
+        if usesTLS {
+            guard RemoteDirectHost.isValid(host) else { return nil }
+        } else {
+            let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+            let octets = parts.compactMap { UInt8($0) }
+            guard rawPort >= 1024, octets.count == 4, parts.count == 4,
+                  parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }),
+                  octets[0] == 10 || (octets[0] == 172 && (16...31).contains(octets[1]))
+                    || (octets[0] == 192 && octets[1] == 168) else { return nil }
+        }
         let base64 = encoded.replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
         let padded = base64 + String(repeating: "=", count: (4 - base64.count % 4) % 4)
@@ -111,6 +183,7 @@ struct WatchLocalPCMEndpoint: Equatable, Sendable {
         self.host = host
         port = UInt16(rawPort)
         self.secret = secret
+        self.usesTLS = usesTLS
     }
 }
 

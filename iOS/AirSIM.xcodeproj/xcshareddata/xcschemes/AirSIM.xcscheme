@@ -10,6 +10,9 @@
    <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
       <Testables>
          <TestableReference skipped="NO" parallelizable="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="EE2000000000000000000001" BuildableName="AirSIMUITests.xctest" BlueprintName="AirSIMUITests" ReferencedContainer="container:AirSIM.xcodeproj"/>
+         </TestableReference>
+         <TestableReference skipped="NO" parallelizable="NO">
             <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E30000000000000000000001" BuildableName="AirSIMTests.xctest" BlueprintName="AirSIMTests" ReferencedContainer="container:AirSIM.xcodeproj"/>
          </TestableReference>
       </Testables>

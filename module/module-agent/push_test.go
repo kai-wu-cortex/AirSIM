@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -447,6 +448,64 @@ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
 	}
 	if len(received) != 1 || received[0].DeliveryID != message.DeliveryID || received[0].Content != message.Content {
 		t.Fatalf("短信中继载荷错误: %#v", received)
+	}
+}
+
+func TestManualHeartbeatRequiresEnabledRelayAndPropagatesFailure(t *testing.T) {
+	manager := newPushManager(filepath.Join(t.TempDir(), "push.json"))
+	snapshot := agentHeartbeatSnapshot{CellularState: "registered"}
+	if err := manager.sendHeartbeatRequired(snapshot, true); err == nil {
+		t.Fatal("unconfigured heartbeat must not report success")
+	}
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/v1/events/heartbeat" {
+			t.Errorf("unexpected side effect: %s", r.URL.Path)
+		}
+		if requests == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}))
+	defer server.Close()
+	manager.client = server.Client()
+	if err := manager.store(testPushRegistration(server.URL)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.sendHeartbeatRequired(snapshot, true); err == nil {
+		t.Fatal("Relay failure must reach caller")
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d", requests)
+	}
+	if err := manager.sendHeartbeatRequired(snapshot, true); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("successful heartbeat requests=%d", requests)
+	}
+	if err := manager.relayGate.disableAndDrain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.sendHeartbeatRequired(snapshot, true); err == nil {
+		t.Fatal("pure local mode must reject heartbeat")
+	}
+	if requests != 2 {
+		t.Fatal("pure local mode emitted heartbeat")
+	}
+	if err := manager.relayGate.enable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.setCloudEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.sendHeartbeatRequired(snapshot, true); err == nil {
+		t.Fatal("disabled cloud must not report success")
+	}
+	if requests != 2 {
+		t.Fatal("disabled cloud emitted heartbeat")
 	}
 }
 

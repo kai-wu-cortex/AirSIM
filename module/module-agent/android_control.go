@@ -70,6 +70,7 @@ type androidControl struct {
 	pending    map[string]*androidPendingCommand
 	seenEvents map[string]time.Time
 	lastSeen   time.Time
+	battery    *androidBatteryReading
 }
 
 func newAndroidControl(token string) *androidControl {
@@ -314,7 +315,9 @@ func (a *agent) androidPairRegister(response http.ResponseWriter, request *http.
 		"device_id_hint": hint,
 	})
 	if a.pairRegistrationSync != nil {
-		go a.pairRegistrationSync()
+		// The scheduler admits the job before spawning it, so a queued callback
+		// cannot become a fresh cloud operation after a pure-local enter/exit.
+		a.pairRegistrationSync()
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
 		"configured": true, "device_id_hint": hint,
@@ -346,6 +349,7 @@ func (a *agent) androidCommandNext(response http.ResponseWriter, request *http.R
 	if !requireMethod(response, request, http.MethodGet) || !a.requireAndroidControl(response, request) {
 		return
 	}
+	a.android.updateBattery(request.Header.Get("X-AirSIM-Android-Battery"), time.Now())
 	wait := 25
 	if raw := request.URL.Query().Get("wait"); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 && parsed <= 30 {

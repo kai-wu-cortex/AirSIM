@@ -11,6 +11,10 @@ workers_dev = true
 
 [observability]
 enabled = true
+head_sampling_rate = 0.1
+
+[triggers]
+crons = ["17 4 * * *"]
 
 [vars]
 APNS_TEAM_ID = "REPLACE_WITH_APPLE_TEAM_ID"
@@ -51,7 +55,7 @@ WEBRTC_ROLLOUT_PERCENT = "0"
 #   APNS_P8="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 #   DASHBOARD_TOKEN="replace-with-a-password-manager-generated-random-token"
 [secrets]
-required = ["APNS_P8", "DASHBOARD_TOKEN"]
+required = ["APNS_P8", "DASHBOARD_TOKEN", "NOTION_TOKEN", "NOTION_DATABASE_ID"]
 
 [[kv_namespaces]]
 binding = "DEVICES"

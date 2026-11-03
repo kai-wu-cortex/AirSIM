@@ -163,6 +163,20 @@ public final class PairingServer implements Closeable {
             if (claim.optBoolean("want_direct_route", false)) {
                 // Return the live gateway on this exact pairing interface, never guessed ports.
                 DirectGatewayRoutes.Ports ports = awaitDirectRoute(peer.getLocalAddress().getHostAddress());
+                if (ports == null) {
+                    // Registration/key persistence succeeded, but manual pairing is not
+                    // usable without authenticated control + PCM ports. Keep the 200
+                    // registration response for existing iOS clients, which already
+                    // reject missing route proofs as directGatewayUnavailable. Do not
+                    // tell Android's user that end-to-end pairing completed.
+                    BridgeLog.info("pairing_direct_gateway_unavailable state="
+                            + VoWLANGatewayService.currentDiagnosticState());
+                    respond(peer, 200, response.toString());
+                    listener.onFailed("密钥已保存，但直连网关未就绪，尚未完成手动配对。"
+                            + "请检查默认电话应用和 Shizuku/PCM 桥，待网关就绪后重新打开配对窗口。\n"
+                            + VoWLANGatewayService.currentDiagnosticState());
+                    return true;
+                }
                 if (ports != null) {
                     byte[] secret = PairingCrypto.decodeBase64URL(vowlanSecret);
                     try {

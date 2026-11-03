@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.provider.Telephony;
 import android.telephony.SmsMessage;
+import android.telephony.SubscriptionManager;
 
 import org.json.JSONObject;
 
@@ -16,6 +17,19 @@ import java.util.concurrent.Executors;
 /** Receives carrier SMS without requiring the default-SMS-app role. */
 public final class IncomingSMSReceiver extends BroadcastReceiver {
     private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
+
+    private static String simSlot(Context context, Intent intent) {
+        try {
+            int subscriptionID = intent.getIntExtra("subscription", -1);
+            if (subscriptionID < 0) subscriptionID = intent.getIntExtra("subscription_id", -1);
+            if (subscriptionID <= 0) return "";
+            SubscriptionManager manager = context.getSystemService(SubscriptionManager.class);
+            int slot = manager == null ? -1 : manager.getSlotIndex(subscriptionID);
+            return slot >= 0 ? "SIM " + (slot + 1) : "";
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
 
     @Override public void onReceive(Context context, Intent intent) {
         if (!Telephony.Sms.Intents.SMS_RECEIVED_ACTION.equals(intent.getAction())) return;
@@ -37,7 +51,8 @@ public final class IncomingSMSReceiver extends BroadcastReceiver {
                 String id = SMSDeliveryIdentity.id(sender, content.toString(), eventTimestamp);
                 JSONObject event = new JSONObject(WireJson.smsEvent(UUID.randomUUID().toString(),
                         id, sender == null ? "" : sender, content.toString(),
-                        Instant.ofEpochMilli(eventTimestamp).toString()));
+                        Instant.ofEpochMilli(eventTimestamp).toString(),
+                        simSlot(application, intent)));
                 if (RuntimeMode.isStandalone(application)) {
                     StandaloneAgentGateway.get(application).sendSMSEvent(event.toString());
                 } else {

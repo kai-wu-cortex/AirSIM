@@ -4,6 +4,7 @@ import Foundation
 enum ContactAuthorizationState: Equatable {
     case notDetermined
     case authorized
+    case limited
     case denied
 }
 
@@ -20,7 +21,7 @@ enum ContactAccessPolicy {
         userInitiated: Bool
     ) -> ContactAccessAction {
         switch state {
-        case .authorized: return .load
+        case .authorized, .limited: return .load
         case .notDetermined: return userInitiated ? .request : .waitForUser
         case .denied: return .blocked
         }
@@ -38,7 +39,7 @@ struct ContactFetcher: ContactFetching {
     func authorizationState() -> ContactAuthorizationState {
         let status = CNContactStore.authorizationStatus(for: .contacts)
         if status == .authorized { return .authorized }
-        if #available(iOS 18.0, *), status == .limited { return .authorized }
+        if #available(iOS 18.0, *), status == .limited { return .limited }
         return status == .notDetermined ? .notDetermined : .denied
     }
 
@@ -65,7 +66,8 @@ struct ContactFetcher: ContactFetching {
     }
 
     func displayName(for number: String) throws -> String? {
-        guard authorizationState() == .authorized else { return nil }
+        let state = authorizationState()
+        guard state == .authorized || state == .limited else { return nil }
         let target = ContactStore.normalized(number)
         guard !target.isEmpty else { return nil }
         let contacts = try fetchAll()
@@ -103,10 +105,12 @@ final class ContactStore: ObservableObject {
 
     @Published private(set) var contacts: [Contact] = []
     @Published private(set) var isAuthorized = false
+    @Published private(set) var isLimitedAccess = false
     @Published private(set) var authorizationState: ContactAuthorizationState = .notDetermined
     @Published var errorMessage: String?
     private let cache: ContactCacheStore
     private let fetcher: any ContactFetching
+    private var contactsObserver: NSObjectProtocol?
 
     init(fileManager: FileManager = .default, fetcher: any ContactFetching = ContactFetcher(),
          cache: ContactCacheStore? = nil) {
@@ -116,7 +120,23 @@ final class ContactStore: ObservableObject {
         contacts = self.cache.load()
         let state = fetcher.authorizationState()
         authorizationState = state
-        isAuthorized = state == .authorized
+        isAuthorized = state == .authorized || state == .limited
+        isLimitedAccess = state == .limited
+        contactsObserver = NotificationCenter.default.addObserver(
+            forName: .CNContactStoreDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.refresh(force: true)
+            }
+        }
+    }
+
+    deinit {
+        if let contactsObserver {
+            NotificationCenter.default.removeObserver(contactsObserver)
+        }
     }
 
     nonisolated static func normalized(_ phone: String) -> String {
@@ -129,15 +149,15 @@ final class ContactStore: ObservableObject {
         return value
     }
 
-    func loadIfAuthorized() async {
-        await refresh(userInitiated: false)
+    func loadIfAuthorized(force: Bool = false) async {
+        await refresh(userInitiated: false, force: force)
     }
 
     func requestAccessAndLoad() async {
-        await refresh(userInitiated: true)
+        await refresh(userInitiated: true, force: true)
     }
 
-    private func refresh(userInitiated: Bool) async {
+    private func refresh(userInitiated: Bool = false, force: Bool = false) async {
         do {
             // 手机重启后可能先在数据保护尚未解锁时读取到空数组；每次前台刷新都重试磁盘缓存。
             let cachedContacts = cache.load()
@@ -150,6 +170,7 @@ final class ContactStore: ObservableObject {
                 fetcher.authorizationState()
             }.value
             authorizationState = state
+            isLimitedAccess = state == .limited
 
             switch ContactAccessPolicy.action(for: state, userInitiated: userInitiated) {
             case .request:
@@ -176,8 +197,10 @@ final class ContactStore: ObservableObject {
             }
 
             isAuthorized = true
-            // 非用户主动刷新时优先使用已恢复的缓存，避免每次切换联系人页都完整枚举通讯录。
-            guard userInitiated || contacts.isEmpty || cache.needsNameRefresh else {
+            isLimitedAccess = authorizationState == .limited
+            // 非用户主动刷新时优先使用已恢复的缓存；联系人变更通知和联系人页
+            // 进入时会 force，确保新增联系人不会被旧缓存挡住。
+            guard force || userInitiated || contacts.isEmpty || cache.needsNameRefresh else {
                 errorMessage = nil
                 return
             }
@@ -191,6 +214,7 @@ final class ContactStore: ObservableObject {
             errorMessage = nil
         } catch {
             isAuthorized = false
+            isLimitedAccess = false
             errorMessage = error.localizedDescription
         }
     }

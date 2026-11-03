@@ -26,6 +26,9 @@ import com.airsim.phonecontrol.RuntimeMode;
 import com.airsim.phonecontrol.SMSCommandExecutor;
 import com.airsim.phonecontrol.SimSlotJson;
 import com.airsim.phonecontrol.RemoteAudioSessionRegistry;
+import com.airsim.phonecontrol.PureLocalModeCoordinator;
+import com.airsim.phonecontrol.PureLocalModeRuntime;
+import com.airsim.phonecontrol.PureLocalModeWire;
 
 import org.json.JSONObject;
 
@@ -142,6 +145,15 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         == PackageManager.PERMISSION_GRANTED
                 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
                         == PackageManager.PERMISSION_GRANTED);
+    }
+
+    public static void publishSMS(Context context, org.json.JSONObject event) {
+        VoBLEGatewayService active = instance;
+        if (active == null) {
+            start(context);
+            return;
+        }
+        active.controlQueue.execute(() -> active.publishSMS(event));
     }
 
     public static void publishCallState(
@@ -314,7 +326,8 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                     + " request_id=" + com.airsim.phonecontrol.DebugRedactor.safeIdentifier(requestId));
             // Reading fresh metadata or sending SMS must not replace an active
             // call's ID/generation.
-            if ((!"device_info".equals(action) && !"sms_send".equals(action)) || session == null) {
+            if ((!"device_info".equals(action) && !"sms_send".equals(action)
+                    && !"local_mode_status".equals(action) && !"local_mode_set".equals(action)) || session == null) {
                 session = new SessionContext(deviceId, envelope.sessionId(),
                         envelope.callId(), envelope.generation());
             }
@@ -323,7 +336,12 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                     envelope.generation(), body.optString("sim_account", ""));
             VoBLECallController.Result result;
             boolean revokeAfterResponse = false;
-            if ("sms_send".equals(action)) {
+            if ("local_mode_status".equals(action) || "local_mode_set".equals(action)) {
+                PureLocalModeRuntime runtime = PureLocalModeRuntime.get(this);
+                PureLocalModeCoordinator.Status status = "local_mode_status".equals(action)
+                        ? runtime.status() : runtime.apply(PureLocalModeWire.command(body), "ble:" + identity);
+                result = VoBLECallController.Result.success(PureLocalModeWire.status(status).toString());
+            } else if ("sms_send".equals(action)) {
                 String sent = SMSCommandExecutor.sendFromVoBLE(
                         this, requestId, body.optString("number", ""),
                         body.optString("message", ""), body.optString("sim_account", ""));
@@ -336,6 +354,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         ignored -> VoBLECallController.Result.success("ready"));
             } else if ("device_info".equals(action)) {
                 result = VoBLECallController.Result.success(new JSONObject()
+                        .put("battery", com.airsim.phonecontrol.AndroidBatteryStatus.snapshot(this))
                         .put("agent_id", AndroidAgentIdentity.agentID(this))
                         .put("device_name", AndroidAgentIdentity.deviceName())
                         .put("agent_kind", RuntimeMode.isStandalone(this) ? "standalone" : "avf")
@@ -460,6 +479,18 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
         }
         if (terminal) callGenerations.remove(callId);
         if (terminal) stopMedia(callId, generation);
+    }
+
+    private void publishSMS(org.json.JSONObject event) {
+        SessionContext target = session;
+        if (target == null || !channel.isReady(target.deviceId)) return;
+        try {
+            sendControl(target.deviceId, target.sessionId, "", 0,
+                    "sms_event", new org.json.JSONObject(event.toString()));
+            BridgeLog.info("voble_sms_event_sent");
+        } catch (Exception error) {
+            BridgeLog.error("voble_sms_event_failed", error);
+        }
     }
 
     private VoBLECallController.Result startMedia(

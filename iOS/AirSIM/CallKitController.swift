@@ -132,16 +132,22 @@ final class CallKitController: NSObject {
     private var incomingDeduplicator = IncomingCallDeduplicator()
     private(set) var currentIncomingPush: IncomingVoIPCall?
 
-    override init() {
+    override convenience init() {
+        self.init(observesSystemCallbacks: true)
+    }
+
+    /// Synthetic report callbacks in unit tests must not race the simulator's
+    /// unrelated provider reset. Production always observes the real provider.
+    init(observesSystemCallbacks: Bool) {
         let configuration = CXProviderConfiguration()
         configuration.maximumCallGroups = 1
         configuration.maximumCallsPerCallGroup = 1
-        configuration.supportedHandleTypes = [.phoneNumber]
+        configuration.supportedHandleTypes = [.phoneNumber, .generic]
         configuration.supportsVideo = false
         configuration.includesCallsInRecents = true
         provider = CXProvider(configuration: configuration)
         super.init()
-        provider.setDelegate(self, queue: .main)
+        if observesSystemCallbacks { provider.setDelegate(self, queue: .main) }
     }
 
     deinit {
@@ -248,7 +254,8 @@ final class CallKitController: NSObject {
                 return
             }
             incomingReportCompletions.append(completion)
-            reportIncomingIfNeeded(number: currentNumber, callerName: call.callerName, source: "PushKit 重投")
+            reportIncomingIfNeeded(number: currentNumber, callerName: call.callerName,
+                                   source: "PushKit 重投", genericHandle: call.isVirtual)
             handler?.callKitDidReceiveIncoming(call)
             return
         }
@@ -263,7 +270,8 @@ final class CallKitController: NSObject {
         missingCallPolls = 0
         endActionFulfilled = false
         incomingReportCompletions.append(completion)
-        reportIncomingIfNeeded(number: call.number, callerName: call.callerName, source: "PushKit")
+        reportIncomingIfNeeded(number: call.number, callerName: call.callerName,
+                               source: "PushKit", genericHandle: call.isVirtual)
         handler?.callKitDidReceiveIncoming(call)
     }
 
@@ -279,7 +287,7 @@ final class CallKitController: NSObject {
         let localOwnerBusy = model?.ownsLocalCallPresentation == true
             || model?.cloudCallOwnsPrimaryPresentation == true
             || model?.deviceCallContext.admissionReservation != nil
-        if isAvailable, CloudModePreference.isEnabled(),
+        if isAvailable, CloudSignalingPreference.isEnabled(),
            !localOwnerBusy,
            currentUUID == nil || currentUUID == call.uuid,
            incomingDeduplicator.shouldAccept(callID: call.callID, uuid: call.uuid) {
@@ -292,7 +300,13 @@ final class CallKitController: NSObject {
         let end = systemEnd ?? { [provider] uuid in
             provider.reportCall(with: uuid, endedAt: Date(), reason: .unanswered)
         }
-        report(call.uuid, update(number: call.number, callerName: call.callerName)) { error in
+        PushDiagnostics.record("PushKit 来电未进入主通话展示", fields: [
+            "callkit_available": String(isAvailable),
+            "signaling_enabled": String(CloudSignalingPreference.isEnabled()),
+            "local_owner_busy": String(localOwnerBusy),
+            "system_call_exists": String(currentUUID != nil)])
+        report(call.uuid, update(number: call.number, callerName: call.callerName,
+                                 genericHandle: call.isVirtual)) { error in
             Task { @MainActor in
                 if error == nil { end(call.uuid) }
                 completion(error)
@@ -301,12 +315,12 @@ final class CallKitController: NSObject {
     }
 
     /// 先让系统接管呼出事务；真正的模块 ATD 只能在 CXProvider delegate 回调中执行。
-    func startOutgoingCall(number: String,
+    func startOutgoingCall(number: String, intentID: UUID = UUID(),
         systemStart: ((CXStartCallAction) async throws -> Void)? = nil) async throws {
         guard isAvailable else { throw CallKitBridgeError.unavailable }
         guard currentUUID == nil else { throw CallKitBridgeError.callInProgress }
 
-        let uuid = UUID()
+        let uuid = intentID
         currentUUID = uuid
         currentDirection = "outgoing"
         currentNumber = number
@@ -315,7 +329,7 @@ final class CallKitController: NSObject {
         endActionFulfilled = false
 
         do {
-            let handle = CXHandle(type: .phoneNumber, value: number)
+            let handle = CallKitNumberPresentation.handle(number: number)
             let action = CXStartCallAction(call: uuid, handle: handle)
             if let systemStart { try await systemStart(action) } else { try await request(action) }
         } catch {
@@ -436,18 +450,20 @@ final class CallKitController: NSObject {
         currentState = call.state
     }
 
-    private func reportIncomingIfNeeded(number: String?, callerName: String?, source: String) {
+    private func reportIncomingIfNeeded(number: String?, callerName: String?, source: String,
+                                        genericHandle: Bool = false) {
         guard !incomingReportRequested, !systemCallReported, let uuid = currentUUID else { return }
         incomingReportRequested = true
         debugLog("请求系统来电界面；来源=\(source)")
         let report: RequiredSystemReporter = incomingSystemReporter ?? { [provider] uuid, update, done in
             provider.reportNewIncomingCall(with: uuid, update: update, completion: done)
         }
-        report(uuid, update(number: number, callerName: callerName)) { [weak self] error in
+        report(uuid, update(number: number, callerName: callerName, genericHandle: genericHandle)) { [weak self] error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.currentUUID == uuid else { return }
                 if let error {
+                    PushDiagnostics.record("CallKit 系统来电上报失败", error: error)
                     let diagnosticError = error as NSError
                     self.debugLog(
                         "系统来电上报失败；domain=\(diagnosticError.domain) code=\(diagnosticError.code) "
@@ -463,6 +479,7 @@ final class CallKitController: NSObject {
                     self.handler?.callKitDidFail("系统来电界面启动失败：\(error.localizedDescription)")
                     self.finishIncomingReport(error)
                 } else {
+                    PushDiagnostics.record("CallKit 系统来电上报成功")
                     self.debugLog("系统来电上报成功")
                     self.systemCallReported = true
                     self.finishIncomingReport(nil)
@@ -513,12 +530,15 @@ final class CallKitController: NSObject {
         return call.state == "active" || call.state == "held" ? .remoteEnded : .unanswered
     }
 
-    private func update(number: String?, callerName: String?) -> CXCallUpdate {
-        let update = CXCallUpdate()
+    private func update(number: String?, callerName: String?, genericHandle: Bool) -> CXCallUpdate {
+        let update = CallKitNumberPresentation.update(number: number, callerName: callerName)
         let value = number?.isEmpty == false ? number! : "未知号码"
-        update.remoteHandle = CXHandle(type: .phoneNumber, value: value)
-        if let callerName, !callerName.isEmpty, callerName != number {
-            update.localizedCallerName = callerName
+        if genericHandle {
+            // Dashboard virtual calls use a title, not a phone number. A
+            // .phoneNumber handle can be rejected/blank for non-numeric text.
+            let title = callerName?.isEmpty == false ? callerName! : value
+            update.remoteHandle = CXHandle(type: .generic, value: title)
+            update.localizedCallerName = title
         }
         update.supportsHolding = false
         update.supportsGrouping = false
@@ -605,20 +625,24 @@ final class CallKitController: NSObject {
             guard let handler else { throw CallKitBridgeError.handlerUnavailable }
             let origin: CallAnswerOrigin = appAnswerRequestUUID == action.callUUID ? .app : .system
             appAnswerRequestUUID = nil
-            let backendError = try await CallKitActionCoordinator.perform(
-                prepare: { try handler.callKitPrepareAudioSession() },
-                fulfill: {
-                    self.currentState = "connecting"
-                    // 系统事务只确认“用户接受了接听”。公网 WebSocket、ATA 和 PCM
-                    // 在其后异步建立，不能阻塞 CallKit 激活 AVAudioSession。
-                    action.fulfill()
-                },
-                backend: { try await handler.callKitAnswer(uuid: action.callUUID, origin: origin) }
-            )
-            guard currentUUID == action.callUUID else { return }
-            if let backendError {
+            currentState = "connecting"
+            // Configure the audio category before fulfilling the system answer
+            // so CallKit can activate the session. A prepare failure must not
+            // fail CXAnswerCallAction: the backend can still configure audio and
+            // report a real transport error separately.
+            do {
+                try handler.callKitPrepareAudioSession()
+            } catch {
+                debugLog("接听前音频预配置失败，继续系统接听：\(error.localizedDescription)")
+            }
+            action.fulfill()
+            do {
+                try await handler.callKitAnswer(uuid: action.callUUID, origin: origin)
+                guard currentUUID == action.callUUID else { return }
+            } catch {
+                guard currentUUID == action.callUUID else { return }
                 finishCurrentCall(previous: nil, reason: .failed)
-                handler.callKitDidFail(backendError.localizedDescription)
+                handler.callKitDidFail(error.localizedDescription)
             }
         } catch {
             fail(action, error: error)

@@ -96,12 +96,12 @@ struct AirSIMFirstConnectionView: View {
 }
 
 #Preview("已配对设备 · 空列表") {
-    Form { Section("三星连接") { PairedAndroidDeviceRows(devices: [], onDelete: { _ in }) } }
+    Form { Section("安卓连接") { PairedAndroidDeviceRows(devices: [], onDelete: { _ in }) } }
 }
 
 #Preview("已配对设备 · 在线与离线") {
     Form {
-        Section("三星连接") {
+        Section("安卓连接") {
             PairedAndroidDeviceRows(devices: [
                 .init(id: "preview-flip", deviceName: "Samsung Flip7", phoneNumber: "+10000000001",
                       agentKind: "standalone", cloudOnline: false, vowlanOnline: false,
@@ -158,6 +158,240 @@ private struct PairedAndroidDeviceRows: View {
     }
 }
 
+private struct PureLocalSlideControl: View {
+    let enabled: Bool
+    let busy: Bool
+    let blockedByCall: Bool
+    let action: (Bool) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @GestureState private var dragTranslation: CGFloat = 0
+    @Namespace private var glassNamespace
+
+    private var isInteractive: Bool { !busy && !blockedByCall }
+    private var title: String {
+        if busy { return "正在切换连接策略" }
+        if blockedByCall { return "通话中不可切换" }
+        return enabled ? "纯本地模式已开启" : "滑动开启纯本地模式"
+    }
+
+    private var statusText: String { enabled ? "本地优先 · Relay 已阻断" : "标准连接" }
+    private var tint: Color { enabled ? .green : .blue }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: enabled ? "network.badge.shield.half.filled" : "network")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 30, height: 30)
+                    .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.body.weight(.semibold))
+                    Text(statusText).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                if busy { ProgressView().controlSize(.small) }
+                else {
+                    Text(enabled ? "已开启" : "已关闭")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(enabled ? Color.green : Color.secondary)
+                        .padding(.horizontal, 9).padding(.vertical, 5)
+                        .background((enabled ? Color.green : Color.secondary).opacity(0.1), in: Capsule())
+                }
+            }
+
+            // Keep instructions above the glass surface so material blending
+            // and the moving thumb cannot obscure them in either appearance.
+            slideInstruction
+
+            GeometryReader { proxy in
+                let knob: CGFloat = 48
+                let inset: CGFloat = 4
+                let travel = max(1, proxy.size.width - knob - inset * 2)
+                let directionalDrag = enabled ? -dragTranslation : dragTranslation
+                let progress = min(1, max(0, directionalDrag / travel))
+                let restingOffset = enabled ? travel : 0
+                let movingOffset = enabled ? restingOffset - progress * travel : progress * travel
+
+                Group {
+                    if #available(iOS 26.0, *) {
+                        GlassEffectContainer(spacing: 6) {
+                            ZStack(alignment: .leading) {
+                                Capsule(style: .continuous)
+                                    .fill(.clear)
+                                    .glassEffect(
+                                        .regular.tint(tint.opacity(0.12 + progress * 0.12)).interactive(),
+                                        in: .capsule
+                                    )
+                                    .glassEffectID("pure-local-track", in: glassNamespace)
+
+                                sliderThumb(knob: knob)
+                                    .glassEffect(
+                                        .regular.tint(tint.opacity(enabled ? 0.72 : 0.58)).interactive(),
+                                        in: .circle
+                                    )
+                                    .glassEffectID("pure-local-thumb", in: glassNamespace)
+                                    .offset(x: inset + movingOffset)
+                            }
+                        }
+                    } else {
+                        ZStack(alignment: .leading) {
+                            Capsule(style: .continuous)
+                                .fill(.ultraThinMaterial)
+                                .overlay {
+                                    Capsule(style: .continuous)
+                                        .fill(tint.opacity(0.12 + progress * 0.12))
+                                }
+                            sliderThumb(knob: knob)
+                                .background(tint, in: Circle())
+                                .shadow(color: .black.opacity(0.14), radius: 3, y: 1)
+                                .offset(x: inset + movingOffset)
+                        }
+                    }
+                }
+                .contentShape(Capsule())
+                .gesture(
+                    DragGesture(minimumDistance: 6)
+                        .updating($dragTranslation) { value, state, _ in
+                            guard isInteractive else { return }
+                            state = value.translation.width
+                        }
+                        .onEnded { value in
+                            guard isInteractive else { return }
+                            let distance = enabled ? -value.translation.width : value.translation.width
+                            guard distance >= travel * 0.78 else { return }
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            action(enabled)
+                        }
+                )
+                .animation(reduceMotion ? nil : .interactiveSpring(response: 0.32, dampingFraction: 0.82), value: dragTranslation)
+            }
+            .frame(height: 56)
+        }
+        .padding(.vertical, 4)
+        .opacity(isInteractive ? 1 : 0.62)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("纯本地模式")
+        .accessibilityValue("\(enabled ? "已开启" : "已关闭")，\(statusText)")
+        .accessibilityHint(blockedByCall ? "结束通话后可以切换" : (enabled ? "双击关闭纯本地模式" : "双击开启纯本地模式"))
+        .accessibilityAddTraits(isInteractive ? .isButton : [])
+        .accessibilityAction {
+            guard isInteractive else { return }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            action(enabled)
+        }
+        .accessibilityIdentifier("pureLocalModeSlider")
+    }
+
+    private var slideInstruction: some View {
+        Text(busy ? "正在切换，请稍候" : blockedByCall ? "请先结束当前通话" : (enabled ? "向左滑动关闭" : "向右滑动开启"))
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .contentTransition(.opacity)
+    }
+
+    private func sliderThumb(knob: CGFloat) -> some View {
+        Circle()
+            .fill(.clear)
+            .frame(width: knob, height: knob)
+            .overlay {
+                if busy { ProgressView().tint(.white) }
+                else {
+                    Image(systemName: enabled ? "chevron.left.2" : "chevron.right.2")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+    }
+}
+
+private struct RemoteDirectSettingsView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var agentID = ""
+    @State private var enabled = false
+    @State private var host = ""
+    @State private var controlPort = "443"
+    @State private var pcmPort = "7593"
+    @State private var message = ""
+    @State private var saving = false
+    @State private var saveTask: Task<Void, Never>?
+
+    var body: some View {
+        Form {
+            Section {
+                RemoteDirectGuideEntry(context: .existingDevice)
+            }
+
+            Section {
+                Picker("已配对设备", selection: $agentID) {
+                    Text("选择安卓手机").tag("")
+                    ForEach(model.pairedDeviceHistory) { device in
+                        Text(device.deviceName).tag(device.id)
+                    }
+                }
+                Toggle("启用自建域名直连", isOn: $enabled)
+                    .disabled(agentID.isEmpty)
+            } footer: {
+                Text("试验性功能，真实公网配对与双向音频仍待真机验收。为已通过私网或公网域名配对的手机配置 NAS 或软路由加密入口。验证后保存，不会自动开启 Relay。")
+            }
+            .disabled(saving)
+            if enabled {
+                Section("远程入口") {
+                    TextField("DDNS 域名，例如 phone.example.com", text: $host)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("HTTPS 控制端口", text: $controlPort).keyboardType(.numberPad)
+                    TextField("TLS 音频端口", text: $pcmPort).keyboardType(.numberPad)
+                }
+                .disabled(saving)
+            }
+            Section {
+                Button(enabled ? "验证并保存" : "保存关闭") {
+                    saving = true
+                    let target = agentID
+                    saveTask = Task { @MainActor in
+                        defer { saving = false }
+                        do {
+                            let route = enabled ? try RemoteDirectConfiguration.route(agentID: target,
+                                host: host, controlPort: controlPort, pcmPort: pcmPort) : nil
+                            try await model.configureRemoteDirect(agentID: target, route: route)
+                            message = route == nil ? "已关闭此设备的自建域名直连。" :
+                                "控制入口与设备身份验证通过，已保存。音频入口需在实际通话时验证。"
+                        } catch is CancellationError {
+                            message = "配置已取消，请重新验证。"
+                        } catch { message = error.localizedDescription }
+                    }
+                }
+                .disabled(agentID.isEmpty || saving || model.vowlan.callInProgress())
+                if saving { ProgressView("正在验证远程设备…") }
+                if !message.isEmpty { Text(message).font(.footnote) }
+            } footer: {
+                Text("选择 VoWLAN 或自动模式后，局域网优先，不可达时尝试自建域名。NAS 需为控制与音频分别提供有效证书的 TLS 转发；只有网页反向代理不足以传输音频。此选项不提供后台来电推送，通话中不能更改。")
+            }
+        }
+        .navigationTitle("自建域名直连（试验性）")
+        .onAppear {
+            if agentID.isEmpty { agentID = model.pairedDeviceHistory.first?.id ?? "" }
+            load()
+        }
+        .onChange(of: agentID) { _ in load() }
+        .onDisappear { saveTask?.cancel() }
+    }
+
+    private func load() {
+        let route = VoWLANManualRouteStore.routes().first { $0.agentID == agentID && $0.isRemote }
+        enabled = route != nil
+        host = route?.host ?? ""
+        controlPort = route.map { String($0.controlPort) } ?? "443"
+        pcmPort = route.map { String($0.pcmPort) } ?? "7593"
+        message = ""
+    }
+}
+
 struct AirSIMSettingsView: View {
     private enum SelfTestPhase {
         case idle
@@ -173,7 +407,14 @@ struct AirSIMSettingsView: View {
     @State private var appUpdateInbox = AppUpdateResultInbox()
     @State private var updateViewVisible = false
     @AppStorage(ConnectionModePreference.key) private var connectionModeRaw = ConnectionModePreference.selected().rawValue
+    @AppStorage(CloudSignalingPreference.key) private var cloudSignalingEnabled = CloudSignalingPreference.isEnabled()
+    @AppStorage(BackgroundStandbyPreference.key) private var backgroundStandbyEnabled = false
     @AppStorage(LiveActivityVisibilityPreference.key) private var liveActivityEnabled = true
+    @AppStorage(SMSVerificationCodeClipboard.enabledKey) private var autoCopySMSCode = true
+    @AppStorage(FeedbackUploader.descriptionKey) private var feedbackDescription = ""
+    @AppStorage(FeedbackUploader.remarkKey) private var feedbackRemark = ""
+    @State private var feedbackUploadStatus = ""
+    @State private var feedbackUploading = false
     @State private var relayURL = RelayConfiguration.effectiveURL(
         stored: UserDefaults.standard.string(forKey: "airsim.push-relay-url"),
         buildSetting: Bundle.main.object(forInfoDictionaryKey: "AirSIMPushRelayURL") as? String,
@@ -187,22 +428,46 @@ struct AirSIMSettingsView: View {
     @State private var deviceDeletionInProgress = false
     @State private var networkPrefixesText = NetworkRoutePreferences.storedText()
     @State private var networkPrefixError: String?
+    @AppStorage(RelayEgressGate.persistenceKey) private var pureLocalEnabled = false
+    @State private var pureLocalBusy = false
+    @State private var pureLocalError: String?
+    @State private var diagnosticCloudOnline: Bool?
     @FocusState private var networkPrefixesFocused: Bool
+    @FocusState private var feedbackFocusedField: FeedbackFocusedField?
+
+    private enum FeedbackFocusedField: Hashable {
+        case description
+        case remark
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    Toggle(isOn: Binding(
-                        get: { !runtimePolicy.startsCloud },
-                        set: { enabled in
-                            connectionModeRaw = ConnectionModePreference.selectingLocalOnly(
-                                enabled, from: selectedMode).rawValue
+                    PureLocalSlideControl(
+                        enabled: pureLocalEnabled,
+                        busy: pureLocalBusy,
+                        blockedByCall: model.activeCall != nil,
+                        action: { currentValue in
+                            let requestedValue = !currentValue
+                            Task { @MainActor in await setPureLocalMode(requestedValue) }
                         }
-                    )) {
-                        Label("仅本地模式", systemImage: "network.slash")
+                    )
+                    if let pureLocalError { Text(pureLocalError).font(.footnote).foregroundStyle(.red) }
+                    Text(pureLocalEnabled
+                         ? "已硬阻断 AirSIM Relay、云端注册、心跳、命令、媒体与反馈；VoWLAN、VoBLE、Tailscale 和本地短信继续可用。"
+                         : "滑到底启用。启用后不会因本地链路失败回退到 Relay；GitHub 版本检查不受影响。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } header: { Text("纯本地模式") }
+
+                Section {
+                    Toggle(isOn: $cloudSignalingEnabled) {
+                        Label("云端通知（APNs）", systemImage: "bell.badge")
                     }
-                    .accessibilityIdentifier("localOnlyMode")
+                    .accessibilityIdentifier("cloudSignaling")
+                    .onChange(of: cloudSignalingEnabled) { enabled in
+                        model.setCloudSignalingEnabled(enabled)
+                    }
                     Picker("连接模式", selection: $connectionModeRaw) {
                         ForEach(AirSIMConnectionMode.allCases) { mode in
                             Label(mode.title, systemImage: modeIcon(mode)).tag(mode.rawValue)
@@ -218,7 +483,24 @@ struct AirSIMSettingsView: View {
                 } header: {
                     Text("运行模式")
                 } footer: {
-                    Text(selectedMode.detail + "\n仅本地模式与连接模式同步；关闭表示允许云端，安卓仍需完成云端配对。")
+                    Text(selectedMode.detail + "\n云端通知只负责 APNs/PushKit 与 Relay 注册，不会改变当前媒体模式；VoWLAN 模式下通话仍只走局域网。")
+                }
+
+                Section {
+                    Toggle("后台静音音频保活", isOn: $backgroundStandbyEnabled)
+                        .onChange(of: backgroundStandbyEnabled) { enabled in
+                            model.setBackgroundStandbyEnabled(enabled)
+                        }
+                        .accessibilityIdentifier("backgroundStandby")
+                    Text(backgroundStandbyEnabled
+                         ? "已开启：App 退到后台时播放静音音频，尽量维持轮询、CallKit 与 Push 处理；会明显增加耗电。"
+                         : "已关闭：不播放后台静音音频，降低耗电；iOS 仍可通过 PushKit 唤醒，但后台轮询可能被挂起。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("后台保活")
+                } footer: {
+                    Text("这是全局开关，关闭后所有后台静音音频保活路径都会停止；不会关闭 VoWLAN、蓝牙或云端 Push 功能。")
                 }
 
                 Section("当前连接") {
@@ -227,10 +509,15 @@ struct AirSIMSettingsView: View {
                     LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
                     LabeledContent(
                         "云端 Relay",
-                        value: runtimePolicy.startsCloud
-                            ? (model.cloudAgentStatus?.cloudOnline == true ? "Agent 在线" : "不可达")
-                            : "当前模式已关闭"
+                        value: CloudRelayStatusCopy.text(pureLocal: pureLocalEnabled,
+                            cloudOnline: runtimePolicy.startsCloud ? model.cloudAgentStatus?.cloudOnline : diagnosticCloudOnline,
+                            usesCloudCalls: runtimePolicy.startsCloud)
                     )
+                    if !pureLocalEnabled && !runtimePolicy.startsCloud {
+                        Text("当前通话使用本地链路；云端通话未启用，但仍可手动检查 Relay、注册与 Agent 心跳。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(model.connectionModePresentation.detail)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -273,12 +560,17 @@ struct AirSIMSettingsView: View {
                         + "公网地址始终不会被视为私有网段。")
                 }
 
-                Section("三星连接") {
+                Section("安卓连接") {
                     LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
                     NavigationLink {
                         SamsungPairingView()
                     } label: {
                         Label("配对安卓手机", systemImage: "personalhotspot")
+                    }
+                    NavigationLink {
+                        RemoteDirectSettingsView()
+                    } label: {
+                        Label("自建域名直连（试验性）", systemImage: "network.badge.shield.half.filled")
                     }
                     PairedAndroidDeviceRows(devices: model.pairedDeviceHistory, onDelete: { deletingDevice = $0 })
                         .disabled(deviceDeletionInProgress)
@@ -415,7 +707,7 @@ struct AirSIMSettingsView: View {
                             }
                         }
                     }
-                    .disabled(!runtimePolicy.startsCloud || selfTestPhase == .running)
+                    .disabled(pureLocalEnabled || selfTestPhase == .running)
 
                     if let report = selfTestReport {
                         ForEach(report.steps) { step in
@@ -449,9 +741,16 @@ struct AirSIMSettingsView: View {
                 } header: {
                     Text("云端模式自检")
                 } footer: {
-                    Text(!runtimePolicy.startsCloud
-                        ? "当前连接模式不运行云端自检。"
-                        : "依次验证本机 Push 凭据、Relay 身份、设备注册、Agent 记录、90 秒心跳和命令路由；失败步骤会给出具体卡点，不会拨号或发送短信。")
+                    Text(pureLocalEnabled
+                        ? "纯本地模式已开启，禁止访问 Relay；关闭后可手动自检。"
+                        : "依次验证本机 Push 凭据、Relay 身份、设备注册、Agent 记录、150 秒心跳和命令路由；失败步骤会给出具体卡点，不会拨号或发送短信。")
+                }
+
+                Section("短信") {
+                    Toggle("自动复制验证码到剪贴板", isOn: $autoCopySMSCode)
+                    Text("收到新验证码短信后自动复制，便于系统键盘显示粘贴建议。会覆盖当前剪贴板内容，可随时关闭。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("通知转发") {
@@ -506,9 +805,55 @@ struct AirSIMSettingsView: View {
                         }
                     }
                 }
+
+                Section("反馈") {
+                    TextField("用户描述（可选）", text: $feedbackDescription, axis: .vertical)
+                        .lineLimit(2...4)
+                        .focused($feedbackFocusedField, equals: .description)
+                        .submitLabel(.done)
+                        .onSubmit { feedbackFocusedField = nil }
+                    TextField("备注（可选）", text: $feedbackRemark, axis: .vertical)
+                        .lineLimit(2...4)
+                        .focused($feedbackFocusedField, equals: .remark)
+                        .submitLabel(.done)
+                        .onSubmit { feedbackFocusedField = nil }
+                    Button {
+                        feedbackFocusedField = nil
+                        feedbackUploading = true
+                        feedbackUploadStatus = "正在收集并上传…"
+                        Task {
+                            defer { feedbackUploading = false }
+                            let result = await FeedbackUploader.shared.upload(
+                                trigger: "manual",
+                                eventID: UUID().uuidString,
+                                api: model.verboseDiagnosticsAPI,
+                                model: model
+                            )
+                            feedbackUploadStatus = result
+                        }
+                    } label: {
+                        Label(feedbackUploading ? "正在上传…" : "立即上传反馈", systemImage: "paperplane")
+                    }
+                    .disabled(feedbackUploading)
+                    if !feedbackUploadStatus.isEmpty {
+                        Text(feedbackUploadStatus)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("仅手动上传脱敏后的连接状态、Verbose 日志和 Android 日志；不上传短信内容、号码或密钥。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { feedbackFocusedField = nil }
+                }
             }
             .task { await model.refreshPairedDeviceInformation() }
-            .sheet(item: $appUpdatePresentation, onDismiss: presentManualAppUpdateIfIdle) { presentation in
+            .fullScreenCover(item: $appUpdatePresentation, onDismiss: presentManualAppUpdateIfIdle) { presentation in
                 AppUpdateSheet(presentation: presentation, updates: appUpdates)
             }
             .onAppear { updateViewVisible = true; presentManualAppUpdateIfIdle() }
@@ -542,6 +887,40 @@ struct AirSIMSettingsView: View {
         }
     }
 
+    @MainActor
+    private func setPureLocalMode(_ enabled: Bool) async {
+        guard !pureLocalBusy else { return }
+        guard model.activeCall == nil else { pureLocalError = "通话中不能切换纯本地模式"; return }
+        pureLocalBusy = true; pureLocalError = nil
+        defer { pureLocalBusy = false }
+        if enabled {
+            UserDefaults.standard.set(connectionModeRaw, forKey: "airsim.pure-local.prior-mode")
+            UserDefaults.standard.set(cloudSignalingEnabled, forKey: "airsim.pure-local.prior-cloud")
+            RelayEgressGate.shared.setPersistentBlocked(true)
+            pureLocalEnabled = true
+            guard await RelayEgressGate.shared.disableAndDrain() else {
+                pureLocalError = "云端连接尚未完全排空，请稍后重试"
+                return
+            }
+            cloudSignalingEnabled = false
+            model.setCloudSignalingEnabled(false)
+            connectionModeRaw = AirSIMConnectionMode.localDual.rawValue
+            model.setConnectionMode(.localDual)
+        } else {
+            do {
+                try RelayEgressGate.shared.enableAfterRestore()
+                RelayEgressGate.shared.setPersistentBlocked(false)
+                pureLocalEnabled = false
+                let raw = UserDefaults.standard.string(forKey: "airsim.pure-local.prior-mode") ?? AirSIMConnectionMode.automatic.rawValue
+                let cloud = UserDefaults.standard.object(forKey: "airsim.pure-local.prior-cloud") as? Bool ?? true
+                connectionModeRaw = raw
+                cloudSignalingEnabled = cloud
+                model.setCloudSignalingEnabled(cloud)
+                model.setConnectionMode(AirSIMConnectionMode(rawValue: raw) ?? .automatic)
+            } catch { pureLocalError = "本地退出尚未完成：\(error.localizedDescription)" }
+        }
+    }
+
     private var updateCallBusy: Bool {
         model.activeCall != nil || model.remoteCall != nil || model.pendingOutgoingCall != nil
     }
@@ -559,6 +938,7 @@ struct AirSIMSettingsView: View {
     }
 
     private func startCloudSelfTest() {
+        guard !pureLocalEnabled, !RelayEgressGate.shared.isBlocked else { return }
         selfTestTask?.cancel()
         selfTestPhase = .running
         selfTestReport = .initial
@@ -570,7 +950,14 @@ struct AirSIMSettingsView: View {
             guard !Task.isCancelled else { return }
             selfTestReport = report
             selfTestPhase = .completed
-            await model.refreshCloudStatusForDiagnostics()
+            if runtimePolicy.startsCloud {
+                await model.refreshCloudStatusForDiagnostics()
+            } else {
+                // Explicit diagnostics must not use the automatic cloud-mode fetch guard.
+                let status = try? await VoIPPushController.shared.fetchCloudAgentStatusForDiagnostics(allowLocalMode: true)
+                guard !Task.isCancelled, !pureLocalEnabled else { return }
+                diagnosticCloudOnline = status?.cloudOnline
+            }
         }
     }
 
@@ -858,3 +1245,169 @@ private struct NotificationForwardingEditor: View {
         }
     }
 }
+
+@MainActor
+final class FeedbackUploader {
+    static let shared = FeedbackUploader()
+    static let descriptionKey = "airsim.feedback-description"
+    static let remarkKey = "airsim.feedback-remark"
+    private static let endpoint = URL(string: "https://airsim-push.remotepilot.site/v1/feedback")!
+
+    private init() {}
+
+    static func permitsUpload(trigger: String) -> Bool { trigger == "manual" }
+
+    func upload(trigger: String, eventID: String, api: AirSIMAPI?, model: AppModel?) async -> String {
+        // Reject before collecting Android logs or contacting either endpoint.
+        guard Self.permitsUpload(trigger: trigger) else { return "自动反馈上传已关闭，请手动上传" }
+
+        let snapshot: AgentFeedbackSnapshot?
+        if let api {
+            snapshot = try? await api.feedbackSnapshot()
+        } else {
+            snapshot = nil
+        }
+        let trace = await AgentVerboseTraceRecorder.shared.exportText(agentEvents: [])
+        // Keep the newest Android rows; a prefix loses the call/crash window that
+        // triggered this feedback.
+        let androidLog = String((snapshot?.bridgeLog ?? "").suffix(400_000))
+        let pcm = Self.pcm(from: androidLog)
+        let audio = Self.audioDiagnostics(trace: trace, snapshot: snapshot)
+        let mode = ConnectionModePreference.selected()
+        let modeValue: String
+        switch mode {
+        case .vowlan, .localDual: modeValue = "vowlan"
+        case .bluetooth: modeValue = "voble"
+        case .cloud: modeValue = "cloud"
+        case .automatic: modeValue = "auto"
+        }
+        let device = UIDevice.current
+        let body: [String: Any] = [
+            "feedback_id": UUID().uuidString,
+            "trigger": trigger,
+            "platform": snapshot == nil ? "iOS" : "Both",
+            "app_version": AppInformation.version,
+            "ios_version": device.systemVersion,
+            "iphone_model": device.model,
+            "android_model": snapshot?.model ?? "",
+            "android_sdk": snapshot?.sdk ?? 0,
+            "connection_mode": modeValue,
+            "route": mode.title,
+            "relay_status": "unknown",
+            "pcm": pcm,
+            "audio": audio,
+            "crash": CrashDiagnosticsStore.shared.recent(),
+            "error_summary": "",
+            "description": UserDefaults.standard.string(forKey: Self.descriptionKey) ?? "",
+            "remark": UserDefaults.standard.string(forKey: Self.remarkKey) ?? "",
+            "ios_trace": String(trace.prefix(250_000)),
+            "android_log": androidLog,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
+            return "反馈数据生成失败"
+        }
+        var request = URLRequest(url: Self.endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 25
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+        do {
+            let (responseData, response) = try await RelayEgressGate.shared.send(request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return "上传失败（HTTP \( (response as? HTTPURLResponse)?.statusCode ?? 0)）"
+            }
+            if let object = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+               let url = object["url"] as? String, !url.isEmpty {
+                return "已上传：\(url)"
+            }
+            return "已上传到 Notion"
+        } catch {
+            return "上传失败：\(error.localizedDescription)"
+        }
+    }
+
+    private static func audioDiagnostics(trace: String, snapshot: AgentFeedbackSnapshot?) -> [String: Any] {
+        let lines = trace.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let start = lines.lastIndex { $0.contains("phase=answer_observed") } ?? 0
+        let relevant = lines[start...]
+        var stages: [String] = []
+        var startupMilliseconds = 0
+        for line in relevant {
+            // Trace lines are formatted as "[APP] ... AUDIO 通话音频启动".
+            guard line.contains("AUDIO 通话音频启动") else { continue }
+            if let phase = Self.value(after: "phase=", in: line), !phase.isEmpty,
+               !stages.contains(phase) { stages.append(phase) }
+            let phase = Self.value(after: "phase=", in: line) ?? ""
+            if phase != "stopped", phase != "failed",
+               let duration = Int(Self.value(after: "duration_ms=", in: line) ?? "") {
+                startupMilliseconds = max(startupMilliseconds, duration)
+            }
+        }
+        let expected = ["answer_observed", "phone_start", "engine_ready", "agent_register",
+                        "pcm_ready", "first_downlink", "agent_ready", "stopped"]
+        let missing = expected.filter { !stages.contains($0) }
+        let telecom = snapshot?.audio?.telecomState ?? ""
+        let clientClosed = snapshot?.audio?.pcmClientClosed ?? false
+        let pcmHealth = String((snapshot?.audio?.pcmHealth ?? "").prefix(500))
+        let summary = "stages=\(stages.joined(separator: ",")); missing=\(missing.joined(separator: ",")); "
+            + "telecom=\(telecom); pcm_client_closed=\(clientClosed); pcm=\(pcmHealth)"
+        return [
+            "stages": stages,
+            "missing": missing,
+            "startup_ms": startupMilliseconds,
+            "pcm_client_closed": clientClosed,
+            "telecom_state": telecom,
+            "summary": summary,
+        ]
+    }
+
+    private static func value(after marker: String, in line: String) -> String? {
+        guard let range = line.range(of: marker) else { return nil }
+        return line[range.upperBound...].split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init)
+    }
+
+    private static func pcm(from log: String) -> [String: Any] {
+        let route = value("pcm_route", in: log)
+        let capture = value("pcm_capture", in: log)
+        let initialized = value("pcm_initialized", in: log) == "true"
+        let verified = route == "verified"
+        let down = Int(value("pcm_down_peak", in: log)) ?? 0
+        let up = Int(value("pcm_up_peak", in: log)) ?? 0
+        let downBytes = Int(value("pcm_down_bytes", in: log)) ?? 0
+        let upBytes = Int(value("pcm_up_bytes", in: log)) ?? 0
+        let mode: String
+        if !initialized || route.isEmpty {
+            mode = "not_connected"
+        } else if route == "verified" && down > 0 && up > 0 {
+            mode = "vowlan_direct_full_duplex"
+        } else if route == "verified" && down > 0 {
+            mode = "vowlan_direct_downlink_only"
+        } else if route == "verified" && up > 0 {
+            mode = "vowlan_direct_uplink_only"
+        } else {
+            mode = "vowlan_direct_silent"
+        }
+        return [
+            "mode": mode,
+            "route": route,
+            "capture_source": capture.isEmpty ? "" : "voice_downlink",
+            "initialized": initialized,
+            "route_verified": verified,
+            "capture": capture.isEmpty ? "unverified" : capture,
+            "down_peak": down,
+            "up_peak": up,
+            "down_bytes": downBytes,
+            "up_bytes": upBytes,
+            "failure": value("pcm_failure", in: log),
+        ]
+    }
+
+    private static func value(_ key: String, in log: String) -> String {
+        guard let expression = try? NSRegularExpression(pattern: "\\b" + NSRegularExpression.escapedPattern(for: key) + "=([^\\s]+)") else { return "" }
+        let range = NSRange(log.startIndex..<log.endIndex, in: log)
+        guard let match = expression.firstMatch(in: log, range: range),
+              let valueRange = Range(match.range(at: 1), in: log) else { return "" }
+        return String(log[valueRange])
+    }
+}
+

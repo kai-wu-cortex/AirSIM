@@ -40,6 +40,7 @@ public final class DirectCallOwnership {
         if (lease == null || lease.closed || sessions.get(lease.host) != lease) return;
         lease.pcmReady = true;
         RemoteCallAudioScope.SHARED.bind(lease, lease.callID);
+        RemoteCallHangupGuard.ownerBound(lease.callID);
     }
     private static synchronized Lease existing(String host) { return sessions.get(host); }
     public static void end(Lease lease, boolean disconnect) {
@@ -53,5 +54,6 @@ public final class DirectCallOwnership {
             id = lease.callID;
         }
         if (disconnect && !id.isEmpty()) CallRepository.disconnect(id);
+        else if (!id.isEmpty()) RemoteCallHangupGuard.ownerLost(id);
     }
 }

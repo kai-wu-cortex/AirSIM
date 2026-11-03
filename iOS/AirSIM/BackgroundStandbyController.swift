@@ -4,6 +4,7 @@ import CryptoKit
 import Foundation
 import UIKit
 import UserNotifications
+import WidgetKit
 
 enum BackgroundStandbySuspensionPolicy {
     static func shouldStopAudio(isAlreadySuspended: Bool) -> Bool {
@@ -130,6 +131,7 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         IncomingCallNotification.registerCategory()
+        CrashDiagnosticsStore.shared.start()
         let policy = ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected())
         CallKitController.shared.setEnabled(policy.usesCallKit)
         if policy.usesCallKit, CallKitController.shared.handler == nil {
@@ -138,12 +140,12 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
 		// Watch token 与跨设备接听所有权必须在冷启动阶段就可接收，不能等待
 		// SwiftUI 首屏 onAppear（锁屏 PushKit 唤醒时首屏可能永远不出现）。
 		WatchCallCoordinator.shared.start()
-        if policy.startsCloud {
+        if CloudSignalingPreference.isEnabled() {
             VoIPPushController.shared.start()
             application.registerForRemoteNotifications()
         }
 #if DEBUG
-        print(!policy.startsCloud
+        print(!CloudSignalingPreference.isEnabled()
             ? "[AirSIM Local] 已跳过 APNs 与 PushKit 注册"
             : "[AirSIM APNs] 已启动普通通知与 PushKit 注册")
 #endif
@@ -152,7 +154,7 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
 
     func applicationDidBecomeActive(_ application: UIApplication) {
         // 首次授权弹窗可能晚于 didFinishLaunching 返回；回到前台时重新登记是幂等的。
-        guard ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsCloud else { return }
+        guard CloudSignalingPreference.isEnabled() else { return }
         VoIPPushController.shared.start()
         application.registerForRemoteNotifications()
         Task { await VoIPPushController.shared.syncRegistration() }
@@ -162,7 +164,7 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
-        guard ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsCloud else { return }
+        guard CloudSignalingPreference.isEnabled() else { return }
         VoIPPushController.shared.storeAlertToken(deviceToken)
 #if DEBUG
         print("[AirSIM APNs] 普通通知 token 已更新；字节数=\(deviceToken.count)")
@@ -173,7 +175,7 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        guard ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsCloud else { return }
+        guard CloudSignalingPreference.isEnabled() else { return }
         VoIPPushController.shared.clearAlertToken()
 #if DEBUG
         print("[AirSIM APNs] 普通通知 token 注册失败：\(error.localizedDescription)")
@@ -185,7 +187,7 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        guard ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsCloud else {
+        guard CloudSignalingPreference.isEnabled() else {
             completionHandler(.noData)
             return
         }
@@ -360,13 +362,34 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         guard !pushed.contentTruncated else { return false }
         guard !historyStore.visibleMessages([pushed.message]).isEmpty else { return false }
         var messages = historyStore.loadMessages()
-        guard !messages.contains(where: { $0.deliveryID == pushed.deliveryID }) else { return false }
+        guard !messages.contains(where: { $0.id == pushed.message.id }) else { return false }
         messages.append(pushed.message)
         messages.sort { $0.timestamp > $1.timestamp }
         if messages.count > 2_000 {
             messages = Array(messages.prefix(2_000))
         }
-        return historyStore.saveMessages(messages)
+        guard historyStore.saveMessages(messages) else { return false }
+        // A background notification need not create a SwiftUI scene/AppModel.
+        // Refresh counts from durable state without starting any connection.
+        let store = AirSIMWidgetStore()
+        var snapshot = store.load()
+        let stored = historyStore.loadMessages()
+        let unread = historyStore.unreadMessageIDs(in: stored)
+        snapshot.devices = snapshot.devices.map { device in
+            var updated = device
+            updated.unreadMessages = Set(stored.filter {
+                $0.sourceAgentID == device.id && unread.contains($0.id)
+            }.map(\.id)).count
+            return updated
+        }
+        let allowed = Set(snapshot.devices.map(\.id))
+        snapshot.messages = stored.filter { $0.sourceAgentID.map { allowed.contains($0) } ?? false }
+            .sorted { $0.timestamp > $1.timestamp }.prefix(6).map {
+                .init(agentID: $0.sourceAgentID, date: $0.timestamp, incoming: !$0.isOutgoing,
+                      contentPreview: AirSIMWidgetSnapshot.messagePreview($0.content))
+            }
+        if store.save(snapshot) { WidgetCenter.shared.reloadTimelines(ofKind: AirSIMWidgetSnapshot.kind) }
+        return true
     }
 }
 
@@ -378,20 +401,45 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
     init() { vowlan.startBrowsing() }
     func stop() { vowlan.stopBrowsing() }
 
+    private func selectedAgent() -> VoWLANDiscoveredAgent? {
+        let candidates = vowlan.discoveredAgents.filter {
+            PairedAndroidDeviceStore.permits($0.id)
+                && VoWLANCredentialStore.load(agentID: $0.id) != nil
+        }
+        if let bound = AndroidAgentBindingPreference.selected() {
+            return candidates.first { $0.id == bound }
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
     func availableSamsungAPI() async -> AirSIMAPI? {
-        await vowlan.probeNow()
-        guard vowlan.availability.isOnlineForDisplay,
-              let endpoint = vowlan.availability.endpoint,
-              let credential = VoWLANCredentialStore.load() else { return nil }
-        return AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential))
+        // PushKit can answer before the SwiftUI AppModel and Bonjour browser
+        // have completed startup. Wait briefly for the bound device, never use
+        // the legacy global credential or an arbitrary discovered Android.
+        for attempt in 0..<10 {
+            await vowlan.probeNow()
+            if vowlan.availability.isOnlineForDisplay,
+               let activeEndpoint = vowlan.availability.endpoint,
+               let agent = selectedAgent(),
+               agent.endpoint == activeEndpoint,
+               let credential = VoWLANCredentialStore.load(agentID: agent.id) {
+                return AirSIMAPI(route: .vowlan(endpoint: activeEndpoint, credential: credential))
+            }
+            if attempt < 9 { try? await Task.sleep(for: .milliseconds(300)) }
+        }
+        return nil
     }
 
     func callKitStart(number: String) async throws {
+        let intentID = CallKitController.shared.currentSystemCallUUID ?? UUID()
         guard let api = await availableSamsungAPI() else { throw CallKitBridgeError.noReachableTransport }
-        try await api.dial(number: number)
+        guard !Task.isCancelled,
+              CallKitController.shared.currentSystemCallUUID == intentID else { throw CancellationError() }
+        try await api.dial(number: number, operationID: intentID)
     }
     func callKitPrepareAudioSession() throws {
-        if CallKitController.shared.currentIncomingPush?.authenticatedMediaURL != nil {
+        if CloudModePreference.isEnabled(),
+           CallKitController.shared.currentIncomingPush?.authenticatedMediaURL != nil {
             try IPhoneCloudCallSession.shared.prepareAudioForCallKit()
         }
     }
@@ -467,6 +515,15 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
         else { IPhoneCloudCallSession.shared.stopAudio() }
     }
     func callKitDidFail(_ message: String) {}
+}
+
+enum BackgroundStandbyPreference {
+    static let key = "airsim.background-standby-enabled"
+
+    /// Off by default: silent audio keeps the process alive but is expensive.
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: key) as? Bool ?? false
+    }
 }
 
 /// 个人侧载模式下维持静音播放，让 iOS 在熄屏后继续执行模块来电轮询。
@@ -550,7 +607,8 @@ final class BackgroundStandbyController {
 
     /// 回到前台或后台音频被系统中断后重新确认静音播放仍在运行。
     func ensureRunning() {
-        guard enabled, appIsBackground, !suspendedForCall,
+        guard enabled, BackgroundStandbyPreference.isEnabled(),
+              appIsBackground, !suspendedForCall,
               BackgroundStandbySuspensionPolicy.shouldRunStandby(
                   callKitAudioActive: CallKitController.shared.audioSessionIsActive) else { return }
         retryTask?.cancel()
@@ -651,9 +709,7 @@ final class IncomingCallNotifier {
             }
 #endif
             Task { @MainActor in
-                guard ConnectionModeRuntimePolicy(
-                    mode: ConnectionModePreference.selected()
-                ).startsCloud else { return }
+                guard CloudSignalingPreference.isEnabled() else { return }
                 VoIPPushController.shared.start()
                 UIApplication.shared.registerForRemoteNotifications()
             }
@@ -781,7 +837,7 @@ final class SMSNotificationCoordinator {
     /// Cloud/APNs is authoritative when a usable alert token exists. Local
     /// notifications are only the owner for local/BLE-only operation.
     func cloudOwnsNotifications() -> Bool {
-        CloudModePreference.isEnabled()
+        CloudSignalingPreference.isEnabled()
             && VoIPPushController.shared.registrationReadiness().alertTokenReady
     }
 

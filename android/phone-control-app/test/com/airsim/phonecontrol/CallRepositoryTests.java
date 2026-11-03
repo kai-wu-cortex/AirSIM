@@ -11,6 +11,7 @@ public final class CallRepositoryTests {
         lossOfOldDirectSessionCannotEndAnotherCall();
         answerNeverTargetsAnActiveCallWithoutRinging();
         cloudRejectTargetsOnlyItsAuthenticatedCall();
+        cloudCallEventsDriveOnlyTheirOwnCall();
         localRejectUsesPublishedCallIdentity();
         System.out.println("call repository tests passed");
     }
@@ -107,6 +108,19 @@ public final class CallRepositoryTests {
             CallRepository.remove(ringing);
             CallRepository.remove(active);
         }
+    }
+
+    private static void cloudCallEventsDriveOnlyTheirOwnCall() {
+        String owned = "0c8f8a52-3f7e-4f0e-9d2b-6a1e5f4c3b2a";
+        String waiting = "a41d2c9e-77b0-4e61-8f3a-2c5d9e8b7f10";
+        assertTrue(CloudCallTarget.owns(owned, owned));
+        // Call waiting: the second call's ringing or ended must not drive or end the cloud call.
+        assertTrue(!CloudCallTarget.owns(owned, waiting));
+        // An outgoing cloud call learns its Telecom id from its first outgoing event; until then an
+        // earlier call's late event does not belong to it.
+        assertTrue(!CloudCallTarget.owns("", waiting));
+        assertTrue(!CloudCallTarget.owns("", ""));
+        assertTrue(!CloudCallTarget.owns(owned, ""));
     }
 
     private static void cloudRejectTargetsOnlyItsAuthenticatedCall() {

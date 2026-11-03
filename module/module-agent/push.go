@@ -24,6 +24,7 @@ import (
 // relay is the only component that owns the Apple .p8 key.
 type pushRegistration struct {
 	commandEpoch                 uint64   // runtime-only, never serialized
+	relayEpoch                   uint64   // runtime-only operation generation
 	CloudEnabled                 *bool    `json:"cloud_enabled,omitempty"`
 	LocalMode                    bool     `json:"local_mode,omitempty"`
 	DeviceID                     string   `json:"device_id"`
@@ -115,6 +116,7 @@ type callStatePushEvent struct {
 }
 
 type agentHeartbeatSnapshot struct {
+	Battery              *androidBatteryReading
 	ATOK                 bool
 	CellularState        string
 	CellularRegistration string
@@ -124,23 +126,24 @@ type agentHeartbeatSnapshot struct {
 }
 
 type agentHeartbeatEvent struct {
-	CommandRoutingVersion int    `json:"command_routing_version"`
-	Event                 string `json:"event"`
-	DeviceID              string `json:"device_id"`
-	DeviceSecret          string `json:"device_secret"`
-	AgentVersion          string `json:"agent_version"`
-	AgentID               string `json:"agent_id,omitempty"`
-	AgentKind             string `json:"agent_kind,omitempty"`
-	DeviceName            string `json:"device_name,omitempty"`
-	Manufacturer          string `json:"manufacturer,omitempty"`
-	Model                 string `json:"model,omitempty"`
-	PhoneNumber           string `json:"phone_number,omitempty"`
-	ATOK                  bool   `json:"at_ok"`
-	CellularState         string `json:"cellular_state"`
-	CellularRegistration  string `json:"cellular_registration,omitempty"`
-	CellularRecovery      string `json:"cellular_recovery,omitempty"`
-	ECMCarrier            string `json:"ecm_carrier,omitempty"`
-	SignalDBM             *int   `json:"signal_dbm,omitempty"`
+	Battery               *androidBatteryReading `json:"battery,omitempty"`
+	CommandRoutingVersion int                    `json:"command_routing_version"`
+	Event                 string                 `json:"event"`
+	DeviceID              string                 `json:"device_id"`
+	DeviceSecret          string                 `json:"device_secret"`
+	AgentVersion          string                 `json:"agent_version"`
+	AgentID               string                 `json:"agent_id,omitempty"`
+	AgentKind             string                 `json:"agent_kind,omitempty"`
+	DeviceName            string                 `json:"device_name,omitempty"`
+	Manufacturer          string                 `json:"manufacturer,omitempty"`
+	Model                 string                 `json:"model,omitempty"`
+	PhoneNumber           string                 `json:"phone_number,omitempty"`
+	ATOK                  bool                   `json:"at_ok"`
+	CellularState         string                 `json:"cellular_state"`
+	CellularRegistration  string                 `json:"cellular_registration,omitempty"`
+	CellularRecovery      string                 `json:"cellular_recovery,omitempty"`
+	ECMCarrier            string                 `json:"ecm_carrier,omitempty"`
+	SignalDBM             *int                   `json:"signal_dbm,omitempty"`
 }
 
 type pushManager struct {
@@ -152,6 +155,7 @@ type pushManager struct {
 	configPath       string
 	config           pushRegistration
 	client           *http.Client
+	relayGate        *relayEgress
 	lastError        string
 	lastCallID       string
 	lastUUID         string
@@ -175,9 +179,11 @@ var pushTokenPattern = regexp.MustCompile(`^[0-9a-fA-F]{16,512}$`)
 var pushDNSServers = []string{"1.1.1.1:53", "8.8.8.8:53", "223.5.5.5:53"}
 
 func newPushManager(configPath string) *pushManager {
+	localPolicy, policyErr := (localModeStore{path: configPath + ".local-mode"}).read()
 	manager := &pushManager{
 		configPath:   configPath,
 		client:       newPushHTTPClient(),
+		relayGate:    newRelayEgress(localPolicy.Blocked || policyErr != nil),
 		smsDelivered: map[string]bool{},
 		smsInFlight:  map[string]bool{},
 	}
@@ -193,6 +199,9 @@ func newPushManager(configPath string) *pushManager {
 		}
 	} else if !os.IsNotExist(err) {
 		manager.lastError = "读取推送配置失败: " + err.Error()
+	}
+	if policyErr != nil {
+		manager.lastError = policyErr.Error()
 	}
 	return manager
 }
@@ -441,6 +450,9 @@ func syncPushConfigDirectory(path string) error {
 }
 
 func (p *pushManager) cloudEnabledLocked() bool {
+	if p.relayGate != nil && !p.relayGate.current(p.relayGate.generation()) {
+		return false
+	}
 	if p.config.LocalMode {
 		return false
 	}
@@ -686,6 +698,17 @@ func validCallLifecyclePhase(phase string) bool {
 }
 
 func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
+	return p.sendHeartbeatRequired(snapshot, false)
+}
+
+func (p *pushManager) sendHeartbeatRequired(snapshot agentHeartbeatSnapshot, required bool) error {
+	if required && p.relayGate != nil {
+		_, release, err := p.relayGate.acquire(context.Background(), p.relayGate.generation())
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	if snapshot.CellularState != "registered" && snapshot.CellularState != "searching" &&
 		snapshot.CellularState != "denied" && snapshot.CellularState != "unregistered" {
 		return errors.New("蜂窝心跳状态无效")
@@ -696,9 +719,13 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
 	cloudEnabled := p.cloudEnabledLocked()
 	p.mu.Unlock()
 	if !cloudEnabled || registration.RelayURL == "" {
+		if required {
+			return errors.New("云端未开启、纯本地模式已启用或尚未配置 Relay")
+		}
 		return nil
 	}
 	return p.postJSON(client, registration.RelayURL+"/v1/events/heartbeat", agentHeartbeatEvent{
+		Battery:               snapshot.Battery,
 		CommandRoutingVersion: 1,
 		Event:                 "agent_heartbeat", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, AgentVersion: agentVersion,
@@ -715,7 +742,14 @@ func (p *pushManager) sendHeartbeat(snapshot agentHeartbeatSnapshot) error {
 func (p *pushManager) commandRegistration() (pushRegistration, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.commandRegistrationLocked()
+}
+
+func (p *pushManager) commandRegistrationLocked() (pushRegistration, bool) {
 	registration := p.config
+	if p.relayGate != nil {
+		registration.relayEpoch = p.relayGate.generation()
+	}
 	ready := p.cloudEnabledLocked() && registration.DeviceID != "" &&
 		registration.DeviceSecret != "" && registration.RelayURL != ""
 	return registration, ready
@@ -730,6 +764,13 @@ func (p *pushManager) pullCommands() ([]cloudDeviceCommand, error) {
 }
 
 func (p *pushManager) pullCommandsFor(registration pushRegistration) ([]cloudDeviceCommand, error) {
+	if p.relayGate != nil {
+		_, release, err := p.relayGate.acquire(context.Background(), registration.relayEpoch)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
 	if !validCommandAgentID(registration.AndroidAgentID) {
 		return nil, errors.New("需补全原配对配置中的 Android Agent 身份")
 	}
@@ -760,6 +801,13 @@ func (p *pushManager) completeCommand(result cloudCommandResult) error {
 }
 
 func (p *pushManager) completeCommandFor(registration pushRegistration, result cloudCommandResult) error {
+	if p.relayGate != nil {
+		_, release, err := p.relayGate.acquire(context.Background(), registration.relayEpoch)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	if !validCommandAgentID(registration.AndroidAgentID) {
 		return errors.New("需补全原配对配置中的 Android Agent 身份")
 	}
@@ -784,17 +832,30 @@ func (p *pushManager) postJSON(client *http.Client, endpoint string, value any) 
 }
 
 func (p *pushManager) postJSONResponse(client *http.Client, endpoint string, value, output any) error {
+	ctx := context.Background()
+	var epoch uint64
+	if p.relayGate != nil {
+		epoch = p.relayGate.generation()
+		operationContext, release, err := p.relayGate.acquire(ctx, epoch)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = operationContext
+	}
 	body, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("User-Agent", "AirSIM-QDC507/"+agentVersion)
-	response, err := client.Do(request)
+	guardedClient := *client
+	guardedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := guardedClient.Do(request)
 	if err != nil {
 		return err
 	}
@@ -806,6 +867,9 @@ func (p *pushManager) postJSONResponse(client *http.Client, endpoint string, val
 		if err := json.NewDecoder(response.Body).Decode(output); err != nil {
 			return fmt.Errorf("解析推送中继响应失败: %w", err)
 		}
+	}
+	if p.relayGate != nil && !p.relayGate.current(epoch) {
+		return errors.New("stale_relay_operation")
 	}
 	return nil
 }
@@ -843,7 +907,7 @@ func (a *agent) pushRegister(response http.ResponseWriter, request *http.Request
 		writeError(response, http.StatusBadRequest, err.Error())
 		return
 	}
-	go a.syncPushRegistration()
+	a.scheduleRelayJob(a.syncPushRegistrationContext)
 	a.mu.RLock()
 	var call *callRecord
 	if a.calls.Active != nil {
@@ -864,6 +928,30 @@ func (a *agent) pushStatus(response http.ResponseWriter, request *http.Request) 
 	writeJSON(response, http.StatusOK, a.push.status())
 }
 
+// Authenticated, explicit diagnostic; never changes cloud mode or sends SMS/call pushes.
+func (a *agent) pushHeartbeat(response http.ResponseWriter, request *http.Request) {
+	if !requireMethod(response, request, http.MethodPost) {
+		return
+	}
+	a.mu.RLock()
+	snapshot := agentHeartbeatSnapshot{
+		CellularState: a.modem.CellularState, CellularRegistration: a.modem.RegistrationText,
+		CellularRecovery: a.modem.RecoveryState, SignalDBM: a.modem.SignalDBM,
+	}
+	a.mu.RUnlock()
+	snapshot.Battery = a.android.batterySnapshot(time.Now())
+	if snapshot.CellularState == "" {
+		snapshot.CellularState = "unregistered"
+	}
+	snapshot.ATOK = a.at.healthSnapshot().ConsecutiveFailures < 3
+	snapshot.ECMCarrier = readDebugFile(usbCarrierPath)
+	if err := a.push.sendHeartbeatRequired(snapshot, true); err != nil {
+		writeError(response, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]bool{"accepted": true})
+}
+
 func (a *agent) pushMode(response http.ResponseWriter, request *http.Request) {
 	if !requireMethod(response, request, http.MethodPost) {
 		return
@@ -879,16 +967,19 @@ func (a *agent) pushMode(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if body.Enabled {
-		go a.syncPushRegistration()
+		a.scheduleRelayJob(a.syncPushRegistrationContext)
 	}
 	writeJSON(response, http.StatusOK, a.push.status())
 }
 
-func (a *agent) syncPushRegistration() {
+func (a *agent) syncPushRegistrationContext(ctx context.Context) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(1<<attempt) * time.Second)
+		if ctx.Err() != nil {
+			return
+		}
+		if attempt > 0 && !waitRelayRetry(ctx, time.Duration(1<<attempt)*time.Second) {
+			return
 		}
 		if err := a.push.sendRegistration(); err == nil {
 			if syncErr := a.syncCloudCommandsOnce(); syncErr != nil {
@@ -910,9 +1001,11 @@ func (a *agent) scheduleIncomingPush(callID string) {
 	if callID == "" {
 		return
 	}
-	go func() {
+	a.scheduleRelayJob(func(ctx context.Context) {
 		// Give +CLIP a short window to fill the number without delaying CallKit by seconds.
-		time.Sleep(350 * time.Millisecond)
+		if !waitRelayRetry(ctx, 350*time.Millisecond) {
+			return
+		}
 		a.mu.RLock()
 		if a.calls.Active == nil || a.calls.Active.ID != callID {
 			a.mu.RUnlock()
@@ -922,8 +1015,11 @@ func (a *agent) scheduleIncomingPush(callID string) {
 		a.mu.RUnlock()
 		var lastErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			if attempt > 0 {
-				time.Sleep(time.Duration(1<<attempt) * time.Second)
+			if ctx.Err() != nil {
+				return
+			}
+			if attempt > 0 && !waitRelayRetry(ctx, time.Duration(1<<attempt)*time.Second) {
+				return
 			}
 			if _, err := a.push.sendIncoming(call, time.Now()); err == nil {
 				return
@@ -934,18 +1030,21 @@ func (a *agent) scheduleIncomingPush(callID string) {
 		if lastErr != nil {
 			a.debug.add("push", "tx", "来电推送失败", lastErr.Error(), map[string]string{"call_id": callID})
 		}
-	}()
+	})
 }
 
 func (a *agent) scheduleSMSPush(message smsMessage) {
 	if message.DeliveryID == "" || a.push == nil {
 		return
 	}
-	go func() {
+	a.scheduleRelayJob(func(ctx context.Context) {
 		var lastErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			if attempt > 0 {
-				time.Sleep(time.Duration(1<<attempt) * time.Second)
+			if ctx.Err() != nil {
+				return
+			}
+			if attempt > 0 && !waitRelayRetry(ctx, time.Duration(1<<attempt)*time.Second) {
+				return
 			}
 			if _, err := a.push.sendSMS(message); err == nil {
 				return
@@ -956,5 +1055,5 @@ func (a *agent) scheduleSMSPush(message smsMessage) {
 		if lastErr != nil {
 			a.debug.add("push", "tx", "短信推送失败", lastErr.Error(), map[string]string{"delivery_id": message.DeliveryID})
 		}
-	}()
+	})
 }

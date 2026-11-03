@@ -50,11 +50,12 @@ final class AppUpdatePresenter {
     void showNotes(Runnable after) {
         Activity activity = liveOwner();
         if (activity == null || dialog != null) return;
-        String notes = "• 首次安装／升级后显示版本说明，设置中可重看并检查应用更新。\n\n"
-                + "• 本地双通道、多安卓设备归属，改进短信会话、配对与 Verbose 诊断。\n\n"
-                + "• 臻情设备采用最低非零音量兼容策略；其他机型保持现有策略。\n\n"
-                + "• PCM 启动失败及时释放资源，TXT 保留启动阶段、错误码和异常类别。\n\n"
-                + "华为等 OEM 实际音频能力及双向声音仍待真机验证；最低音量不等于完全静音。";
+        String notes = "• 修复 Android 10 的 SIM 订阅监听兼容性，避免启动 Service 时调用高版本接口崩溃。\n\n"
+                + "• 上报设备电量，供兼容的 iPhone 小组件显示；无有效采样时不会伪造电量。\n\n"
+                + "• 配套 iPhone build 162 新增小组件、未读短信／未接来电标记与试验性 TLS 公网配对教程。\n\n"
+                + "• 改善 Shizuku 短信收件箱兼容性；首次追平只补转近 15 分钟短信，旧短信仅推进游标。\n\n"
+                + "• U30Air 客户端与通话收尾改进需要兼容设备端；本 APK 不安装或更新 U30Air 固件。\n\n"
+                + "• 反馈仍由用户手动上传；配对和已有数据保留。";
         AlertDialog next = new AlertDialog.Builder(activity).setTitle("当前版本更新内容 · " + version + "（" + build + "）")
                 .setMessage(notes).setPositiveButton("知道了", (ignored, which) -> {
                     preferences.edit().putString(NOTES_SEEN, version + "#" + build).apply();

@@ -1,6 +1,7 @@
 package com.airsim.phonecontrol;
 
 import android.content.Context;
+import android.os.Looper;
 import android.os.Parcel;
 
 import org.json.JSONObject;
@@ -25,6 +26,10 @@ public final class RootBridgeMain {
 
     public static void main(String[] args) {
         try {
+            // app_process starts on a bare main thread. ActivityThread.systemMain()
+            // constructs a Handler and otherwise throws
+            // "Can't create handler inside thread ... that has not called Looper.prepare()".
+            if (Looper.myLooper() == null) Looper.prepareMainLooper();
             if (args.length < 3) throw new IllegalArgumentException("usage: package port token-file");
             String packageName = args[0];
             int port = Integer.parseInt(args[1]);

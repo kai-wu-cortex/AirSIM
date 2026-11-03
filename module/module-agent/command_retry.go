@@ -119,7 +119,8 @@ func (p *pushManager) commandFailedFor(origin *pushRegistration, failures int, e
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if origin != nil && (!p.cloudEnabledLocked() || !sameCommandRegistration(p.config, *origin)) {
+	current, ready := p.commandRegistrationLocked()
+	if origin != nil && (!ready || !sameCommandRegistration(current, *origin)) {
 		return 0
 	}
 	until := time.Now().Add(delay)

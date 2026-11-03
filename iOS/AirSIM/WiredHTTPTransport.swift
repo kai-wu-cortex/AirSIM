@@ -41,6 +41,31 @@ enum LocalWiFiSubnet {
               let mask = NetworkRoutePreferences.parseIPv4(netmask) else { return false }
         return matches(target: target, local: ip, netmask: mask)
     }
+
+    /// Local IPv4 addresses are part of the WiFi identity. DHCP can change the
+    /// address while the interface/gateway tuple stays identical; without this,
+    /// NWPathMonitor would not invalidate a cached VoWLAN LAN host.
+    static func localIPv4Addresses() -> [String] {
+        var result: [String] = []
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return result }
+        defer { freeifaddrs(ifaddr) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            defer { cursor = entry.pointee.ifa_next }
+            let flags = Int32(entry.pointee.ifa_flags)
+            guard flags & IFF_UP != 0, flags & IFF_LOOPBACK == 0 else { continue }
+            guard String(cString: entry.pointee.ifa_name).hasPrefix("en") else { continue }
+            guard let address = entry.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let length = socklen_t(address.pointee.sa_len)
+            if getnameinfo(address, length, &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
+                result.append(String(cString: host))
+            }
+        }
+        return result.sorted()
+    }
 }
 
 /// Shared by the app and its extension; no AppModel/controller dependency.
@@ -58,7 +83,8 @@ enum VoWLANNetworkRoutePolicy {
     }
 
     static func usesSystemRouting(host: String, isLocalSubnet: Bool) -> Bool {
-        permitsDirectIPv4(host) && !isLocalSubnet
+        // DNS routes are admitted only by the explicit TLS endpoint constructor.
+        (NetworkRoutePreferences.parseIPv4(host) == nil || permitsDirectIPv4(host)) && !isLocalSubnet
     }
 
     /// True only for tailnet/CGNAT addresses. A plain 192.168/10 LAN must not be
@@ -82,6 +108,28 @@ final class WiredHTTPTransport: @unchecked Sendable {
 
     init() {}
 
+    /// Safe to retry only for callers whose request is idempotent (for example
+    /// enabling the audio host). Do not use this for dial/SMS/answer POSTs.
+    static func isRetryableTransportFailure(_ error: Error) -> Bool {
+        guard let error = error as? WiredHTTPError else { return false }
+        switch error {
+        case .wiredPathUnavailable, .connectionFailed, .connectionClosed, .timedOut:
+            return true
+        case .invalidRequest, .sendFailed, .receiveFailed, .responseTooLarge,
+             .invalidResponse, .incompleteResponse, .unreadableUpload:
+            return false
+        }
+    }
+
+    /// Permits a read-only operation-status lookup, NEVER replaying a POST.
+    static func permitsOperationStatusLookup(after error: Error) -> Bool {
+        guard let error = error as? WiredHTTPError else { return false }
+        switch error {
+        case .invalidRequest, .unreadableUpload: return false
+        default: return true
+        }
+    }
+
     static func allowsInterfaceFallback(httpMethod: String?) -> Bool {
         switch httpMethod?.uppercased() ?? "GET" {
         case "GET", "HEAD": return true
@@ -95,10 +143,12 @@ final class WiredHTTPTransport: @unchecked Sendable {
     }
 
     func send(_ request: URLRequest, uploadFileURL: URL? = nil) async throws -> WiredHTTPResponse {
+        try Task.checkCancellation()
         guard let url = request.url,
-              url.scheme?.lowercased() == "http",
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host,
-              let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? 80)) else {
+              let rawPort = UInt16(exactly: url.port ?? (scheme == "https" ? 443 : 80)),
+              let port = NWEndpoint.Port(rawValue: rawPort) else {
             throw WiredHTTPError.invalidRequest
         }
 
@@ -115,6 +165,10 @@ final class WiredHTTPTransport: @unchecked Sendable {
             body = .none
         }
 
+        if scheme == "https" {
+            return try await sendOnce(request, host: NWEndpoint.Host(host), port: port,
+                                      body: body, route: .system, tls: true)
+        }
         if VoWLANNetworkRoutePolicy.usesSystemRouting(host: host) {
             return try await sendOnce(
                 request, host: NWEndpoint.Host(host), port: port, body: body, route: .system)
@@ -124,6 +178,7 @@ final class WiredHTTPTransport: @unchecked Sendable {
             return try await sendOnce(
                 request, host: NWEndpoint.Host(host), port: port, body: body, route: .type(.wifi))
         } catch {
+            try Task.checkCancellation()
             guard Self.allowsInterfaceFallback(httpMethod: request.httpMethod),
                   (error as? WiredHTTPError)?.isInterfaceFailure == true else { throw error }
             // A local address can also be reached through a VPN when the phone is not on
@@ -138,20 +193,43 @@ final class WiredHTTPTransport: @unchecked Sendable {
         host: NWEndpoint.Host,
         port: NWEndpoint.Port,
         body: WiredHTTPBody,
-        route: WiredInterfaceRoute
+        route: WiredInterfaceRoute,
+        tls: Bool = false
     ) async throws -> WiredHTTPResponse {
-        try await withCheckedThrowingContinuation { continuation in
-            let operation = WiredHTTPRequestOperation(
-                request: request,
-                host: host,
-                port: port,
-                body: body,
-                route: route,
-                queue: queue,
-                continuation: continuation
-            )
-            operation.start()
-        }
+        let cancellation = WiredHTTPRequestCancellation()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                let operation = WiredHTTPRequestOperation(
+                    request: request, host: host, port: port, body: body,
+                    route: route, tls: tls, queue: queue, continuation: continuation)
+                cancellation.install(operation)
+            }
+        } onCancel: { cancellation.cancel() }
+    }
+}
+
+/// Cancellation may race installation or a network callback. Operation state
+/// and continuation completion remain confined to the operation's serial queue.
+private final class WiredHTTPRequestCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var operation: WiredHTTPRequestOperation?
+    private var cancelled = false
+
+    func install(_ next: WiredHTTPRequestOperation) {
+        lock.lock()
+        operation = next
+        let wasCancelled = cancelled
+        lock.unlock()
+        if wasCancelled { next.cancel() } else { next.start() }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let current = operation
+        lock.unlock()
+        current?.cancel()
     }
 }
 
@@ -220,6 +298,7 @@ private final class WiredHTTPRequestOperation: @unchecked Sendable {
         port: NWEndpoint.Port,
         body: WiredHTTPBody,
         route: WiredInterfaceRoute,
+        tls: Bool,
         queue: DispatchQueue,
         continuation: CheckedContinuation<WiredHTTPResponse, Error>
     ) {
@@ -235,7 +314,9 @@ private final class WiredHTTPRequestOperation: @unchecked Sendable {
         tcp.noDelay = true
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 5
-        let parameters = NWParameters(tls: nil, tcp: tcp)
+        // Default Network.framework trust evaluation validates the DNS name and
+        // certificate chain. Never install a permissive verify block or downgrade.
+        let parameters = NWParameters(tls: tls ? NWProtocolTLS.Options() : nil, tcp: tcp)
         switch route {
         case .system: break // Let iOS select the active VPN route, including cellular underlay.
         case let .type(type): parameters.requiredInterfaceType = type
@@ -244,6 +325,15 @@ private final class WiredHTTPRequestOperation: @unchecked Sendable {
     }
 
     func start() {
+        queue.async { self.startOnQueue() }
+    }
+
+    func cancel() {
+        queue.async { self.finish(.failure(CancellationError())) }
+    }
+
+    private func startOnQueue() {
+        guard !finished else { return }
         // NWConnection 的回调使用弱引用；请求结束前由操作自持有，避免局部变量离开作用域后提前释放。
         keepAlive = self
 #if DEBUG

@@ -1,38 +1,863 @@
 import CryptoKit
+import CallKit
 import CoreBluetooth
 import AVFoundation
 import XCTest
 import Contacts
 import Network
 import SwiftUI
+import WidgetKit
 @testable import AirSIM
 
 @MainActor
+final class LiveActivityReconciliationTests: XCTestCase {
+    private typealias State = AirSIMCallActivityAttributes.ContentState
+
+    private func state(_ online: Bool) -> State {
+        LiveActivityStateBuilder.make(call: nil, callerName: nil, moduleOnline: online,
+            radio: nil, idleStartedAt: Date(timeIntervalSince1970: 0))
+    }
+
+    private func publish(_ controller: LiveActivityController, online: Bool, foreground: Bool = true) async {
+        await controller.update(call: nil, callerName: nil, moduleOnline: online, radio: nil,
+                                appIsActive: foreground)
+    }
+
+    func testRestartReconcilesDuplicateAndEndedCards() async {
+        let store = MemoryActivityStore([
+            .init(id: "a", state: state(false), isRunning: true),
+            .init(id: "b", state: state(true), isRunning: true),
+            .init(id: "c", state: state(false), isRunning: false)])
+        let controller = LiveActivityController(store: store)
+        await publish(controller, online: true)
+        XCTAssertEqual(store.values.map(\.id), ["a"])
+        XCTAssertEqual(store.values.first?.state.phase, .standby)
+        XCTAssertEqual(Set(store.ended), ["b", "c"])
+        XCTAssertEqual(store.created, 0)
+    }
+
+    func testRemoteContentOverwriteIsRepairedWithoutChangingLocalSnapshot() async {
+        let store = MemoryActivityStore([])
+        let controller = LiveActivityController(store: store)
+        await publish(controller, online: true)
+        let id = store.values[0].id
+        store.values = [.init(id: id, state: state(false), isRunning: true)]
+        await publish(controller, online: true)
+        XCTAssertEqual(store.values.first?.state.phase, .standby)
+        XCTAssertEqual(store.created, 1)
+    }
+
+    func testEndedCachedHandleIsReplacedOnlyInForeground() async {
+        let store = MemoryActivityStore([])
+        let controller = LiveActivityController(store: store)
+        await publish(controller, online: true)
+        let oldID = store.values[0].id
+        store.values = [.init(id: oldID, state: state(false), isRunning: false)]
+        await publish(controller, online: true, foreground: false)
+        XCTAssertTrue(store.values.isEmpty)
+        XCTAssertEqual(store.created, 1)
+        await publish(controller, online: true)
+        XCTAssertEqual(store.created, 2)
+        XCTAssertNotEqual(store.values.first?.id, oldID)
+        XCTAssertEqual(store.values.first?.state.phase, .standby,
+                       "Activity expiry must not turn an online device into an offline snapshot")
+    }
+
+    func testExpiredCardRestoresCurrentCallInsteadOfEndingIt() async {
+        let store = MemoryActivityStore([])
+        let controller = LiveActivityController(store: store)
+        let now = Date()
+        let call = CallRecord(id: "overnight-call", index: 0, direction: "incoming",
+            state: "active", number: nil, startedAt: now, updatedAt: now, endedAt: nil, missed: false)
+        await controller.update(call: call, callerName: nil, moduleOnline: true,
+                                radio: nil, appIsActive: true)
+        let original = store.values[0]
+        store.values = [.init(id: original.id, state: original.state, isRunning: false)]
+        await controller.update(call: call, callerName: nil, moduleOnline: true,
+                                radio: nil, appIsActive: false)
+        XCTAssertTrue(store.values.isEmpty, "Background expiry does not require recreating a card to keep a call alive")
+        await controller.update(call: call, callerName: nil, moduleOnline: true,
+                                radio: nil, appIsActive: true)
+        XCTAssertEqual(store.values.count, 1)
+        XCTAssertNotEqual(store.values.first?.id, original.id)
+        XCTAssertEqual(store.values.first?.state.callID, original.state.callID)
+        XCTAssertEqual(store.values.first?.state.phase, original.state.phase)
+    }
+
+    func testSlowOfflineWriteCannotOverwriteNewerOnlineRequest() async {
+        let store = MemoryActivityStore([])
+        let controller = LiveActivityController(store: store)
+        await publish(controller, online: true)
+        let started = expectation(description: "offline update suspended")
+        var resume: CheckedContinuation<Void, Never>?
+        store.beforeUpdate = {
+            await withCheckedContinuation { resume = $0; started.fulfill() }
+        }
+        let old = Task { await self.publish(controller, online: false) }
+        await fulfillment(of: [started], timeout: 2)
+        await publish(controller, online: true)
+        store.beforeUpdate = nil
+        resume?.resume()
+        await old.value
+        XCTAssertEqual(store.values.first?.state.phase, .standby)
+        XCTAssertEqual(store.maximumConcurrentWrites, 1)
+    }
+
+    func testDisableDuringWriteCleansAllActivitiesAndDoesNotRecreate() async {
+        let store = MemoryActivityStore([])
+        let controller = LiveActivityController(store: store)
+        await publish(controller, online: true)
+        let started = expectation(description: "update suspended")
+        var resume: CheckedContinuation<Void, Never>?
+        store.beforeUpdate = {
+            await withCheckedContinuation { resume = $0; started.fulfill() }
+        }
+        let old = Task { await self.publish(controller, online: false) }
+        await fulfillment(of: [started], timeout: 2)
+        controller.setEnabled(false)
+        await publish(controller, online: true)
+        resume?.resume()
+        await old.value
+        XCTAssertTrue(store.values.isEmpty)
+        XCTAssertEqual(store.created, 1)
+    }
+
+    func testRemoteDuplicateIsRemovedEvenWithoutAnotherStatusPoll() async {
+        let store = MemoryActivityStore([])
+        let controller = LiveActivityController(store: store)
+        await publish(controller, online: true)
+        let selectedID = store.values[0].id
+        let ended = expectation(description: "remote duplicate dismissed")
+        store.afterEnd = { id in if id == "remote" { ended.fulfill() } }
+        store.values.append(.init(id: "remote", state: state(false), isRunning: true))
+        store.onActivityAdded?()
+        await fulfillment(of: [ended], timeout: 2)
+        XCTAssertEqual(store.values.map(\.id), [selectedID])
+    }
+
+    func testSelectedCloudStatusOverridesMissingLegacyGlobalFlag() {
+        let agent = AndroidAgentPresentation(id: "A", deviceName: "Android", phoneNumber: nil,
+            agentKind: nil, cloudOnline: true, vowlanOnline: false, bluetoothOnline: false, isCurrent: true)
+        let result = LiveActivityStateBuilder.make(call: nil, callerName: nil, moduleOnline: false,
+            radio: nil, agent: .init(agent: agent, pairedAgentCount: 1), idleStartedAt: Date())
+        XCTAssertEqual(result.phase, .cloudStandby)
+        XCTAssertEqual(result.cloudOnline, true)
+    }
+
+    func testOtherDeviceGlobalOnlineFlagCannotMarkSelectedOfflineDeviceOnline() {
+        let agent = AndroidAgentPresentation(id: "A", deviceName: "Android", phoneNumber: nil,
+            agentKind: nil, cloudOnline: false, vowlanOnline: false, bluetoothOnline: false, isCurrent: true)
+        let result = LiveActivityStateBuilder.make(call: nil, callerName: nil, moduleOnline: true,
+            cloudOnline: true, radio: nil, agent: .init(agent: agent, pairedAgentCount: 1), idleStartedAt: Date())
+        XCTAssertEqual(result.phase, .offline)
+    }
+
+    func testRegistrationDeclaresStatusSurfaceButPureLocalExportsNoRelayFields() throws {
+        let cloud = AgentPushRegistration(cloudModeEnabled: true, deviceID: "fixture", deviceSecret: "fixture",
+            token: "fixture", alertToken: "", watchVoIPToken: "", watchBundleID: "",
+            liveActivityPushToStartToken: "fixture", bundleID: "com.example.airsim", environment: "sandbox", relayURL: "")
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(cloud)) as? [String: Any])
+        XCTAssertEqual(encoded["live_activity_presentation"] as? String, "agent_status")
+        let local = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            AgentPushRegistration.local(vowlanSecret: "fixture"))) as? [String: Any])
+        XCTAssertNil(local["live_activity_presentation"])
+        XCTAssertNil(local["live_activity_push_to_start_token"])
+    }
+}
+
+@MainActor
+private final class MemoryActivityStore: LiveActivityStore {
+    var available = true
+    var onActivityAdded: (() -> Void)?
+    var values: [LiveActivityEntry]
+    var created = 0
+    var ended: [String] = []
+    var beforeUpdate: (() async -> Void)?
+    var afterEnd: ((String) -> Void)?
+    private var concurrentWrites = 0
+    var maximumConcurrentWrites = 0
+
+    init(_ values: [LiveActivityEntry]) { self.values = values }
+    func entries() -> [LiveActivityEntry] { values }
+    func create(_ state: AirSIMCallActivityAttributes.ContentState) throws -> String {
+        created += 1
+        let id = "created-\(created)"
+        values.append(.init(id: id, state: state, isRunning: true))
+        return id
+    }
+    func update(_ id: String, state: AirSIMCallActivityAttributes.ContentState) async {
+        concurrentWrites += 1
+        maximumConcurrentWrites = max(maximumConcurrentWrites, concurrentWrites)
+        await beforeUpdate?()
+        if let index = values.firstIndex(where: { $0.id == id }) {
+            values[index] = .init(id: id, state: state, isRunning: true)
+        }
+        concurrentWrites -= 1
+    }
+    func end(_ id: String) async {
+        values.removeAll { $0.id == id }
+        ended.append(id)
+        afterEnd?(id)
+    }
+}
+
+final class CallKitNumberPresentationTests: XCTestCase {
+    @MainActor
+    func testIncomingPushPassesLiteralNumberToSystemWithoutRewritingPayload() throws {
+        let call = try IncomingVoIPCall(userInfo: [
+            "event": "incoming_call", "call_id": "number-fixture", "call_uuid": UUID().uuidString,
+            "number": "13800138000",
+        ])
+        let controller = CallKitController()
+        controller.setEnabled(true)
+        var reported = false
+        controller.reportIncomingPush(call, systemReport: { _, update, _ in
+            reported = true
+            XCTAssertEqual(update.remoteHandle?.type, .generic)
+            XCTAssertEqual(update.remoteHandle?.value, "13800138000")
+            XCTAssertEqual(update.localizedCallerName, "13800138000")
+        }) { _ in }
+        XCTAssertTrue(reported)
+        XCTAssertEqual(controller.currentIncomingPush?.number, "13800138000")
+    }
+
+    @MainActor
+    func testOutgoingCallKitActionKeepsDialTarget() async throws {
+        let controller = CallKitController()
+        controller.setEnabled(true)
+        try await controller.startOutgoingCall(number: "13800138000", systemStart: { action in
+            XCTAssertEqual(action.handle.type, .generic)
+            XCTAssertEqual(action.handle.value, "13800138000")
+        })
+    }
+
+    @MainActor
+    func testVirtualCallsStillUseTheirTitle() throws {
+        let call = try IncomingVoIPCall(userInfo: [
+            "event": "incoming_call", "call_id": "virtual-fixture", "call_uuid": UUID().uuidString,
+            "number": "+8613800138000", "caller_name": "测试通知", "virtual_call": true, "tts_text": "测试",
+        ])
+        let controller = CallKitController()
+        controller.setEnabled(true)
+        var reported = false
+        controller.reportIncomingPush(call, systemReport: { _, update, _ in
+            reported = true
+            XCTAssertEqual(update.remoteHandle?.type, .generic)
+            XCTAssertEqual(update.remoteHandle?.value, "测试通知")
+            XCTAssertEqual(update.localizedCallerName, "测试通知")
+        }) { _ in }
+        XCTAssertTrue(reported)
+    }
+
+    func testNationalNumbersNeverAcquireLocalDeviceCountryCode() {
+        for number in ["13800138000", "010-12345678", "020 7946 0018", "2025550100", "10086", "*123#"] {
+            let update = CallKitNumberPresentation.update(number: number, callerName: nil)
+            XCTAssertEqual(update.remoteHandle?.type, .generic, number)
+            XCTAssertEqual(update.remoteHandle?.value, number)
+            XCTAssertEqual(update.localizedCallerName, number)
+        }
+    }
+
+    func testExplicitInternationalNumbersKeepTheirOwnCountryCode() {
+        for number in ["+8613800138000", "+86 138-0013-8000", "+1 (202) 555-0100", "+442079460018", "+819012345678"] {
+            let update = CallKitNumberPresentation.update(number: number, callerName: nil)
+            XCTAssertEqual(update.remoteHandle?.type, .phoneNumber, number)
+            XCTAssertEqual(update.remoteHandle?.value, number)
+            XCTAssertNil(update.localizedCallerName)
+        }
+    }
+
+    func testNamesAndUnknownNumbersRemainDisplayable() {
+        let named = CallKitNumberPresentation.update(number: "13800138000", callerName: "测试联系人")
+        XCTAssertEqual(named.localizedCallerName, "测试联系人")
+        XCTAssertEqual(named.remoteHandle?.value, "13800138000")
+        for number: String? in [nil, "", "   "] {
+            let unknown = CallKitNumberPresentation.update(number: number, callerName: nil)
+            XCTAssertEqual(unknown.remoteHandle?.type, .generic)
+            XCTAssertEqual(unknown.remoteHandle?.value, "未知号码")
+        }
+    }
+
+    func testNumericCallerNameDoesNotReenableRegionalFormatting() {
+        for name in ["13800138000", "", "  "] {
+            let update = CallKitNumberPresentation.update(number: "13800138000", callerName: name)
+            XCTAssertEqual(update.localizedCallerName, "13800138000")
+            XCTAssertEqual(update.remoteHandle?.type, .generic)
+        }
+    }
+
+    func testDialTargetsAreNeverRewrittenIncludingInternationalAccessPrefixes() {
+        for number in ["13800138000", "008613800138000", "0118613800138000", "+86 138-0013-8000", "*123#"] {
+            XCTAssertEqual(CallKitNumberPresentation.handle(number: number).value, number)
+        }
+        XCTAssertEqual(CallKitNumberPresentation.handle(number: "008613800138000").type, .generic)
+    }
+
+    func testInvalidInternationalTextRemainsLiteral() {
+        for number in ["+", "++8613800138000", "+0123456789", "+8613800138000 ext 12", "+1234567890123456", "匿名来电"] {
+            let handle = CallKitNumberPresentation.handle(number: number)
+            XCTAssertEqual(handle.type, .generic)
+            XCTAssertEqual(handle.value, number)
+        }
+    }
+}
+
+@MainActor
+final class ManualFeedbackPolicyTests: XCTestCase {
+    func testAutomaticTriggersAreRejectedBeforeCollectionOrUpload() async {
+        for trigger in ["", "periodic", "error", "call_ended", "sms_sent", "sms_received", "crash", "startup", "MANUAL", " manual "] {
+            XCTAssertFalse(FeedbackUploader.permitsUpload(trigger: trigger))
+            let message = await FeedbackUploader.shared.upload(trigger: trigger, eventID: "fixture", api: nil, model: nil)
+            XCTAssertEqual(message, "自动反馈上传已关闭，请手动上传")
+        }
+    }
+
+    func testExplicitManualActionRemainsAllowed() {
+        XCTAssertTrue(FeedbackUploader.permitsUpload(trigger: "manual"))
+    }
+}
+
+final class TunnelRecoveryRegressionTests: XCTestCase {
+    func testUnansweredPushDoesNotFreezeLocalRouteRecovery() {
+        XCTAssertFalse(VoWLANNetworkChangePolicy.preservesCallRoute(
+            state: .ringing, transportLocked: false, cloudCallActive: false))
+        XCTAssertTrue(VoWLANNetworkChangePolicy.preservesCallRoute(
+            state: .ringing, transportLocked: true, cloudCallActive: false))
+        XCTAssertTrue(VoWLANNetworkChangePolicy.preservesCallRoute(
+            state: .active, transportLocked: false, cloudCallActive: false))
+        XCTAssertTrue(VoWLANNetworkChangePolicy.preservesCallRoute(
+            state: .ringing, transportLocked: false, cloudCallActive: true))
+    }
+
+    func testCancelledLocalHTTPRequestDoesNotWaitForNetworkTimeout() async throws {
+        // 127/8 is intentionally routed via the Wi-Fi-only path: without task
+        // cancellation it waits for the path deadline (then may try fallback).
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:9/v1/health")!)
+        request.timeoutInterval = 30
+        let entered = expectation(description: "request entered")
+        let cancelled = expectation(description: "request cancelled promptly")
+        let requestTask = Task {
+            entered.fulfill()
+            do {
+                _ = try await WiredHTTPTransport().send(request)
+                XCTFail("Cancelled request must not succeed")
+            } catch is CancellationError {
+                cancelled.fulfill()
+            } catch {
+                XCTFail("Expected cancellation, got \(error)")
+            }
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        requestTask.cancel()
+        await fulfillment(of: [cancelled], timeout: 1)
+        await requestTask.value
+    }
+
+    func testAlreadyCancelledLocalHTTPRequestCannotStart() async throws {
+        let task = Task {
+            while !Task.isCancelled { await Task.yield() }
+            do {
+                _ = try await WiredHTTPTransport().send(URLRequest(url: URL(string: "http://127.0.0.1:9/")!))
+                XCTFail("Already cancelled task must not send")
+            } catch { XCTAssertTrue(error is CancellationError) }
+        }
+        task.cancel()
+        await task.value
+    }
+
+    @MainActor
+    func testNetworkEpochCancelsOldProbeWithoutClearingNewFlight() async throws {
+        let flight = VoWLANProbeFlight()
+        let endpoint = try VoWLANEndpoint(host: "100.64.1.2", controlPort: 7592, pcmPort: 7593)
+        var oldResume: CheckedContinuation<Void, Never>?
+        var newResume: CheckedContinuation<Void, Never>?
+        var oldWasCancelled = false
+        let old = Task {
+            await flight.run(epoch: 1, endpoint: endpoint) {
+                await withCheckedContinuation { oldResume = $0 }
+                oldWasCancelled = Task.isCancelled
+            }
+        }
+        while oldResume == nil { await Task.yield() }
+        let new = Task {
+            await flight.run(epoch: 2, endpoint: endpoint) {
+                await withCheckedContinuation { newResume = $0 }
+            }
+        }
+        while newResume == nil { await Task.yield() }
+        oldResume?.resume()
+        await old.value
+        XCTAssertTrue(oldWasCancelled)
+        XCTAssertTrue(flight.isRunning, "An obsolete completion must not clear the new network's operation")
+        newResume?.resume()
+        await new.value
+        XCTAssertFalse(flight.isRunning)
+    }
+
+    @MainActor
+    func testWatchdogCallerCancellationDoesNotCancelSharedProbe() async throws {
+        let flight = VoWLANProbeFlight()
+        let endpoint = try VoWLANEndpoint(host: "100.64.1.2", controlPort: 7592, pcmPort: 7593)
+        var resume: CheckedContinuation<Void, Never>?
+        var operationWasCancelled = true
+        let caller = Task {
+            await flight.run(epoch: 1, endpoint: endpoint) {
+                await withCheckedContinuation { resume = $0 }
+                operationWasCancelled = Task.isCancelled
+            }
+        }
+        while resume == nil { await Task.yield() }
+        caller.cancel()
+        resume?.resume()
+        await caller.value
+        XCTAssertFalse(operationWasCancelled,
+                       "Publishing unavailable/fallback cancels the watchdog, not the health operation it awaits")
+    }
+
+    @MainActor
+    func testConcurrentProbeTriggersShareOneOperation() async throws {
+        let flight = VoWLANProbeFlight()
+        let endpoint = try VoWLANEndpoint(host: "100.64.1.2", controlPort: 7592, pcmPort: 7593)
+        var starts = 0
+        var pending: [CheckedContinuation<Void, Never>] = []
+        let operation: @MainActor () async -> Void = {
+            starts += 1
+            await withCheckedContinuation { pending.append($0) }
+        }
+        let first = Task { await flight.run(epoch: 1, endpoint: endpoint, operation: operation) }
+        while pending.isEmpty { await Task.yield() }
+        let second = Task { await flight.run(epoch: 1, endpoint: endpoint, operation: operation) }
+        for _ in 0..<30 { await Task.yield() }
+        for continuation in pending { continuation.resume() }
+        await first.value
+        await second.value
+        XCTAssertEqual(starts, 1, "Foreground, discovery and watchdog must not invalidate each other's signed probe")
+    }
+
+    func testSavedTailnetRouteIsNotReplacedByLANAdvertisementDuringVerification() throws {
+        let vpn = VoWLANManualRoute(agentID: "peer", host: "100.64.1.2", controlPort: 7592, pcmPort: 7593)
+        let lan = VoWLANDiscoveredAgent(id: "peer",
+            endpoint: try .init(host: "192.168.31.203", controlPort: 7592, pcmPort: 7593),
+            deviceName: "Phone", manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [lan], manual: [vpn],
+            live: [], preferred: nil).first?.endpoint, vpn.endpoint)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [lan], manual: [vpn],
+            live: [lan], preferred: lan.endpoint).first?.endpoint, lan.endpoint,
+            "An already verified LAN route or active call must remain stable")
+    }
+
+    func testNetworkChangeKeepsPairedVPNCandidatesOutsideCGNAT() throws {
+        let routes = ["100.64.1.2", "10.88.0.2", "172.20.1.2", "192.168.50.2"].map {
+            VoWLANManualRoute(agentID: $0, host: $0, controlPort: 39001, pcmPort: 39002)
+        }
+        XCTAssertEqual(VoWLANNetworkChangePolicy.manualCandidates(routes), routes)
+        for route in routes {
+            let endpoint = try XCTUnwrap(route.endpoint)
+            XCTAssertTrue(VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host, isLocalSubnet: false))
+            XCTAssertFalse(VoWLANAvailability.discovered(endpoint, at: Date()).isReady(),
+                           "Restoring a saved VPN route must not restore online state")
+        }
+    }
+
+    func testRecoveryCandidatesRejectMalformedRoutes() {
+        let invalid = [
+            VoWLANManualRoute(agentID: "", host: "10.88.0.2", controlPort: 39001, pcmPort: 39002),
+            VoWLANManualRoute(agentID: "peer", host: "127.0.0.1", controlPort: 39001, pcmPort: 39002),
+            VoWLANManualRoute(agentID: "peer", host: "10.88.0.2", controlPort: 0, pcmPort: 39002)
+        ]
+        XCTAssertTrue(VoWLANNetworkChangePolicy.manualCandidates(invalid).isEmpty)
+    }
+
+    func testFreshDHCPAddressBeatsSavedCandidateExceptDuringCall() throws {
+        let saved = VoWLANManualRoute(agentID: "peer", host: "10.88.0.2", controlPort: 39001, pcmPort: 39002)
+        let fresh = VoWLANDiscoveredAgent(id: "peer",
+            endpoint: try .init(host: "192.168.50.3", controlPort: 40001, pcmPort: 40002),
+            deviceName: "Phone", manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)
+        let candidates = VoWLANNetworkChangePolicy.manualCandidates([saved])
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [fresh], manual: candidates,
+            live: [], preferred: nil).first?.endpoint, fresh.endpoint)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [fresh], manual: candidates,
+            live: [], preferred: saved.endpoint).first?.endpoint, saved.endpoint)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [], manual: candidates,
+            live: [], preferred: nil).first?.endpoint, saved.endpoint)
+    }
+
+    func testOfflineLANAndVPNFallbackCannotCycleWithinOneProbe() throws {
+        let lan = try VoWLANEndpoint(host: "192.168.50.3", controlPort: 7592, pcmPort: 7593)
+        let vpn = try VoWLANEndpoint(host: "100.64.1.2", controlPort: 39001, pcmPort: 39002)
+        var attempts = VoWLANProbeAttempts()
+        XCTAssertTrue(attempts.begin(lan))
+        XCTAssertTrue(attempts.permits(vpn))
+        XCTAssertTrue(attempts.begin(vpn))
+        XCTAssertFalse(attempts.permits(lan))
+        XCTAssertFalse(attempts.begin(lan))
+        XCTAssertFalse(attempts.begin(vpn))
+        var nextRecovery = VoWLANProbeAttempts()
+        XCTAssertTrue(nextRecovery.begin(vpn), "A later recovery can retry the VPN")
+    }
+
+    func testVerboseExportDisclosesWhenTunnelTracingWasDisabled() async {
+        let recorder = AgentVerboseTraceRecorder(initiallyEnabled: false, maxEntries: 20, persistenceURL: nil)
+        await recorder.recordAudioStartup(phase: "answer_observed")
+        await recorder.recordEvent(source: "ios", category: "vowlan", phase: "failed", title: "not collected")
+        let disabled = await recorder.exportText(agentEvents: [])
+        XCTAssertTrue(disabled.contains("verbose_enabled=false"))
+        XCTAssertFalse(disabled.contains("not collected"))
+        await recorder.setEnabled(true)
+        let enabled = await recorder.exportText(agentEvents: [])
+        XCTAssertTrue(enabled.contains("verbose_enabled=true"))
+    }
+}
+
+@MainActor
+final class RemoteDirectTests: XCTestCase {
+    private let credential = try! VoWLANCredential(secret: Data(repeating: 0x57, count: 32))
+
+    private func response(_ request: URLRequest, agentID: String, proof: Bool = true) throws -> WiredHTTPResponse {
+        let nonce = request.value(forHTTPHeaderField: "X-AirSIM-VoWLAN-Nonce") ?? ""
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("AIRSIM-HEALTH1\n\(nonce)\n\(agentID)".utf8),
+                                                 using: SymmetricKey(data: credential.secret))
+        var value: [String: Any] = ["ok": true, "agent_id": agentID]
+        if proof { value["identity_proof"] = Data(mac).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "") }
+        return WiredHTTPResponse(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
+    }
+
+    func testRemoteAddressValidationAndLegacyRestrictions() throws {
+        let route = try RemoteDirectConfiguration.route(agentID: "A", host: " Phone.Example.com \n",
+                                                        controlPort: "443", pcmPort: "17593")
+        let endpoint = try XCTUnwrap(route.endpoint)
+        XCTAssertEqual(endpoint.controlBaseURL.absoluteString, "https://phone.example.com:443/")
+        XCTAssertTrue(endpoint.usesTLS)
+        for host in ["8.8.8.8", "192.168.1.2", "::1", "https://phone.example.com", "a.example/path",
+                     "user@a.example", "a.example:443", "a..example", "-a.example", "a.example.", "localhost", "a.例子", "0x7f.1", "127.0x1"] {
+            XCTAssertThrowsError(try RemoteDirectConfiguration.route(agentID: "A", host: host,
+                                                                     controlPort: "443", pcmPort: "7593"), host)
+        }
+        for port in ["0", "65536", "-1", "+443", "44.3", ""] {
+            XCTAssertThrowsError(try RemoteDirectConfiguration.route(agentID: "A", host: "a.example",
+                                                                     controlPort: port, pcmPort: "7593"))
+        }
+        XCTAssertThrowsError(try VoWLANEndpoint(host: "phone.example.com", controlPort: 7592, pcmPort: 7593))
+        XCTAssertThrowsError(try VoWLANEndpoint(host: "8.8.8.8", controlPort: 7592, pcmPort: 7593))
+        XCTAssertFalse(AirSIMAPI.isAllowedLocalURL(endpoint.controlBaseURL))
+        let api = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential))
+        XCTAssertEqual(api.baseURL.scheme, "https")
+    }
+
+    func testPublicPairingRequiresDomainAndThreeValidTLSPorts() throws {
+        let address = try SamsungManualPairingAddress(host: " Phone.Example.com ", port: "9443",
+            usesTLS: true, controlPort: "8443", pcmPort: "17593")
+        XCTAssertEqual(address.host, "phone.example.com")
+        XCTAssertTrue(address.usesTLS)
+        XCTAssertEqual(address.remoteControlPort, 8443)
+        XCTAssertEqual(address.remotePCMPort, 17593)
+        for host in ["https://phone.example.com", "phone.example.com/path", "8.8.8.8", "localhost"] {
+            XCTAssertThrowsError(try SamsungManualPairingAddress(host: host, port: "9443",
+                usesTLS: true, controlPort: "443", pcmPort: "7593"))
+        }
+        XCTAssertThrowsError(try SamsungManualPairingAddress(host: "phone.example.com", port: "9443"))
+        for ports in [("0", "443", "7593"), ("9443", "65536", "7593"), ("9443", "443", "")] {
+            XCTAssertThrowsError(try SamsungManualPairingAddress(host: "phone.example.com", port: ports.0,
+                usesTLS: true, controlPort: ports.1, pcmPort: ports.2))
+        }
+    }
+
+    func testPublicPairingVerifiesEncryptedInternalRouteBeforeExternalPortMapping() async throws {
+        let address = try SamsungManualPairingAddress(host: "phone.example.com", port: "9443",
+            usesTLS: true, controlPort: "8443", pcmPort: "17593")
+        let registration = AgentPushRegistration.local(vowlanSecret: Data(0..<32).base64EncodedString())
+        let peer = ManualPairingPeerProbe(endpoint: address.endpoint)
+        let result = try await SamsungPairingClient.pairManually(address: address, code: "123456",
+            registration: registration, transport: { endpoint, body, method, path, timeout in
+                XCTAssertEqual(endpoint, address.endpoint)
+                return try await peer.exchange(endpoint: endpoint, body: body, method: method, path: path, timeout: timeout)
+            })
+        XCTAssertEqual(result.route, .init(agentID: "fixture-agent", host: "phone.example.com",
+            controlPort: 8443, pcmPort: 17593, tls: true))
+        XCTAssertTrue(try XCTUnwrap(result.route.endpoint).usesTLS)
+        let corrupt = ManualPairingPeerProbe(corruptRoute: true, endpoint: address.endpoint)
+        do {
+            _ = try await SamsungPairingClient.pairManually(address: address, code: "123456",
+                registration: registration, transport: { endpoint, body, method, path, timeout in
+                    try await corrupt.exchange(endpoint: endpoint, body: body, method: method, path: path, timeout: timeout)
+                })
+            XCTFail("External port mapping must not bypass Android route proof")
+        } catch { XCTAssertEqual(error as? SamsungPairingClientError, .directGatewayUnavailable) }
+    }
+
+    func testPublicPairingKeepsRetryDeviceWithoutAdmittingUnverifiedGateway() async throws {
+        let id = "public-pairing-" + UUID().uuidString
+        defer {
+            PairedAndroidDeviceStore.forget(id)
+            VoWLANPairingRecordStore.remove(agentID: id)
+            VoWLANManualRouteStore.remove(agentID: id)
+        }
+        let directory = LocalDeviceDirectory(credentials: RemoteTestCredentials(agentID: id, credential: credential),
+            healthTransport: { _ in
+                XCTFail("Public mapping must be verified by configureRemoteDirect before admission")
+                throw URLError(.badServerResponse)
+            })
+        let model = AppModel(localDirectory: directory,
+            callKitController: CallKitController(observesSystemCallbacks: false))
+        let endpoint = try VoWLANEndpoint(host: "phone.example.com", controlPort: 443, pcmPort: 17593, usesTLS: true)
+        try await model.completeLocalPairing(agentID: id,
+            registration: .local(vowlanSecret: credential.encodedSecret), endpoint: endpoint)
+        XCTAssertTrue(model.pairedDeviceHistory.contains { $0.id == id }, "Failed gateway validation must remain retryable")
+        XCTAssertNil(directory.api(for: id))
+        XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
+    }
+
+    func testLegacyRouteDecodingAndRemoteCoexistenceRemoval() throws {
+        let suite = "remote-routes-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let old = Data(#"[{"agentID":"A","host":"192.168.1.2","controlPort":7592,"pcmPort":7593}]"#.utf8)
+        defaults.set(old, forKey: "AirSIM.manualDirectRoutes.v1")
+        let local = try XCTUnwrap(VoWLANManualRouteStore.routes(defaults: defaults).first)
+        XCTAssertFalse(local.isRemote)
+        XCTAssertFalse(try XCTUnwrap(local.endpoint).usesTLS)
+        let remote = try RemoteDirectConfiguration.route(agentID: "A", host: "a.example", controlPort: "443", pcmPort: "7593")
+        try VoWLANManualRouteStore.save(remote, defaults: defaults)
+        let reopened = UserDefaults(suiteName: suite)!
+        XCTAssertEqual(VoWLANManualRouteStore.routes(defaults: reopened).count, 2)
+        XCTAssertEqual(VoWLANManualRouteStore.selected(defaults: reopened), local)
+        let updated = try RemoteDirectConfiguration.route(agentID: "A", host: "b.example", controlPort: "8443", pcmPort: "7593")
+        try VoWLANManualRouteStore.save(updated, defaults: defaults)
+        XCTAssertEqual(VoWLANManualRouteStore.routes(defaults: defaults), [local, updated])
+        VoWLANManualRouteStore.removeRemote(agentID: "A", defaults: defaults)
+        XCTAssertEqual(VoWLANManualRouteStore.routes(defaults: defaults), [local])
+        try VoWLANManualRouteStore.save(remote, defaults: defaults)
+        VoWLANManualRouteStore.remove(agentID: "A", defaults: defaults)
+        XCTAssertTrue(VoWLANManualRouteStore.routes(defaults: defaults).isEmpty)
+    }
+
+    func testColdRestorePrefersLocalEvenWhenRemoteWasSavedLast() throws {
+        let id = "remote-restore-" + UUID().uuidString
+        let previousBinding = AndroidAgentBindingPreference.selected()
+        AndroidAgentBindingPreference.set(id)
+        let controller = VoWLANController()
+        defer {
+            controller.stopBrowsing()
+            VoWLANManualRouteStore.remove(agentID: id)
+            AndroidAgentBindingPreference.set(previousBinding)
+        }
+        let local = VoWLANManualRoute(agentID: id, host: "192.168.1.50", controlPort: 7592, pcmPort: 7593)
+        try VoWLANManualRouteStore.save(local)
+        try VoWLANManualRouteStore.save(RemoteDirectConfiguration.route(agentID: id,
+            host: "phone.example.com", controlPort: "443", pcmPort: "17593"))
+        controller.startBrowsing()
+        XCTAssertEqual(controller.availability.endpoint, local.endpoint)
+        XCTAssertEqual(controller.discoveredAgents.first(where: { $0.id == id })?.endpoint, local.endpoint)
+    }
+
+    func testFallbackIsSameDeviceBoundedAndPreservesPreferredRemoteIdentity() throws {
+        let lan = VoWLANManualRoute(agentID: "A", host: "192.168.1.2", controlPort: 7592, pcmPort: 7593)
+        let remote = try RemoteDirectConfiguration.route(agentID: "A", host: "a.example", controlPort: "443", pcmPort: "7593")
+        let other = try RemoteDirectConfiguration.route(agentID: "B", host: "b.example", controlPort: "443", pcmPort: "7593")
+        let le = try XCTUnwrap(lan.endpoint), re = try XCTUnwrap(remote.endpoint)
+        XCTAssertEqual(VoWLANRouteCandidates.alternateManualRoute([other, lan, remote], agentID: "A", failed: le), remote)
+        XCTAssertNil(VoWLANRouteCandidates.alternateManualRoute([other, lan, remote], agentID: "A", failed: re, attempted: [le, re]))
+        let routes = VoWLANRouteCandidates.merge(discovered: [], manual: [remote, lan], live: [], preferred: re)
+        XCTAssertEqual(routes.first?.id, "A")
+        XCTAssertEqual(routes.first?.endpoint, re)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [], manual: [remote, lan], live: [], preferred: nil).first?.endpoint, le)
+    }
+
+    func testTLSAudioAndWatchPayloadKeepEncryptionFlag() throws {
+        let endpoint = try VoWLANEndpoint(host: "a.example", controlPort: 443, pcmPort: 443, usesTLS: true)
+        let audio = PCMRoute.vowlan(endpoint: endpoint, credential: credential)
+        XCTAssertTrue(audio.usesTLS)
+        XCTAssertTrue(audio.usesSystemRouting)
+        XCTAssertFalse(audio.requiresWiFi)
+        XCTAssertTrue(String(data: try audio.handshake(), encoding: .utf8)!.hasPrefix("AIRSIMVWL1 "))
+        var payload: [String: Any] = ["pcm_host": "a.example", "pcm_port": 443,
+                                     "pcm_secret": credential.encodedSecret, "pcm_tls": true]
+        XCTAssertEqual(WatchLocalPCMEndpoint(dictionary: payload)?.usesTLS, true)
+        payload.removeValue(forKey: "pcm_tls")
+        XCTAssertNil(WatchLocalPCMEndpoint(dictionary: payload), "Never interpret a domain as plaintext")
+        payload["pcm_host"] = "192.168.1.2"; payload["pcm_port"] = 7593
+        XCTAssertEqual(WatchLocalPCMEndpoint(dictionary: payload)?.usesTLS, false)
+        let historical = VoWLANPairingRecord.Endpoint(endpoint)
+        let restored = try JSONDecoder().decode(VoWLANPairingRecord.Endpoint.self, from: JSONEncoder().encode(historical))
+        XCTAssertEqual(restored.endpoint, endpoint)
+    }
+
+    func testTLSControlSendsClientHelloAndNeverDowngradesToPlainHTTP() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let listening = expectation(description: "plain test server listening")
+        let received = expectation(description: "TLS ClientHello received")
+        let queue = DispatchQueue(label: "test.remote-direct.tls")
+        listener.stateUpdateHandler = { state in if case .ready = state { listening.fulfill() } }
+        listener.newConnectionHandler = { peer in
+            peer.start(queue: queue)
+            peer.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
+                XCTAssertEqual(data?.first, 0x16, "Expected TLS handshake, never a plaintext signed GET")
+                received.fulfill()
+                // A plaintext impostor cannot satisfy the HTTPS request.
+                peer.send(content: Data("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".utf8),
+                          completion: .contentProcessed { _ in peer.cancel() })
+            }
+        }
+        listener.start(queue: queue)
+        defer { listener.cancel() }
+        await fulfillment(of: [listening], timeout: 3)
+        let port = try XCTUnwrap(listener.port)
+        var request = URLRequest(url: URL(string: "https://127.0.0.1:\(port.rawValue)/v1/health")!)
+        request.timeoutInterval = 3
+        do { _ = try await WiredHTTPTransport().send(request); XCTFail("Accepted plaintext HTTP as TLS") }
+        catch {}
+        await fulfillment(of: [received], timeout: 3)
+    }
+
+    func testRemovedRemoteCandidateCannotReenterDeviceDirectory() async throws {
+        let id = "remote-directory-" + UUID().uuidString
+        let route = try RemoteDirectConfiguration.route(agentID: id, host: "a.example", controlPort: "443", pcmPort: "7593")
+        let endpoint = try XCTUnwrap(route.endpoint)
+        defer { VoWLANManualRouteStore.remove(agentID: id); VoWLANPairingRecordStore.remove(agentID: id) }
+        let directory = LocalDeviceDirectory(credentials: RemoteTestCredentials(agentID: id, credential: credential),
+            healthTransport: { try await self.response($0, agentID: id) })
+        try VoWLANManualRouteStore.save(route)
+        try await directory.verify(agentID: id, endpoint: endpoint)
+        XCTAssertEqual(directory.routes(for: id)?.vowlan, endpoint)
+        VoWLANManualRouteStore.removeRemote(agentID: id)
+        directory.invalidateRemoteRoute(agentID: id)
+        do { try await directory.verify(agentID: id, endpoint: endpoint); XCTFail("Disabled candidate resurrected") }
+        catch is CancellationError {} catch { XCTFail("\(error)") }
+        XCTAssertNil(directory.api(for: id))
+    }
+
+    func testRemoteHealthRequiresNonceProofAndExactAgent() async throws {
+        let endpoint = try VoWLANEndpoint(host: "a.example", controlPort: 443, pcmPort: 7593, usesTLS: true)
+        let valid = try await VoWLANAuthenticatedHealth.fetch(agentID: "A", endpoint: endpoint, credential: credential) { request in
+            XCTAssertEqual(request.url?.scheme, "https")
+            XCTAssertEqual(request.url?.path, "/v1/health")
+            XCTAssertNotNil(request.value(forHTTPHeaderField: "X-AirSIM-VoWLAN-Signature"))
+            return try await self.response(request, agentID: "A")
+        }
+        XCTAssertEqual(valid.agentID, "A")
+        for (id, proof) in [("B", true), ("A", false)] {
+            do {
+                _ = try await VoWLANAuthenticatedHealth.fetch(agentID: "A", endpoint: endpoint, credential: credential) {
+                    try await self.response($0, agentID: id, proof: proof)
+                }
+                XCTFail("Unauthenticated/misrouted NAS response accepted")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, VoWLANControllerError.authenticationFailed.localizedDescription) }
+        }
+    }
+
+    func testConfigureDoesNotPersistFailureOrChangeSelectedDevice() async throws {
+        let id = "remote-config-" + UUID().uuidString
+        let previousMode = ConnectionModePreference.selected(), previousBinding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set("other-device")
+        let store = RemoteTestCredentials(agentID: id, credential: credential)
+        defer {
+            VoWLANManualRouteStore.remove(agentID: id)
+            ConnectionModePreference.set(previousMode); AndroidAgentBindingPreference.set(previousBinding)
+        }
+        let controller = VoWLANController()
+        let local = try VoWLANEndpoint(host: "192.168.1.50", controlPort: 7592, pcmPort: 7593)
+        VoWLANPairingRecordStore.remember(agentID: id, credential: credential, endpoint: local, deviceName: nil)
+        defer { controller.stopBrowsing(); VoWLANPairingRecordStore.remove(agentID: id) }
+        let route = try RemoteDirectConfiguration.route(agentID: id, host: "a.example", controlPort: "443", pcmPort: "7593")
+        do {
+            try await controller.configureRemoteRoute(agentID: id, route: route, credentials: store) { _ in throw URLError(.serverCertificateUntrusted) }
+            XCTFail("TLS failure saved")
+        } catch {}
+        XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
+        try await controller.configureRemoteRoute(agentID: id, route: route, credentials: store) { try await self.response($0, agentID: id) }
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains(route))
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains { $0.agentID == id && $0.endpoint == local })
+        XCTAssertEqual(AndroidAgentBindingPreference.selected(), "other-device")
+        XCTAssertTrue(controller.discoveredAgents.isEmpty, "Cloud-only mode must not start local discovery")
+        controller.callInProgress = { true }
+        do { try await controller.configureRemoteRoute(agentID: id, route: nil); XCTFail("changed during call") } catch {}
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains(route))
+        controller.callInProgress = { false }
+        try await controller.configureRemoteRoute(agentID: id, route: nil)
+        XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id && $0.isRemote })
+        XCTAssertTrue(VoWLANManualRouteStore.routes().contains { $0.agentID == id && $0.endpoint == local })
+    }
+
+    func testDisableWhileVerificationIsInFlightCannotRestoreRemoteRoute() async throws {
+        let id = "remote-race-" + UUID().uuidString
+        let previous = ConnectionModePreference.selected()
+        ConnectionModePreference.set(.cloud)
+        let store = RemoteTestCredentials(agentID: id, credential: credential)
+        defer { VoWLANManualRouteStore.remove(agentID: id); ConnectionModePreference.set(previous) }
+        let controller = VoWLANController(), gate = RemoteHealthGate()
+        defer { controller.stopBrowsing() }
+        let route = try RemoteDirectConfiguration.route(agentID: id, host: "a.example", controlPort: "443", pcmPort: "7593")
+        let entered = expectation(description: "verification suspended")
+        let saving = Task {
+            try await controller.configureRemoteRoute(agentID: id, route: route, credentials: store) { request in
+                entered.fulfill()
+                await gate.wait()
+                return try await self.response(request, agentID: id)
+            }
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        try await controller.configureRemoteRoute(agentID: id, route: nil)
+        await gate.release()
+        do { try await saving.value; XCTFail("stale validation restored disabled route") } catch is CancellationError {} catch { XCTFail("\(error)") }
+        XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
+    }
+}
+
+private struct RemoteTestCredentials: LocalDeviceCredentialStoring {
+    let agentID: String
+    let credential: VoWLANCredential
+    func load(agentID: String) -> VoWLANCredential? { agentID == self.agentID ? credential : nil }
+    func save(_ credential: VoWLANCredential, agentID: String) throws {}
+    func remove(agentID: String) {}
+    func legacy() -> VoWLANCredential? { nil }
+}
+
+private actor RemoteHealthGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { released = true; continuation?.resume(); continuation = nil }
+}
+
+@MainActor
 final class CloudStandbyLifecycleRegressionTests: XCTestCase {
-    func testFailedFreshDialQueryClearsPreviousOnlinePresentation() async throws {
+    func testKnownTargetDialDoesNotWaitForStatusAndFailedCommandKeepsTarget() async throws {
         let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
         ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(nil)
         defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
         let online = try status(online: true)
-        var requests = 0, now = Date()
+        let previousTarget = CloudAgentTargetStore.last()
+        defer { if let previousTarget { CloudAgentTargetStore.remember(previousTarget) } else { CloudAgentTargetStore.forget() } }
+        var requests = 0, now = Date(), targets: [CloudCommandTarget] = []
         let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
             cloudStatusFetcher: {
                 requests += 1
                 if requests > 1 { throw URLError(.notConnectedToInternet) }
                 return online
+            }, cloudOutgoingStarter: { number, target, _ in
+                XCTAssertEqual(number, "fixture")
+                targets.append(target)
+                throw URLError(.notConnectedToInternet)
             }, cloudStatusNow: { now })
         defer { model.stop() }
         _ = await model.refreshCloudStatusForDiagnostics()
         now.addTimeInterval(600)
         do {
             try await model.callKitStart(number: "fixture")
-            XCTFail("failed fresh status query must not authorize a cached cloud dial")
+            XCTFail("the command's own failure must reach the caller")
         } catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
-        XCTAssertEqual(requests, 2)
-        XCTAssertNil(model.cloudAgentStatus)
-        XCTAssertNil(model.cloudAgentDirectory)
-        XCTAssertFalse(model.pairedAndroidAgents.contains { $0.cloudOnline })
-        XCTAssertFalse(model.canStartOutgoingCommand)
+        XCTAssertEqual(requests, 1, "a known target must not wait for another Relay status round trip")
+        XCTAssertEqual(targets, [.init(agentID: "standby-fixture", routingVersion: 1)])
+        XCTAssertEqual(model.cloudAgentStatus?.activeAgentID, "standby-fixture")
+        XCTAssertEqual(CloudAgentTargetStore.last(), "standby-fixture")
+        XCTAssertTrue(model.canStartOutgoingCommand, "a failed attempt must allow a deliberate retry")
+        XCTAssertNil(model.pendingOutgoingCall)
     }
 
     func testForegroundIdleKeepsCloudDeviceCardWithoutRepeatingRelayQuery() async throws {
@@ -115,7 +940,7 @@ final class CloudStandbyLifecycleRegressionTests: XCTestCase {
         XCTAssertFalse(model.pairedAndroidAgents.contains { $0.cloudOnline })
     }
 
-    func testFailedExplicitQueryDoesNotReviveOldOnlineDirectory() async throws {
+    func testFailedExplicitQueryPreservesLastObservationAndReportsProbeError() async throws {
         let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
         ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(nil)
         defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
@@ -130,10 +955,12 @@ final class CloudStandbyLifecycleRegressionTests: XCTestCase {
         _ = await model.refreshCloudStatusForDiagnostics()
         model.didEnterBackground()
         shouldFail = true
-        _ = await model.refreshCloudStatusForDiagnostics()
-        XCTAssertNil(model.cloudAgentStatus)
-        XCTAssertNil(model.cloudAgentDirectory)
-        XCTAssertFalse(model.pairedAndroidAgents.contains { $0.cloudOnline })
+        let reply = await model.refreshCloudStatusForDiagnostics()
+        XCTAssertNil(reply, "a failed probe must not be returned as a fresh success")
+        XCTAssertNotNil(model.cloudStatusError)
+        XCTAssertEqual(model.cloudAgentStatus?.activeAgentID, "standby-fixture")
+        XCTAssertEqual(model.cloudAgentDirectory?.activeAgentID, "standby-fixture")
+        XCTAssertTrue(model.canStartOutgoingCommand, "the saved target stays dialable; the command validates reachability")
     }
 }
 
@@ -202,15 +1029,20 @@ final class AudioGraphAndVerboseRegressionTests: XCTestCase {
         XCTAssertFalse(CloudModePreference.isEnabled())
     }
 
-    func testLocalOnlySwitchConvertsAutomaticToDualLocalWithoutSeparatePreference() {
-        let old = ConnectionModePreference.selected()
-        ConnectionModePreference.set(.automatic)
-        defer { ConnectionModePreference.set(old) }
+    func testCloudSignalingDoesNotChangeVoWLANMediaMode() {
+        let oldMode = ConnectionModePreference.selected()
+        let oldSignaling = CloudSignalingPreference.isEnabled()
+        ConnectionModePreference.set(.vowlan)
+        CloudSignalingPreference.set(false)
+        defer {
+            ConnectionModePreference.set(oldMode)
+            CloudSignalingPreference.set(oldSignaling)
+        }
         let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()))
-        model.setLocalModeEnabled(true)
-        XCTAssertEqual(ConnectionModePreference.selected(), .localDual)
+        model.setCloudSignalingEnabled(true)
+        XCTAssertEqual(ConnectionModePreference.selected(), .vowlan)
+        XCTAssertTrue(CloudSignalingPreference.isEnabled())
         XCTAssertFalse(CloudModePreference.isEnabled())
-        XCTAssertTrue(ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsBluetooth)
     }
 
     func testAuthenticatedMetadataRetainsPeerGenerationAndRejectsWrongOwner() throws {
@@ -687,15 +1519,169 @@ final class CallUpdateWorkSchedulerTests: XCTestCase {
         XCTAssertEqual(reducer.state, .ready)
     }
 
+    func testCancelledPollDoesNotCancelSingleFlightAudioRegistration() async {
+        let coordinator = LocalCallAudioStartupCoordinator()
+        let waiting = expectation(description: "registration pending")
+        var release: CheckedContinuation<Void, Never>?
+        var outcome: LocalCallAudioStartupOutcome?
+        var rollbacks: [LocalCallAudioRollbackReason] = []
+        var starts = 0
+        let poll = Task {
+            await coordinator.run {
+                starts += 1
+                outcome = await LocalCallAudioStartupCoordinator.start(
+                    activatePhoneAudio: { true },
+                    registerAgentAudio: {
+                        await withCheckedContinuation { release = $0; waiting.fulfill() }
+                        return .registered
+                    }, rollbackPhoneAudio: { rollbacks.append($0) })
+            }
+        }
+        await fulfillment(of: [waiting], timeout: 2)
+        poll.cancel()
+        let callbackEntered = expectation(description: "CallKit callback joins startup")
+        let callKit = Task {
+            callbackEntered.fulfill()
+            await coordinator.run { starts += 1 }
+        }
+        await fulfillment(of: [callbackEntered], timeout: 2)
+        release?.resume()
+        await poll.value
+        await callKit.value
+        XCTAssertEqual(outcome, .started)
+        XCTAssertTrue(rollbacks.isEmpty)
+        XCTAssertEqual(starts, 1, "CallKit and polling must share one audio startup")
+    }
+
+    func testExplicitAudioCancellationRollsBackLateRegistration() async {
+        let coordinator = LocalCallAudioStartupCoordinator()
+        let waiting = expectation(description: "registration pending")
+        var release: CheckedContinuation<Void, Never>?
+        var outcome: LocalCallAudioStartupOutcome?
+        var rollbacks: [LocalCallAudioRollbackReason] = []
+        let callback = Task {
+            await coordinator.run {
+                outcome = await LocalCallAudioStartupCoordinator.start(
+                    activatePhoneAudio: { true },
+                    registerAgentAudio: {
+                        await withCheckedContinuation { release = $0; waiting.fulfill() }
+                        return .registered
+                    }, rollbackPhoneAudio: { rollbacks.append($0) })
+            }
+        }
+        await fulfillment(of: [waiting], timeout: 2)
+        coordinator.cancel()
+        release?.resume()
+        await callback.value
+        XCTAssertEqual(outcome, .callNoLongerActive)
+        XCTAssertEqual(rollbacks, [.taskCancelled])
+    }
+
+    func testCancelledStartupHandsOffToOneReplacementAfterCleanup() async {
+        let coordinator = LocalCallAudioStartupCoordinator()
+        let oldWaiting = expectation(description: "old startup pending")
+        let newEntered = expectation(description: "replacement callers entered")
+        newEntered.expectedFulfillmentCount = 2
+        let newStarted = expectation(description: "replacement started")
+        var releaseOld: CheckedContinuation<Void, Never>?
+        var releaseNew: CheckedContinuation<Void, Never>?
+        var cleanedUp = false
+        var starts = 0
+        let old = Task {
+            await coordinator.run {
+                await withCheckedContinuation { releaseOld = $0; oldWaiting.fulfill() }
+                cleanedUp = true
+            }
+        }
+        await fulfillment(of: [oldWaiting], timeout: 2)
+        coordinator.cancel()
+        let replacements = (0..<2).map { _ in Task {
+            newEntered.fulfill()
+            await coordinator.run {
+                XCTAssertTrue(cleanedUp, "New audio must not overlap old rollback")
+                starts += 1
+                await withCheckedContinuation { releaseNew = $0; newStarted.fulfill() }
+            }
+        } }
+        await fulfillment(of: [newEntered], timeout: 2)
+        XCTAssertEqual(starts, 0)
+        releaseOld?.resume()
+        await fulfillment(of: [newStarted], timeout: 2)
+        await old.value
+        let lateEntered = expectation(description: "late observer joins replacement")
+        let late = Task {
+            lateEntered.fulfill()
+            await coordinator.run { starts += 1 }
+        }
+        await fulfillment(of: [lateEntered], timeout: 2)
+        releaseNew?.resume()
+        for replacement in replacements { await replacement.value }
+        await late.value
+        XCTAssertEqual(starts, 1, "Cancelled startup must neither swallow nor duplicate replacement")
+    }
+
+    func testCancelledReplacementWaiterCannotReviveAudio() async {
+        let coordinator = LocalCallAudioStartupCoordinator()
+        let oldWaiting = expectation(description: "old startup pending")
+        let newEntered = expectation(description: "replacement waiting")
+        var release: CheckedContinuation<Void, Never>?
+        var starts = 0
+        let old = Task {
+            await coordinator.run {
+                await withCheckedContinuation { release = $0; oldWaiting.fulfill() }
+            }
+        }
+        await fulfillment(of: [oldWaiting], timeout: 2)
+        coordinator.cancel()
+        let replacement = Task {
+            newEntered.fulfill()
+            await coordinator.run { starts += 1 }
+        }
+        await fulfillment(of: [newEntered], timeout: 2)
+        replacement.cancel()
+        release?.resume()
+        await old.value
+        await replacement.value
+        XCTAssertEqual(starts, 0)
+        await coordinator.run { starts += 1 }
+        XCTAssertEqual(starts, 1, "A later valid request must still start")
+    }
+
+    func testRepeatedStartupCancellationHandsOffWithoutLosingRequests() async {
+        let coordinator = LocalCallAudioStartupCoordinator()
+        var starts = 0
+        for _ in 0..<3 {
+            let waiting = expectation(description: "startup pending")
+            let entered = expectation(description: "replacement waiting")
+            var release: CheckedContinuation<Void, Never>?
+            let old = Task {
+                await coordinator.run {
+                    await withCheckedContinuation { release = $0; waiting.fulfill() }
+                }
+            }
+            await fulfillment(of: [waiting], timeout: 2)
+            coordinator.cancel()
+            let replacement = Task {
+                entered.fulfill()
+                await coordinator.run { starts += 1 }
+            }
+            await fulfillment(of: [entered], timeout: 2)
+            release?.resume()
+            await old.value
+            await replacement.value
+        }
+        XCTAssertEqual(starts, 3)
+    }
+
     func testEndedCallCannotRegisterAfterPhoneActivationReturns() async throws {
         var current = true
         var registrations = 0
         var rollbacks = 0
         let result = await LocalCallAudioStartupCoordinator.start(
-            isCurrent: { current },
+            invalidationReason: { current ? nil : .callNotActive },
             activatePhoneAudio: { current = false; return true },
             registerAgentAudio: { registrations += 1; return .registered },
-            rollbackPhoneAudio: { rollbacks += 1 }
+            rollbackPhoneAudio: { _ in rollbacks += 1 }
         )
         XCTAssertEqual(result, .callNoLongerActive)
         XCTAssertEqual(registrations, 0)
@@ -706,9 +1692,9 @@ final class CallUpdateWorkSchedulerTests: XCTestCase {
         var current = true
         var rollbacks = 0
         let result = await LocalCallAudioStartupCoordinator.start(
-            isCurrent: { current }, activatePhoneAudio: { true },
+            invalidationReason: { current ? nil : .callNotActive }, activatePhoneAudio: { true },
             registerAgentAudio: { current = false; return .registered },
-            rollbackPhoneAudio: { rollbacks += 1 }
+            rollbackPhoneAudio: { _ in rollbacks += 1 }
         )
         XCTAssertEqual(result, .callNoLongerActive)
         XCTAssertEqual(rollbacks, 1)
@@ -727,6 +1713,17 @@ final class CallUpdateWorkSchedulerTests: XCTestCase {
         XCTAssertEqual(entries.first?.category, "call-audio")
         XCTAssertEqual(entries.first?.elapsedMilliseconds, 180)
         XCTAssertEqual(entries.first?.fields, ["phase": "engine_ready"])
+    }
+
+    func testAudioRollbackReasonPersistsWithoutVerboseOrPrivateIdentifiers() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let file = directory.appendingPathComponent("rollback-trace.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recorder = AgentVerboseTraceRecorder(initiallyEnabled: false, maxEntries: 10, persistenceURL: file)
+        await recorder.recordAudioStartup(phase: "rollback", rollbackReason: .routeChanged)
+        let restored = AgentVerboseTraceRecorder(initiallyEnabled: false, maxEntries: 10, persistenceURL: file)
+        let entries = await restored.snapshot()
+        XCTAssertEqual(entries.map(\.fields), [["phase": "rollback", "reason": "route_changed"]])
     }
 
     func testSlowSupplementalWorkCannotDelayToneStopOrAudioStartup() async {
@@ -843,6 +1840,16 @@ final class CloudAgentRoutingTests: XCTestCase {
         XCTAssertEqual(body["target_agent_id"],"A")
         XCTAssertEqual(body["command_id"],"synthetic-command")
     }
+    func testStaleCloudAgentCanStillBeUsedForDialTarget() throws {
+        let s = try status(#"[{"agent_id":"A","cloud_online":false,"command_routing_version":1}]"#)
+        XCTAssertThrowsError(try CloudAgentRouting.select(
+            boundAgentID: "A", agents: s.agents, relayRoutingVersion: 1))
+        let target = try CloudAgentRouting.select(
+            boundAgentID: "A", agents: s.agents, relayRoutingVersion: 1,
+            requireOnline: false)
+        XCTAssertEqual(target.agentID, "A")
+    }
+
     func testLegacyCapabilitiesCannotCreateNewActions() throws {
         let old = try status(#"[{"agent_id":"A","cloud_online":true}]"#,capabilities:"")
         XCTAssertNil(old.commandRoutingVersion)
@@ -974,34 +1981,85 @@ final class VoWLANNetworkRecoveryTests: XCTestCase {
     }
 }
 
-final class SMSDeletionTests: XCTestCase {
-    @MainActor
-    func testConversationRowOpensThreadOutsideDeletionMode() async throws {
-        let model = AppModel()
-        model.messages = [SMSMessage(sender: "sms-navigation-fixture", content: "test message",
-                                    code: nil, timestamp: Date(), deliveryID: "navigation-fixture")]
-        let view = MessagesView(pendingRecipient: .constant(nil), pendingConversation: .constant(nil))
-            .environmentObject(model)
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
-        let previous = scene.windows.first(where: \.isKeyWindow)
-        let window = UIWindow(windowScene: scene)
-        window.rootViewController = UIHostingController(rootView: view)
-        window.makeKeyAndVisible()
-        defer { window.isHidden = true; previous?.makeKeyAndVisible() }
-        try await Task.sleep(nanoseconds: 500_000_000)
-        func descendants(_ view: UIView) -> [UIView] {
-            [view] + view.subviews.flatMap(descendants)
-        }
-        let list = try XCTUnwrap(descendants(window).compactMap { $0 as? UICollectionView }.first)
-        let index = IndexPath(item: 0, section: 0)
-        XCTAssertGreaterThan(list.numberOfItems(inSection: 0), 0)
-        list.selectItem(at: index, animated: false, scrollPosition: [])
-        list.delegate?.collectionView?(list, didSelectItemAt: index)
-        try await Task.sleep(nanoseconds: 600_000_000)
-        let navigation = descendants(window).compactMap { $0 as? UINavigationBar }.first
-        XCTAssertEqual(navigation?.topItem?.title, "sms-navigation-fixture",
-                       "Reading a conversation must navigate, not select it for deletion")
+final class HistoryAttentionTests: XCTestCase {
+    func testReadStatePersistsAndKeepsDevicesAndNewDeliveriesSeparate() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalHistoryStore(directoryURL: directory)
+        let a = SMSMessage(sender: "fixture", content: "same", code: nil, timestamp: Date(timeIntervalSince1970: 1000),
+                           deliveryID: "one", sourceAgentID: "a")
+        var b = a; b.sourceAgentID = "b"
+        var sent = a; sent.deliveryID = "sent"; sent.direction = .outgoing
+        XCTAssertTrue(store.saveMessages([a, a, b, sent]))
+        XCTAssertEqual(store.unreadMessageIDs(in: store.loadMessages()), [a.id, b.id])
+        XCTAssertTrue(store.markMessagesRead([a]))
+        let reopened = LocalHistoryStore(directoryURL: directory)
+        XCTAssertEqual(reopened.unreadMessageIDs(in: reopened.loadMessages()), [b.id])
+        var newer = a; newer.deliveryID = "two"
+        XCTAssertTrue(reopened.saveMessages([a, newer]))
+        XCTAssertEqual(reopened.unreadMessageIDs(in: reopened.loadMessages()), [b.id, newer.id])
+        XCTAssertTrue(reopened.deleteMessages(ids: [b.id], from: reopened.loadMessages()))
+        XCTAssertEqual(reopened.unreadMessageIDs(in: reopened.loadMessages()), [newer.id])
     }
+
+    func testUpgradeBaselinesHistoryButCountsNewMissedCalls() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let now = Date(timeIntervalSince1970: 1000)
+        let old = CallRecord(id: "old", index: 1, direction: "incoming", state: "ended", number: nil,
+                             startedAt: now, updatedAt: now, endedAt: now, missed: true, sourceAgentID: "a")
+        let oldSMS = SMSMessage(sender: "fixture", content: "old", code: nil, timestamp: now, deliveryID: nil)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([old]).write(to: directory.appendingPathComponent("call-history.json"))
+        try encoder.encode([oldSMS]).write(to: directory.appendingPathComponent("messages.json"))
+        let store = LocalHistoryStore(directoryURL: directory)
+        XCTAssertTrue(store.unseenMissedCallIDs(in: [old]).isEmpty)
+        XCTAssertTrue(store.unreadMessageIDs(in: [oldSMS]).isEmpty)
+        let new = CallRecord(id: "new", index: 2, direction: "incoming", state: "ended", number: nil,
+                             startedAt: now, updatedAt: now, endedAt: now, missed: true, sourceAgentID: "b")
+        let outgoing = CallRecord(id: "out", index: 3, direction: "outgoing", state: "ended", number: nil,
+                             startedAt: now, updatedAt: now, endedAt: now, missed: false)
+        XCTAssertTrue(store.saveCallHistory([old, new, outgoing]))
+        XCTAssertEqual(store.unseenMissedCallIDs(in: store.loadCallHistory()), [new.id])
+        XCTAssertTrue(store.markMissedCallsSeen([new]))
+        XCTAssertTrue(LocalHistoryStore(directoryURL: directory).unseenMissedCallIDs(in: [new]).isEmpty)
+        var upgraded = oldSMS; upgraded.deliveryID = "assigned-later"
+        XCTAssertTrue(store.saveMessages([upgraded]))
+        XCTAssertTrue(store.unreadMessageIDs(in: store.loadMessages()).isEmpty)
+    }
+
+    func testViewingOneMissedCallKeepsOtherRowsUnseenAfterRestart() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalHistoryStore(directoryURL: directory)
+        let now = Date()
+        let a = CallRecord(id: "missed-a", index: 1, direction: "incoming", state: "ended", number: "10086",
+            startedAt: now, updatedAt: now, endedAt: now, missed: true, sourceAgentID: "a")
+        let b = CallRecord(id: "missed-b", index: 2, direction: "incoming", state: "ended", number: nil,
+            startedAt: now, updatedAt: now, endedAt: now, missed: true, sourceAgentID: "b")
+        XCTAssertTrue(store.saveCallHistory([a, b]))
+        XCTAssertEqual(store.unseenMissedCallIDs(in: [a, b]), [a.id, b.id])
+        XCTAssertTrue(store.markMissedCallsSeen([a]))
+        let reopened = LocalHistoryStore(directoryURL: directory)
+        XCTAssertEqual(reopened.unseenMissedCallIDs(in: reopened.loadCallHistory()), [b.id])
+        XCTAssertTrue(reopened.markMissedCallsSeen([a, b]))
+        XCTAssertTrue(reopened.unseenMissedCallIDs(in: [a, b]).isEmpty)
+    }
+
+    func testCorruptAttentionFileIsNotOverwritten() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalHistoryStore(directoryURL: directory)
+        let file = directory.appendingPathComponent("history-attention.json")
+        let data = Data("broken".utf8); try data.write(to: file)
+        XCTAssertFalse(store.markMessagesRead([]))
+        XCTAssertEqual(try Data(contentsOf: file), data)
+    }
+}
+
+final class SMSDeletionTests: XCTestCase {
+    // Full navigation interaction lives in AirSIMUITests/SMSNavigationUITests.swift.
 
     func testRepeatedFractionalLegacySaveAndUpgradeDoNotDuplicateMessages() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -1147,9 +2205,13 @@ private actor ManualPairingPeerProbe {
     let key = Curve25519.KeyAgreement.PrivateKey()
     let secret = Data(0..<32)
     let corruptRoute: Bool
-    init(corruptRoute: Bool = false) { self.corruptRoute = corruptRoute }
+    let expectedEndpoint: NWEndpoint
+    init(corruptRoute: Bool = false, endpoint: NWEndpoint = .hostPort(host: "100.64.1.2", port: 38000)) {
+        self.corruptRoute = corruptRoute
+        self.expectedEndpoint = endpoint
+    }
     func exchange(endpoint: NWEndpoint, body: Data, method: String, path: String, timeout: TimeInterval) throws -> Data {
-        guard endpoint == .hostPort(host: "100.64.1.2", port: 38000) else { throw URLError(.badURL) }
+        guard endpoint == expectedEndpoint else { throw URLError(.badURL) }
         if method == "GET", path == "/pair/v1/info" {
             return try JSONSerialization.data(withJSONObject: ["product": "airsim-pair", "version": 1,
                 "session_id": "fixture-session", "server_public_key": key.publicKey.rawRepresentation.base64EncodedString(),
@@ -1321,6 +2383,14 @@ final class AirSIMTests: XCTestCase {
         XCTAssertTrue(VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host))
         XCTAssertTrue(VoWLANNetworkRoutePolicy.usesSystemRouting(host: "192.168.1.5"))
         XCTAssertFalse(VoWLANNetworkRoutePolicy.usesSystemRouting(host: "8.8.8.8"))
+        XCTAssertTrue(VoWLANNetworkChangePolicy.discardsLocalRoute(
+            host: "192.168.1.5", isLocalSubnet: true, callInProgress: false))
+        XCTAssertTrue(VoWLANNetworkChangePolicy.discardsLocalRoute(
+            host: "192.168.1.5", isLocalSubnet: false, callInProgress: false))
+        XCTAssertFalse(VoWLANNetworkChangePolicy.discardsLocalRoute(
+            host: "100.64.1.2", isLocalSubnet: false, callInProgress: false))
+        XCTAssertFalse(VoWLANNetworkChangePolicy.discardsLocalRoute(
+            host: "192.168.1.5", isLocalSubnet: true, callInProgress: true))
         let api = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential))
         XCTAssertEqual(api.baseURL.absoluteString, "http://100.64.1.2:39001/")
         XCTAssertFalse(AirSIMAPI.isAllowedLocalURL(URL(string: "http://8.8.8.8:39001/")!))
@@ -1416,11 +2486,13 @@ final class AirSIMTests: XCTestCase {
         XCTAssertNil(VoWLANManualRouteStore.selected(defaults: reopened))
     }
 
-    func testFreshDiscoveryReplacesUnreachableManualRouteForSamePhone() throws {
+    func testExplicitLANFallbackReplacesFailedManualRouteForSamePhone() throws {
         let saved = VoWLANManualRoute(agentID: "agent", host: "100.64.1.2", controlPort: 39001, pcmPort: 39002)
         let wifi = VoWLANDiscoveredAgent(id: "agent", endpoint: try .init(host: "192.168.1.2", controlPort: 40001, pcmPort: 40002),
             deviceName: "Fresh phone", manufacturer: nil, model: nil, phoneNumber: nil, agentKind: "standalone")
-        let fallback = VoWLANRouteCandidates.merge(discovered: [wifi], manual: [saved], live: [], preferred: nil)
+        // The probe selects this fallback after failure. nil only means that
+        // nothing has verified yet; it is not evidence that the VPN is dead.
+        let fallback = VoWLANRouteCandidates.merge(discovered: [wifi], manual: [saved], live: [], preferred: wifi.endpoint)
         XCTAssertEqual(fallback, [wifi])
         let manualFirst = VoWLANRouteCandidates.merge(discovered: [wifi], manual: [saved], live: [], preferred: saved.endpoint)
         XCTAssertEqual(manualFirst.first?.endpoint, saved.endpoint)
@@ -1521,6 +2593,17 @@ final class AirSIMTests: XCTestCase {
         contact.familyName = "王"
         XCTAssertEqual(ContactFetcher.contact(from: contact)?.name,
                        CNContactFormatter.string(from: contact, style: .fullName))
+    }
+
+    func testLimitedContactAccessLoadsInsteadOfRequestingOrBlocking() {
+        XCTAssertEqual(
+            ContactAccessPolicy.action(for: .limited, userInitiated: false),
+            .load
+        )
+        XCTAssertEqual(
+            ContactAccessPolicy.action(for: .limited, userInitiated: true),
+            .load
+        )
     }
 
     @MainActor
@@ -1980,6 +3063,31 @@ final class AirSIMTests: XCTestCase {
         ))
     }
 
+    func testPushRegistrationBackoffIsIndependentForEachGateway() {
+        var ledger = PushRegistrationLedger<String>()
+        let now = Date(timeIntervalSince1970: 1_000)
+        ledger.record("mu300", fingerprint: "production-token", succeeded: false, now: now)
+        XCTAssertFalse(ledger.shouldAttempt("mu300", fingerprint: "production-token", now: now))
+        XCTAssertTrue(ledger.shouldAttempt("samsung", fingerprint: "production-token", now: now))
+        ledger.record("samsung", fingerprint: "production-token", succeeded: true, now: now)
+        XCTAssertFalse(ledger.needsRegistration("samsung", fingerprint: "production-token"))
+        XCTAssertTrue(ledger.needsRegistration("mu300", fingerprint: "production-token"))
+        XCTAssertTrue(ledger.shouldAttempt("mu300", fingerprint: "production-token", now: now.addingTimeInterval(30)))
+        XCTAssertFalse(ledger.shouldAttempt("samsung", fingerprint: "production-token", now: now.addingTimeInterval(60)))
+    }
+
+    func testPushTokenChangeAndGatewayRecoveryInvalidateRegistrationCache() {
+        var ledger = PushRegistrationLedger<String>()
+        ledger.record("samsung", fingerprint: "sandbox-token", succeeded: true)
+        ledger.record("mu300", fingerprint: "sandbox-token", succeeded: true)
+        for route in ["samsung", "mu300"] {
+            XCTAssertTrue(ledger.shouldAttempt(route, fingerprint: "production-token"))
+        }
+        ledger.retain(["samsung"])
+        XCTAssertTrue(ledger.shouldAttempt("mu300", fingerprint: "sandbox-token"))
+        XCTAssertTrue(ledger.shouldAttempt("samsung-new-ip", fingerprint: "sandbox-token"))
+    }
+
     func testNewAgentRouteRequiresRegistrationEvenWithSameToken() {
         XCTAssertTrue(PushRegistrationAttemptPolicy.shouldRegisterAgent(
             fingerprint: "same-token",
@@ -2361,6 +3469,18 @@ final class AirSIMTests: XCTestCase {
         ))
     }
 
+    func testDialPasteSanitizerKeepsOnlyDialableCharacters() {
+        XCTAssertEqual(DialPadPasteSanitizer.sanitize(" +1 (555) 010-9999 "), "+15550109999")
+        XCTAssertEqual(DialPadPasteSanitizer.sanitize("1+2+3"), "123")
+        XCTAssertEqual(DialPadPasteSanitizer.sanitize("abc"), "")
+    }
+
+    func testSMSVerificationCodeExtractor() {
+        XCTAssertEqual(SMSVerificationCodeExtractor.extract(from: "验证码为 123456，5 分钟内有效"), "123456")
+        XCTAssertEqual(SMSVerificationCodeExtractor.extract(from: "Your verification code: 9876"), "9876")
+        XCTAssertEqual(SMSVerificationCodeExtractor.extract(from: "Your code is 4321"), "4321")
+    }
+
     func testVoWLANModeUsesCallKit() {
         XCTAssertTrue(ConnectionModeRuntimePolicy(mode: .vowlan).usesCallKit)
         XCTAssertTrue(ConnectionModeRuntimePolicy(mode: .automatic).usesCallKit)
@@ -2663,13 +3783,48 @@ final class AirSIMTests: XCTestCase {
         XCTAssertEqual(lifecycle.apply(end), .ignored)
     }
 
-    func testWatchPayloadCarriesBluetoothTransport() {
+    func testWatchPayloadCarriesBluetoothTransportAndIdentityAliases() {
+        let uuid = UUID()
         let payload = WatchCallPayload(
-            callID: "ble-call", callUUID: UUID(), phase: .active,
+            callID: "push-call", callUUID: uuid, aliases: ["local:android:7"], phase: .active,
             number: "10010", callerName: nil, transport: "bluetooth",
             updatedAt: Date(timeIntervalSince1970: 42))
         XCTAssertEqual(payload.dictionary["transport"] as? String, "bluetooth")
-        XCTAssertEqual(WatchCallPayload(dictionary: payload.dictionary)?.transport, "bluetooth")
+        XCTAssertEqual(payload.dictionary["call_aliases"] as? [String], ["local:android:7"])
+        let decoded = WatchCallPayload(dictionary: payload.dictionary)
+        XCTAssertEqual(decoded?.transport, "bluetooth")
+        XCTAssertTrue(decoded?.matches(callID: "local:android:7", callUUID: nil) == true)
+        XCTAssertTrue(decoded?.matches(callID: nil, callUUID: uuid) == true)
+        XCTAssertFalse(decoded?.matches(callID: "other", callUUID: UUID()) == true)
+    }
+
+    func testWatchPayloadDeduplicatesPrimaryIdentityFromAliases() {
+        let payload = WatchCallPayload(
+            callID: "same", callUUID: nil, aliases: ["same", "", "other"], phase: .ended,
+            number: nil, callerName: nil, updatedAt: Date())
+        XCTAssertEqual(payload.aliases, ["other"])
+    }
+    func testWatchMirrorPolicyRejectsStaleAndTombstonedStates() {
+        let uuid = UUID()
+        let active = WatchCallPayload(
+            callID: "push-call", callUUID: uuid, aliases: ["local:call"], phase: .active,
+            number: nil, callerName: nil, updatedAt: Date(timeIntervalSince1970: 20))
+        let oldIncoming = WatchCallPayload(
+            callID: "push-call", callUUID: uuid, aliases: ["local:call"], phase: .incoming,
+            number: nil, callerName: nil, updatedAt: Date(timeIntervalSince1970: 10))
+        XCTAssertTrue(WatchCallMirrorPolicy.isNewer(active, than: oldIncoming.updatedAt))
+        XCTAssertFalse(WatchCallMirrorPolicy.isNewer(oldIncoming, than: active.updatedAt))
+        XCTAssertTrue(WatchCallMirrorPolicy.isTombstoned(
+            oldIncoming, endedCallIDs: ["local:call"], endedCallUUIDs: []))
+        XCTAssertTrue(WatchCallMirrorPolicy.identityKeys(for: active).contains("uuid:\(uuid.uuidString.lowercased())"))
+    }
+
+    func testWatchPayloadRejectsConflictingUUIDWhenCallIDIsReused() {
+        let first = WatchCallPayload(
+            callID: "reused", callUUID: UUID(), phase: .active,
+            number: nil, callerName: nil, updatedAt: Date())
+        XCTAssertFalse(first.matches(callID: "reused", callUUID: UUID()))
+        XCTAssertTrue(first.matches(callID: "reused", callUUID: nil))
     }
 
     func testVoBLEDiagnosticsRedactsSecretsAndMedia() {
@@ -2948,23 +4103,33 @@ final class AirSIMTests: XCTestCase {
     }
 
     @MainActor
-    func testVoWLANTransportFailureFallsBackOnceToCloud() async throws {
+    func testLegacyDialHasStableIDAndNeverConfirmsAnUnrelatedSameNumberCall() async throws {
+        let boundary = R18DialHTTPFailureProbe()
+        let secret = try VoWLANCredential(secret: Data(repeating: 7, count: 32))
+        let endpoint = try VoWLANEndpoint(host: "192.168.50.3", controlPort: 7592, pcmPort: 7593)
+        let api = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: secret), transport: boundary)
+        let intent = UUID()
+        do { try await api.dial(number: "fixture", operationID: intent); XCTFail("Must propagate unknown result") }
+        catch { XCTAssertTrue(error is URLError) }
+        let requests = await boundary.requests
+        XCTAssertEqual(requests.count, 1, "No replay or same-number state recovery")
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[0].httpBody!) as? [String: String])
+        XCTAssertEqual(payload["operation_id"], intent.uuidString.lowercased())
+        XCTAssertEqual(requests[0].httpMethod, "POST")
+    }
+
+    @MainActor
+    func testVoWLANTransportFailureNeverReplaysDialThroughCloud() async throws {
         let local = OutgoingCallServiceProbe(dialError: URLError(.timedOut))
         var cloudAttempts = 0
-
-        let result = try await OutgoingCallRouteCoordinator.start(
-            number: "10086",
-            vowlanService: local,
-            cloudModeEnabled: true
-        ) {
-            cloudAttempts += 1
-            return "cloud-call"
-        }
-
-        XCTAssertEqual(result, .cloud("cloud-call"))
-        XCTAssertEqual(cloudAttempts, 1)
-        let localActions = await local.recordedActions()
-        XCTAssertEqual(localActions, ["warm", "dial:10086"])
+        do {
+            _ = try await OutgoingCallRouteCoordinator.start(number: "fixture", vowlanService: local,
+                cloudModeEnabled: true) { cloudAttempts += 1; return "cloud-call" }
+            XCTFail("Unknown dial outcome must not be retried")
+        } catch { XCTAssertTrue(error is URLError) }
+        XCTAssertEqual(cloudAttempts, 0)
+        let actions = await local.recordedActions()
+        XCTAssertEqual(actions, ["warm", "dial:fixture"])
     }
 
     @MainActor
@@ -3029,6 +4194,30 @@ final class AirSIMTests: XCTestCase {
                 bundleID: "org.example.airsim"
             ),
             "https://push.remotepilot.site/"
+        )
+        XCTAssertEqual(
+            RelayConfiguration.effectiveURL(
+                stored: "http://airsim-push.remotepilot.site",
+                buildSetting: "",
+                bundleID: "com.eric3u.airsim"
+            ),
+            "https://airsim-push.remotepilot.site"
+        )
+        XCTAssertEqual(
+            RelayConfiguration.effectiveURL(
+                stored: "https:",
+                buildSetting: "",
+                bundleID: "com.eric3u.airsim"
+            ),
+            "https://airsim-push.remotepilot.site"
+        )
+        XCTAssertEqual(
+            RelayConfiguration.effectiveURL(
+                stored: nil,
+                buildSetting: "http:",
+                bundleID: "com.eric3u.airsim"
+            ),
+            "https://airsim-push.remotepilot.site"
         )
     }
 
@@ -3190,14 +4379,25 @@ final class AirSIMTests: XCTestCase {
             callKitAudioActive: false))
     }
 
-    func testLiveActivityAgentPagingUsesFivePerPage() {
-        XCTAssertEqual(LiveActivityAgentPaging.pageSize, 5)
+    func testLiveActivityNumberShowsFullSyncedNumber() {
+        XCTAssertEqual(LiveActivityNumberFormatter.display("+447471840835"), "+447471840835")
+        XCTAssertEqual(LiveActivityNumberFormatter.display("+14155551234"), "+14155551234")
+        XCTAssertEqual(LiveActivityNumberFormatter.display("+8615502030017"), "+8615502030017")
+        XCTAssertEqual(LiveActivityNumberFormatter.display("+85291234567"), "+85291234567")
+        XCTAssertEqual(LiveActivityNumberFormatter.display("13800138000"), "13800138000")
+        XCTAssertEqual(LiveActivityNumberFormatter.display(""), "未配置")
+    }
+
+    func testLiveActivityAgentPagingUsesThreePerPage() {
+        XCTAssertEqual(LiveActivityAgentPaging.pageSize, 3)
         XCTAssertEqual(LiveActivityAgentPaging.pageCount(for: 0), 1)
-        XCTAssertEqual(LiveActivityAgentPaging.pageCount(for: 5), 1)
-        XCTAssertEqual(LiveActivityAgentPaging.pageCount(for: 7), 2)
-        XCTAssertEqual(LiveActivityAgentPaging.slice(Array(0..<7), requestedPage: 0), [0, 1, 2, 3, 4])
-        XCTAssertEqual(LiveActivityAgentPaging.slice(Array(0..<7), requestedPage: 1), [5, 6])
-        XCTAssertEqual(LiveActivityAgentPaging.slice(Array(0..<7), requestedPage: 9), [5, 6])
+        XCTAssertEqual(LiveActivityAgentPaging.pageCount(for: 3), 1)
+        XCTAssertEqual(LiveActivityAgentPaging.pageCount(for: 4), 2)
+        XCTAssertEqual(LiveActivityAgentPaging.pageCount(for: 7), 3)
+        XCTAssertEqual(LiveActivityAgentPaging.slice(Array(0..<7), requestedPage: 0), [0, 1, 2])
+        XCTAssertEqual(LiveActivityAgentPaging.slice(Array(0..<7), requestedPage: 1), [3, 4, 5])
+        XCTAssertEqual(LiveActivityAgentPaging.slice(Array(0..<7), requestedPage: 2), [6])
+        XCTAssertEqual(LiveActivityAgentPaging.slice(Array(0..<7), requestedPage: 9), [6])
     }
 
     func testLiveActivityPinnedAgentsMoveToTop() {
@@ -3562,5 +4762,491 @@ final class AirSIMTests: XCTestCase {
         NetworkRoutePreferences.save("30.0.0.0/8", defaults: suite)
         XCTAssertEqual(NetworkRoutePreferences.stored(defaults: suite).map(\.text), ["30.0.0.0/8"])
         suite.removePersistentDomain(forName: "airsim.tests.network-prefixes")
+    }
+}
+
+final class PhoneWindowLayoutTests: XCTestCase {
+    func testWindowWidthNotDeviceIdentitySelectsColumns() {
+        for size in [CGSize(width: 390, height: 780), CGSize(width: 560, height: 700),
+                     CGSize(width: 800, height: 240)] {
+            XCTAssertFalse(PhoneWindowLayout.usesTwoColumns(size, accessibilitySize: false))
+        }
+        for size in [CGSize(width: 740, height: 340), CGSize(width: 860, height: 740)] {
+            XCTAssertTrue(PhoneWindowLayout.usesTwoColumns(size, accessibilitySize: false))
+            XCTAssertFalse(PhoneWindowLayout.usesTwoColumns(size, accessibilitySize: true))
+        }
+    }
+
+    func testKeypadFitsColumnsWithoutShrinkingTouchTargets() {
+        for size in [CGSize(width: 320, height: 460), CGSize(width: 390, height: 720),
+                     CGSize(width: 740, height: 340), CGSize(width: 860, height: 740)] {
+            let split = PhoneWindowLayout.usesTwoColumns(size, accessibilitySize: false)
+            let width = split ? (size.width - 64) / 2 : size.width
+            let metrics = DialPadLayoutMetrics(availableHeight: size.height,
+                availableWidth: width, compactWidth: true, twoColumns: split)
+            XCTAssertGreaterThanOrEqual(metrics.keySize, 44)
+            XCTAssertLessThanOrEqual(metrics.keypadWidth, width - 32)
+        }
+    }
+}
+
+@MainActor
+final class AirSIMWidgetTests: XCTestCase {
+    func testBatteryExpiryAndMalformedMetadataDoNotBreakHealth() throws {
+        let now = Date(timeIntervalSince1970: 1800000000)
+        let zero = AndroidBatteryReading(percent: 0, charging: true, observedAtMS: now.timeIntervalSince1970 * 1000)
+        XCTAssertTrue(zero.isFresh(at: now))
+        XCTAssertEqual(zero.symbol, "battery.100percent.bolt")
+        XCTAssertFalse(zero.isFresh(at: now.addingTimeInterval(300)))
+        XCTAssertFalse(zero.isFresh(at: now.addingTimeInterval(-61)))
+        let health = try JSONDecoder().decode(VoWLANHealthIdentity.self,
+            from: Data(#"{"ok":true,"agent_id":"a","battery":{"percent":"invalid"}}"#.utf8))
+        XCTAssertTrue(health.ok)
+        XCTAssertFalse(try XCTUnwrap(health.battery).isFresh(at: now))
+        var snapshot = AirSIMWidgetSnapshot.preview(at: now)
+        snapshot.devices[0].battery = zero
+        XCTAssertTrue(snapshot.expirationDates(after: now).contains(now.addingTimeInterval(300)))
+    }
+
+    @available(iOS 17.0, *)
+    func testBackgroundWidgetIntentBootstrapsWithoutVisibleScene() async throws {
+        let savedHandler = AirSIMWidgetControlBridge.handler
+        let savedBootstrap = AirSIMWidgetControlBridge.bootstrap
+        defer {
+            AirSIMWidgetControlBridge.handler = savedHandler
+            AirSIMWidgetControlBridge.bootstrap = savedBootstrap
+        }
+        AirSIMWidgetControlBridge.handler = nil
+        var starts = 0
+        var requests: [String] = []
+        AirSIMWidgetControlBridge.bootstrap = {
+            starts += 1
+            AirSIMWidgetControlBridge.handler = { action, expected, target in
+                requests.append("\(action):\(expected):\(target)")
+                return true
+            }
+        }
+        XCTAssertFalse(AirSIMWidgetSwitchIntent.openAppWhenRun)
+        _ = try await AirSIMWidgetSwitchIntent(action: "mode", expected: "vowlan", target: "bluetooth").perform()
+        _ = try await AirSIMWidgetSwitchIntent(action: "device", expected: "a", target: "b").perform()
+        XCTAssertEqual(starts, 1, "Warm intents must reuse the existing host")
+        XCTAssertEqual(requests, ["mode:vowlan:bluetooth", "device:a:b"])
+    }
+
+    @available(iOS 17.0, *)
+    func testBackgroundWidgetIntentPropagatesHostRejection() async {
+        let saved = AirSIMWidgetControlBridge.handler
+        defer { AirSIMWidgetControlBridge.handler = saved }
+        AirSIMWidgetControlBridge.handler = { _, _, _ in false }
+        do {
+            _ = try await AirSIMWidgetSwitchIntent(action: "mode", expected: "stale", target: "cloud").perform()
+            XCTFail("A rejected switch must not report success")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
+        }
+    }
+
+    func testSMSContentPreviewNormalizesWhitespaceAndSupportsOldMetadata() throws {
+        XCTAssertEqual(AirSIMWidgetSnapshot.messagePreview("  包裹已送达\n请查收\t "), "包裹已送达 请查收")
+        XCTAssertEqual(AirSIMWidgetSnapshot.messagePreview("\n \t"), "（空短信）")
+        XCTAssertEqual(AirSIMWidgetSnapshot.messagePreview(String(repeating: "📱", count: 130)).count, 120)
+        let old = Data(#"{"agentID":"a","maskedNumber":"139 •••• 2580","date":0,"incoming":true}"#.utf8)
+        let message = try JSONDecoder().decode(AirSIMWidgetSnapshot.RecentMessage.self, from: old)
+        XCTAssertEqual(message.displayText, "打开查看短信内容")
+    }
+
+    func testWidgetModeCycleCannotSelectCloudWhilePureLocalIsEnabled() {
+        for mode in AirSIMConnectionMode.allCases {
+            let next = WidgetConnectionModeCycle.next(after: mode, pureLocal: true)
+            XCTAssertTrue([AirSIMConnectionMode.vowlan, .bluetooth, .localDual].contains(next))
+        }
+        var visited = Set<AirSIMConnectionMode>()
+        var mode = AirSIMConnectionMode.vowlan
+        for _ in 0..<5 {
+            visited.insert(mode)
+            mode = WidgetConnectionModeCycle.next(after: mode, pureLocal: false)
+        }
+        XCTAssertEqual(visited, Set(AirSIMConnectionMode.allCases))
+        XCTAssertEqual(mode, .vowlan)
+    }
+
+    func testRecentSummariesStayScopedAndOlderSnapshotsDecode() throws {
+        let sample = AirSIMWidgetSnapshot.preview()
+        XCTAssertEqual(sample.latestMessage(for: "preview-galaxy")?.displayText, "快递已送达，请及时查收。")
+        XCTAssertNil(sample.latestMessage(for: "preview-redmi"))
+        XCTAssertEqual(sample.latestCall(for: "preview-redmi")?.id, "example-2")
+        XCTAssertNil(sample.latestCall(for: "unpaired"))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(sample)) as? [String: Any])
+        object.removeValue(forKey: "messages")
+        object.removeValue(forKey: "controls")
+        let old = try JSONDecoder().decode(AirSIMWidgetSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(old.messages)
+        XCTAssertNil(old.controls)
+        XCTAssertEqual(old.devices, sample.devices)
+        XCTAssertEqual(old.calls, sample.calls)
+    }
+
+    func testExpiredObservationBecomesUnknownWithoutChangingDeviceState() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let snapshot = AirSIMWidgetSnapshot.preview(at: now)
+        let device = snapshot.devices[0]
+        XCTAssertEqual(device.status(at: now), "最近在线")
+        XCTAssertEqual(device.status(at: now.addingTimeInterval(300)), "状态待刷新")
+        XCTAssertTrue(device.recentlyReachable, "Expiry is a display condition, not an offline event")
+        XCTAssertEqual(snapshot.expirationDates(after: now), [now.addingTimeInterval(300)])
+    }
+
+    func testSnapshotRoundTripMasksCallNumbersAndHandlesCorruption() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("snapshot.json"), store = AirSIMWidgetStore(fileURL: root.appendingPathComponent("snapshot.json"))
+        let sample = AirSIMWidgetSnapshot.preview()
+        XCTAssertTrue(store.save(sample))
+        XCTAssertEqual(store.load(), sample)
+        XCTAssertEqual(AirSIMWidgetSnapshot.mask("13812346028"), "138 •••• 6028")
+        XCTAssertEqual(AirSIMWidgetSnapshot.mask("10086"), "号码已隐藏")
+        XCTAssertFalse(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("13812346028"))
+        try Data("broken".utf8).write(to: url)
+        XCTAssertEqual(store.load(), .empty)
+        var future = sample; future.version = 99
+        XCTAssertTrue(store.save(future))
+        XCTAssertEqual(store.load(), .empty)
+    }
+
+    func testWidgetLinksAreNavigationOnlyAndRoundTripOpaqueDeviceIDs() throws {
+        for destination in AirSIMWidgetDestination.allCases {
+            let url = destination.url(agentID: "Android / A?B&名称")
+            let parsed = try XCTUnwrap(AirSIMWidgetDestination.parse(url))
+            XCTAssertEqual(parsed.destination, destination)
+            XCTAssertEqual(parsed.agentID, "Android / A?B&名称")
+            XCTAssertFalse(url.absoluteString.contains("tel:"))
+        }
+        for value in ["https://widget/dial", "airsim://widget/dial/extra", "airsim://widget/hangup", "airsim://user@widget/dial"] {
+            XCTAssertNil(AirSIMWidgetDestination.parse(URL(string: value)!))
+        }
+    }
+
+    func testRenderEveryWidgetFamilyInLightDarkAndLargeText() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let fixtures: [(String, WidgetFamily, CGFloat, CGFloat)] = [
+            ("small", .systemSmall, 158, 158), ("medium", .systemMedium, 338, 158),
+            ("large", .systemLarge, 338, 354), ("extra-large", .systemExtraLarge, 720, 354),
+            ("circular", .accessoryCircular, 76, 76), ("rectangular", .accessoryRectangular, 172, 76),
+            ("inline", .accessoryInline, 260, 26)]
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AirSIMWidgetRenders")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for scheme in [ColorScheme.light, .dark] {
+            for (name, family, width, height) in fixtures {
+                let accessory = name == "circular" || name == "rectangular" || name == "inline"
+                let view = AirSIMDeviceWidgetView(snapshot: .preview(at: now), date: now, family: family)
+                    .padding(accessory ? 0 : 16)
+                    .frame(width: width, height: height)
+                    .background(scheme == .light ? Color.white : Color.black)
+                    // ImageRenderer has no WidgetKit host. Supply a sample
+                    // outer container so relative corners can be inspected.
+                    .containerShape(RoundedRectangle(cornerRadius: accessory ? 0 : 28, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: accessory ? 0 : 28, style: .continuous))
+                    .environment(\.colorScheme, scheme)
+                    .environment(\.locale, Locale(identifier: "zh_CN"))
+                let renderer = ImageRenderer(content: view); renderer.scale = 2
+                let image = try XCTUnwrap(renderer.uiImage)
+                let data = try XCTUnwrap(image.pngData())
+                try data.write(to: folder.appendingPathComponent("\(name)-\(scheme).png"))
+                let attachment = XCTAttachment(image: image); attachment.name = "\(name)-\(scheme)"; attachment.lifetime = .keepAlways; add(attachment)
+            }
+        }
+        for (name, family, width, height) in fixtures.prefix(4) {
+            let view = AirSIMDeviceWidgetView(snapshot: .preview(at: now), date: now, family: family)
+                .padding(16).frame(width: width, height: height).background(Color.white)
+                .containerShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .environment(\.colorScheme, .light).environment(\.dynamicTypeSize, .accessibility5)
+                .environment(\.locale, Locale(identifier: "zh_CN"))
+            let renderer = ImageRenderer(content: view); renderer.scale = 2
+            let image = try XCTUnwrap(renderer.uiImage)
+            try XCTUnwrap(image.pngData()).write(to: folder.appendingPathComponent("\(name)-accessibility.png"))
+            let attachment = XCTAttachment(image: image); attachment.name = "\(name)-accessibility"; attachment.lifetime = .keepAlways; add(attachment)
+        }
+        print("WIDGET_RENDER_DIRECTORY=\(folder.path)")
+    }
+}
+
+private actor R18DialHTTPFailureProbe: AirSIMHTTPTransport {
+    private(set) var requests: [URLRequest] = []
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        requests.append(request)
+        throw URLError(.timedOut)
+    }
+}
+
+@MainActor
+final class DialOperationRecoveryTests: XCTestCase {
+    private func api(_ boundary: OperationQueryTransport) throws -> AirSIMAPI {
+        .init(route: .vowlan(endpoint: try .init(host: "192.168.50.3", controlPort: 7592, pcmPort: 7593),
+            credential: try .init(secret: Data(repeating: 0x32, count: 32))), transport: boundary)
+    }
+    func testConfirmedLiveAndEndedAreRecoveredWithOriginalIdentity() async throws {
+        for mode in ["dialing", "active", "ended"] {
+            let transport = OperationQueryTransport(mode: mode)
+            let result = try await api(transport).dialOwnedCall(number: "fixture", operationID: "original-intent", expectedAgentID: "paired-agent")
+            XCTAssertEqual(result.callID, "original-call")
+            XCTAssertEqual(result.backendID, "original-backend")
+            XCTAssertEqual(result.recoveredState, mode == "ended" ? .ended : mode == "active" ? .active : .connecting)
+            let requests = await transport.requests
+            XCTAssertEqual(requests.map(\.httpMethod), ["POST", "GET"])
+            XCTAssertEqual(requests[1].url?.path, "/api/calls/operation")
+            XCTAssertEqual(URLComponents(url: requests[1].url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "original-intent")
+        }
+    }
+    func testUnknownRejectedAndNoCapabilityNeverReplayOrAdopt() async throws {
+        for mode in ["unknown", "rejected", "confirmedUnknown", "missing", "queryTimeout", "query401"] {
+            let transport = OperationQueryTransport(mode: mode)
+            do {
+                _ = try await api(transport).dialOwnedCall(number: "fixture", operationID: "original-intent", expectedAgentID: "paired-agent")
+                XCTFail("Must not adopt \(mode)")
+            } catch {}
+            let requests = await transport.requests
+            XCTAssertEqual(requests.map(\.httpMethod), ["POST", "GET"], mode)
+        }
+    }
+    func testStatusProofIsRequiredAndBindsEveryStateAndIdentityField() async throws {
+        for mode in ["noStatusProof", "tamperState", "wrongNonce", "wrongAgent", "wrongOperation",
+                     "badDialProof", "unknownWithIDs", "endedWithoutDate", "unknownEnum", "newline", "version2"] {
+            let transport = OperationQueryTransport(mode: mode)
+            do {
+                _ = try await api(transport).dialOwnedCall(number: "fixture", operationID: "original-intent", expectedAgentID: "paired-agent")
+                XCTFail("Must reject \(mode)")
+            } catch { XCTAssertTrue(error is DialOperationRecoveryError, mode) }
+            let requests = await transport.requests
+            XCTAssertEqual(requests.count, 2, mode)
+        }
+    }
+    func testDefiniteRejectionAndUnboundLegacyPeerDoNotQuery() async throws {
+        for (mode, agent) in [("dial409", Optional("paired-agent")), ("active", nil)] {
+            let transport = OperationQueryTransport(mode: mode)
+            do {
+                _ = try await api(transport).dialOwnedCall(number: "fixture", operationID: "original-intent", expectedAgentID: agent)
+                XCTFail("Expected original error")
+            } catch {}
+            let requests = await transport.requests
+            XCTAssertEqual(requests.map(\.httpMethod), ["POST"])
+        }
+        XCTAssertFalse(AirSIMAPI.canQueryUnknownDial(after: CancellationError()))
+        XCTAssertFalse(AirSIMAPI.canQueryUnknownDial(after: URLError(.cancelled)))
+    }
+}
+
+@MainActor
+final class EarlyMediaNegotiationTests: XCTestCase {
+    private func grant(expiry: Int64, session: String = "session") -> EarlyMediaGrant {
+        .init(version: 1, agentID: "agent", callID: "call", sessionID: session, expiresAt: expiry,
+            state: "early_media", direction: "recvonly", format: "s16le-8000-mono", proof: "fixture")
+    }
+
+    func testReconnectUsesRenewedLeaseAndRejectsRollbackOrDifferentSession() throws {
+        let now = Int64(Date().timeIntervalSince1970)
+        let original = grant(expiry: now + 10)
+        let lease = EarlyMediaLeaseState(original)
+        let route = PCMRoute.vowlan(endpoint: try .init(host: "192.168.2.90", controlPort: 7592, pcmPort: 7593),
+            credential: try .init(secret: Data(repeating: 0x37, count: 32)))
+        let handshakes = PCMHandshakeSequence { try route.earlyMediaHandshake(lease.current()) }
+        func binding(_ data: Data) throws -> [String] {
+            let parts = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+            let payload = try XCTUnwrap(Data(base64Encoded: String(parts[4])))
+            return String(decoding: payload, as: UTF8.self).components(separatedBy: "\n")
+        }
+        XCTAssertEqual(try binding(handshakes.next())[3], String(now + 10))
+        XCTAssertTrue(lease.renew(grant(expiry: now + 25), now: now))
+        XCTAssertEqual(try binding(handshakes.next())[3], String(now + 25))
+        XCTAssertFalse(lease.renew(original, now: now), "An older grant must not roll back the live lease")
+        XCTAssertFalse(lease.renew(grant(expiry: now + 26, session: "another-call-session"), now: now))
+        XCTAssertFalse(lease.renew(grant(expiry: now + 31), now: now), "Lease duration is bounded")
+        XCTAssertEqual(lease.current().expiresAt, now + 25)
+    }
+
+    func testDelayedMediaAndRenewalKeepSameCallSession() async {
+        var now: TimeInterval = 1000, requests = 0, pending = 0
+        var accepted: [EarlyMediaGrant] = []
+        let outcome = await EarlyMediaNegotiator.run(clockOffset: 0, now: { now }, uptime: { now },
+            sleep: { now += $0 }, isCurrent: { true }, onPending: { pending += 1 }, probe: {
+                requests += 1
+                switch requests {
+                case 1, 2, 4: return .pending
+                case 3, 5: return .ready(self.grant(expiry: Int64(now) + 25))
+                default: return .revoked
+                }
+            }, accept: { accepted.append($0); return true })
+        XCTAssertEqual(outcome, .revoked)
+        XCTAssertEqual(requests, 6)
+        XCTAssertEqual(pending, 3, "Losing readiness after an active lease must also revoke playback")
+        XCTAssertEqual(accepted.count, 2)
+        XCTAssertEqual(accepted[0].sessionID, accepted[1].sessionID)
+        XCTAssertGreaterThan(accepted[1].expiresAt, accepted[0].expiresAt)
+    }
+
+    func testPendingIsBoundedAndUnsupportedNeverStartsPlayback() async {
+        for supported in [false, true] {
+            var elapsed: TimeInterval = 0, requests = 0, starts = 0
+            let result = await EarlyMediaNegotiator.run(clockOffset: 0, now: { 1000 }, uptime: { elapsed },
+                sleep: { elapsed += $0 }, isCurrent: { true }, probe: {
+                    requests += 1; return supported ? .pending : .unsupported
+                }, accept: { _ in starts += 1; return true })
+            XCTAssertEqual(result, supported ? .timedOut : .unsupported)
+            XCTAssertEqual(requests, supported ? 60 : 1)
+            XCTAssertEqual(starts, 0)
+        }
+    }
+
+    func testLateGrantAfterCallEndedCannotActivateAudio() async {
+        var current = true, starts = 0
+        let result = await EarlyMediaNegotiator.run(clockOffset: 0, now: { 1000 }, uptime: { 0 },
+            sleep: { _ in XCTFail("No retry for ended call") }, isCurrent: { current }, probe: {
+                current = false; return .ready(self.grant(expiry: 1025))
+            }, accept: { _ in starts += 1; return true })
+        XCTAssertEqual(result, .cancelled)
+        XCTAssertEqual(starts, 0)
+    }
+
+    func testTransientFailuresAndExpiredLeaseDoNotRetryForever() async {
+        var now: TimeInterval = 1000, requests = 0
+        let result = await EarlyMediaNegotiator.run(clockOffset: 0, now: { now }, uptime: { now },
+            sleep: { now += $0 }, isCurrent: { true }, probe: {
+                requests += 1; throw URLError(.timedOut)
+            }, accept: { _ in XCTFail("No grant"); return true })
+        XCTAssertEqual(result, .unavailable)
+        XCTAssertEqual(requests, 3)
+        let expired = await EarlyMediaNegotiator.run(clockOffset: 10, now: { 1000 }, uptime: { 0 },
+            sleep: { _ in XCTFail("No retry") }, isCurrent: { true }, probe: {
+                .ready(self.grant(expiry: 1005))
+            }, accept: { _ in XCTFail("Expired grant"); return true })
+        XCTAssertEqual(expired, .unavailable)
+    }
+
+    func testControlProbeDistinguishesPendingAndRequiresValidBoundProof() async throws {
+        let credential = try VoWLANCredential(secret: Data(repeating: 0x37, count: 32))
+        for variant in ["valid", "pending", "unsupported", "revoked", "wrongNonce", "wrongCall", "tamperedDirection", "expired"] {
+            let boundary = EarlyMediaHTTPFixture(variant: variant, credential: credential)
+            let api = AirSIMAPI(route: .vowlan(endpoint: try .init(host: "192.168.2.90", controlPort: 7592, pcmPort: 7593),
+                credential: credential), transport: boundary)
+            let result = try await api.probeEarlyMedia(agentID: "agent", callID: "call")
+            switch variant {
+            case "valid": if case .ready = result {} else { XCTFail("Valid bound grant rejected") }
+            case "pending": XCTAssertEqual(result, .pending)
+            case "unsupported": XCTAssertEqual(result, .unsupported)
+            default: XCTAssertEqual(result, .revoked, variant)
+            }
+            let requests = await boundary.requests
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.httpMethod, "GET")
+            XCTAssertEqual(requests.first?.url?.path, "/api/calls/early-media")
+            XCTAssertEqual(URLComponents(url: requests[0].url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, "call")
+        }
+    }
+
+    func testReceiveOnlyPCMDeliversDownlinkAndCannotSendUplink() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let listening = expectation(description: "listening"), connected = expectation(description: "authenticated PCM")
+        let received = expectation(description: "downlink"), uplink = expectation(description: "no uplink")
+        uplink.isInverted = true
+        let queue = DispatchQueue(label: "test.early-media.recvonly")
+        let credential = try VoWLANCredential(secret: Data(repeating: 0x37, count: 32))
+        let route = PCMRoute.vowlan(endpoint: try .init(host: "192.168.2.90", controlPort: 7592, pcmPort: 7593), credential: credential)
+        let handshake = try route.earlyMediaHandshake(grant(expiry: Int64(Date().timeIntervalSince1970) + 25))
+        let frame = Data(repeating: 0x24, count: 320)
+        listener.stateUpdateHandler = { if case .ready = $0 { listening.fulfill() } }
+        listener.newConnectionHandler = { peer in
+            peer.start(queue: queue)
+            peer.receive(minimumIncompleteLength: handshake.count, maximumLength: handshake.count) { data, _, _, _ in
+                XCTAssertEqual(data, handshake)
+                XCTAssertTrue(String(decoding: handshake, as: UTF8.self).hasPrefix("AIRSIMEM1 "))
+                peer.send(content: Data("AIRSIMREADY".utf8) + frame, completion: .contentProcessed { _ in })
+                peer.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, _ in
+                    if data?.isEmpty == false { uplink.fulfill() }
+                    peer.cancel()
+                }
+            }
+        }
+        listener.start(queue: queue)
+        defer { listener.cancel() }
+        await fulfillment(of: [listening], timeout: 3)
+        let transport = NetworkPCMTransport(host: "127.0.0.1", port: try XCTUnwrap(listener.port),
+            handshakeSequence: PCMHandshakeSequence { handshake }, requiresWiFi: false,
+            usesSystemRouting: true, usesTLS: false, isOverlayHost: false, receiveOnly: true,
+            onPCM: { data in XCTAssertEqual(data, frame); received.fulfill() },
+            onEvent: { if case .connected = $0 { connected.fulfill() } })
+        transport.start()
+        defer { transport.stop() }
+        await fulfillment(of: [connected, received], timeout: 4)
+        transport.sendPCM(Data(repeating: 0x77, count: 320))
+        await fulfillment(of: [uplink], timeout: 0.3)
+    }
+}
+
+private actor EarlyMediaHTTPFixture: AirSIMHTTPTransport {
+    let variant: String
+    let credential: VoWLANCredential
+    private(set) var requests: [URLRequest] = []
+    init(variant: String, credential: VoWLANCredential) { self.variant = variant; self.credential = credential }
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        requests.append(request)
+        if variant == "pending" { return .init(statusCode: 202, body: Data()) }
+        if variant == "unsupported" { return .init(statusCode: 404, body: Data()) }
+        if variant == "revoked" { return .init(statusCode: 410, body: Data()) }
+        let grant = EarlyMediaGrant(version: 1, agentID: "agent", callID: variant == "wrongCall" ? "other" : "call",
+            sessionID: "session", expiresAt: Int64(Date().timeIntervalSince1970) + (variant == "expired" ? -1 : 25),
+            state: "early_media", direction: "recvonly", format: "s16le-8000-mono", proof: "")
+        let nonce = variant == "wrongNonce" ? "stale" : request.value(forHTTPHeaderField: "X-AirSIM-VoWLAN-Nonce")!
+        let proof = Data(HMAC<SHA256>.authenticationCode(for: grant.proofMessage(nonce: nonce), using: SymmetricKey(data: credential.secret)))
+            .base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        var body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(grant)) as! [String: Any]
+        body["proof"] = proof
+        if variant == "tamperedDirection" { body["direction"] = "sendrecv" }
+        return .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: body))
+    }
+}
+
+private actor OperationQueryTransport: AirSIMHTTPTransport {
+    let mode: String
+    private(set) var requests: [URLRequest] = []
+    init(mode: String) { self.mode = mode }
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        requests.append(request)
+        if request.httpMethod == "POST" {
+            if mode == "dial409" { return .init(statusCode: 409, body: Data("protected".utf8)) }
+            throw URLError(.timedOut)
+        }
+        if mode == "missing" { return .init(statusCode: 404, body: Data()) }
+        if mode == "queryTimeout" { throw URLError(.timedOut) }
+        if mode == "query401" { return .init(statusCode: 401, body: Data()) }
+        let nonce = mode == "wrongNonce" ? "old-nonce" : request.value(forHTTPHeaderField: "X-AirSIM-VoWLAN-Nonce")!
+        let agent = mode == "wrongAgent" ? "other-agent" : "paired-agent"
+        let operation = mode == "wrongOperation" ? "other-intent" : "original-intent"
+        let status = ["unknown", "rejected", "unknownWithIDs"].contains(mode) ? (mode == "rejected" ? "rejected" : "unknown") : "confirmed"
+        let hasIDs = status == "confirmed" || mode == "unknownWithIDs"
+        let android = hasIDs ? "original-call" : ""
+        let backend = hasIDs ? "original-backend" : ""
+        let state = mode == "ended" || mode == "endedWithoutDate" ? "ended"
+            : mode == "confirmedUnknown" || status != "confirmed" ? "unknown"
+            : mode == "dialing" ? "dialing" : mode == "unknownEnum" ? "invented" : "active"
+        let ended = mode == "ended" ? "2026-11-03T00:00:00Z" : ""
+        func sign(_ text: String) -> String {
+            Data(HMAC<SHA256>.authenticationCode(for: Data(text.utf8), using: SymmetricKey(data: Data(repeating: 0x32, count: 32))))
+                .base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        }
+        var value: [String: Any] = ["version": 1, "agent_id": agent, "operation_id": operation,
+            "status": status, "call_state": state,
+            "status_proof": sign(["AIRSIM-OPERATION1", nonce, agent, operation, status, android, backend, state, ended].joined(separator: "\n"))]
+        if hasIDs {
+            value["android_id"] = android; value["backend_id"] = backend
+            value["operation_proof"] = sign("AIRSIM-DIAL1\n\(nonce)\n\(operation)\n\(android)\n\(backend)")
+        }
+        if !ended.isEmpty { value["ended_at"] = ended }
+        if mode == "noStatusProof" { value.removeValue(forKey: "status_proof") }
+        if mode == "badDialProof" { value["operation_proof"] = "bad" }
+        if mode == "tamperState" { value["call_state"] = "ended"; value["ended_at"] = "2026-11-03T00:00:00Z" }
+        if mode == "newline" { value["backend_id"] = "original-backend\nforged" }
+        if mode == "version2" { value["version"] = 2 }
+        return .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
     }
 }

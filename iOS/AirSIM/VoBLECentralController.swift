@@ -114,6 +114,14 @@ struct VoBLEAndroidEvent: Equatable, Sendable {
     let number: String
 }
 
+struct VoBLEAndroidSMS: Equatable, Sendable {
+    let sender: String
+    let content: String
+    let timestamp: String
+    let deliveryID: String
+    let simSlot: String
+}
+
 enum VoBLECentralError: LocalizedError, Equatable {
     case notReady, invalidResponse, authenticationFailed, commandTimedOut, disconnected
     case bluetooth(String)
@@ -241,6 +249,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     @Published private(set) var deviceInformation: AndroidAgentMetadata?
     var currentDeviceName: String? { peripheral?.name }
     var onEvent: ((VoBLEAndroidEvent) -> Void)?
+    var onSMS: ((VoBLEAndroidSMS) -> Void)?
     var onAudioDownlinkFragment: ((Data) -> Void)?
     var onReadyToSendAudio: (() -> Void)?
     var onDisconnected: (() -> Void)?
@@ -295,6 +304,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     private let peripheralPreferenceKey = "airsim.voble.peripheral-id"
     private var explicitPairingPeripheral: UUID?
     private var deviceInformationRevision: UInt64 = 0
+    private var deviceInformationRefreshTask: Task<Void, Never>?
     private var applicationIsBackground = UIApplication.shared.applicationState == .background
     private var systemReconnecting = false
     /// Set only when this side asks CoreBluetooth to cancel. It is diagnostic,
@@ -368,12 +378,12 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
         connect(selected, restored: false)
     }
 
-    func refreshDeviceInformation() async {
+    func refreshDeviceInformation(preserveCachedUntilResponse: Bool = false) async {
         guard state == .ready, let identity = authenticatedIdentity else { return }
         let session = sessionID
         deviceInformationRevision &+= 1
         let revision = deviceInformationRevision
-        deviceInformation = nil
+        if !preserveCachedUntilResponse { deviceInformation = nil }
         do {
             let response = try await send(command: "device_info")
             guard response.success, state == .ready, authenticatedIdentity == identity, sessionID == session,
@@ -692,6 +702,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     }
 
     private func resetConnection(keepingPeripheral: Bool = false) {
+        deviceInformationRefreshTask?.cancel(); deviceInformationRefreshTask = nil
         connectionRevision &+= 1
         pairingTask?.cancel(); pairingTask = nil; queuedPairingMessages = 0
         systemReconnecting = false
@@ -728,7 +739,20 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
         let message: String?
         if case let .failed(value) = state { message = value } else { message = nil }
         if errorMessage != message { errorMessage = message }
-        if state == .ready, previous != .ready { onReady?() }
+        if state == .ready, previous != .ready {
+            onReady?()
+            deviceInformationRefreshTask?.cancel()
+            deviceInformationRefreshTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                    guard let self, self.state == .ready else { return }
+                    // No background keepalive or competition with call control/audio.
+                    if UIApplication.shared.applicationState == .active, !CallKitController.shared.managesCurrentCall {
+                        await self.refreshDeviceInformation(preserveCachedUntilResponse: true)
+                    }
+                }
+            }
+        }
         if case .disconnected = event, enabled, reconnectBarrier.permitsConnection {
             radio.restartDiscoveryAfterDisconnect()
         }
@@ -907,6 +931,13 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
                     callID: envelope.callID, generation: envelope.generation,
                     direction: body["direction"] as? String ?? "", state: body["state"] as? String ?? "",
                     number: body["number"] as? String ?? ""))
+            } else if envelope.command == "sms_event" {
+                onSMS?(VoBLEAndroidSMS(
+                    sender: body["sender"] as? String ?? "",
+                    content: body["content"] as? String ?? "",
+                    timestamp: body["timestamp"] as? String ?? "",
+                    deliveryID: body["delivery_id"] as? String ?? "",
+                    simSlot: body["sim_slot"] as? String ?? ""))
             }
         } catch { errorMessage = error.localizedDescription }
     }

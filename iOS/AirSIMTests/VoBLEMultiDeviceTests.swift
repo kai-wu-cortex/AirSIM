@@ -6,6 +6,67 @@ import CryptoKit
 
 @MainActor
 final class VoBLEMultiDeviceTests: XCTestCase {
+    func testDialPadClearsAcceptedNumber() async throws {
+        try await verifyDialPadInput(initial: "10086", expected: "")
+    }
+
+    func testDialPadClearsAcceptedTrimmedNumber() async throws {
+        try await verifyDialPadInput(initial: " 10086 ", expected: "")
+    }
+
+    func testDialPadKeepsFailedNumberForRetry() async throws {
+        try await verifyDialPadInput(initial: "10086", expected: "10086", fail: true)
+    }
+
+    func testDialPadKeepsNewDraftWhileDialIsPending() async throws {
+        try await verifyDialPadInput(initial: "10086", edited: "10010", expected: "10010")
+    }
+
+    func testDialPadKeepsUnrelatedDraftForExternalDial() async throws {
+        try await verifyDialPadInput(initial: "10010", expected: "10010")
+    }
+
+    private func verifyDialPadInput(initial: String, edited: String? = nil,
+                                    expected: String, fail: Bool = false) async throws {
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.bluetooth); AndroidAgentBindingPreference.set(nil)
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let hub = VoBLEDeviceHub(radio: VoBLERadioController(io: RadioIOProbe()), pairingStore: MemoryPairings())
+        let session = hub.prepare(peripheralID: UUID())
+        authenticate(session.central, as: "dialpad-fixture")
+        let backend = ModeExitBackend()
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in backend }, bluetoothHub: hub, callKitController: CallKitController())
+        defer {
+            backend.onDial = {}
+            if let active = model.deviceCalls.active { model.deviceCallRouter.finished(active) }
+            model.stop()
+        }
+        model.numberInput = initial
+        backend.onDial = {
+            if let edited { model.numberInput = edited }
+            if fail { throw DeviceCallRoutingError.unavailable }
+        }
+        do {
+            try await model.callKitStart(number: "10086")
+            XCTAssertFalse(fail, "failed dial must throw")
+        } catch {
+            guard fail else { throw error }
+            XCTAssertEqual(error as? DeviceCallRoutingError, .unavailable)
+        }
+        XCTAssertEqual(backend.dialCount, 1, "test must exercise the accepted/failed backend receipt")
+        XCTAssertEqual(model.numberInput, expected)
+        if fail {
+            XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+            XCTAssertNil(model.deviceCalls.active)
+            XCTAssertNil(model.deviceCallContext.media.owner)
+            backend.onDial = {}
+            try await model.callKitStart(number: "10086")
+            XCTAssertEqual(backend.dialCount, 2, "only an explicit new request may retry")
+            XCTAssertEqual(model.numberInput, "")
+        }
+    }
+
     func testPairingPageShowsSharedScanBeforeAnyDeviceIsSelected() {
         let io = RadioIOProbe()
         let hub = VoBLEDeviceHub(radio: VoBLERadioController(io: io), pairingStore: MemoryPairings())
@@ -401,8 +462,12 @@ final class VoBLEMultiDeviceTests: XCTestCase {
 private final class ModeExitBackend: DeviceCallBackend {
     let epoch: UInt64 = 1
     var onEnd: () async -> Void = {}
+    var onDial: () throws -> Void = {}
+    var dialCount = 0
     func dial(number: String, operationID: String, systemUUID: UUID) async throws -> DeviceBackendCall {
-        .init(callID: "fixture", backendID: "fixture", generation: nil)
+        dialCount += 1
+        try onDial()
+        return .init(callID: "fixture", backendID: "fixture", generation: nil)
     }
     func answer(callID: String, generation: UInt64?) async throws {}
     func end(callID: String, generation: UInt64?, reject: Bool) async throws { await onEnd() }

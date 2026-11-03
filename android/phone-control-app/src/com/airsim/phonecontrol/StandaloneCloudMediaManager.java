@@ -42,10 +42,34 @@ final class StandaloneCloudMediaManager implements Closeable {
         this.context = context.getApplicationContext();
     }
 
-    void startOutgoing(JSONObject call) {
-        if (call == null) return;
-        try { start(Descriptor.from(call)); }
+    void startOutgoing(JSONObject call, CallRepository.OutgoingCallObservation observation) {
+        var generation = RelayEgressGate.shared.generation();
+        boolean started = false;
+        try {
+            if (call == null || !generation.isCurrent()) return;
+            Descriptor descriptor = Descriptor.from(call);
+            descriptor.outgoingObservation = observation;
+            bindOutgoing(descriptor);
+            start(descriptor, generation);
+            started = true;
+        }
         catch (Exception error) { BridgeLog.error("standalone_outgoing_media_invalid", error); }
+        finally { if (!started && observation != null) observation.close(); }
+    }
+
+    private void bindOutgoing(Descriptor descriptor) {
+        synchronized (descriptor) {
+            if (!descriptor.androidID.isEmpty() || !"outgoing".equals(descriptor.direction)
+                    || descriptor.outgoingObservation == null) return;
+            // Creation is observed before dialing and survives Telecom removal. A delayed
+            // terminal event can still clean up its own call, never an arbitrary old event.
+            String candidate = descriptor.outgoingObservation.matchingCallID();
+            if (!candidate.isEmpty()) {
+                descriptor.androidID = candidate;
+                descriptor.outgoingObservation.close();
+                descriptor.outgoingObservation = null;
+            }
+        }
     }
 
     String androidCallIDFor(JSONObject call) {
@@ -53,6 +77,7 @@ final class StandaloneCloudMediaManager implements Closeable {
         synchronized (lock) {
             if (active == null) return "";
             Descriptor descriptor = active.descriptor;
+            bindOutgoing(descriptor);
             return new CloudCallTarget(descriptor.callID, descriptor.callUUID,
                     descriptor.generation, descriptor.androidID).resolve(
                     call.optString("call_id"), call.optString("call_uuid"),
@@ -61,6 +86,8 @@ final class StandaloneCloudMediaManager implements Closeable {
     }
 
     void handleCallEvent(JSONObject registration, JSONObject event, StandaloneRelayClient relay) throws Exception {
+        var generation = RelayEgressGate.shared.generation();
+        if (!generation.isCurrent()) return;
         String state = event.optString("state", "");
         String direction = event.optString("direction", "");
         String androidID = event.optString("call_id", "");
@@ -69,6 +96,12 @@ final class StandaloneCloudMediaManager implements Closeable {
             descriptor = active == null ? null : active.descriptor;
         }
         if ("incoming".equals(direction) && "incoming".equals(state) && descriptor == null) {
+            // A queued ringing event can survive a Relay time-out until after the
+            // carrier call has ended. Never wake CallKit with a stale ring.
+            if (CallRepository.state(androidID) < 0 && eventAgeMillis(event) > 3_000) {
+                BridgeLog.info("standalone_incoming_skipped_ended");
+                return;
+            }
             descriptor = Descriptor.incoming(registration, androidID);
             JSONObject payload = identity(registration).put("event", "incoming_call")
                     .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
@@ -77,11 +110,12 @@ final class StandaloneCloudMediaManager implements Closeable {
                     .put("issued_at", Instant.now().toString())
                     .put("expires_at", Instant.now().plusSeconds(90).toString())
                     .put("media_transport", "legacy_pcm");
-            postRelay(registration, relay, "/v2/events/call", payload, 15_000);
-            start(descriptor);
-        } else if (descriptor != null && descriptor.androidID.isEmpty()
-                && "outgoing".equals(direction)) {
-            descriptor.androidID = androidID;
+            // Keep ringing latency bounded; a failed call event stays queued for
+            // the priority retry path instead of blocking the agent loop for 15s.
+            postRelay(registration, relay, "/v2/events/call", payload, 5_000);
+            start(descriptor, generation);
+        } else if (descriptor != null && descriptor.androidID.isEmpty()) {
+            bindOutgoing(descriptor);
             synchronized (lock) {
                 if (active != null && active.descriptor == descriptor) {
                     synchronized (active) {
@@ -93,6 +127,12 @@ final class StandaloneCloudMediaManager implements Closeable {
                     }
                 }
             }
+        }
+        if (descriptor != null && !CloudCallTarget.owns(descriptor.androidID, androidID)) {
+            // Call waiting, or a late event of an earlier call: it must not rewrite or end
+            // the lifecycle of the call this session owns.
+            BridgeLog.info("standalone_call_event_other_call state=" + state);
+            return;
         }
         if (descriptor != null) {
             String phase = phase(state);
@@ -133,6 +173,14 @@ final class StandaloneCloudMediaManager implements Closeable {
         postRelay(registration, relay, "/v2/events/call-state", lifecycle, 12_000);
     }
 
+    private static long eventAgeMillis(JSONObject event) {
+        String eventID = event.optString("event_id", "");
+        int dash = eventID.indexOf('-');
+        if (dash <= 0) return 0;
+        try { return Math.max(0, System.currentTimeMillis() - Long.parseLong(eventID.substring(0, dash))); }
+        catch (NumberFormatException ignored) { return 0; }
+    }
+
     private void postRelay(JSONObject registration, StandaloneRelayClient relay, String path,
                            JSONObject payload, int timeoutMillis) throws Exception {
         try {
@@ -161,12 +209,33 @@ final class StandaloneCloudMediaManager implements Closeable {
         }
     }
 
-    private void start(Descriptor descriptor) {
+    private void start(Descriptor descriptor, RelayEgressGate.Generation generation) {
         synchronized (lock) {
+            if (!generation.isCurrent()) return;
             if (active != null && active.descriptor.same(descriptor)) return;
             if (active != null) active.close();
-            active = new CloudSession(descriptor);
+            active = new CloudSession(descriptor, generation);
             sessions.execute(active);
+        }
+    }
+
+    /**
+     * The Relay will never take this queued call event. When it was the carrier's "ended", still
+     * close the cloud call of that Android call, or its media session keeps reconnecting.
+     */
+    void abandonCallEvent(String encoded) {
+        JSONObject event;
+        try { event = new JSONObject(encoded); } catch (Exception ignored) { return; }
+        if (!"ended".equals(event.optString("state", ""))) return;
+        String androidID = event.optString("call_id", "");
+        synchronized (lock) {
+            if (active != null && CloudCallTarget.owns(active.descriptor.androidID, androidID)) {
+                String callUUID = active.descriptor.callUUID;
+                active.close();
+                active = null;
+                BridgeLog.info("standalone_cloud_call_closed_unconfirmed call_uuid="
+                        + DebugRedactor.safeIdentifier(callUUID));
+            }
         }
     }
 
@@ -181,6 +250,8 @@ final class StandaloneCloudMediaManager implements Closeable {
 
     private final class CloudSession implements Runnable, Closeable {
         final Descriptor descriptor;
+        final CloudCallRetryPolicy.MediaRetry mediaRetry = new CloudCallRetryPolicy.MediaRetry();
+        final RelayEgressGate.Generation relayGeneration;
         volatile boolean running = true;
         volatile StandaloneWebSocket webSocket;
         volatile Socket pcm;
@@ -189,11 +260,15 @@ final class StandaloneCloudMediaManager implements Closeable {
         volatile boolean mediaStarted;
         int sequence;
 
-        CloudSession(Descriptor descriptor) { this.descriptor = descriptor; }
+        CloudSession(Descriptor descriptor) { this(descriptor, RelayEgressGate.shared.generation()); }
+        CloudSession(Descriptor descriptor, RelayEgressGate.Generation generation) {
+            this.descriptor = descriptor;
+            this.relayGeneration = generation;
+        }
 
         @Override public void run() {
             int reconnectFailures = 0;
-            while (running) {
+            while (running && relayGeneration.isCurrent()) {
                 StandaloneWebSocket owner = null;
                 boolean connected = false;
                 try {
@@ -202,9 +277,10 @@ final class StandaloneCloudMediaManager implements Closeable {
                             + URLEncoder.encode(descriptor.secret, "UTF-8"));
                     owner = StandaloneWebSocket.connect(endpoint, "");
                     synchronized (this) {
-                        if (!running) { closeSocket(owner); return; }
+                        if (!running || !relayGeneration.isCurrent()) { closeSocket(owner); return; }
                         webSocket = owner;
                     }
+                    mediaRetry.authenticated();
                     owner.writeText(status("agent_ready", ""));
                     BridgeLog.info("standalone_cloud_media_connected call_uuid="
                             + DebugRedactor.safeIdentifier(descriptor.callUUID));
@@ -216,6 +292,18 @@ final class StandaloneCloudMediaManager implements Closeable {
                         connected = false;
                         reconnectFailures = Math.min(4, reconnectFailures + 1);
                         BridgeLog.error("standalone_cloud_media_disconnected", error);
+                        var outcome = mediaRetry.outcome(error, CallRepository.state(descriptor.androidID),
+                                android.os.SystemClock.elapsedRealtime());
+                        if (outcome != CloudCallRetryPolicy.MediaOutcome.RECONNECT) {
+                            // Relay no longer has this call (ended, expired or never stored),
+                            // so every reconnect with this secret would be refused again.
+                            BridgeLog.info("standalone_cloud_media_abandoned call_uuid="
+                                    + DebugRedactor.safeIdentifier(descriptor.callUUID) + " " + CloudCallRetryPolicy.describe(error));
+                            synchronized (lock) {
+                                if (outcome == CloudCallRetryPolicy.MediaOutcome.STOP_AND_RELEASE && active == this) active = null;
+                            }
+                            close();
+                        }
                     }
                 } finally {
                     closeSocket(owner);
@@ -366,6 +454,9 @@ final class StandaloneCloudMediaManager implements Closeable {
         @Override public synchronized void close() {
             running = false;
             mediaStarted = false;
+            synchronized (descriptor) {
+                if (descriptor.outgoingObservation != null) descriptor.outgoingObservation.close();
+            }
             RemoteAudioSessionRegistry.setCloud(pcm, false, "");
             closeSocket(webSocket);
             closeSocket(mediaPump);
@@ -380,6 +471,7 @@ final class StandaloneCloudMediaManager implements Closeable {
         final String secret;
         final String relayURL;
         final String direction;
+        CallRepository.OutgoingCallObservation outgoingObservation;
         volatile String androidID;
 
         Descriptor(String callID, String callUUID, long generation, String secret,

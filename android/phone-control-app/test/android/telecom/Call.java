@@ -3,6 +3,7 @@ package android.telecom;
 public class Call {
     public static final int STATE_DIALING = 1;
     public static final int STATE_RINGING = 2;
+    public static final int STATE_HOLDING = 3;
     public static final int STATE_ACTIVE = 4;
     public static final int STATE_DISCONNECTING = 9;
     public static final int STATE_DISCONNECTED = 10;

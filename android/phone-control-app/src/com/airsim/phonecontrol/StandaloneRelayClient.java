@@ -15,6 +15,12 @@ final class StandaloneRelayClient {
     record Response(int status, String body, long retryAfterMillis) {}
 
     Response post(JSONObject registration, String path, JSONObject payload, int timeoutMillis) throws Exception {
+        return post(registration, path, payload, timeoutMillis, RelayEgressGate.shared.generation(), null, 0);
+    }
+
+    private Response post(JSONObject registration, String path, JSONObject payload, int timeoutMillis,
+                          RelayEgressGate.Generation generation,
+                          RelayCommandRetryState lifetime, long epoch) throws Exception {
         String base = registration.getString("relay_url");
         URI target = URI.create(base + path);
         if (!"https".equalsIgnoreCase(target.getScheme()) || target.getHost() == null
@@ -22,8 +28,15 @@ final class StandaloneRelayClient {
             throw new IllegalArgumentException("Relay 必须使用无凭据 HTTPS 地址");
         }
         HttpURLConnection connection = (HttpURLConnection) new URL(target.toString()).openConnection();
+        RelayEgressGate.Lease lease = null;
         try {
+            lease = RelayEgressGate.shared.acquire(generation, connection::disconnect);
+            lease.checkCurrent();
+            if (lifetime != null && !lifetime.attach(epoch, connection::disconnect)) {
+                throw new java.io.IOException("stale_sms_operation");
+            }
             connection.setRequestMethod("POST");
+            connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(8_000);
             connection.setReadTimeout(timeoutMillis);
             connection.setUseCaches(false);
@@ -31,20 +44,37 @@ final class StandaloneRelayClient {
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             connection.setRequestProperty("User-Agent", "AirSIM-Standalone/0.1");
             byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+            if (lifetime != null && !lifetime.isCurrent(epoch)) throw new java.io.IOException("stale_sms_operation");
+            lease.checkCurrent();
             try (OutputStream output = connection.getOutputStream()) { output.write(body); }
             int status = connection.getResponseCode();
             InputStream stream = status >= 200 && status < 300
                     ? connection.getInputStream() : connection.getErrorStream();
-            return new Response(status, read(stream), RelayHTTPException.parseRetryAfter(
+            Response response = new Response(status, read(stream), RelayHTTPException.parseRetryAfter(
                     connection.getHeaderField("Retry-After"), System.currentTimeMillis()));
+            lease.checkCurrent();
+            if (lifetime != null && !lifetime.isCurrent(epoch)) throw new java.io.IOException("stale_sms_operation");
+            return response;
         } finally {
-            connection.disconnect();
+            try { connection.disconnect(); }
+            finally { if (lease != null) lease.close(); }
         }
     }
 
     JSONObject postJSON(JSONObject registration, String path, JSONObject payload, int timeoutMillis)
             throws Exception {
-        Response response = post(registration, path, payload, timeoutMillis);
+        return postJSON(registration, path, payload, timeoutMillis, RelayEgressGate.shared.generation());
+    }
+
+    JSONObject postJSON(JSONObject registration, String path, JSONObject payload, int timeoutMillis,
+                        RelayEgressGate.Generation generation) throws Exception {
+        return postJSON(registration, path, payload, timeoutMillis, generation, null, 0);
+    }
+
+    JSONObject postJSON(JSONObject registration, String path, JSONObject payload, int timeoutMillis,
+                        RelayEgressGate.Generation generation,
+                        RelayCommandRetryState lifetime, long epoch) throws Exception {
+        Response response = post(registration, path, payload, timeoutMillis, generation, lifetime, epoch);
         if (response.status < 200 || response.status >= 300) {
             throw new RelayHTTPException(response.status, response.body, response.retryAfterMillis);
         }

@@ -247,6 +247,8 @@ public final class MainActivity extends Activity {
 	}
 
     private void configureWindow() {
+        getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         getWindow().getDecorView().setSystemUiVisibility(0);
@@ -269,7 +271,12 @@ public final class MainActivity extends Activity {
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
                 Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-                view.setPadding(0, bars.top, 0, bars.bottom);
+                Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
+                View focused = getCurrentFocus();
+                if (focused instanceof EditText && ime.bottom > 0) focused.post(() ->
+                        focused.requestRectangleOnScreen(new android.graphics.Rect(0, 0,
+                                focused.getWidth(), focused.getHeight()), false));
             } else {
                 view.setPadding(0, insets.getSystemWindowInsetTop(), 0,
                         insets.getSystemWindowInsetBottom());
@@ -843,6 +850,30 @@ public final class MainActivity extends Activity {
         agentRefreshResult.setPadding(dp(12), dp(8), dp(12), dp(8));
         agentRefreshResult.setBackground(rounded(SURFACE, 12, BORDER, 1));
         root.addView(agentRefreshResult, matchWithTop(6));
+        TextView heartbeat = secondaryButton("立即发送云端心跳");
+        TextView heartbeatResult = description("仅检查注册和心跳，不拨号、不发送短信；纯本地模式下禁止发送。");
+        heartbeat.setOnClickListener(ignored -> {
+            if (!heartbeat.isEnabled()) return;
+            heartbeat.setEnabled(false);
+            heartbeatResult.setText("正在发送，请稍候…");
+            new Thread(() -> {
+                String message;
+                try {
+                    if (RelayEgressGate.shared.isBlocked()) throw new IllegalStateException("纯本地模式已开启，禁止发送云端心跳");
+                    if (RuntimeMode.isStandalone(this)) StandaloneAgentService.sendManualHeartbeat();
+                    else if (!new JSONObject(new AgentClient(this).sendHeartbeat()).optBoolean("accepted", false))
+                        throw new IllegalStateException("Agent 未确认心跳已被接受，请升级 Agent 后重试");
+                    message = "Relay 已接受心跳，请在 iPhone 重新运行云端自检。此结果不代表通话链路已通过。";
+                } catch (Exception error) {
+                    message = "心跳发送失败：" + DebugRedactor.sanitize(String.valueOf(error.getMessage()));
+                    BridgeLog.error("manual_heartbeat_failed", error);
+                }
+                final String result = message;
+                runOnUiThread(() -> { heartbeat.setEnabled(true); heartbeatResult.setText(result); });
+            }, "AirSIMManualHeartbeat").start();
+        });
+        root.addView(heartbeat, matchWithTop(10));
+        root.addView(heartbeatResult, matchWithTop(6));
 
         CheckBox debugEnabled = new CheckBox(this);
         debugEnabled.setText("启用 Debug 模式");
@@ -876,8 +907,56 @@ public final class MainActivity extends Activity {
         releases.setOnClickListener(ignored -> openProjectURL(AppInformation.RELEASES_URL));
         aboutCard.addView(releases, matchWithTop(10));
         root.addView(aboutCard, matchWithTop(10));
+
+        root.addView(sectionTitle("反馈"), matchWithTop(22));
+        LinearLayout feedbackCard = card(SURFACE, 22);
+        feedbackCard.setOrientation(LinearLayout.VERTICAL);
+        feedbackCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+        feedbackCard.addView(description("仅手动上传脱敏日志到 Notion；不上传短信内容或密钥。"));
+        EditText feedbackDescription = input("用户描述（可选）", InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        feedbackDescription.setSingleLine(false);
+        feedbackDescription.setMinLines(2);
+        feedbackDescription.setText(FeedbackUploader.description(this));
+        feedbackCard.addView(feedbackDescription, matchWithTop(10));
+        feedbackCard.addView(feedbackPasteButton(feedbackDescription, "粘贴到描述"), matchWithTop(6));
+        EditText feedbackRemark = input("备注（可选）", InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        feedbackRemark.setSingleLine(false);
+        feedbackRemark.setMinLines(2);
+        feedbackRemark.setText(FeedbackUploader.remark(this));
+        feedbackCard.addView(feedbackRemark, matchWithTop(8));
+        feedbackCard.addView(feedbackPasteButton(feedbackRemark, "粘贴到备注"), matchWithTop(6));
+        TextView uploadFeedback = secondaryButton("保存并立即上传反馈");
+        uploadFeedback.setOnClickListener(ignored -> {
+            FeedbackUploader.setFields(this, feedbackDescription.getText().toString(),
+                    feedbackRemark.getText().toString());
+            FeedbackUploader.submit(this, "manual", "manual:" + UUID.randomUUID());
+            toast("反馈已提交，正在上传");
+        });
+        feedbackCard.addView(uploadFeedback, matchWithTop(12));
+        root.addView(feedbackCard, matchWithTop(10));
         refreshShizukuStatus();
         return scroll(root);
+    }
+
+    private TextView feedbackPasteButton(EditText input, String title) {
+        input.setLongClickable(true);
+        input.setSelectAllOnFocus(false);
+        input.setGravity(Gravity.TOP | Gravity.START);
+        TextView button = secondaryButton(title);
+        button.setOnClickListener(ignored -> {
+            ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+            android.content.ClipData clip = clipboard == null ? null : clipboard.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0 || clip.getItemAt(0).getText() == null) {
+                toast("剪贴板没有可粘贴的文字"); return;
+            }
+            int start = Math.max(0, input.getSelectionStart());
+            int end = Math.max(0, input.getSelectionEnd());
+            input.getText().replace(Math.min(start, end), Math.max(start, end), clip.getItemAt(0).getText());
+            input.requestFocus();
+        });
+        return button;
     }
 
     private void openProjectURL(String url) {

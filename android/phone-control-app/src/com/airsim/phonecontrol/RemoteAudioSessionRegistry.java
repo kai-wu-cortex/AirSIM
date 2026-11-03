@@ -23,9 +23,11 @@ public final class RemoteAudioSessionRegistry {
         if (active) {
             cloud.add(owner);
             RemoteCallAudioScope.SHARED.bind(owner, confirmedCall);
+            RemoteCallHangupGuard.ownerBound(confirmedCall);
         } else {
             cloud.remove(owner);
-            RemoteCallAudioScope.SHARED.release(owner);
+            String releasedCall = RemoteCallAudioScope.SHARED.release(owner);
+            if (releasedCall != null) RemoteCallHangupGuard.ownerLost(releasedCall);
         }
         AirSIMInCallService.refreshAudioPolicy();
     }
@@ -47,12 +49,18 @@ public final class RemoteAudioSessionRegistry {
 
     public static void ownCall(Object owner, String confirmedCall) {
         RemoteCallAudioScope.SHARED.bind(owner, confirmedCall);
+        RemoteCallHangupGuard.ownerBound(confirmedCall);
         AirSIMInCallService.refreshAudioPolicy();
     }
 
     public static void releaseCall(Object owner) {
-        RemoteCallAudioScope.SHARED.release(owner);
+        String releasedCall = RemoteCallAudioScope.SHARED.release(owner);
+        if (releasedCall != null) RemoteCallHangupGuard.ownerLost(releasedCall);
         AirSIMInCallService.refreshAudioPolicy();
+    }
+
+    static synchronized boolean ownsCall(String callID) {
+        return RemoteCallAudioScope.SHARED.ownsCall(callID);
     }
 
     static synchronized boolean ownsCall(java.util.List<String> calls) { return active() && RemoteCallAudioScope.SHARED.owns(calls); }

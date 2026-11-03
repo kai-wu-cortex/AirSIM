@@ -203,6 +203,25 @@ struct KeychainLocalDeviceCredentials: LocalDeviceCredentialStoring {
 }
 
 enum VoWLANHealthProof {
+    static func verifyOperationStatus(_ status: DialOperationStatus, nonce: String,
+                                      agentID: String, operationID: String, credential: VoWLANCredential) -> Bool {
+        guard !nonce.isEmpty, status.matches(agentID: agentID, operationID: operationID) else { return false }
+        let encoded = status.statusProof.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        guard let bytes = Data(base64Encoded: encoded + String(repeating: "=", count: (4 - encoded.count % 4) % 4)),
+              HMAC<SHA256>.isValidAuthenticationCode(bytes, authenticating: status.proofMessage(nonce: nonce),
+                  using: SymmetricKey(data: credential.secret)) else { return false }
+        if status.status == "confirmed" {
+            return verifyDial(status.operationProof, nonce: nonce, operationID: operationID,
+                androidID: status.androidID ?? "", backendID: status.backendID ?? "", credential: credential)
+        }
+        return true
+    }
+    static func verifyEarlyMedia(_ grant: EarlyMediaGrant, nonce: String, credential: VoWLANCredential) -> Bool {
+        let encoded = grant.proof.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        guard let bytes = Data(base64Encoded: encoded + String(repeating: "=", count: (4 - encoded.count % 4) % 4)) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(bytes, authenticating: grant.proofMessage(nonce: nonce),
+                                                     using: SymmetricKey(data: credential.secret))
+    }
     static func verifyDial(_ signature: String?, nonce: String, operationID: String,
                            androidID: String, backendID: String, credential: VoWLANCredential) -> Bool {
         guard let signature, !androidID.isEmpty, !backendID.isEmpty else { return false }
@@ -230,15 +249,17 @@ struct VoWLANPairingRecord: Codable, Equatable, Identifiable, Sendable {
         let host: String
         let controlPort: UInt16
         let pcmPort: UInt16
+        var tls: Bool? = nil
 
         init(_ endpoint: VoWLANEndpoint) {
             host = endpoint.host
             controlPort = endpoint.controlPort
             pcmPort = endpoint.pcmPort
+            tls = endpoint.usesTLS ? true : nil
         }
 
         var endpoint: VoWLANEndpoint? {
-            try? VoWLANEndpoint(host: host, controlPort: controlPort, pcmPort: pcmPort)
+            try? VoWLANEndpoint(host: host, controlPort: controlPort, pcmPort: pcmPort, usesTLS: tls == true)
         }
     }
 

@@ -149,17 +149,20 @@ actor AgentVerboseTraceRecorder {
 
     /// Always retain a bounded, non-identifying startup timeline, even when full
     /// request tracing is off. Never accept arbitrary call data through this API.
-    func recordAudioStartup(phase: String, elapsedMilliseconds: Int? = nil) {
+    func recordAudioStartup(phase: String, elapsedMilliseconds: Int? = nil,
+                            rollbackReason: LocalCallAudioRollbackReason? = nil) {
         let allowed: Set<String> = ["answer_observed", "phone_start", "engine_ready",
                                     "agent_register", "agent_ready", "pcm_ready",
-                                    "first_downlink", "stopped", "failed"]
+                                    "first_downlink", "stopped", "failed", "rollback"]
         guard allowed.contains(phase) else { return }
+        var fields = ["phase": phase]
+        if phase == "rollback", let rollbackReason { fields["reason"] = rollbackReason.rawValue }
         entries.append(AgentVerboseTraceEntry(
             id: UUID(), traceID: "--------", timestamp: Date(),
             stage: phase == "failed" ? .failure : .event,
             method: "AUDIO", path: "通话音频启动", detail: "",
             elapsedMilliseconds: elapsedMilliseconds.map { max(0, $0) },
-            source: "APP", category: "call-audio", fields: ["phase": phase]
+            source: "APP", category: "call-audio", fields: fields
         ))
         trimIfNeeded()
         persist()
@@ -205,6 +208,7 @@ actor AgentVerboseTraceRecorder {
             "AirSIM Agent Verbose Trace",
             "app_version=\(AppInformation.version)",
             "exported_at=\(Self.iso8601.string(from: Date()))",
+            "verbose_enabled=\(enabled)",
             "local_entries=\(entries.count) agent_events=\(agentEvents.count)",
             ""
         ]
