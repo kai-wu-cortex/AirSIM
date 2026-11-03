@@ -29,6 +29,8 @@ assert_contains "$S" 'relay.postJSON(registration, "/v1/devices/register", paylo
   'registration sync must upload only the fields the Relay reads'
 assert_contains "$S" 'RelayRegistrationPayload.forRelay(snapshot.registration())' \
   'manual heartbeat must upload only the fields the Relay reads'
+assert_contains "$S" 'RelayRegistrationPayload.syncKey(registration).hashCode()' \
+  'a new Relay URL must re-register at once'
 assert_contains "$S" 'registrationRecovery.onFailure(heartbeatError' \
   'heartbeat 401 must request re-registration'
 assert_contains "$S" 'registrationRecovery.onFailure(error, android.os.SystemClock.elapsedRealtime());' \

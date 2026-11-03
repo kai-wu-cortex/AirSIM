@@ -15,6 +15,11 @@ final class RelayRegistrationPayload {
 
     private RelayRegistrationPayload() {}
 
+    /** What one sync covers: the payload and the Relay it went to, so a new Relay URL re-registers at once. */
+    static String syncKey(JSONObject stored) throws JSONException {
+        return stored.optString("relay_url", "") + "\n" + forRelay(stored);
+    }
+
     static JSONObject forRelay(JSONObject stored) throws JSONException {
         JSONObject payload = new JSONObject();
         for (String field : FIELDS) {

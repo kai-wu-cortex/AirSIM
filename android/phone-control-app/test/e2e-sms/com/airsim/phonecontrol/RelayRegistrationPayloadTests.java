@@ -34,7 +34,17 @@ public final class RelayRegistrationPayloadTests {
         JSONObject minimal = RelayRegistrationPayload.forRelay(new JSONObject().put("device_id", "iphone-air")
                 .put("alert_token", "bb".repeat(32)).put("relay_url", "https://relay.example"));
         equal("[alert_token, device_id]", new TreeSet<>(minimal.keySet()).toString(), "absent fields stay absent");
-        System.out.println("Relay registration payload tests passed: 2 cases");
+
+        // What a sync covers: a new Relay URL re-registers at once, a field the Relay never reads does not.
+        JSONObject moved = new JSONObject(stored.toString()).put("relay_url", "https://other.example");
+        if (RelayRegistrationPayload.syncKey(stored).equals(RelayRegistrationPayload.syncKey(moved))) {
+            throw new AssertionError("a new Relay URL must change the sync key");
+        }
+        JSONObject webhook = new JSONObject(stored.toString())
+                .put("notification_forwarding", new JSONObject().put("webhook", "https://hooks.example/other"));
+        equal(RelayRegistrationPayload.syncKey(stored), RelayRegistrationPayload.syncKey(webhook),
+                "a field the Relay never reads does not trigger a re-post");
+        System.out.println("Relay registration payload tests passed: 3 cases");
     }
 
     private static void equal(Object expected, Object actual, String label) {

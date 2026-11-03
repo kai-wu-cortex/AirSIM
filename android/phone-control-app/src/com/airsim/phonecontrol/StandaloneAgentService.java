@@ -194,7 +194,7 @@ public final class StandaloneAgentService extends Service {
 
     private void syncRegistration(JSONObject registration) throws Exception {
         JSONObject payload = RelayRegistrationPayload.forRelay(registration);
-        int hash = payload.toString().hashCode();
+        int hash = RelayRegistrationPayload.syncKey(registration).hashCode();
         // A Relay 401 means the device record is gone; re-post the unchanged registration. The
         // signal is one-shot, so a failed re-post waits for the next back-off window instead of
         // retrying every cycle.
