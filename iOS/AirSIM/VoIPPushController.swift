@@ -1143,6 +1143,7 @@ final class VoIPPushController: NSObject {
     }
 
     func updateRelayURL(_ value: String) {
+        let previous = configuredRelayURL()
         let normalized = RelayConfiguration.effectiveURL(
             stored: value,
             buildSetting: nil,
@@ -1153,6 +1154,8 @@ final class VoIPPushController: NSObject {
         } else {
             UserDefaults.standard.set(normalized, forKey: Keys.relayURL)
         }
+        // E2E SMS keys belong to the Relay they were negotiated through (issue #24).
+        E2EPairingPolicy.relayChanged(from: previous, to: configuredRelayURL(), store: KeychainE2EKeyStore.shared)
         resetRegistrationBackoff()
         Task { await syncRegistration() }
     }
@@ -1669,16 +1672,27 @@ final class VoIPPushController: NSObject {
     }
 
     /// Whether the Relay that a pairing registers with forwards encrypted SMS. `/healthz` needs no
-    /// registration, so this works before the first cloud pairing; any failure means no.
-    func relaySupportsE2ESMS(relayURL: String) async -> Bool {
+    /// registration, so this works before the first cloud pairing. A "no" makes Android drop an
+    /// existing key, so dropped connections and 5xx are retried like the self-test's health probe;
+    /// any other answer is final.
+    nonisolated static func relaySupportsE2ESMS(
+        relayURL: String,
+        send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
+            try await RelayEgressGate.shared.send($0)
+        }
+    ) async -> Bool {
         guard let url = RelayEndpoint.url(base: relayURL, path: "healthz") else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 6
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        guard let (data, response) = try? await RelayEgressGate.shared.send(request),
-              let http = response as? HTTPURLResponse else { return false }
-        return RelayHealthValidation.supportsE2ESMS(statusCode: http.statusCode, data: data)
+        for attempt in 1...3 {
+            if attempt > 1 { try? await Task.sleep(for: .milliseconds(300 * (attempt - 1))) }
+            guard let (data, response) = try? await send(request),
+                  let http = response as? HTTPURLResponse, http.statusCode < 500 else { continue }
+            return RelayHealthValidation.supportsE2ESMS(statusCode: http.statusCode, data: data)
+        }
+        return false
     }
 
     private static let selfTestSession: URLSession = {
@@ -1776,7 +1790,7 @@ final class VoIPPushController: NSObject {
             }
             var offerE2E = false
             if !localOnly {
-                let relaySupports = await self.relaySupportsE2ESMS(relayURL: registration.relayURL)
+                let relaySupports = await Self.relaySupportsE2ESMS(relayURL: registration.relayURL)
                 offerE2E = E2EPairingPolicy.offer(localOnly: localOnly, relaySupports: relaySupports,
                                                   keychainReady: relaySupports && KeychainE2EKeyStore.shared.canStore())
             }

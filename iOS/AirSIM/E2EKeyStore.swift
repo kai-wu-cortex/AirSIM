@@ -24,6 +24,7 @@ protocol E2EKeyStoring: Sendable {
     func record(agentID: String) throws -> E2EKeyRecord?
     func save(_ record: E2EKeyRecord, agentID: String) throws
     func remove(agentID: String)
+    func removeAll()
     /// Whether a key saved now can also be read by the Notification Service Extension.
     func canStore() -> Bool
 }
@@ -62,6 +63,16 @@ struct KeychainE2EKeyStore: E2EKeyStoring {
 
     func remove(agentID: String) {
         guard let query = try? baseQuery(account: agentID) else { return }
+        SecItemDelete(query as CFDictionary)
+    }
+
+    func removeAll() {
+        guard let accessGroup else { return }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.service,
+            kSecAttrAccessGroup as String: accessGroup,
+        ]
         SecItemDelete(query as CFDictionary)
     }
 

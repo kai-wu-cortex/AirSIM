@@ -9,6 +9,14 @@ enum E2EPairingPolicy {
     static func offer(localOnly: Bool, relaySupports: Bool, keychainReady: Bool) -> Bool {
         !localOnly && relaySupports && keychainReady
     }
+
+    /// Android keeps one key per (iPhone, Relay) and sends plaintext through a Relay it has no key
+    /// for. A key kept here would refuse that plaintext as forged, so a Relay change drops the keys
+    /// until a pairing through the new Relay sends a fresh one.
+    static func relayChanged(from old: String, to new: String, store: any E2EKeyStoring) {
+        guard old != new else { return }
+        store.removeAll()
+    }
 }
 
 /// What a successful claim does to the agent's stored key. Applied only when the pairing's VoWLAN
@@ -25,10 +33,21 @@ enum E2EPairingKeyChange: Equatable, Sendable {
         return .save(E2EKeyRecord(key: sentKey.withUnsafeBytes { Data($0) }, deviceID: deviceID))
     }
 
-    /// The pairing result mentions encryption only once the key that was sent is the one stored.
-    func successSuffix(agentID: String, store: any E2EKeyStoring = KeychainE2EKeyStore.shared) -> String {
-        guard case .save(let record) = self, (try? store.record(agentID: agentID)) == record else { return "" }
-        return "，云端短信已加密"
+    /// The pairing result names a committed change: the key that was sent is the one stored, or a
+    /// cloud pairing without a key removed the one this Android had (never silently).
+    func resultSuffix(agentID: String, hadKey: Bool, store: any E2EKeyStoring = KeychainE2EKeyStore.shared) -> String {
+        let stored = try? store.record(agentID: agentID)
+        switch self {
+        case .save(let record): return stored == record ? "，云端短信已加密" : ""
+        case .remove: return hadKey && stored == nil ? "，云端短信加密已关闭" : ""
+        }
+    }
+
+    /// A Bonjour pairing still waiting for the signed health check: Android already encrypts with
+    /// the new key, which the iPhone keeps only in memory until then.
+    static func waitingMessage(keySent: Bool) -> String {
+        "加密配对已写入安卓，正在等待通话网关身份验证；暂未建立可用路由。"
+            + (keySent ? "短信钥匙会在验证通过后保存，期间请保持 AirSIM 打开。" : "")
     }
 }
 

@@ -56,14 +56,59 @@ final class E2ESMSAppTests: XCTestCase {
         XCTAssertEqual(E2EPairingKeyChange.after(localOnly: false, sentKey: nil, deviceID: "iphone-air"), .remove)
     }
 
-    func testSuccessSuffixNeedsTheSentKeyStored() {
+    func testResultSuffixReportsCommittedKeyChanges() {
         let record = E2EKeyRecord(key: Data(repeating: 9, count: 32), deviceID: "iphone-air")
         let stored = MemoryE2EKeyStore(["android-A": record])
-        XCTAssertEqual(E2EPairingKeyChange.save(record).successSuffix(agentID: "android-A", store: stored), "，云端短信已加密")
-        XCTAssertEqual(E2EPairingKeyChange.save(record).successSuffix(agentID: "android-B", store: stored), "")
+        XCTAssertEqual(E2EPairingKeyChange.save(record).resultSuffix(agentID: "android-A", hadKey: false, store: stored),
+                       "，云端短信已加密")
+        XCTAssertEqual(E2EPairingKeyChange.save(record).resultSuffix(agentID: "android-B", hadKey: false, store: stored), "")
         let other = E2EKeyRecord(key: Data(repeating: 8, count: 32), deviceID: "iphone-air")
-        XCTAssertEqual(E2EPairingKeyChange.save(other).successSuffix(agentID: "android-A", store: stored), "")
-        XCTAssertEqual(E2EPairingKeyChange.remove.successSuffix(agentID: "android-A", store: stored), "")
+        XCTAssertEqual(E2EPairingKeyChange.save(other).resultSuffix(agentID: "android-A", hadKey: false, store: stored), "")
+        // A cloud pairing that dropped an existing key says so instead of turning encryption off silently.
+        let empty = MemoryE2EKeyStore()
+        XCTAssertEqual(E2EPairingKeyChange.remove.resultSuffix(agentID: "android-A", hadKey: true, store: empty),
+                       "，云端短信加密已关闭")
+        XCTAssertEqual(E2EPairingKeyChange.remove.resultSuffix(agentID: "android-A", hadKey: false, store: empty), "")
+        // Not committed yet (identity still unproven): say nothing.
+        XCTAssertEqual(E2EPairingKeyChange.remove.resultSuffix(agentID: "android-A", hadKey: true, store: stored), "")
+    }
+
+    func testWaitingMessageWarnsThatTheKeyIsNotSavedYet() {
+        let waiting = "加密配对已写入安卓，正在等待通话网关身份验证；暂未建立可用路由。"
+        XCTAssertEqual(E2EPairingKeyChange.waitingMessage(keySent: false), waiting)
+        XCTAssertEqual(E2EPairingKeyChange.waitingMessage(keySent: true),
+                       waiting + "短信钥匙会在验证通过后保存，期间请保持 AirSIM 打开。")
+    }
+
+    func testRelayChangeClearsE2EKeys() {
+        // Android keeps one key per (iPhone, Relay) and sends plaintext through a new Relay, which a
+        // kept key would refuse as forged; the next pairing on the new Relay turns encryption back on.
+        let keys = E2ESMSFixture.store()
+        E2EPairingPolicy.relayChanged(from: "https://relay.example", to: "https://relay.example", store: keys)
+        XCTAssertEqual(keys.all.count, 1)
+        E2EPairingPolicy.relayChanged(from: "https://relay.example", to: "https://other.example", store: keys)
+        XCTAssertEqual(keys.all, [:])
+    }
+
+    func testRelayProbeRetriesTransientFailures() async {
+        let url = URL(string: "https://relay.example/healthz")!
+        func reply(_ status: Int, _ body: String) -> (Data, URLResponse) {
+            (Data(body.utf8), HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        }
+        let supported = reply(200, #"{"ok":true,"service":"airsim-push-relay","version":"0.2.1","capabilities":{"e2e_sms":1}}"#)
+        let flaky = ScriptedRelay([nil, reply(503, "{}"), supported])
+        let offered = await VoIPPushController.relaySupportsE2ESMS(relayURL: "https://relay.example") { try await flaky.send($0) }
+        XCTAssertTrue(offered)
+        XCTAssertEqual(flaky.calls, 3)
+        let down = ScriptedRelay([nil, nil, nil, supported])
+        let unreachable = await VoIPPushController.relaySupportsE2ESMS(relayURL: "https://relay.example") { try await down.send($0) }
+        XCTAssertFalse(unreachable)
+        XCTAssertEqual(down.calls, 3)
+        // A Relay that answers without the capability is not asked again.
+        let old = ScriptedRelay([reply(200, #"{"ok":true,"service":"airsim-push-relay","version":"0.2.0"}"#), supported])
+        let unsupported = await VoIPPushController.relaySupportsE2ESMS(relayURL: "https://relay.example") { try await old.send($0) }
+        XCTAssertFalse(unsupported)
+        XCTAssertEqual(old.calls, 1)
     }
 
     // MARK: - SMS pushes in the app
@@ -144,5 +189,23 @@ final class E2ESMSAppTests: XCTestCase {
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(registration)) as? [String: Any])
             XCTAssertNil(object["e2e_key"])
         }
+    }
+}
+
+/// Answers each request with the next scripted reply; nil throws like a dropped connection.
+private final class ScriptedRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var replies: [(Data, URLResponse)?]
+    private var count = 0
+    init(_ replies: [(Data, URLResponse)?]) { self.replies = replies }
+    var calls: Int { lock.withLock { count } }
+
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let reply: (Data, URLResponse)? = lock.withLock {
+            count += 1
+            return replies.isEmpty ? nil : replies.removeFirst()
+        }
+        guard let reply else { throw URLError(.networkConnectionLost) }
+        return reply
     }
 }

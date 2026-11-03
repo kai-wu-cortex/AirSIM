@@ -328,5 +328,9 @@ final class MemoryE2EKeyStore: E2EKeyStoring, @unchecked Sendable {
         lock.withLock { records[agentID] = nil }
     }
 
+    func removeAll() {
+        lock.withLock { records.removeAll() }
+    }
+
     func canStore() -> Bool { failure == nil }
 }

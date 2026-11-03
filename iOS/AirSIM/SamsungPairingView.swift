@@ -150,12 +150,13 @@ struct SamsungPairingView: View {
                 try Task.checkCancellation()
                 let e2e = E2EPairingKeyChange.after(localOnly: localPairingOnly, sentKey: result.e2eKey,
                                                     deviceID: registration.deviceID)
+                let hadKey = (try? KeychainE2EKeyStore.shared.record(agentID: result.route.agentID)) != nil
                 try await model.completeLocalPairing(agentID: result.route.agentID,
                     registration: registration, endpoint: result.route.endpoint,
                     clockOffset: result.clockOffset, e2e: e2e)
                 try await model.vowlan.installManualRoute(result.route)
                 if !localPairingOnly { model.setCloudSignalingEnabled(true) }
-                let paired = "配对成功" + (e2e?.successSuffix(agentID: result.route.agentID) ?? "")
+                let paired = "配对成功" + (e2e?.resultSuffix(agentID: result.route.agentID, hadKey: hadKey) ?? "")
                 // Tailscale/5G can need a moment before the control port is
                 // reachable after the pairing window closes.
                 for attempt in 0..<3 {
@@ -197,11 +198,12 @@ struct SamsungPairingView: View {
                     )
                 let e2e = E2EPairingKeyChange.after(localOnly: localPairingOnly, sentKey: paired.e2eKey,
                                                     deviceID: registration.deviceID)
+                let hadKey = (try? KeychainE2EKeyStore.shared.record(agentID: paired.agentID)) != nil
                 try await model.completeLocalPairing(agentID: paired.agentID, registration: registration, e2e: e2e)
                 if !localPairingOnly { model.setCloudSignalingEnabled(true) }
                 return model.localDevices.api(for: paired.agentID) == nil
-                    ? "加密配对已写入安卓，正在等待通话网关身份验证；暂未建立可用路由。"
-                    : paired.message + (e2e?.successSuffix(agentID: paired.agentID) ?? "")
+                    ? E2EPairingKeyChange.waitingMessage(keySent: paired.e2eKey != nil)
+                    : paired.message + (e2e?.resultSuffix(agentID: paired.agentID, hadKey: hadKey) ?? "")
             }
 #if DEBUG
             print("[AirSIM Pair] claim_completed session=\(service.sessionID)")
