@@ -24,7 +24,7 @@
 | `POST /api/calls/history/ack` | Added to Android LAN allowlist | Old gateway 404 is remembered for this iOS process; relaunch retries after gateway upgrade. |
 | `POST /api/calls/hangup` | iOS captures exact local call ID before sending/retrying | A lost response is reconciled against authenticated status/history. Never retry an unscoped hangup on a replacement call. |
 | `POST /api/calls/audio/record` | Optional 404 cached by iOS | No recording capability added to Android. |
-| Relay `POST /v1/devices/commands`, `type=send_sms` | Optional `sim_account` passed through | Device validates the opaque account; omission preserves default SIM behavior. Old Worker ignores selection, so update Worker before advertising cloud SIM selection. |
+| Relay `POST /v1/commands/enqueue`, `type=send_sms` | Optional `sim_account` passed through | Device validates the opaque account; omission preserves default SIM behavior. Old Worker ignores selection, so update Worker before advertising cloud SIM selection. |
 | Relay `POST /v1/events/sms` | Optional `sim_slot` forwarded into SMS APNs payload/subtitle | `SIM 1`…`SIM 99` display labels accepted; missing remains unknown. Encrypted payload stays opaque. |
 
 Example resolve body (identifiers illustrative):
