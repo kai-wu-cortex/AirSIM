@@ -1,5 +1,7 @@
 # AirSIM iOS 与 watchOS
 
+2026-11-05：[Apps v0.9.8.23](../docs/releases/0.9.8.23.md)，iOS／Watch／Widget `0.9.8（172）`。包含兼容设备的跨模式早期媒体和 iPhone 云端扬声器恢复；AVF Linux Agent 未更新，不能仅通过更新 Bridge 获得新媒体能力。发布及实机验证范围见说明；以下旧版本记录保留追溯。
+
 2026-10-31 发布准备：[Apps v0.9.8.21](../docs/releases/0.9.8.21.md)，iOS／Watch／Live Activity `0.9.8 (162)`。包含 PR #18、后台 VoWLAN 恢复与 CallKit 无区号号码原样展示；TestFlight 使用 production APNs，上传、处理及外测可用状态见发布说明。下文旧候选状态仅作历史记录，不能代表当前发布状态。
 
 2026-10-30 未发布修复：[APNs 接听后的本地音频启动竞态](../docs/vowlan-first-call-startup.md)。兼容通话的音频任务独立于轮询；前后台刷新不再因轮询世代或调用方取消而关闭已握手的 PCM。挂断、停止、CallKit 停用／重置仍取消在途启动，回滚记录固定原因码，不记录通话身份或 PCM。未安装、发布或上传 TestFlight，锁屏 APNs 接听与双向声音须真机复验。

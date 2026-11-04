@@ -13,6 +13,8 @@ enum AppReleaseNotes {
     // Bundled: showing installed-version notes never needs GitHub, Relay or pairing.
     // Keep this summary in sync with the candidate's source and docs when publishing.
     static let items = [
+        "VoWLAN、蓝牙与云端支持兼容设备的运营商早期媒体；接通前只接收语音，不提前计时或开启麦克风。",
+        "修复 U30Air 云端旧协议的公告播放，以及听筒和扬声器切换后的声音中断。",
         "灵动岛用 Wi-Fi、蓝牙、双通道组合和云朵区分连接状态；活动过期不会直接标记设备离线。",
         "设置按连接、来电短信、灵动岛小组件等分类，减少重复入口；底部标签保持展开。",
         "短信支持搜索联系人、号码和消息内容；大尺寸小组件最多展示 5 条最近通话和短信。",
@@ -23,7 +25,7 @@ enum AppReleaseNotes {
         "最近通话与短信的底部标签、小组件标题显示未接／未读数量，对应记录也有醒目标记。",
         "呼出结束时按通话身份停止等待音与计时；网络波动不会自动重复拨号。"
     ]
-    static let limitations = "U30Air 需运行兼容设备端。运营商早期媒体仅在临时候选中完成单次试听，尚未正式开放。TLS 公网功能为试验性，需要可入站的自建网关、有效证书及独立音频转发；不自动穿透 NAT，也不新增后台推送。小组件刷新由系统调度，模式切换不代表已连接。GitHub 发布不代表 TestFlight 已可更新。"
+    static let limitations = "U30Air 需运行兼容设备端。运营商早期媒体依赖兼容 Agent、手机音频能力和运营商实际下行，不保证每次拒接或挂断都有公告。TLS 公网功能为试验性，需要可入站的自建网关、有效证书及独立音频转发；不自动穿透 NAT，也不新增后台推送。小组件刷新由系统调度，模式切换不代表已连接。GitHub 发布不代表 TestFlight 已可更新。"
 }
 
 enum AppUpdateChannel {

@@ -1,5 +1,7 @@
 # AirSIM Android Standalone
 
+2026-11-05：[Apps v0.9.8.23](../docs/releases/0.9.8.23.md)，Android Standalone `0.9.8.23（128）`。包含兼容设备的跨模式早期媒体和 iPhone 云端扬声器恢复；AVF Linux Agent 未更新，不能仅通过更新 Bridge 获得新媒体能力。发布及实机验证范围见说明；以下旧版本记录保留追溯。
+
 ## 通用安卓应用与机型适配
 
 AirSIM 是统一的安卓应用，不区分三星版、Redmi 版或其他厂商版本。Standalone 使用统一包名 `com.airsim.phonecontrol.standalone`、版本序列与发布包，内置各机型适配；运行时依据设备能力、系统版本和已验证的机型条件选择音频路径。用户无需根据手机品牌选择 APK。
