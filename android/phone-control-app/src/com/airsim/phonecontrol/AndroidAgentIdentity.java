@@ -7,7 +7,6 @@ import android.os.Build;
 import android.provider.Settings;
 import android.telephony.SubscriptionInfo;
 import android.telephony.SubscriptionManager;
-import android.telephony.TelephonyManager;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -47,53 +46,56 @@ public final class AndroidAgentIdentity {
 
     public static String phoneNumber(Context context) {
         if (context.checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS)
+                != PackageManager.PERMISSION_GRANTED
+                || context.checkSelfPermission(Manifest.permission.READ_PHONE_STATE)
                 != PackageManager.PERMISSION_GRANTED) return "";
-        try {
-            String selected = DefaultCallAccount.selectedKey(context);
-            if (!selected.isEmpty()) {
-                for (DefaultCallAccount.Account account : DefaultCallAccount.snapshot(context).accounts()) {
-                    if (selected.equals(account.key())) {
-                        String value = clean(account.number());
-                        if (!value.isEmpty()) return value;
-                        // Some carriers expose the number only via the
-                        // subscription-scoped TelephonyManager.
-                        TelephonyManager scoped = context.getSystemService(TelephonyManager.class);
-                        if (scoped != null && account.subscriptionId() >= 0) {
-                            value = clean(scoped.createForSubscriptionId(
-                                    account.subscriptionId()).getLine1Number());
-                        }
-                        return value;
-                    }
-                }
-                // A disabled chosen card must not borrow another SIM's
-                // number. The paired iPhone still receives fresh sim_slots,
-                // which carry the replacement card's number when available.
+        var snapshot = DefaultCallAccount.snapshot(context);
+        String selected = DefaultCallAccount.selectedKey(context);
+        if (!selected.isEmpty()) {
+            for (DefaultCallAccount.Account account : snapshot.accounts()) {
+                if (selected.equals(account.key())) return currentNumber(context, account);
             }
-            SubscriptionManager manager = context.getSystemService(SubscriptionManager.class);
-            if (manager != null && context.checkSelfPermission(Manifest.permission.READ_PHONE_STATE)
-                    == PackageManager.PERMISSION_GRANTED) {
-                List<SubscriptionInfo> subscriptions = manager.getActiveSubscriptionInfoList();
-                if (subscriptions != null) {
-                    int defaultVoice = SubscriptionManager.getDefaultVoiceSubscriptionId();
-                    for (SubscriptionInfo subscription : subscriptions) {
-                        if (subscription.getSubscriptionId() == defaultVoice) {
-                            return clean(Build.VERSION.SDK_INT >= 33
-                                    ? manager.getPhoneNumber(defaultVoice) : subscription.getNumber());
-                        }
-                    }
-                    for (SubscriptionInfo subscription : subscriptions) {
-                        String value = Build.VERSION.SDK_INT >= 33
-                                ? manager.getPhoneNumber(subscription.getSubscriptionId())
-                                : subscription.getNumber();
-                        if (!clean(value).isEmpty()) return clean(value);
-                    }
-                }
-            }
-            TelephonyManager telephony = context.getSystemService(TelephonyManager.class);
-            return telephony == null ? "" : clean(telephony.getLine1Number());
-        } catch (RuntimeException ignored) {
+            // Removed/disabled explicit selection must never borrow another SIM.
             return "";
         }
+        try {
+            var telecom = context.getSystemService(android.telecom.TelecomManager.class);
+            var handle = telecom == null ? null : telecom.getDefaultOutgoingPhoneAccount("tel");
+            if (handle != null) {
+                for (var account : snapshot.accounts()) {
+                    if (handle.equals(account.handle())) return currentNumber(context, account);
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Continue with subscription-scoped lookup when Telecom cannot resolve it.
+        }
+        try {
+            SubscriptionManager manager = context.getSystemService(SubscriptionManager.class);
+            List<SubscriptionInfo> subscriptions = manager == null ? null : manager.getActiveSubscriptionInfoList();
+            if (subscriptions != null) {
+                int defaultVoice = SubscriptionManager.getDefaultVoiceSubscriptionId();
+                SubscriptionInfo chosen = null;
+                for (SubscriptionInfo subscription : subscriptions) {
+                    if (subscription.getSubscriptionId() == defaultVoice) chosen = subscription;
+                }
+                if (chosen == null && subscriptions.size() == 1) chosen = subscriptions.get(0);
+                if (chosen != null) {
+                    int id = chosen.getSubscriptionId();
+                    String value = "";
+                    try { value = clean(Build.VERSION.SDK_INT >= 33 ? manager.getPhoneNumber(id) : chosen.getNumber()); }
+                    catch (RuntimeException ignored) { }
+                    return value.isEmpty() ? DefaultCallAccount.scopedNumber(context, id) : value;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // OEM subscription failures must not hide an available Telecom number.
+        }
+        return snapshot.accounts().size() == 1 ? currentNumber(context, snapshot.accounts().get(0)) : "";
+    }
+
+    private static String currentNumber(Context context, DefaultCallAccount.Account account) {
+        String value = clean(account.number());
+        return value.isEmpty() ? DefaultCallAccount.scopedNumber(context, account.subscriptionId()) : value;
     }
 
     private static String clean(String value) {

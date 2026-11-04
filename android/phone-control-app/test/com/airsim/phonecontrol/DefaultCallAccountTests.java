@@ -22,6 +22,7 @@ public final class DefaultCallAccountTests {
         metadataIsOptionalAndNumberRequiresPermission();
         android29UsesSupportedSubscriptionLookup();
         supportsMoreThanTwoAccountsAndKeepsIdentityAcrossReordering();
+        telecomNumbersSurviveSubscriptionFailureWithoutCrossingAccounts();
         System.out.println("default call account tests passed");
     }
 
@@ -178,6 +179,35 @@ public final class DefaultCallAccountTests {
         DefaultCallAccount.select(context, DefaultCallAccount.snapshot(context).accounts().get(2));
         telecom.enabled = List.of(three, one, two);
         assertEquals(three, DefaultCallAccount.dialExtras(context).getParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE));
+    }
+
+    private static void telecomNumbersSurviveSubscriptionFailureWithoutCrossingAccounts() {
+        PhoneAccountHandle one = handle("opaque-one"), two = handle("opaque-two");
+        TelecomManager telecom = telecom(one, two);
+        telecom.accounts.put(one, new PhoneAccount(one, "SIM 1", PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION,
+                android.net.Uri.parse("tel:+10000000001"), null));
+        telecom.accounts.put(two, new PhoneAccount(two, "SIM 2", PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION,
+                android.net.Uri.parse("tel:+10000000002"), android.net.Uri.parse("tel:+10000000003")));
+        Context context = context(telecom);
+        context.setSystemService(TelephonyManager.class, new TelephonyManager() {
+            @Override public int getSubscriptionId(PhoneAccountHandle handle) { throw new IllegalStateException("OEM service unavailable"); }
+        });
+        var denied = DefaultCallAccount.snapshot(context);
+        assertEquals("", denied.accounts().get(0).number());
+        assertEquals("", denied.accounts().get(1).number());
+        context.grant(Manifest.permission.READ_PHONE_NUMBERS);
+        var snapshot = DefaultCallAccount.snapshot(context);
+        assertEquals("+10000000001", snapshot.accounts().get(0).number());
+        assertEquals("+10000000003", snapshot.accounts().get(1).number());
+        assertEquals(-1, snapshot.accounts().get(0).subscriptionId());
+        assertEquals(-1, snapshot.accounts().get(1).slotIndex());
+        telecom.enabled = List.of(two, one);
+        assertEquals("+10000000003", DefaultCallAccount.snapshot(context).accounts().get(0).number());
+        telecom.accounts.put(two, new PhoneAccount(two, "SIM 2", PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION,
+                android.net.Uri.parse("sip:someone@example.invalid"), android.net.Uri.parse("tel:")));
+        assertEquals("", DefaultCallAccount.snapshot(context).accounts().get(0).number());
+        context.revoke(Manifest.permission.READ_PHONE_NUMBERS);
+        assertEquals("", DefaultCallAccount.snapshot(context).accounts().get(1).number());
     }
     private static void assertTrue(boolean value) {
         if (!value) throw new AssertionError("expected true");

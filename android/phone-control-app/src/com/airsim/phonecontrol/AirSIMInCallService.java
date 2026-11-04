@@ -48,6 +48,7 @@ public final class AirSIMInCallService extends InCallService {
     @Override
     public void onCallRemoved(Call call) {
         String callId = CallRepository.id(call);
+        CallRepository.revokeEarlyMedia(callId);
         Call.Details details = call.getDetails();
         DisconnectCause disconnect = details == null ? null : details.getDisconnectCause();
         BridgeLog.info("telecom_call_removed call_id=" + DebugRedactor.safeIdentifier(callId)
@@ -68,6 +69,7 @@ public final class AirSIMInCallService extends InCallService {
     }
 
     private void emit(Call call, int state) {
+        CallRepository.earlyMediaCallStateChanged(CallRepository.id(call), state);
         String wireState = TelecomStateMapper.toWireState(state);
 		callStates.put(call, wireState);
 		updateLocalAudioPolicy();

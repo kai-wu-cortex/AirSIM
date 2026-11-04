@@ -20,6 +20,9 @@ final class AudioStartupFailure extends IOException {
             : phase.equals("select_uplink_route") && origin != cause ? "telephony_query_failed" : switch (phase) {
             case "buffer_sizes" -> "invalid_buffer_sizes";
             case "create_capture" -> "capture_create_failed";
+            case "select_capture_route" -> "capture_route_unavailable";
+            case "bind_capture_route" -> "capture_route_rejected";
+            case "select_playback_format" -> "playback_format_unsupported";
             case "create_attributes" -> "attributes_create_failed";
             case "select_uplink_route" -> "telephony_tx_unavailable";
             case "create_playback" -> "playback_create_failed";

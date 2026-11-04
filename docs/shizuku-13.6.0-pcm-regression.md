@@ -47,3 +47,8 @@ AirSIM 侧没有通过修改安全模型、强制重启音频服务或掩盖异�
 - 该记录不等于所有 HyperOS 3／Shizuku 版本都会失败；升级 Shizuku 前应在目标设备复验 PCM。
 - 若上游发布修复版本，应重新验证后再升级；不要把降级当作永久方案。
 - AirSIM 仍要求默认电话角色、Shizuku 授权、目标 OEM 的蜂窝音频能力；这些条件不因本问题改变。
+
+
+## 2026-11-04：Redmi 9 / MIUI 13 补充实证
+
+Redmi 9（MT6768、Android 12、MIUI 13）也已复现 13.6.0 的用户服务加载崩溃。此机表现为服务绑定超时，尚未执行到 AirSIM PCM 初始化；与上文“服务已连接后 PCM 反复退出”的现象应区分。限时启动对照捕获 `LoadedApk.makeApplication(LoadedApk.java:1395)` 空指针，13.5.4 可创建同一个服务；用户授权原位降级并重启后，实际 Shizuku 绑定与 PCM 监听恢复。详见 [Redmi 9 记录](android-redmi9-pcm-adaptation.md)。官方上游 [#1198](https://github.com/RikkaApps/Shizuku/issues/1198) 记录了相同异常，不应仅凭“联发科”品牌推断所有设备或所有启动错误都相同。

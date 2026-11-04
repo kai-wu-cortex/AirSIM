@@ -22,6 +22,17 @@ public final class CallRepository {
     private static final java.util.Set<OutgoingCallObservation> OUTGOING =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
+    static final EarlyMediaLeases EARLY_MEDIA = new EarlyMediaLeases(() -> System.nanoTime()/1_000_000L, CallRepository::earlyMediaEligible);
+    static void revokeEarlyMedia(String id) { EARLY_MEDIA.revokeAndroid(id); }
+    static void earlyMediaCallStateChanged(String id, int state) {
+        // A dial receipt can precede repeated CONNECTING/details callbacks.
+        // Keep its identity through setup; only DIALING may actually open PCM.
+        if (!earlyMediaSetupState(state)) revokeEarlyMedia(id);
+    }
+    private static boolean earlyMediaSetupState(int state) {
+        return state == Call.STATE_DIALING || state == Call.STATE_CONNECTING
+            || state == Call.STATE_SELECT_PHONE_ACCOUNT;
+    }
     private CallRepository() {}
 
     public static String add(Call call) {
@@ -124,6 +135,17 @@ public final class CallRepository {
                     || owned.getState() == Call.STATE_DISCONNECTING) return;
             try { owned.disconnect(); } catch (RuntimeException ignored) {}
         });
+    }
+
+    /** Only the one still-unconnected outgoing carrier call may expose early downlink. */
+    static boolean earlyMediaEligible(String callId) {
+        Call call = CALLS.get(callId);
+        if (call == null || CALLS.size() != 1) return false;
+        int state = call.getState();
+        if (!earlyMediaSetupState(state)) return false;
+        Call.Details details = call.getDetails();
+        return details != null && details.getCallDirection() == Call.Details.DIRECTION_OUTGOING
+            && details.getConnectTimeMillis() == 0;
     }
 
     public static int state(String callId) {

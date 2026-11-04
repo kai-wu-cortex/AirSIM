@@ -4,6 +4,7 @@ import android.telecom.Call;
 
 public final class CallRepositoryTests {
     public static void main(String[] args) {
+        earlyMediaSurvivesSetupCallbacksButNeverResurrectsAfterConnection();
         watchdogRequiresPCMAndConfirmedControlIdentity();
         oldHangupCompletionCannotCloseReplacementLease();
         newDialOwnershipIgnoresIncomingAndDifferentOutgoingCalls();
@@ -14,6 +15,35 @@ public final class CallRepositoryTests {
         cloudCallEventsDriveOnlyTheirOwnCall();
         localRejectUsesPublishedCallIdentity();
         System.out.println("call repository tests passed");
+    }
+
+    private static void earlyMediaSurvivesSetupCallbacksButNeverResurrectsAfterConnection() {
+        for (int terminal : new int[]{Call.STATE_ACTIVE, Call.STATE_DISCONNECTING, Call.STATE_DISCONNECTED}) {
+            Call call = new Call(Call.STATE_CONNECTING, Call.Details.DIRECTION_OUTGOING, "2025550199");
+            String id = CallRepository.add(call);
+            try {
+                // Real Redmi sequence: receipt at CONNECTING, duplicate details,
+                // then DIALING. Setup callbacks must not delete the receipt.
+                CallRepository.EARLY_MEDIA.register("owner", "agent", "backend", id);
+                String session = null;
+                for (int state : new int[]{Call.STATE_CONNECTING, Call.STATE_CONNECTING,
+                        Call.STATE_SELECT_PHONE_ACCOUNT, Call.STATE_DIALING, Call.STATE_DIALING}) {
+                    call.setStateForTest(state);
+                    CallRepository.earlyMediaCallStateChanged(id, state);
+                    var grant = CallRepository.EARLY_MEDIA.grant("owner", "backend", 100);
+                    if (grant == null) throw new AssertionError("setup callback revoked dial receipt: " + state);
+                    if (session != null && !session.equals(grant.session())) throw new AssertionError("setup replaced session");
+                    session = grant.session();
+                }
+                call.setStateForTest(terminal);
+                CallRepository.earlyMediaCallStateChanged(id, terminal);
+                // A late setup callback must never resurrect an ended/connected lease.
+                call.setStateForTest(Call.STATE_DIALING);
+                CallRepository.earlyMediaCallStateChanged(id, Call.STATE_DIALING);
+                if (CallRepository.EARLY_MEDIA.grant("owner", "backend", 101) != null)
+                    throw new AssertionError("revoked lease resurrected after " + terminal);
+            } finally { CallRepository.revokeEarlyMedia(id); CallRepository.remove(call); }
+        }
     }
 
     private static void watchdogRequiresPCMAndConfirmedControlIdentity() {

@@ -41,6 +41,8 @@ public final class ShizukuBridgeUserService extends Binder {
     private boolean standalonePCM;
     private java.lang.Process bridgeProcess;
     private boolean bridgeDesired;
+    private boolean shuttingDown;
+    private android.net.LocalServerSocket bridgeOwnership;
     private Context serviceContext;
     private volatile LocalOutputMuteController outputMute;
     private volatile String outputStrategy = "vowlan";
@@ -197,6 +199,7 @@ public final class ShizukuBridgeUserService extends Binder {
     private String ensureBridgeStarted() throws IOException {
         synchronized (lock) {
             verifyIdentity();
+            if (shuttingDown) throw new IOException("privileged service is stopping");
             bridgeDesired = true;
             if (bridgeProcess != null && bridgeProcess.isAlive()) return statusLocked();
             if (sourceApk.isEmpty()) throw new IOException("application source path unavailable");
@@ -205,6 +208,11 @@ public final class ShizukuBridgeUserService extends Binder {
             // loopback and does not require this interface.
             if (!standalonePCM && NetworkInterface.getByName("avf_tap_fixed") == null) {
                 throw new IOException("AVF interface unavailable: avf_tap_fixed");
+            }
+            // A supervisor must own the bridge before it can retire any PCM
+            // process. Root and Shizuku must never kill each other's live child.
+            if (bridgeOwnership == null) {
+                bridgeOwnership = new android.net.LocalServerSocket("airsim-pcm-owner-" + packageName);
             }
             stopStaleAudioBridges();
             List<String> command = new ArrayList<>();
@@ -296,7 +304,7 @@ public final class ShizukuBridgeUserService extends Binder {
         boolean restart;
         synchronized (lock) {
             if (bridgeProcess == launched) bridgeProcess = null;
-            restart = bridgeDesired;
+            restart = bridgeDesired && !shuttingDown;
         }
         Log.w(TAG, "PCM bridge exited code=" + exit + " restart=" + restart);
         if (restart) {
@@ -520,15 +528,35 @@ public final class ShizukuBridgeUserService extends Binder {
     }
 
     public void destroy() {
+        shutdown();
+        System.exit(0);
+    }
+
+    synchronized void shutdown() {
         synchronized (lock) {
+            if (shuttingDown) return;
+            shuttingDown = true;
             bridgeDesired = false;
-            if (bridgeProcess != null) bridgeProcess.destroy();
+            if (bridgeProcess != null) {
+                bridgeProcess.destroy();
+                try {
+                    if (!bridgeProcess.waitFor(1, TimeUnit.SECONDS)) {
+                        bridgeProcess.destroyForcibly();
+                        bridgeProcess.waitFor(1, TimeUnit.SECONDS);
+                    }
+                } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            }
             bridgeProcess = null;
         }
         try { setLocalOutputMuted(false); }
         catch (Throwable error) { Log.w(TAG, "restore output during destroy failed", error); }
         audioOperations.close();
-        System.exit(0);
+        synchronized (lock) {
+            if (bridgeOwnership != null) {
+                try { bridgeOwnership.close(); } catch (IOException ignored) {}
+                bridgeOwnership = null;
+            }
+        }
     }
 
     private static String safeMessage(Throwable error) {

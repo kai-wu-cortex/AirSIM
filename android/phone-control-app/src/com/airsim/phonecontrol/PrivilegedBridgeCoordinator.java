@@ -13,6 +13,9 @@ final class PrivilegedBridgeCoordinator {
     }
 
     private Transport transport;
+    private volatile long connectionGeneration;
+
+    long connectionGeneration() { return connectionGeneration; }
     private boolean desiredMuted;
     private boolean hasMuteIntent;
     private String desiredTransport = PrivilegedBridgeProtocol.TRANSPORT_VOWLAN;
@@ -20,6 +23,7 @@ final class PrivilegedBridgeCoordinator {
     private String lastBridgeStatus = "disconnected";
 
     synchronized void connect(Transport value) throws Exception {
+        connectionGeneration++;
         transport = value;
         lastBridgeStatus = value.startBridge();
         lastResult = lastBridgeStatus;
@@ -27,6 +31,7 @@ final class PrivilegedBridgeCoordinator {
     }
 
     synchronized void disconnect() {
+        connectionGeneration++;
         transport = null;
         lastResult = "disconnected";
         lastBridgeStatus = "disconnected";
