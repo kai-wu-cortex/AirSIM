@@ -17,6 +17,7 @@ final class CloudPCMMediaPump implements Closeable {
     private final Sender sender;
     private final Failure failure;
     private final Executor executor;
+    private final boolean receiveOnly;
     private final CloudPCMAudioQueue outgoing = new CloudPCMAudioQueue(false);
     private final CloudPCMAudioQueue incoming = new CloudPCMAudioQueue(true);
     private final AtomicBoolean running = new AtomicBoolean(true);
@@ -25,6 +26,11 @@ final class CloudPCMMediaPump implements Closeable {
 
     CloudPCMMediaPump(InputStream capture, OutputStream playback, Sender sender,
                       Failure failure, Executor executor) {
+        this(capture, playback, sender, failure, executor, false);
+    }
+    CloudPCMMediaPump(InputStream capture, OutputStream playback, Sender sender,
+                      Failure failure, Executor executor, boolean receiveOnly) {
+        this.receiveOnly = receiveOnly;
         this.capture = capture; this.playback = playback; this.sender = sender;
         this.failure = failure; this.executor = executor;
     }
@@ -32,11 +38,11 @@ final class CloudPCMMediaPump implements Closeable {
         if (!running.get() || !started.compareAndSet(false, true)) return;
         executor.execute(this::capture);
         executor.execute(() -> paced(true));
-        executor.execute(() -> paced(false));
+        if (!receiveOnly) executor.execute(() -> paced(false));
         executor.execute(this::watchdog);
     }
     void receive(byte[] pcm) {
-        if (!running.get() || pcm.length == 0 || pcm.length % 320 != 0) return;
+        if (receiveOnly || !running.get() || pcm.length == 0 || pcm.length % 320 != 0) return;
         long now = nowMillis();
         for (int offset = 0; offset < pcm.length; offset += 320) {
             incoming.offer(java.util.Arrays.copyOfRange(pcm, offset, offset + 320), now);

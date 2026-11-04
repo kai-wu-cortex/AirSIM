@@ -1,16 +1,14 @@
 package com.airsim.phonecontrol;
 
 import android.content.Context;
-import android.os.Build;
 import org.json.JSONObject;
 
-/** Experimental Redmi 9 WLAN downlink; no cloud/AVF/global microphone fallback. */
-final class AndroidEarlyMedia {
+/** Transport-independent admission; the privileged bridge must prove capture capability. */
+public final class AndroidEarlyMedia {
     static final EarlyMediaLeases LEASES = CallRepository.EARLY_MEDIA;
-    static boolean supported(Context context) {
-        return RuntimeMode.isStandalone(context) && "lancelot".equalsIgnoreCase(Build.DEVICE)
-            && "mt6768".equalsIgnoreCase(Build.HARDWARE)
-            && ("xiaomi".equalsIgnoreCase(Build.MANUFACTURER) || "redmi".equalsIgnoreCase(Build.MANUFACTURER));
+    public static boolean supported(Context context) {
+        // This is protocol support, not proof that an OEM exposes carrier audio.
+        return RuntimeMode.isStandalone(context);
     }
     static String response(EarlyMediaLeases.Grant g, String nonce, byte[] secret) throws Exception {
         return new JSONObject().put("version",1).put("agent_id",g.agent()).put("call_id",g.call())

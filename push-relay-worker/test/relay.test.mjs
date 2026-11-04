@@ -1904,3 +1904,17 @@ test("SMS SIM selection survives durable delivery only to its target Android", a
       ...payload, command_id: crypto.randomUUID(), sim_account: bad}), env)).status, 400);
   }
 });
+
+test("relay preserves optional early media negotiation and scoped status without changing call state", () => {
+  const agent = new MemoryMediaSocket("agent");
+  const iphone = new MemoryMediaSocket("iphone");
+  const state = new MemoryMediaState([agent, iphone]);
+  const session = new CallMediaSession(state, {});
+  const identity = { call_id: "carrier", call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9", generation: 8 };
+  session.webSocketMessage(iphone, JSON.stringify({ action: "answer", ...identity, early_media_version: 1 }));
+  assert.equal(JSON.parse(agent.sent.at(-1)).early_media_version, 1);
+  const ready = JSON.stringify({ status: "early_media_ready_v1", ...identity });
+  session.webSocketMessage(agent, ready);
+  assert.equal(iphone.sent.at(-1), ready);
+  assert.equal(iphone.sent.some(message => typeof message === "string" && JSON.parse(message).status === "active"), false);
+});

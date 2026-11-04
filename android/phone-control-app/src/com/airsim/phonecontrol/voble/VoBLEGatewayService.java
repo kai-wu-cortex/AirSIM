@@ -361,7 +361,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         .put("call_generation", calls.currentGeneration())
                         .put("phone_number", AndroidAgentIdentity.phoneNumber(this))
                         .put("sim_slots", SimSlotJson.slots(this)).toString());
-            } else if ("start_media".equals(action)) {
+            } else if ("start_media".equals(action) || "start_early_media".equals(action)) {
                 result = calls.executeOnce(request, true,
                         ignored -> startMedia(deviceId, identity, envelope));
             } else if ("stop_media".equals(action)) {
@@ -454,6 +454,10 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
         }
         if (generation == null) return;
         boolean terminal = calls.observeCall(callId, generation, state);
+        VoBLEMediaSession earlySession = media;
+        if (earlySession != null && earlySession.receiveOnly() && !"dialing".equals(state)) {
+            stopMedia(callId, generation);
+        }
         synchronized (mediaLifecycleLock) {
             VoBLEMediaSession current = media;
             if (!destroyed && !terminal && current != null && mediaIdentity != null
@@ -498,6 +502,12 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
         if (!calls.ownsCall(envelope.callId(), envelope.generation())) {
             return VoBLECallController.Result.failure("call_mismatch");
         }
+        boolean early = "start_early_media".equals(envelope.command());
+        if (early && (!com.airsim.phonecontrol.AndroidEarlyMedia.supported(this)
+                || !CallRepository.earlyMediaEligible(envelope.callId())
+                || CallRepository.state(envelope.callId()) != android.telecom.Call.STATE_DIALING)) {
+            return VoBLECallController.Result.failure("early_media_unavailable");
+        }
         try {
             InetSocketAddress endpoint;
             if (RuntimeMode.isStandalone(this)) {
@@ -511,19 +521,32 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
             VoBLEPairingManager.SessionKeys keys = pairingManager.storedSessionKeys(
                     peerIdentity, envelope.sessionId(), envelope.callId(), envelope.generation());
             byte[] mediaKey = keys.media();
+            if (early) {
+                String nonce = new JSONObject(new String(envelope.ciphertext(), StandardCharsets.UTF_8)).optString("number");
+                byte[] derived = VoBLEMediaSession.earlyMediaKey(mediaKey, nonce);
+                Arrays.fill(mediaKey, (byte) 0);
+                mediaKey = derived;
+            }
             try {
                 stopMedia("", 0);
                 VoBLEMediaSession next = new VoBLEMediaSession(
                         endpoint,
                         address -> VoBLEPCMBridgeSession.open(
-                                address, VoBLEPCMBridgeSession.socketConnector()),
+                                address, VoBLEPCMBridgeSession.socketConnector(), early),
                         packet -> gatt.notifyAudioPacket(deviceId, packet),
                         failed -> {
                             RemoteAudioSessionRegistry.releaseCall(failed);
                             try {
                                 controlQueue.execute(() -> {
                                     // Delayed failure from an old call cannot stop its replacement.
-                                    if (media == failed) stopMedia("", 0);
+                                    if (media == failed) {
+                                        if (early) {
+                                            try { sendControl(deviceId, envelope.sessionId(), envelope.callId(),
+                                                    envelope.generation(), "early_media_stopped", new JSONObject()); }
+                                            catch (Exception ignored) { /* BLE disconnect cleanup still applies. */ }
+                                        }
+                                        stopMedia("", 0);
+                                    }
                                 });
                             } catch (java.util.concurrent.RejectedExecutionException destroyed) {
                                 // Service teardown already releases/cleans up its current media.
@@ -531,12 +554,19 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         });
                 VoBLEMediaSession.Identity identity = new VoBLEMediaSession.Identity(
                         envelope.callId(), envelope.generation());
+                final long earlyDeadline = System.nanoTime() + 120_000_000_000L;
+                if (early) next.setCaptureAllowed(() -> System.nanoTime() < earlyDeadline
+                        && calls.ownsCall(envelope.callId(), envelope.generation())
+                        && CallRepository.earlyMediaEligible(envelope.callId())
+                        && CallRepository.state(envelope.callId()) == android.telecom.Call.STATE_DIALING);
                 next.start(identity, mediaKey);
                 synchronized (mediaLifecycleLock) {
                     synchronized (next) {
                         // Socket reads may complete after shutdownNow; publication
                         // and service teardown must share the same lifecycle lock.
-                        if (destroyed || !next.ready()) {
+                        if (destroyed || !next.ready() || !calls.ownsCall(envelope.callId(), envelope.generation())
+                                || (early && (!CallRepository.earlyMediaEligible(envelope.callId())
+                                || CallRepository.state(envelope.callId()) != android.telecom.Call.STATE_DIALING))) {
                             next.close();
                             throw new java.io.IOException("PCM gateway stopped during startup");
                         }
@@ -553,7 +583,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         0, 0, 0, "");
                 publishDiagnostics();
                 BridgeLog.info("voble_media_started call_generation=" + envelope.generation());
-                return VoBLECallController.Result.success("media_ready");
+                return VoBLECallController.Result.success(early ? "early_media_ready_v1" : "media_ready");
             } finally {
                 Arrays.fill(mediaKey, (byte) 0);
             }

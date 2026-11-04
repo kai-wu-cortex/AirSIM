@@ -138,7 +138,7 @@ public final class CallRepository {
     }
 
     /** Only the one still-unconnected outgoing carrier call may expose early downlink. */
-    static boolean earlyMediaEligible(String callId) {
+    public static boolean earlyMediaEligible(String callId) {
         Call call = CALLS.get(callId);
         if (call == null || CALLS.size() != 1) return false;
         int state = call.getState();

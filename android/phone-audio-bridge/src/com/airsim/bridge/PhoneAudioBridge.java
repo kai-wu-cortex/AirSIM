@@ -183,10 +183,8 @@ public final class PhoneAudioBridge {
     private static void streamEarlyAudio(Socket client, long started, BridgeStats stats) throws Exception {
         String phase="select_capture_route";
         try {
-            if (!Redmi9PCMProfile.matches(Build.MANUFACTURER, Build.DEVICE, Build.HARDWARE))
-                throw new IllegalStateException("receive-only profile unavailable");
             AudioDeviceInfo rx=findTelephonyDevice(true);
-            if(rx==null || !Redmi9PCMProfile.supports(rx.getSampleRates(),rx.getChannelCounts(),rx.getEncodings(),8000,1))
+            if(rx==null || !TelephonyDownlinkProfile.supports(rx.getSampleRates(),rx.getChannelCounts(),rx.getEncodings()))
                 throw new IllegalStateException("Telephony Rx unavailable");
             phase="create_capture";
             int buffer=AudioRecord.getMinBufferSize(SAMPLE_RATE,CHANNEL_IN,ENCODING);
@@ -217,7 +215,7 @@ public final class PhoneAudioBridge {
                 phase="send_ready";
                 BridgeProtocol.writeReady(client.getOutputStream());
                 stats.resetAudio();
-                emit(started,"audio_profile",Map.of("profile","redmi9_mtk_experimental","direction","recvonly","capture_rate",8000,"capture_source","voice_downlink"));
+                emit(started,"audio_profile",Map.of("profile","telephony_downlink","direction","recvonly","capture_rate",8000,"capture_source","voice_downlink"));
                 emit(started,"client_ready",Map.of("result","receive_only_capture","route_verified",false));
                 client.setSoTimeout(0);
                 Thread disconnect=new Thread(() -> {
@@ -410,7 +408,7 @@ public final class PhoneAudioBridge {
                         if (config != null) silenced = config.isClientSilenced() ? "yes" : "no";
                     } catch (RuntimeException | LinkageError ignored) { /* Missing metadata is not verified routing. */ }
                     emit(0, "capture_route_observed", Map.of("capture_route", route, "capture_silenced", silenced));
-                    if (strictTelephony && route.equals("other")) throw new IOException("capture is not routed to Telephony Rx");
+                    if (strictTelephony && (route.equals("other") || silenced.equals("yes"))) throw new IOException("capture is not routed to Telephony Rx");
                 }
                 if (awaitAudibleFrame) {
                     if (!hasSignal(frame, evenCount)) continue;

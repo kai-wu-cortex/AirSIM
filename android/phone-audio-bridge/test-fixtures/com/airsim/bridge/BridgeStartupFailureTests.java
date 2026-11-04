@@ -34,7 +34,14 @@ public final class BridgeStartupFailureTests {
         }
         readyWriteFailureIsNotCaptureFailure(start);
         redmi9BindsRxAndUsesNativeTx(start);
-        receiveOnlyNeverCreatesPlayback();
+        for (String manufacturer : new String[] {"samsung", "Xiaomi", "OPPO", "vivo", "HONOR", "unknown"}) {
+            android.os.Build.MANUFACTURER = manufacturer;
+            android.os.Build.DEVICE = "generic-device";
+            android.os.Build.HARDWARE = "generic-soc";
+            receiveOnlyNeverCreatesPlayback();
+        }
+        if (!TelephonyDownlinkProfile.supports(new int[0], new int[0], new int[0])) throw new AssertionError("arbitrary formats");
+        if (TelephonyDownlinkProfile.supports(new int[]{48000}, new int[]{2}, new int[]{2})) throw new AssertionError("unsupported formats");
         System.out.println("BridgeStartupFailureTests passed: real startup releases capture and distinguishes denied queries from absent routes");
     }
 

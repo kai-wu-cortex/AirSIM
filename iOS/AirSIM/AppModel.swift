@@ -838,7 +838,8 @@ final class AppModel: ObservableObject {
     }
 
     private func updateOwnedPrimaryAlerts(_ call: CallRecord?) {
-        let suppressed = call?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone
+        let suppressed = (call?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone)
+            || carrierEarlyMediaAudible
         incomingNotifier.update(call: suppressed ? nil : call,
             callerName: call.map { contacts.displayName(for: $0.number) }, appIsActive: appIsActive)
         if suppressed || WatchCallCoordinator.shared.ownsMedia(callID: call?.id) { audio.stopCallTone() }
@@ -908,9 +909,14 @@ final class AppModel: ObservableObject {
         )
     }
 
+    private var carrierEarlyMediaAudible: Bool {
+        (currentCallTransport == .bluetooth && vobleCalls.earlyMediaAudible)
+            || (currentCallTransport == .cloud && IPhoneCloudCallSession.shared.earlyMediaAudible)
+    }
+
     var callAudioIsActive: Bool {
         (audio.active && audio.transportReady && !audio.receiveOnly) || bluetoothPCMConnected
-            || cloudCallAudioState.isConnected || VirtualCallTTSController.shared.isPrepared
+            || (cloudCallAudioState.isConnected && callLifecycleSnapshot.state == .active) || VirtualCallTTSController.shared.isPrepared
     }
 
     /// The actual BLE PCM path, not just the selected session. The engine and
@@ -918,7 +924,7 @@ final class AppModel: ObservableObject {
     /// vobleAudio.running can read a different session and leave the call page
     /// stuck at "establishing" after PCM is already flowing.
     private var bluetoothPCMConnected: Bool {
-        guard currentCallTransport == .bluetooth else { return false }
+        guard currentCallTransport == .bluetooth, callLifecycleSnapshot.state == .active else { return false }
         if let agent = deviceCalls.active?.agentID ?? presentedDeviceCall?.agentID,
            let bundle = vobleHub.retainedBundle(for: agent) {
             return bundle.audio.running || bundle.media.isRunning
@@ -1525,6 +1531,14 @@ final class AppModel: ObservableObject {
     }
 
     var callAudioStatusText: String {
+        if callLifecycleSnapshot.state == .connecting,
+           (currentCallTransport == .bluetooth && vobleCalls.earlyMediaUnavailable)
+            || (currentCallTransport == .cloud && IPhoneCloudCallSession.shared.earlyMediaUnavailable) {
+            return "等待接通 · 设备暂未提供运营商语音"
+        }
+        if callLifecycleSnapshot.state == .connecting, carrierEarlyMediaAudible {
+            return "运营商语音 · 尚未接通"
+        }
         if callLifecycleSnapshot.state == .connecting, audio.receiveOnly {
             return audio.hasReceivedEarlyMedia ? "运营商语音 · 尚未接通" : "正在连接运营商语音 · 尚未接通"
         }
@@ -1599,6 +1613,9 @@ final class AppModel: ObservableObject {
         callKit.setEnabled(runtimePolicy.usesCallKit)
         WatchCallCoordinator.shared.configure(model: self)
         WatchCallCoordinator.shared.start()
+        IPhoneCloudCallSession.shared.onAudioEngineStarted = { [weak self] in
+            self?.audio.retryRequestedSpeakerRoute()
+        }
         IPhoneCloudCallSession.shared.onAudioStateChange = { [weak self] state in
             self?.cloudCallAudioState = state
             if state.isConnected { self?.audio.retryRequestedSpeakerRoute() }
@@ -1757,6 +1774,11 @@ final class AppModel: ObservableObject {
     private func configureVoBLECallCoordinator(_ bundle: VoBLEDeviceSession) {
         let calls = bundle.calls
         let central = bundle.central
+        calls.onEarlyPlayback = { [weak self, weak calls] in
+            guard let self, let calls, let identity = calls.currentIdentity,
+                  calls.mediaPermission(identity), calls.earlyMediaAudible else { return }
+            self.audio.stopCallTone()
+        }
         calls.onOutgoingIntent = { [weak self, weak central] identity in
             self?.vobleHub.setCallActive(true)
             self?.applyVoBLEState(identity: identity, state: .connecting, agentID: central?.authenticatedIdentity)
@@ -2428,7 +2450,7 @@ final class AppModel: ObservableObject {
                         appIsActive: appIsActive
                     )
                 }
-                if lifecycleCall?.direction == "incoming", callKit.suppressesInAppIncomingRingtone {
+                if carrierEarlyMediaAudible || (lifecycleCall?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone) {
                     // CallKit 已负责系统铃声，不能再叠加应用内铃声。
                     audio.stopCallTone()
                 } else {
@@ -3727,6 +3749,12 @@ final class AppModel: ObservableObject {
         guard !Task.isCancelled else { return }
         if callLifecycleSnapshot.state == .connecting { startEarlyMediaIfEligible() }
         let cloudSession = IPhoneCloudCallSession.shared
+        cloudSession.onEarlyPlayback = { [weak self, weak cloudSession] in
+            guard let self, let cloudSession, self.currentCallTransport == .cloud,
+                  cloudSession.earlyMediaAudible,
+                  self.callLifecycleSnapshot.callUUID == cloudSession.call?.uuid else { return }
+            self.audio.stopCallTone()
+        }
         if cloudSession.call != nil, cloudSession.answered {
             await performCallAudioStartup()
             return
@@ -3749,6 +3777,12 @@ final class AppModel: ObservableObject {
         }
         let managedByCallKit = callKit.managesCurrentCall
         let cloudSession = IPhoneCloudCallSession.shared
+        cloudSession.onEarlyPlayback = { [weak self, weak cloudSession] in
+            guard let self, let cloudSession, self.currentCallTransport == .cloud,
+                  cloudSession.earlyMediaAudible,
+                  self.callLifecycleSnapshot.callUUID == cloudSession.call?.uuid else { return }
+            self.audio.stopCallTone()
+        }
         if cloudSession.call != nil, cloudSession.answered {
             if CloudCallAudioStartupPolicy.shouldStart(
                 answered: true,
@@ -4513,12 +4547,9 @@ extension AppModel: CallKitActionHandling {
         try CallKitAudioPreparationCoordinator.prepare(
             suspendStandby: { backgroundStandby.suspendForCall() },
             configureCallAudio: {
-                if ConnectionModePreference.selected() == .cloud,
-                   callKit.currentIncomingPush?.authenticatedMediaURL != nil {
-                    try IPhoneCloudCallSession.shared.prepareAudioForCallKit()
-                } else {
-                    try audio.prepareForCallKit()
-                }
+                // Cloud, BLE and WLAN share the system session and tone controller.
+                // Mark its CallKit ownership even when a different engine plays PCM.
+                try audio.prepareForCallKit()
             },
             resumeStandby: { backgroundStandby.resumeAfterCall() }
         )
@@ -4978,6 +5009,7 @@ extension AppModel: CallKitActionHandling {
     }
 
     func callKitAudioSessionDidActivate() async {
+        audio.callKitDidActivate()
         if VirtualCallTTSController.shared.isPrepared {
             VirtualCallTTSController.shared.start()
             return

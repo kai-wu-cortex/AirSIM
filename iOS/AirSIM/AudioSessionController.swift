@@ -197,6 +197,9 @@ final class AudioSessionController: ObservableObject {
     private var muted = false
     private var requestedSpeakerOverride = false
     private var speakerRouteRetryTask: Task<Void, Never>?
+    private var speakerRouteRetryID = UUID()
+    private let applySpeakerOverride: (Bool) throws -> Void
+    private let observesSpeakerOutput: () -> Bool
     private var sessionActivationManagedByCallKit = false
     private var routeChangeObserver: NSObjectProtocol?
     private var playbackQueue = PlaybackQueueTracker(maximumFrames: 4_000)
@@ -210,8 +213,15 @@ final class AudioSessionController: ObservableObject {
         ) }
     }
 
-    init(toneOutput: (any CallToneOutput)? = nil) {
+    init(toneOutput: (any CallToneOutput)? = nil,
+         applySpeakerOverride: @escaping (Bool) throws -> Void = {
+             try AVAudioSession.sharedInstance().overrideOutputAudioPort($0 ? .speaker : .none)
+         }, observesSpeakerOutput: @escaping () -> Bool = {
+             AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+         }) {
         self.toneOutput = toneOutput ?? SystemCallToneOutput()
+        self.applySpeakerOverride = applySpeakerOverride
+        self.observesSpeakerOutput = observesSpeakerOutput
         // CallKit、蓝牙或系统控制中心都可能改变输出路由，按钮状态必须跟随真实会话。
         routeChangeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
@@ -397,6 +407,11 @@ final class AudioSessionController: ObservableObject {
         sessionActivationManagedByCallKit = true
     }
 
+    func callKitDidActivate() {
+        sessionActivationManagedByCallKit = true
+        retryRequestedSpeakerRoute()
+    }
+
     func setMuted(_ muted: Bool) {
         self.muted = muted
         encoder?.setMuted(muted)
@@ -469,6 +484,7 @@ final class AudioSessionController: ObservableObject {
     /// 切换当前通话的输出路由；关闭扬声器时交还给系统选择听筒或已连接的蓝牙设备。
     func setSpeakerEnabled(_ enabled: Bool) {
         requestedSpeakerOverride = enabled
+        recordSpeakerRoute("requested")
         speakerRoutePending = !SpeakerRoutePolicy.routeMatches(
             requestedSpeaker: enabled,
             currentRouteIsSpeaker: speakerEnabled
@@ -497,10 +513,12 @@ final class AudioSessionController: ObservableObject {
     func retryRequestedSpeakerRoute() {
         let requested = requestedSpeakerOverride
         speakerRouteRetryTask?.cancel()
+        let retryID = UUID()
+        speakerRouteRetryID = retryID
         speakerRouteRetryTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if requestedSpeakerOverride == requested {
+                if speakerRouteRetryID == retryID {
                     speakerRoutePending = false
                     speakerRouteRetryTask = nil
                 }
@@ -510,9 +528,7 @@ final class AudioSessionController: ObservableObject {
                 if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
                 guard !Task.isCancelled, requestedSpeakerOverride == requested else { return }
                 do {
-                    try AVAudioSession.sharedInstance().overrideOutputAudioPort(
-                        requested ? .speaker : .none
-                    )
+                    try applySpeakerOverride(requested)
                     // API 返回只表示系统接受了请求；currentRoute 的切换是异步的。
                     // 等待一个很短的确认窗口，再以真实输出端口决定按钮高亮。
                     try? await Task.sleep(for: .seconds(SpeakerRoutePolicy.routeVerificationDelay))
@@ -522,14 +538,26 @@ final class AudioSessionController: ObservableObject {
                         requestedSpeaker: requested,
                         currentRouteIsSpeaker: speakerEnabled
                     ) {
+                        recordSpeakerRoute("confirmed")
                         return
                     }
                 } catch {
                     // 音频会话还没由 CallKit 激活时保留选择，等待下一次短重试。
+                    recordSpeakerRoute("retry_failed", error: error as NSError)
                 }
             }
             refreshRouteDescription()
         }
+    }
+
+    private func recordSpeakerRoute(_ phase: String, error: NSError? = nil) {
+        let session = AVAudioSession.sharedInstance()
+        var fields = ["requested_speaker": String(requestedSpeakerOverride),
+                      "observed_speaker": String(observesSpeakerOutput()),
+                      "category": session.category.rawValue, "mode": session.mode.rawValue]
+        if let error { fields["error_domain"] = error.domain; fields["error_code"] = String(error.code) }
+        Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "call-audio",
+            phase: "speaker_" + phase, title: "通话输出切换", fields: fields, isFailure: error != nil) }
     }
 
     /// 合并模块侧 D5/D6 统计，避免把 TCP 连通误判为实际存在语音。
@@ -676,7 +704,7 @@ final class AudioSessionController: ObservableObject {
         let input = session.currentRoute.inputs.map { "\($0.portName)[\($0.portType.rawValue)]" }.joined(separator: ", ")
         let output = session.currentRoute.outputs.map { "\($0.portName)[\($0.portType.rawValue)]" }.joined(separator: ", ")
         let inputs = session.availableInputs?.map(\.portName).joined(separator: ", ") ?? "无"
-        let routedToSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        let routedToSpeaker = observesSpeakerOutput()
         if speakerEnabled != routedToSpeaker {
             speakerEnabled = routedToSpeaker
         }
