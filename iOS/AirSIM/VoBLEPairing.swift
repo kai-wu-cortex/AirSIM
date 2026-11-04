@@ -165,8 +165,8 @@ struct VoBLEReplayWindow: Sendable {
 
     mutating func accept(nonce: Data, timestamp: Date, now: Date = Date()) -> Bool {
         guard !revoked, !nonce.isEmpty,
-              timestamp >= now.addingTimeInterval(-maximumAge),
-              timestamp <= now.addingTimeInterval(5),
+              timestamp.timeIntervalSinceReferenceDate >= now.addingTimeInterval(-maximumAge).timeIntervalSinceReferenceDate,
+              timestamp.timeIntervalSinceReferenceDate <= now.addingTimeInterval(5).timeIntervalSinceReferenceDate,
               !observed.contains(nonce) else { return false }
         observed.insert(nonce)
         order.append(nonce)

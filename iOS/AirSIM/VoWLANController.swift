@@ -471,8 +471,10 @@ struct VoWLANRecoveryGate {
     private var nextAttemptAt = Date.distantPast
 
     mutating func shouldAttempt(for availability: VoWLANAvailability, at now: Date) -> Bool {
+        // Compare scalar timestamps: Xcode 27.2 emits a weak Date.>= import
+        // that resolves to null on some 27.2 beta runtimes (see crash-162 analysis).
         guard availability != .unpaired, !availability.isOnlineForDisplay,
-              now >= nextAttemptAt else { return false }
+              now.timeIntervalSinceReferenceDate >= nextAttemptAt.timeIntervalSinceReferenceDate else { return false }
         nextAttemptAt = now.addingTimeInterval(10)
         return true
     }

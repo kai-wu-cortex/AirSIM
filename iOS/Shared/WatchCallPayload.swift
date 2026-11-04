@@ -113,7 +113,7 @@ enum WatchCallMirrorPolicy {
 
     static func isNewer(_ payload: WatchCallPayload, than timestamp: Date?) -> Bool {
         guard let timestamp else { return true }
-        return payload.updatedAt >= timestamp
+        return payload.updatedAt.timeIntervalSinceReferenceDate >= timestamp.timeIntervalSinceReferenceDate
     }
 }
 
@@ -233,7 +233,7 @@ struct WatchVoIPCall: Equatable, Sendable {
             throw WatchVoIPPayloadError.invalidCallUUID
         }
         let expiresAt = Self.date(from: userInfo["expires_at"])
-        if let expiresAt, expiresAt <= now { throw WatchVoIPPayloadError.expired }
+        if let expiresAt, expiresAt.timeIntervalSinceReferenceDate <= now.timeIntervalSinceReferenceDate { throw WatchVoIPPayloadError.expired }
         let media: WatchCallMedia
         if userInfo["media_route"] as? String == "vowlan" {
             let dictionary = Dictionary(uniqueKeysWithValues: userInfo.compactMap { key, value in

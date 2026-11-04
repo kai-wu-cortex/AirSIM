@@ -9,6 +9,23 @@ import SwiftUI
 import WidgetKit
 @testable import AirSIM
 
+final class PhoneNavigationPolicyTests: XCTestCase {
+    func testMessageSearchMatchesContactNumberAndOlderBody() {
+        let contents = ["旧消息：会议改到周五", "最新消息：收到"]
+        XCTAssertTrue(SMSConversationSearch.matches("周五", sender: "138-0013-8000", contactName: "小王", contents: contents))
+        XCTAssertTrue(SMSConversationSearch.matches("小王", sender: "138-0013-8000", contactName: "小王", contents: contents))
+        XCTAssertTrue(SMSConversationSearch.matches("13800138000", sender: "+86 138-0013-8000", contactName: nil, contents: []))
+        XCTAssertTrue(SMSConversationSearch.matches("１３８００１３８０００", sender: "138-0013-8000", contactName: nil, contents: []))
+        XCTAssertTrue(SMSConversationSearch.matches("  \n ", sender: "", contactName: nil, contents: []))
+        XCTAssertTrue(SMSConversationSearch.contains("Résumé ABC", query: "resume abc"))
+        XCTAssertFalse(SMSConversationSearch.matches("code138", sender: "13800138000", contactName: nil, contents: contents))
+        XCTAssertFalse(SMSConversationSearch.matches("不存在", sender: "13800138000", contactName: nil, contents: contents))
+        XCTAssertFalse(SMSConversationSearch.contains("正文", query: " "))
+    }
+
+
+}
+
 @MainActor
 final class LiveActivityReconciliationTests: XCTestCase {
     private typealias State = AirSIMCallActivityAttributes.ContentState
@@ -4581,6 +4598,10 @@ final class AirSIMTests: XCTestCase {
         XCTAssertFalse(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(3)))
         XCTAssertTrue(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(10)))
         XCTAssertFalse(recovery.shouldAttempt(for: .unpaired, at: start.addingTimeInterval(20)))
+        XCTAssertFalse(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(19.999)))
+        XCTAssertTrue(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(20)))
+        recovery.reset()
+        XCTAssertTrue(recovery.shouldAttempt(for: unavailable, at: start))
     }
 
     func testForegroundRecoveryDoesNotRestartVoWLANDuringCall() {
@@ -4884,6 +4905,35 @@ final class AirSIMWidgetTests: XCTestCase {
         XCTAssertNil(old.controls)
         XCTAssertEqual(old.devices, sample.devices)
         XCTAssertEqual(old.calls, sample.calls)
+    }
+
+    func testWidgetKeepsFiveNewestRecordsForEachDevice() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var snapshot = AirSIMWidgetSnapshot.preview(at: now)
+        snapshot.calls = []
+        for index in 0..<8 {
+            for agent in ["preview-galaxy", "preview-redmi"] {
+                let record = AirSIMWidgetSnapshot.RecentCall(id: "\(agent)-\(index)", agentID: agent,
+                    maskedNumber: "138 •••• 6028", date: now.addingTimeInterval(Double(index)),
+                    incoming: true, missed: true, unseen: index == 7)
+                snapshot.calls.append(record)
+            }
+        }
+        snapshot.messages = snapshot.calls.map {
+            .init(agentID: $0.agentID, date: $0.date, incoming: true,
+                  contentPreview: $0.id, unread: $0.unseen)
+        }
+        for agent in ["preview-galaxy", "preview-redmi"] {
+            XCTAssertEqual(snapshot.recentCalls(for: agent).map(\.id), (3...7).reversed().map { "\(agent)-\($0)" })
+            XCTAssertEqual(snapshot.recentMessages(for: agent).map(\.displayText), (3...7).reversed().map { "\(agent)-\($0)" })
+            XCTAssertEqual(snapshot.recentMessages(for: agent).first?.unread, true)
+        }
+        XCTAssertTrue(snapshot.recentCalls(for: "unknown").isEmpty)
+        XCTAssertTrue(snapshot.recentMessages(for: "unknown").isEmpty)
+        XCTAssertEqual(try JSONDecoder().decode(AirSIMWidgetSnapshot.self,
+            from: JSONEncoder().encode(snapshot)), snapshot)
+        let oldMessage = Data(#"{"date":0,"incoming":true}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(AirSIMWidgetSnapshot.RecentMessage.self, from: oldMessage).unread)
     }
 
     func testExpiredObservationBecomesUnknownWithoutChangingDeviceState() {
@@ -5248,5 +5298,60 @@ private actor OperationQueryTransport: AirSIMHTTPTransport {
         if mode == "newline" { value["backend_id"] = "original-backend\nforged" }
         if mode == "version2" { value["version"] = 2 }
         return .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
+    }
+}
+
+final class SettingsNavigationPolicyTests: XCTestCase {
+    func testCallLockAndPureLocalModeSelection() {
+        for mode in AirSIMConnectionMode.allCases {
+            XCTAssertFalse(AirSIMSettingsPolicy.canSelect(mode, pureLocal: false, callBusy: true))
+            XCTAssertFalse(AirSIMSettingsPolicy.canSelect(mode, pureLocal: true, callBusy: true))
+            XCTAssertTrue(AirSIMSettingsPolicy.canSelect(mode, pureLocal: false, callBusy: false))
+            XCTAssertEqual(AirSIMSettingsPolicy.canSelect(mode, pureLocal: true, callBusy: false), mode != .cloud)
+        }
+    }
+
+    func testInvalidRelayDoesNotFallBackToMaintainerServer() {
+        for raw in ["", "https:", "relay.example.com", "file:///tmp/relay", "https://user:password@example.com",
+                    "https://example.com?token=secret", "https://example.com#fragment", "http://192.168.1.2:0",
+                    "https://example.com:65536", "https://bad host.example"] {
+            XCTAssertNil(AirSIMSettingsPolicy.validRelayURL(raw), raw)
+        }
+        XCTAssertEqual(AirSIMSettingsPolicy.validRelayURL(" https://relay.example.com/api \n"), "https://relay.example.com/api")
+        XCTAssertEqual(AirSIMSettingsPolicy.validRelayURL("http://192.168.1.2:8787"), "http://192.168.1.2:8787")
+        XCTAssertEqual(AirSIMSettingsPolicy.validRelayURL("https://[::1]:8443"), "https://[::1]:8443")
+    }
+
+    func testDeviceDestinationsKeepIdentityAcrossNavigation() {
+        XCTAssertNotEqual(AirSIMSettingsPage.device("one"), .device("two"))
+        XCTAssertNotEqual(AirSIMSettingsPage.device("one").id, AirSIMSettingsPage.deviceInfo("one").id)
+    }
+}
+
+
+final class NotificationForwardingFormTests: XCTestCase {
+    func testWebhookAllowsServiceQueryButRejectsBrokenInput() {
+        var target = NotificationForwardingDestination()
+        XCTAssertNotNil(target.validationMessage)
+        target.webhookURL = "https://example.com/robot?key=placeholder"
+        XCTAssertNil(target.validationMessage)
+        target.webhookURL = "file:///tmp/log"
+        XCTAssertNotNil(target.validationMessage)
+        target.enabled = false
+        XCTAssertNil(target.validationMessage)
+    }
+    func testDefaultBarkAndTelegramRequireTheirRoutingFields() {
+        var target = NotificationForwardingDestination()
+        target.channel = .bark
+        XCTAssertNotNil(target.validationMessage)
+        target.deviceKey = "fixture-key"
+        XCTAssertNil(target.validationMessage)
+        target.webhookURL = "http://example.com/push"
+        XCTAssertNotNil(target.validationMessage)
+        target.channel = .telegram; target.webhookURL = ""
+        target.chatID = "fixture-chat"
+        XCTAssertNotNil(target.validationMessage)
+        target.token = "fixture-token"
+        XCTAssertNil(target.validationMessage)
     }
 }

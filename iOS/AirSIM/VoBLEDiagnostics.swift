@@ -60,6 +60,6 @@ struct VoBLERecoveryPolicy: Equatable, Sendable {
     }
 
     func accepts(_ candidate: VoBLEMediaSessionIdentity, at date: Date) -> Bool {
-        candidate == identity && date <= deadline
+        candidate == identity && date.timeIntervalSinceReferenceDate <= deadline.timeIntervalSinceReferenceDate
     }
 }

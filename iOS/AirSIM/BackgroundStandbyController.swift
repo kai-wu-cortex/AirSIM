@@ -382,12 +382,14 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
             }.map(\.id)).count
             return updated
         }
-        let allowed = Set(snapshot.devices.map(\.id))
-        snapshot.messages = stored.filter { $0.sourceAgentID.map { allowed.contains($0) } ?? false }
-            .sorted { $0.timestamp > $1.timestamp }.prefix(6).map {
-                .init(agentID: $0.sourceAgentID, date: $0.timestamp, incoming: !$0.isOutgoing,
-                      contentPreview: AirSIMWidgetSnapshot.messagePreview($0.content))
+        snapshot.messages = snapshot.devices.flatMap { device in
+            AirSIMWidgetSnapshot.recentRecords(stored, for: device.id,
+                agent: \.sourceAgentID, date: \.timestamp).map { message in
+                .init(agentID: message.sourceAgentID, date: message.timestamp, incoming: !message.isOutgoing,
+                      contentPreview: AirSIMWidgetSnapshot.messagePreview(message.content),
+                      unread: unread.contains(message.id))
             }
+        }
         if store.save(snapshot) { WidgetCenter.shared.reloadTimelines(ofKind: AirSIMWidgetSnapshot.kind) }
         return true
     }
@@ -854,7 +856,7 @@ final class SMSNotificationCoordinator {
 
     private func persist() {
         let cutoff = Date().addingTimeInterval(-7 * 24 * 60 * 60)
-        entries = entries.filter { $0.value.touchedAt >= cutoff }
+        entries = entries.filter { $0.value.touchedAt.timeIntervalSinceReferenceDate >= cutoff.timeIntervalSinceReferenceDate }
         if entries.count > 500 {
             let keep = entries.sorted { $0.value.touchedAt > $1.value.touchedAt }.prefix(500)
             entries = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })

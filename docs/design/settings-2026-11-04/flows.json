@@ -1,0 +1,491 @@
+{
+  "pages": [
+    {
+      "id": "home",
+      "title": "设置",
+      "parent": null,
+      "category": "总览",
+      "goal": "一眼看懂当前状态，从六类入口找到功能。",
+      "rule": "纯本地滑块固定在首个卡片。连接状态与所选模式分开。长解释只在详情出现。"
+    },
+    {
+      "id": "local",
+      "title": "纯本地模式",
+      "parent": "home",
+      "category": "总览",
+      "goal": "说明模式边界，避免把纯本地等同于禁止全部网络。",
+      "rule": "滑到底→立即显示处理中→成功状态；失败保留原设置。通话中禁止切换。离线时本机先阻断，安卓待同步。"
+    },
+    {
+      "id": "connections",
+      "title": "连接与设备",
+      "parent": "home",
+      "category": "连接",
+      "goal": "管理设备和连接入口。",
+      "rule": "更换模式不等于连接成功；在当前设备卡展示实际链路。"
+    },
+    {
+      "id": "mode",
+      "title": "通话连接方式",
+      "parent": "connections",
+      "category": "连接",
+      "goal": "选适合自己的通话链路。",
+      "rule": "通话中不能改；纯本地时云端不可选，自动仅尝试本地。纯本地关闭时任何模式都可手动云端自检。"
+    },
+    {
+      "id": "device",
+      "title": "Redmi 9",
+      "parent": "connections",
+      "category": "连接",
+      "goal": "汇总设备状态，故障能就近处理。",
+      "rule": "号码缺失显示“运营商未提供”，不猜测号码。忘记设备需确认，保留手机系统短信。"
+    },
+    {
+      "id": "deviceInfo",
+      "title": "地址与配对信息",
+      "parent": "device",
+      "category": "连接",
+      "goal": "只在需要排障时展示地址和身份。",
+      "rule": "掩码身份、证书与端口只在此页展示；不展示配对密钥。"
+    },
+    {
+      "id": "add",
+      "title": "添加设备",
+      "parent": "connections",
+      "category": "配对",
+      "goal": "先选择连接条件，再进入对应配对表单。",
+      "rule": "共享一次性配对引导；不要求先配置 Relay。域名首次配对必须 TLS。"
+    },
+    {
+      "id": "discover",
+      "title": "发现安卓手机",
+      "parent": "add",
+      "category": "配对",
+      "goal": "选择附近设备并完成一次性认证。",
+      "rule": "权限拒绝→系统权限指南；没有设备→重扫或手动地址。配对成功与网关可用必须分别展示。"
+    },
+    {
+      "id": "pairCode",
+      "title": "一次性配对",
+      "parent": "discover",
+      "category": "配对",
+      "goal": "仅输入安卓当前配对窗口的六位数字。",
+      "rule": "输入不足不发送；验证码错误可原地改正；成功后继续验证控制及音频状态。"
+    },
+    {
+      "id": "manual",
+      "title": "手动地址配对",
+      "parent": "add",
+      "category": "配对",
+      "goal": "支持 Wi-Fi、热点与 Tailscale / 其他 VPN。",
+      "rule": "填写安卓地址及本次配对端口；不是 iPhone 地址、ADB 端口。网络错误保留输入。"
+    },
+    {
+      "id": "domainPair",
+      "title": "公网域名配对",
+      "parent": "add",
+      "category": "配对",
+      "goal": "首次在公网完成安全配对。",
+      "rule": "显式试验性标记；三个端口各有职责；不能跳过证书校验。成功也不代表音频已验收。"
+    },
+    {
+      "id": "paired",
+      "title": "配对结果",
+      "parent": "add",
+      "category": "配对",
+      "goal": "给出认证结果和服务可用性两条独立结论。",
+      "rule": "配对成功但 PCM / 网关未就绪时，不显示“可通话”；不回退写入 Relay。"
+    },
+    {
+      "id": "bluetooth",
+      "title": "蓝牙连接",
+      "parent": "connections",
+      "category": "配对",
+      "goal": "显示发现、连接、认证三个阶段。",
+      "rule": "蓝牙配对采用双方安全码确认；失败支持重试和明确的清凭据确认。"
+    },
+    {
+      "id": "sas",
+      "title": "核对安全码",
+      "parent": "bluetooth",
+      "category": "配对",
+      "goal": "让用户在两端确认同一设备。",
+      "rule": "数字不一致必须取消；认证完成前不开放拨号和音频。"
+    },
+    {
+      "id": "network",
+      "title": "局域网与 VPN",
+      "parent": "connections",
+      "category": "网络",
+      "goal": "只显示当前连接和两个必要入口。",
+      "rule": "普通用户不需要编辑 CIDR；Tailscale 默认支持。"
+    },
+    {
+      "id": "prefixes",
+      "title": "自定义私有网段",
+      "parent": "network",
+      "category": "网络",
+      "goal": "少数特殊网络用户才进入。",
+      "rule": "校验 CIDR；拒绝无效或不允许的公网范围；失败留在当前页并保留输入。"
+    },
+    {
+      "id": "relay",
+      "title": "云端 Relay",
+      "parent": "connections",
+      "category": "网络",
+      "goal": "连接方式与通知权限分开呈现。",
+      "rule": "纯本地关闭时任何通话模式都能手动自检；保存新地址不是注册成功。"
+    },
+    {
+      "id": "tls",
+      "title": "公网域名直连",
+      "parent": "connections",
+      "category": "网络",
+      "goal": "给已有配对设备添加 TLS 入口。",
+      "rule": "无设备先配对；通话中禁止修改；控制身份验证成功后保存，音频仍需实测。"
+    },
+    {
+      "id": "tlsGuide",
+      "title": "域名直连教程",
+      "parent": "tls",
+      "category": "网络",
+      "goal": "四步展示前提、配置、验证与常见问题。",
+      "rule": "教程与实际表单复用；原生页面可折叠展开，不要求用户记住协议细节。"
+    },
+    {
+      "id": "calls",
+      "title": "来电与短信",
+      "parent": "home",
+      "category": "通知",
+      "goal": "只放和接收、短信体验有关的设置。",
+      "rule": "云端通知独立于通话模式；纯本地时禁用但不忘记原偏好。"
+    },
+    {
+      "id": "background",
+      "title": "后台运行",
+      "parent": "calls",
+      "category": "通知",
+      "goal": "解释保活耗电与系统限制。",
+      "rule": "保留现有设置，首次开启强调耗电；关闭不会关闭 PushKit。不要承诺强制退出后有来电。"
+    },
+    {
+      "id": "forwarding",
+      "title": "通知转发",
+      "parent": "calls",
+      "category": "通知",
+      "goal": "展示目标列表及是否已发送到安卓。",
+      "rule": "保留现有“下次配对同步”行为；不能显示为即时远端生效。独立转发可能访问第三方服务。"
+    },
+    {
+      "id": "forwardEditor",
+      "title": "转发目标",
+      "parent": "forwarding",
+      "category": "通知",
+      "goal": "按渠道渐进展示必要字段。",
+      "rule": "敏感信息不预填；保存不会发送测试短信。正文与号码发送范围明确。"
+    },
+    {
+      "id": "templates",
+      "title": "消息模板",
+      "parent": "forwardEditor",
+      "category": "通知",
+      "goal": "高级自定义放在独立详情。",
+      "rule": "模板以草稿保留，最终随转发目标保存；返回不丢草稿。"
+    },
+    {
+      "id": "widgets",
+      "title": "灵动岛与小组件",
+      "parent": "home",
+      "category": "展示",
+      "goal": "以预览帮助理解显示效果。",
+      "rule": "实时活动到期不是离线；回前台恢复，不影响来电链路。小组件更新受系统调度。"
+    },
+    {
+      "id": "order",
+      "title": "设备显示顺序",
+      "parent": "widgets",
+      "category": "展示",
+      "goal": "置顶与排序直接看到结果。",
+      "rule": "只影响显示顺序，不切换实际通话设备。关闭灵动岛时仍可编辑顺序。"
+    },
+    {
+      "id": "widgetGuide",
+      "title": "桌面小组件",
+      "parent": "widgets",
+      "category": "展示",
+      "goal": "预览尺寸与添加方法。",
+      "rule": "大尺寸每栏最多五条，按空间适配；未读角标与正文一致。按钮切换不打开主 App。"
+    },
+    {
+      "id": "islandGuide",
+      "title": "锁屏与灵动岛",
+      "parent": "widgets",
+      "category": "展示",
+      "goal": "说明八小时到期与设备在线无关。",
+      "rule": "不新增后台续命承诺；到期显示与真实设备状态分离。"
+    },
+    {
+      "id": "preferences",
+      "title": "外观与偏好",
+      "parent": "home",
+      "category": "偏好",
+      "goal": "低频偏好集中处理。",
+      "rule": "保留现有外观设置，默认跟随系统。文字随系统辅助功能调整，不另造字号体系。"
+    },
+    {
+      "id": "accessibility",
+      "title": "语言与辅助功能",
+      "parent": "preferences",
+      "category": "偏好",
+      "goal": "明确哪些由 iOS 管理。",
+      "rule": "系统字体、减少动态效果、VoiceOver 保持系统行为；此页提供指引。"
+    },
+    {
+      "id": "help",
+      "title": "帮助与诊断",
+      "parent": "home",
+      "category": "排障",
+      "goal": "先给下一步动作，再给技术细节。",
+      "rule": "检查只在用户点击后执行；不自动上传，不拨号、不发短信。"
+    },
+    {
+      "id": "diagnostics",
+      "title": "检查连接",
+      "parent": "help",
+      "category": "排障",
+      "goal": "从问题类型选择检查链路。",
+      "rule": "本地、蓝牙统一检查入口是拟新增组织方式；沿用现有状态与诊断来源。"
+    },
+    {
+      "id": "result",
+      "title": "检查结果",
+      "parent": "diagnostics",
+      "category": "排障",
+      "goal": "逐项进度、失败位置及下一步操作同屏。",
+      "rule": "结果有检查时间，不伪装实时在线。云端检查含 Push 凭据、Relay 身份、注册、Agent 心跳与命令路由。"
+    },
+    {
+      "id": "checkDetail",
+      "title": "问题与处理方法",
+      "parent": "result",
+      "category": "排障",
+      "goal": "把错误码转为可执行的恢复步骤。",
+      "rule": "保留技术原因在折叠详情，避免将权限、网络与 PCM 故障混为一谈。"
+    },
+    {
+      "id": "permissions",
+      "title": "系统权限",
+      "parent": "calls",
+      "category": "排障",
+      "goal": "告诉用户为什么要权限以及在哪开启。",
+      "rule": "不伪造系统授权弹窗；点击打开系统设置，返回后重新读取真实状态。"
+    },
+    {
+      "id": "logs",
+      "title": "详细日志与技术信息",
+      "parent": "help",
+      "category": "排障",
+      "goal": "统一日志、蓝牙指标和链路详情。",
+      "rule": "手动读取安卓需要已验证直连；导出分享前检查内容，不能假设原始日志已完全脱敏。"
+    },
+    {
+      "id": "logDetail",
+      "title": "日志详情",
+      "parent": "logs",
+      "category": "排障",
+      "goal": "按需查看完整事件。",
+      "rule": "支持文本选择与复制；避免默认铺满设置首页。"
+    },
+    {
+      "id": "feedback",
+      "title": "提交反馈",
+      "parent": "help",
+      "category": "排障",
+      "goal": "描述、预览范围、手动上传。",
+      "rule": "支持粘贴；键盘弹出时输入区域可滚动。纯本地禁止上传；失败保留草稿，不自动重试。"
+    },
+    {
+      "id": "feedbackPreview",
+      "title": "上传内容范围",
+      "parent": "feedback",
+      "category": "排障",
+      "goal": "上传前知道包含什么。",
+      "rule": "这不是完整原始日志自动上传；脱敏预览和撤回入口为本轮设计完善项。"
+    },
+    {
+      "id": "guide",
+      "title": "使用指南",
+      "parent": "help",
+      "category": "帮助",
+      "goal": "按任务组织教程，不堆协议词。",
+      "rule": "教程都能回到对应操作页。"
+    },
+    {
+      "id": "guideDetail",
+      "title": "连接准备与排障",
+      "parent": "guide",
+      "category": "帮助",
+      "goal": "只显示当前步骤必要的信息。",
+      "rule": "更多网络参数在对应配置页面完成，不要求用户重复输入。"
+    },
+    {
+      "id": "about",
+      "title": "关于 AirSIM",
+      "parent": "home",
+      "category": "关于",
+      "goal": "版本与项目链接集中，不占首页。",
+      "rule": "检查更新独立于 Relay；纯本地仍允许 GitHub 版本检查。"
+    },
+    {
+      "id": "notes",
+      "title": "更新内容",
+      "parent": "about",
+      "category": "关于",
+      "goal": "简短说明用户可感知的变化。",
+      "rule": "不把已设计的功能当作正式发布。"
+    },
+    {
+      "id": "update",
+      "title": "检查应用更新",
+      "parent": "about",
+      "category": "关于",
+      "goal": "明确检查中、失败、有更新与最新状态。",
+      "rule": "遵循实际渠道差异：TestFlight 更新前往系统渠道；未签名 IPA 不称可直接安装。"
+    }
+  ],
+  "journeys": {
+    "daily": {
+      "title": "日常使用 · 找到常用设置",
+      "pages": [
+        "home",
+        "calls",
+        "widgets",
+        "preferences"
+      ],
+      "rule": "首页只留摘要与入口，长说明按需展开。"
+    },
+    "pair": {
+      "title": "首次使用 · 自动发现配对",
+      "pages": [
+        "home",
+        "connections",
+        "add",
+        "discover",
+        "pairCode",
+        "paired",
+        "device"
+      ],
+      "rule": "开启安卓配对窗口 → 输入六位码 → 身份认证 → 单独验证网关和音频。"
+    },
+    "vpn": {
+      "title": "外网 / VPN · 手动配对",
+      "pages": [
+        "home",
+        "connections",
+        "add",
+        "manual",
+        "paired",
+        "network"
+      ],
+      "rule": "用安卓 IP 和配对端口；同一隧道不代表所有端口都可达；不需要 Relay。"
+    },
+    "bt": {
+      "title": "蓝牙 · 双方安全码确认",
+      "pages": [
+        "connections",
+        "bluetooth",
+        "sas",
+        "paired"
+      ],
+      "rule": "设备发现与安全码确认是两步，数字不一致就取消。"
+    },
+    "local": {
+      "title": "纯本地 · 开启与限制",
+      "pages": [
+        "home",
+        "local",
+        "mode",
+        "relay",
+        "feedback"
+      ],
+      "rule": "开启即阻断 AirSIM Relay；检查、上传给出受限说明；关闭后按原偏好恢复。"
+    },
+    "cloud": {
+      "title": "云端排障 · 自检到恢复",
+      "pages": [
+        "home",
+        "help",
+        "result",
+        "checkDetail",
+        "relay",
+        "result"
+      ],
+      "rule": "诊断不是通话模式。纯本地关闭时 VoWLAN / 蓝牙 / 双通道都可以运行云端自检。"
+    },
+    "tls": {
+      "title": "试验性 · 域名首次配对",
+      "pages": [
+        "connections",
+        "add",
+        "domainPair",
+        "tlsGuide",
+        "paired",
+        "tls"
+      ],
+      "rule": "有效 TLS 证书、三个入口、身份认证；临时配对入口用完关闭，音频另行验收。"
+    },
+    "notification": {
+      "title": "通知转发 · 配置与同步",
+      "pages": [
+        "calls",
+        "forwarding",
+        "forwardEditor",
+        "templates",
+        "forwarding"
+      ],
+      "rule": "保存本机草稿 → 标明等待下次配对同步。第三方转发独立于 Relay。"
+    },
+    "widget": {
+      "title": "展示 · 小组件与灵动岛",
+      "pages": [
+        "home",
+        "widgets",
+        "order",
+        "widgetGuide",
+        "islandGuide"
+      ],
+      "rule": "调整显示顺序不切换通话设备；过期不等同于离线。"
+    },
+    "feedback": {
+      "title": "故障反馈 · 手动且可恢复",
+      "pages": [
+        "help",
+        "diagnostics",
+        "result",
+        "logs",
+        "feedback",
+        "feedbackPreview"
+      ],
+      "rule": "先诊断，按需读取日志，检查上传范围，手动上传；失败留住草稿。"
+    },
+    "remove": {
+      "title": "设备管理 · 安全移除",
+      "pages": [
+        "connections",
+        "device",
+        "deviceInfo",
+        "device"
+      ],
+      "rule": "选择忘记 → 说明清除范围 → 删除或取消。无需清除系统短信。"
+    },
+    "update": {
+      "title": "更新 · 了解与检查版本",
+      "pages": [
+        "about",
+        "notes",
+        "update"
+      ],
+      "rule": "真实渠道决定更新方式；版本检查不受纯本地开关限制。"
+    }
+  }
+}

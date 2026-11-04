@@ -53,7 +53,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
         }
 
         let expiresAt = Self.date(from: userInfo["expires_at"])
-        if let expiresAt, expiresAt <= now { throw VoIPPushPayloadError.expired }
+        if let expiresAt, expiresAt.timeIntervalSinceReferenceDate <= now.timeIntervalSinceReferenceDate { throw VoIPPushPayloadError.expired }
 
         callID = rawCallID
         agentID = userInfo["agent_id"] as? String
@@ -467,7 +467,7 @@ enum PushRegistrationRetryPolicy {
     }
 
     static func shouldAttemptRelay(now: Date, retryAfter: Date) -> Bool {
-        now >= retryAfter
+        now.timeIntervalSinceReferenceDate >= retryAfter.timeIntervalSinceReferenceDate
     }
 
     static func quotaRetryDate(now: Date) -> Date {
@@ -512,7 +512,7 @@ struct PushRegistrationLedger<Route: Equatable> {
     }
     func shouldAttempt(_ route: Route, fingerprint: String, now: Date = Date()) -> Bool {
         guard let entry = entries.first(where: { $0.route == route && $0.fingerprint == fingerprint }) else { return true }
-        return !entry.succeeded && now >= entry.retryAfter
+        return !entry.succeeded && now.timeIntervalSinceReferenceDate >= entry.retryAfter.timeIntervalSinceReferenceDate
     }
     mutating func record(_ route: Route, fingerprint: String, succeeded: Bool, now: Date = Date()) {
         entries.removeAll { $0.route == route }

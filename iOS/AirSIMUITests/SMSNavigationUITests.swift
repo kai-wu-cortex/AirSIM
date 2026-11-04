@@ -206,3 +206,164 @@ final class SMSNavigationUITests: XCTestCase {
     }
 
 }
+
+final class SettingsJourneyUITests: XCTestCase {
+    @MainActor private func launchSettings() -> XCUIApplication {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launch()
+        XCTAssertTrue(app.buttons["sms-compose"].waitForExistence(timeout: 15))
+        app.buttons["设置"].tap()
+        XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "settings-home"; shot.lifetime = .keepAlways; add(shot)
+        return app
+    }
+
+    @MainActor private func open(_ id: String, in app: XCUIApplication) {
+        let row = app.buttons["settings.link.\(id)"]
+        let form = app.collectionViews.firstMatch
+        for _ in 0..<18 {
+            if row.exists && row.isHittable {
+                // A very large row can be partially behind native glass bars.
+                // Scroll its center into the viewport before resolving the hit point.
+                let frame = form.exists ? form.frame : app.frame
+                var viewport = frame.intersection(app.frame).insetBy(dx: 8, dy: 8)
+                // Duo places system bars on a vertical edge. Only subtract the
+                // edge a bar actually occupies; never treat a sidebar as a header.
+                for bar in [app.navigationBars.firstMatch, app.tabBars.firstMatch] where bar.exists {
+                    let bounds = bar.frame
+                    if bounds.width > bounds.height, bounds.height < frame.height * 0.4 {
+                        if bounds.midY < frame.midY {
+                            let top = max(viewport.minY, bounds.maxY + 8)
+                            viewport = CGRect(x: viewport.minX, y: top, width: viewport.width, height: max(0, viewport.maxY - top))
+                        } else {
+                            viewport.size.height = max(0, min(viewport.maxY, bounds.minY - 8) - viewport.minY)
+                        }
+                    } else if bounds.width < frame.width * 0.3 {
+                        if bounds.midX < frame.midX {
+                            let left = max(viewport.minX, bounds.maxX + 8)
+                            viewport = CGRect(x: left, y: viewport.minY, width: max(0, viewport.maxX - left), height: viewport.height)
+                        } else {
+                            viewport.size.width = max(0, min(viewport.maxX, bounds.minX - 8) - viewport.minX)
+                        }
+                    }
+                }
+                let visible = row.frame.intersection(viewport)
+                if !visible.isNull, viewport.contains(CGPoint(x: row.frame.midX, y: row.frame.midY)) {
+                    // Let XCTest resolve the element's hit point after layout.
+                    // Absolute app coordinates can become stale when Duo swaps
+                    // displays or changes orientation as the keyboard appears.
+                    row.tap()
+                    return
+                }
+            }
+            let scroller = form.exists ? form : app
+            scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.72))
+                .press(forDuration: 0.1, thenDragTo: scroller.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.35)))
+        }
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "unreachable-\(id)"; shot.lifetime = .keepAlways; add(shot)
+        XCTFail("Navigation entry is not reachable: \(id)")
+    }
+
+    @MainActor private func back(_ app: XCUIApplication) {
+        let back = app.buttons["BackButton"]
+        if back.exists { back.tap() }
+        else { app.navigationBars.firstMatch.buttons.firstMatch.tap() }
+    }
+
+    @MainActor func testCategoriesAndManualPairingPreserveNavigation() {
+        let app = launchSettings(); defer { app.terminate() }
+        open("connections", in: app)
+        XCTAssertTrue(app.navigationBars["连接与设备"].waitForExistence(timeout: 3))
+        open("add", in: app)
+        open("pairManual", in: app)
+        XCTAssertTrue(app.textFields["manualPairingHost"].waitForExistence(timeout: 3))
+        let connect = app.buttons["连接并加密配对"]
+        // A short Duo window lazily creates the bottom Form rows after scrolling.
+        for _ in 0..<6 where !connect.exists {
+            let form = app.collectionViews.firstMatch
+            form.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.75))
+                .press(forDuration: 0.1, thenDragTo: form.coordinate(withNormalizedOffset: CGVector(dx: 0.45, dy: 0.35)))
+        }
+        XCTAssertTrue(connect.exists)
+        XCTAssertFalse(connect.isEnabled)
+        back(app)
+        XCTAssertTrue(app.navigationBars["添加设备"].waitForExistence(timeout: 3))
+        back(app); back(app)
+        open("widgets", in: app)
+        open("widgetGuide", in: app)
+        XCTAssertTrue(app.staticTexts["添加小组件"].waitForExistence(timeout: 3))
+        back(app); back(app)
+        open("preferences", in: app)
+        XCTAssertTrue(app.navigationBars["外观与偏好"].waitForExistence(timeout: 3))
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "settings-preferences"; shot.lifetime = .keepAlways; add(shot)
+    }
+
+    @MainActor func testFeedbackDraftSurvivesRangePreviewAndReturn() {
+        let app = launchSettings(); defer { app.terminate() }
+        open("help", in: app); open("feedback", in: app)
+        let text = app.textFields["settings.feedbackDescription"]
+        XCTAssertTrue(text.waitForExistence(timeout: 3))
+        text.tap()
+        if let previous = text.value as? String, previous != text.placeholderValue {
+            text.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count))
+        }
+        text.typeText("settings draft retained")
+        XCTAssertEqual(text.value as? String, "settings draft retained")
+        let done = app.toolbars.buttons["完成"]
+        if done.exists { done.tap() }
+        open("feedbackPreview", in: app)
+        XCTAssertTrue(app.navigationBars["上传内容范围"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["settings draft retained"].waitForExistence(timeout: 3))
+        back(app)
+        XCTAssertEqual(app.textFields["settings.feedbackDescription"].value as? String, "settings draft retained")
+        // This journey deliberately never taps Upload.
+    }
+
+    @MainActor func testBluetoothModeAllowsManualCloudSelfTestWithoutRunningIt() {
+        let app = launchSettings(); defer { app.terminate() }
+        open("help", in: app); open("diagnostics", in: app); open("cloudCheck", in: app)
+        let run = app.buttons["运行云端模式自检"]
+        XCTAssertTrue(run.waitForExistence(timeout: 3))
+        XCTAssertTrue(run.isEnabled)
+        // No live Relay request, call, SMS or feedback upload in this test.
+    }
+}
+
+
+extension SettingsJourneyUITests {
+    @MainActor func testLargeTypeCategoryNavigationAndScreenshots() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launch(); defer { app.terminate() }
+        XCTAssertTrue(app.buttons["sms-compose"].waitForExistence(timeout: 15))
+        app.buttons["设置"].tap()
+        XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
+        for (id, title) in [("connections", "连接与设备"), ("calls", "来电与短信"),
+                            ("widgets", "灵动岛与小组件"), ("preferences", "外观与偏好"),
+                            ("help", "帮助与诊断"), ("about", "关于 AirSIM")] {
+            open(id, in: app)
+            XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 3))
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = "settings-large-\(id)"; shot.lifetime = .keepAlways; add(shot)
+            back(app)
+        }
+    }
+}
+
+
+extension SettingsJourneyUITests {
+    @MainActor func testLandscapeSettingsCategories() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        testLargeTypeCategoryNavigationAndScreenshots()
+    }
+}

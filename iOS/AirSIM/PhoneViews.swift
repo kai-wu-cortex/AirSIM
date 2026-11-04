@@ -875,7 +875,7 @@ struct RecentsView: View {
                         .listStyle(.plain)
                         .scrollContentBackground(.hidden)
                         .environment(\.defaultMinListRowHeight, PhoneListMetrics.rowHeight)
-                        .phoneReportsTabBarCompactState()
+
                     }
                 }
                 .background(PhoneBackdrop())
@@ -1046,6 +1046,7 @@ struct RecentsView: View {
 // MARK: - 短信
 
 struct SMSConversationListState {
+    var searchText = ""
     var showingComposer = false
     var showingClearConfirmation = false
     var editMode: EditMode = .inactive
@@ -1116,6 +1117,8 @@ struct MessagesView: View {
     private var conversations: [(sender: String, messages: [SMSMessage])] {
         Dictionary(grouping: model.messages, by: \.sender)
             .map { ($0.key, $0.value.sorted { $0.timestamp < $1.timestamp }) }
+            .filter { SMSConversationSearch.matches(state.searchText, sender: $0.0,
+                contactName: model.contacts.contact(for: $0.0)?.name, contents: $0.1.map(\.content)) }
             .sorted { ($0.messages.last?.timestamp ?? .distantPast) > ($1.messages.last?.timestamp ?? .distantPast) }
     }
 
@@ -1124,19 +1127,20 @@ struct MessagesView: View {
             // Outside explicit deletion mode, row taps belong to navigation, not selection.
             List(selection: state.editMode.isEditing ? $state.selectedConversations : nil) {
                 if conversations.isEmpty {
-                    EmptyStateView(title: L10n.t("暂无短信"), systemImage: "message")
+                    EmptyStateView(title: state.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? L10n.t("暂无短信") : L10n.t("未找到匹配的短信"), systemImage: "message")
                         .listRowBackground(Color.clear)
                 } else {
                     ForEach(conversations, id: \.sender) { conversation in
                         Group {
                             if state.editMode.isEditing {
-                                MessageConversationRow(sender: conversation.sender, messages: conversation.messages)
+                                MessageConversationRow(sender: conversation.sender, messages: conversation.messages, searchQuery: state.searchText)
                             } else {
                                 Button {
                                     openConversation(conversation.sender)
                                 } label: {
                                     HStack(spacing: 8) {
-                                        MessageConversationRow(sender: conversation.sender, messages: conversation.messages)
+                                        MessageConversationRow(sender: conversation.sender, messages: conversation.messages, searchQuery: state.searchText)
                                         Image(systemName: "chevron.right")
                                             .font(.footnote.weight(.semibold))
                                             .foregroundStyle(.tertiary)
@@ -1166,10 +1170,13 @@ struct MessagesView: View {
                 }
             }
             .listStyle(.plain)
+            .searchable(text: $state.searchText, placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: L10n.t("搜索姓名、号码或短信内容"))
+            .onChange(of: state.searchText) { _ in state.selectedConversations = [] }
             .environment(\.editMode, $state.editMode)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, PhoneListMetrics.rowHeight)
-            .phoneReportsTabBarCompactState()
+
             .background(PhoneBackdrop())
             .task {
                 await model.loadMessagesFromAgent(silently: true)
@@ -1208,6 +1215,11 @@ struct MessagesView: View {
         @EnvironmentObject private var model: AppModel
         let sender: String
         let messages: [SMSMessage]
+        let searchQuery: String
+
+        private var previewMessage: SMSMessage? {
+            messages.last(where: { SMSConversationSearch.contains($0.content, query: searchQuery) }) ?? messages.last
+        }
 
         private var contact: ContactStore.Contact? {
             model.contacts.contact(for: sender)
@@ -1248,14 +1260,14 @@ struct MessagesView: View {
                                 .accessibilityIdentifier("smsConversation.unread.\(sender)")
                         }
                     }
-                    Text(messages.last?.content ?? "")
+                    Text(previewMessage?.content ?? "")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text(messages.last?.timestamp ?? .now, style: .time)
+                Text(previewMessage?.timestamp ?? .now, style: .time)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1906,7 +1918,7 @@ struct ContactsView: View {
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
                     .environment(\.defaultMinListRowHeight, PhoneListMetrics.rowHeight)
-                    .phoneReportsTabBarCompactState()
+
                 }
             }
             .background(PhoneBackdrop())

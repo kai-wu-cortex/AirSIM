@@ -303,7 +303,7 @@ enum ModuleConnectivityPolicy {
         now: Date,
         protectedUntil: Date
     ) -> Bool {
-        consecutiveFailures >= offlineFailureThreshold && now >= protectedUntil
+        consecutiveFailures >= offlineFailureThreshold && now.timeIntervalSinceReferenceDate >= protectedUntil.timeIntervalSinceReferenceDate
     }
 
     static func shouldMarkOffline(
@@ -2416,7 +2416,7 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled, generation == pollingGeneration,
                   callLifecycleSnapshot == callSyncSnapshot, outgoingAttemptID == callSyncAttempt else { return }
             if appIsActive, status.active?.state == "active",
-               Date() >= nextAudioDiagnosticRefresh,
+               Date().timeIntervalSinceReferenceDate >= nextAudioDiagnosticRefresh.timeIntervalSinceReferenceDate,
                let audioConfig = try? await AgentPollingRouteSelector.select(
                    primary: result.api,
                    lockedLocal: currentLocalAPI,
@@ -2729,7 +2729,7 @@ final class AppModel: ObservableObject {
 
     /// 蜂窝状态和版本不必跟随每秒通话轮询；独立刷新避免慢 AT 状态接口拖住来电检测。
     private func scheduleModuleMetadataRefresh(generation: Int, api: AirSIMAPI) {
-        guard moduleMetadataTask == nil, Date() >= nextModuleMetadataRefresh else { return }
+        guard moduleMetadataTask == nil, Date().timeIntervalSinceReferenceDate >= nextModuleMetadataRefresh.timeIntervalSinceReferenceDate else { return }
         nextModuleMetadataRefresh = Date().addingTimeInterval(10)
         moduleMetadataTask = Task { [weak self] in
             await self?.refreshModuleMetadata(generation: generation, api: api)
@@ -3415,7 +3415,7 @@ final class AppModel: ObservableObject {
             var callsByID: [String: CallRecord] = [:]
             for record in callHistory { callsByID[record.id] = record }
             for record in storedCalls {
-                if let existing = callsByID[record.id], existing.updatedAt >= record.updatedAt {
+                if let existing = callsByID[record.id], existing.updatedAt.timeIntervalSinceReferenceDate >= record.updatedAt.timeIntervalSinceReferenceDate {
                     continue
                 }
                 callsByID[record.id] = record
@@ -3442,7 +3442,7 @@ final class AppModel: ObservableObject {
         }
         var byID: [String: CallRecord] = [:]
         for record in callHistory {
-            if let existing = byID[record.id], existing.updatedAt >= record.updatedAt { continue }
+            if let existing = byID[record.id], existing.updatedAt.timeIntervalSinceReferenceDate >= record.updatedAt.timeIntervalSinceReferenceDate { continue }
             byID[record.id] = record
         }
         for record in remote {
@@ -5014,22 +5014,25 @@ extension AppModel {
                          unreadMessages: messages.filter { $0.sourceAgentID == agent.id && unreadMessageIDs.contains($0.id) }.count,
                          unseenMissedCalls: callHistory.filter { $0.sourceAgentID == agent.id && unseenMissedCallIDs.contains($0.id) }.count)
         }
-        let allowedIDs = Set(agents.map(\.id))
-        let calls = callHistory.filter { call in
-            call.endedAt != nil && (call.sourceAgentID == nil || allowedIDs.contains(call.sourceAgentID!))
-        }.sorted { $0.startedAt > $1.startedAt }.prefix(6).map { call in
-            AirSIMWidgetSnapshot.RecentCall(id: call.id, agentID: call.sourceAgentID,
-                maskedNumber: AirSIMWidgetSnapshot.mask(call.number), date: call.startedAt,
-                incoming: call.direction == "incoming", missed: call.missed)
+        let completedCalls = callHistory.filter { $0.endedAt != nil }
+        let calls = devices.flatMap { device in
+            AirSIMWidgetSnapshot.recentRecords(completedCalls, for: device.id,
+                agent: \.sourceAgentID, date: \.startedAt).map { call in
+                AirSIMWidgetSnapshot.RecentCall(id: call.id, agentID: call.sourceAgentID,
+                    maskedNumber: AirSIMWidgetSnapshot.mask(call.number), date: call.startedAt,
+                    incoming: call.direction == "incoming", missed: call.missed,
+                    unseen: unseenMissedCallIDs.contains(call.id))
+            }
         }
-        let recentMessages = messages.filter { message in
-            message.sourceAgentID.map { allowedIDs.contains($0) } ?? false
-        }.sorted { $0.timestamp > $1.timestamp }.prefix(6).map { message in
-            // SMSMessage.id can contain the body and sender for legacy records.
-            // Export the requested bounded preview, never the legacy ID.
-            AirSIMWidgetSnapshot.RecentMessage(agentID: message.sourceAgentID,
-                date: message.timestamp, incoming: !message.isOutgoing,
-                contentPreview: AirSIMWidgetSnapshot.messagePreview(message.content))
+        let recentMessages = devices.flatMap { device in
+            AirSIMWidgetSnapshot.recentRecords(messages, for: device.id,
+                agent: \.sourceAgentID, date: \.timestamp).map { message in
+                // Legacy IDs may contain sender/body; export only the bounded preview.
+                AirSIMWidgetSnapshot.RecentMessage(agentID: message.sourceAgentID,
+                    date: message.timestamp, incoming: !message.isOutgoing,
+                    contentPreview: AirSIMWidgetSnapshot.messagePreview(message.content),
+                    unread: unreadMessageIDs.contains(message.id))
+            }
         }
         let mode = ConnectionModePreference.selected()
         let nextMode = WidgetConnectionModeCycle.next(after: mode, pureLocal: widgetPureLocalEnabled)

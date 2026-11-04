@@ -38,13 +38,23 @@ enum PhoneTab: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .dial: return "circle.grid.3x3"
+        case .dial: return "phone"
         case .recents: return "clock"
-        case .messages: return "message"
-        case .contacts: return "person.crop.circle"
-        case .settings: return "gearshape"
+        case .messages: return "bubble.left.and.bubble.right"
+        case .contacts: return "person.crop.rectangle"
+        case .settings: return "slider.horizontal.3"
         }
     }
+
+    // Reuse immutable symbol images when connection updates invalidate RootView.
+    // Keep titles and native hit targets independent of artwork size.
+    private static let tabImages: [PhoneTab: UIImage] = Dictionary(uniqueKeysWithValues:
+        allCases.map { tab in
+            (tab, UIImage(systemName: tab.icon, withConfiguration:
+                UIImage.SymbolConfiguration(pointSize: 20.57, weight: .regular, scale: .small)) ?? UIImage())
+        })
+
+    var tabImage: UIImage { Self.tabImages[self] ?? UIImage() }
 
     var tabTitle: String {
         switch self {
@@ -85,11 +95,17 @@ struct RootView: View {
                 TabView(selection: selectedTabBinding) {
                     DialPadView()
                         .tag(PhoneTab.dial)
-                        .tabItem { Label(L10n.t(PhoneTab.dial.tabTitle), systemImage: PhoneTab.dial.icon) }
+                        .tabItem { Label { Text(L10n.t(PhoneTab.dial.tabTitle)) } icon: {
+                            Image(uiImage: PhoneTab.dial.tabImage)
+                        }.environment(\.symbolVariants, .none) }
+
 
                     RecentsView(onCall: dial, onMessage: composeMessage)
                         .tag(PhoneTab.recents)
-                        .tabItem { Label(L10n.t(PhoneTab.recents.tabTitle), systemImage: PhoneTab.recents.icon) }
+                        .tabItem { Label { Text(L10n.t(PhoneTab.recents.tabTitle)) } icon: {
+                            Image(uiImage: PhoneTab.recents.tabImage)
+                        }.environment(\.symbolVariants, .none) }
+
                         .badge(AirSIMWidgetSnapshot.badgeText(model.unseenMissedCallIDs.count))
 
                     Group {
@@ -119,16 +135,25 @@ struct RootView: View {
                         }
                     }
                         .tag(PhoneTab.messages)
-                        .tabItem { Label(L10n.t(PhoneTab.messages.tabTitle), systemImage: PhoneTab.messages.icon) }
+                        .tabItem { Label { Text(L10n.t(PhoneTab.messages.tabTitle)) } icon: {
+                            Image(uiImage: PhoneTab.messages.tabImage)
+                        }.environment(\.symbolVariants, .none) }
+
                         .badge(AirSIMWidgetSnapshot.badgeText(model.unreadMessageIDs.count))
 
                     ContactsView(onCall: dial, onMessage: composeMessage)
                         .tag(PhoneTab.contacts)
-                        .tabItem { Label(L10n.t(PhoneTab.contacts.tabTitle), systemImage: PhoneTab.contacts.icon) }
+                        .tabItem { Label { Text(L10n.t(PhoneTab.contacts.tabTitle)) } icon: {
+                            Image(uiImage: PhoneTab.contacts.tabImage)
+                        }.environment(\.symbolVariants, .none) }
+
 
                     AirSIMSettingsView()
                         .tag(PhoneTab.settings)
-                        .tabItem { Label(L10n.t(PhoneTab.settings.tabTitle), systemImage: PhoneTab.settings.icon) }
+                        .tabItem { Label { Text(L10n.t(PhoneTab.settings.tabTitle)) } icon: {
+                            Image(uiImage: PhoneTab.settings.tabImage)
+                        }.environment(\.symbolVariants, .none) }
+
                 }
                 // Keep navigation state, but remove the underlying native tab
                 // chrome from rendering, hit testing and VoiceOver during calls.
@@ -136,7 +161,7 @@ struct RootView: View {
                 .opacity(presentedCall == nil ? 1 : 0)
                 .allowsHitTesting(presentedCall == nil)
                 .accessibilityHidden(presentedCall != nil)
-                .phoneTabBarMinimizeOnScroll()
+                .phoneTabBarAlwaysExpanded()
                 .phoneTabSelectionFeedback(selectedTabRawValue)
                 .tint(.blue)
 
@@ -470,9 +495,9 @@ extension View {
     }
 
     @ViewBuilder
-    func phoneTabBarMinimizeOnScroll() -> some View {
+    func phoneTabBarAlwaysExpanded() -> some View {
         if #available(iOS 26.0, *) {
-            self.tabBarMinimizeBehavior(.onScrollDown)
+            self.tabBarMinimizeBehavior(.never)
         } else {
             self
         }
@@ -489,46 +514,6 @@ extension View {
         } else {
             self
         }
-    }
-}
-
-private struct PhoneTabBarCompactStateActionKey: EnvironmentKey {
-    static let defaultValue: (Bool) -> Void = { _ in }
-}
-
-extension EnvironmentValues {
-    fileprivate var phoneTabBarCompactStateAction: (Bool) -> Void {
-        get { self[PhoneTabBarCompactStateActionKey.self] }
-        set { self[PhoneTabBarCompactStateActionKey.self] = newValue }
-    }
-}
-
-private struct PhoneTabBarCompactScrollReporter: ViewModifier {
-    @Environment(\.phoneTabBarCompactStateAction) private var reportCompactState
-
-    func body(content: Content) -> some View {
-        if #available(iOS 18.0, *) {
-            content.onScrollGeometryChange(for: CGFloat.self) { geometry in
-                max(0, geometry.contentOffset.y + geometry.contentInsets.top)
-            } action: { oldOffset, newOffset in
-                let delta = newOffset - oldOffset
-                if newOffset < 2 {
-                    reportCompactState(false)
-                } else if delta > 2 {
-                    reportCompactState(true)
-                } else if delta < -2 {
-                    reportCompactState(false)
-                }
-            }
-        } else {
-            content
-        }
-    }
-}
-
-extension View {
-    func phoneReportsTabBarCompactState() -> some View {
-        modifier(PhoneTabBarCompactScrollReporter())
     }
 }
 
