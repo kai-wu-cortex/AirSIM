@@ -1,6 +1,7 @@
 import ActivityKit
 import AppIntents
 import Foundation
+import SwiftUI
 
 /// 主 App 与灵动岛扩展共享的活动数据，字段必须保持精简且可编码。
 struct AirSIMCallActivityAttributes: ActivityAttributes {
@@ -481,3 +482,118 @@ enum LiveActivityNumberFormatter {
     }
 }
 
+
+// Presentation only: these cases are never encoded into an ActivityKit/APNs payload.
+// “Dual local” means both local links are available, not simultaneous audio routing.
+enum LiveActivityConnectionMark: CaseIterable {
+    case vowlan, bluetooth, dualLocal, cloud, offline, unknown
+
+    var title: String {
+        switch self {
+        case .vowlan: return "VoWLAN"
+        case .bluetooth: return "VoBLE"
+        case .dualLocal: return "VoWLAN + VoBLE"
+        case .cloud: return "云端"
+        case .offline: return "离线"
+        case .unknown: return "连接方式未知"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .vowlan, .dualLocal: return .green
+        case .bluetooth: return Color(red: 0.30, green: 0.66, blue: 1)
+        case .cloud: return .cyan
+        case .offline, .unknown: return .gray
+        }
+    }
+
+    static func resolve(_ state: AirSIMCallActivityAttributes.ContentState) -> Self {
+        if state.phase == .offline { return .offline }
+        if state.phase == .cloudStandby || state.transport == .cloud { return .cloud }
+        if state.vowlanOnline == true && state.bluetoothOnline == true { return .dualLocal }
+        // The selected transport remains authoritative; optional flags may be absent
+        // in older pushes. Never infer a selected cloud route from availability alone.
+        switch state.transport {
+        case .vowlan: return .vowlan
+        case .bluetooth: return .bluetooth
+        case .cloud: return .cloud
+        case nil:
+            if state.vowlanOnline == true { return .vowlan }
+            if state.bluetoothOnline == true { return .bluetooth }
+            if state.cloudOnline == true { return .cloud }
+            return .unknown
+        }
+    }
+
+    static func resolve(_ agent: AirSIMCallActivityAttributes.ContentState.AgentSummary) -> Self {
+        if agent.vowlanOnline && agent.bluetoothOnline { return .dualLocal }
+        if agent.vowlanOnline { return .vowlan }
+        if agent.bluetoothOnline { return .bluetooth }
+        if agent.cloudOnline { return .cloud }
+        return .offline
+    }
+}
+
+/// Shared by compact/minimal islands, the expanded badge and the device list.
+/// Fixed optical bounds avoid layout jumps; shape and accessibility labels also
+/// distinguish modes when color is unavailable. No animation or extra glass layer.
+struct LiveActivityConnectionIcon: View {
+    let mark: LiveActivityConnectionMark
+    var size: CGFloat = 18
+
+    var body: some View {
+        Group {
+            switch mark {
+            case .vowlan:
+                symbol("wifi")
+            case .bluetooth:
+                bluetooth(height: size)
+            case .dualLocal:
+                HStack(spacing: size * 0.13) {
+                    Image(systemName: "wifi")
+                        .font(.system(size: size * 0.72, weight: .semibold))
+                    bluetooth(height: size * 0.88)
+                }
+            case .cloud:
+                symbol("cloud")
+            case .offline:
+                symbol("wifi.slash")
+            case .unknown:
+                symbol("antenna.radiowaves.left.and.right")
+            }
+        }
+        .foregroundStyle(mark.color)
+        .frame(width: size * (mark == .dualLocal ? 1.55 : 1.25), height: size * 1.15)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(mark == .dualLocal ? "VoWLAN 与蓝牙均在线" : mark.title)
+    }
+
+    private func symbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: size, weight: .semibold))
+    }
+
+    private func bluetooth(height: CGFloat) -> some View {
+        BluetoothConnectionShape()
+            .stroke(style: StrokeStyle(lineWidth: max(1, height * 0.115), lineCap: .round, lineJoin: .round))
+            .frame(width: height * 0.52, height: height)
+    }
+}
+
+/// Bluetooth rune, drawn rather than using an unrelated radio/speaker SF Symbol.
+private struct BluetoothConnectionShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+            CGPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
+        }
+        path.move(to: point(0.08, 0.25))
+        path.addLine(to: point(0.92, 0.75))
+        path.addLine(to: point(0.44, 0.98))
+        path.addLine(to: point(0.44, 0.02))
+        path.addLine(to: point(0.92, 0.25))
+        path.addLine(to: point(0.08, 0.75))
+        return path
+    }
+}

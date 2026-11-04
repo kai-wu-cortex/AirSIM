@@ -13,6 +13,9 @@ enum AppReleaseNotes {
     // Bundled: showing installed-version notes never needs GitHub, Relay or pairing.
     // Keep this summary in sync with the candidate's source and docs when publishing.
     static let items = [
+        "灵动岛用 Wi-Fi、蓝牙、双通道组合和云朵区分连接状态；活动过期不会直接标记设备离线。",
+        "设置按连接、来电短信、灵动岛小组件等分类，减少重复入口；底部标签保持展开。",
+        "短信支持搜索联系人、号码和消息内容；大尺寸小组件最多展示 5 条最近通话和短信。",
         "支持连接运行兼容 AirSIM 设备端的 U30Air，在 iPhone 上使用通话与短信功能。",
         "桌面与锁屏小组件展示设备状态；支持的桌面尺寸提供设备与连接模式切换、最近通话和短信内容摘要。",
         "小组件支持后台切换，显示设备上报的电量；刷新由系统调度，无有效采样时显示未知。",
@@ -96,6 +99,24 @@ private struct NewFeaturePage: Identifiable {
 private enum NewFeatureCatalog {
     static let pages: [NewFeaturePage] = [
         NewFeaturePage(
+            id: 4,
+            kicker: "全新灵动岛图标",
+            title: "连接在哪，\n一眼就知道",
+            body: "Wi-Fi、蓝牙和云端各有专属图标；两条本地链路均在线时显示组合图标。明确离线才显示断连，内容过期不会直接判定设备离线。",
+            symbol: "wave.3.right",
+            accent: .green,
+            demo: .connectionModes
+        ),
+        NewFeaturePage(
+            id: 5,
+            kicker: "设置更清晰 · 短信可搜索",
+            title: "少翻几层，\n更快找到想要的",
+            body: "设置按用途分类，减少重复入口。短信可按联系人、号码和内容搜索；底部标签保持展开，常用页面随时可达。",
+            symbol: "slider.horizontal.3",
+            accent: .blue,
+            demo: .settingsOverview
+        ),
+        NewFeaturePage(
             id: 0,
             kicker: "U30Air 支持",
             title: "连接 U30Air，\n电话短信随身用",
@@ -108,7 +129,7 @@ private enum NewFeatureCatalog {
             id: 1,
             kicker: "桌面与锁屏小组件",
             title: "不用打开 App，\n常用信息一眼可见",
-            body: "查看设备状态、电量、最近通话与短信内容；支持的桌面尺寸可直接切换设备和连接模式。刷新由系统调度，电量以设备有效上报为准。",
+            body: "查看设备状态和电量，大尺寸最多展示 5 条最近通话与短信内容；支持的桌面尺寸可切换设备和连接模式。刷新由系统调度。",
             symbol: "rectangle.grid.2x2.fill",
             accent: .green,
             demo: .widgetSummary
@@ -260,10 +281,47 @@ private struct NewFeaturePageView: View {
 
 
 private enum NewFeatureDemo: String {
-    case u30Air, widgetSummary, publicTLS, unreadBadges
+    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview
 }
 
-private struct FeatureDemoView: UIViewRepresentable {
+private struct FeatureDemoView: View {
+    let demo: NewFeatureDemo
+    let isActive: Bool
+
+    var body: some View {
+        switch demo {
+        case .connectionModes:
+            VStack(spacing: 24) {
+                HStack(spacing: 22) {
+                    ForEach([LiveActivityConnectionMark.vowlan, .bluetooth, .dualLocal, .cloud], id: \.self) { mark in
+                        VStack(spacing: 12) {
+                            LiveActivityConnectionIcon(mark: mark, size: 25)
+                            Text(mark == .dualLocal ? "双通道" : mark.title)
+                                .font(.caption2.weight(.semibold)).foregroundStyle(.white.opacity(0.8))
+                        }
+                    }
+                }
+                .padding(24).background(.black, in: Capsule())
+                Text("连接状态示意").font(.caption).foregroundStyle(.secondary)
+            }
+        case .settingsOverview:
+            VStack(alignment: .leading, spacing: 16) {
+                Label("搜索联系人、号码或短信内容", systemImage: "magnifyingglass")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Divider().overlay(.white.opacity(0.15))
+                Label("连接与设备", systemImage: "antenna.radiowaves.left.and.right")
+                Label("来电与短信", systemImage: "phone")
+                Label("灵动岛与小组件", systemImage: "rectangle.on.rectangle")
+            }
+            .font(.subheadline.weight(.medium)).foregroundStyle(.white)
+            .padding(24).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 24))
+        default:
+            WebFeatureDemoView(demo: demo, isActive: isActive)
+        }
+    }
+}
+
+private struct WebFeatureDemoView: UIViewRepresentable {
     let demo: NewFeatureDemo
     let isActive: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -309,6 +367,7 @@ private enum FeatureDemoHTML {
         case .widgetSummary: illustration = widgetSummary
         case .publicTLS: illustration = publicTLS
         case .unreadBadges: illustration = unreadBadges
+        case .connectionModes, .settingsOverview: illustration = "" // Rendered natively above.
         }
         return """
         <!doctype html><html><head>

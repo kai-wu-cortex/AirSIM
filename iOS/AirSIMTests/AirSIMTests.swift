@@ -5473,3 +5473,78 @@ private actor MissingOptionalAPIBoundary: AirSIMHTTPTransport {
         return WiredHTTPResponse(statusCode: 404, body: Data("{}".utf8))
     }
 }
+
+final class LiveActivityConnectionMarkTests: XCTestCase {
+    private typealias State = AirSIMCallActivityAttributes.ContentState
+
+    func testOfflineOverridesStaleOnlineFlagsAndTransport() {
+        let state = State(callID: "", number: "", displayName: "", phase: .offline,
+            startedAt: .distantPast, transport: .vowlan, vowlanOnline: true, bluetoothOnline: true)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(state), .offline)
+    }
+
+    func testCloudRouteIsNotReplacedByAvailableLocalLinks() {
+        for phase in [State.Phase.standby, .cloudStandby] {
+            let state = State(callID: "", number: "", displayName: "", phase: phase,
+                startedAt: .distantPast, transport: .cloud, vowlanOnline: true, bluetoothOnline: true)
+            XCTAssertEqual(LiveActivityConnectionMark.resolve(state), .cloud)
+        }
+    }
+
+    func testDualMarkRequiresBothLocalLinksAndStalenessDoesNotMeanOffline() {
+        let dual = State(callID: "", number: "", displayName: "", phase: .standby,
+            startedAt: .distantPast, transport: .vowlan, vowlanOnline: true, bluetoothOnline: true)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(dual.liveActivityDisplayState(isStale: true)), .dualLocal)
+        let single = State(callID: "", number: "", displayName: "", phase: .standby,
+            startedAt: .distantPast, transport: .vowlan, vowlanOnline: true, bluetoothOnline: false)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(single), .vowlan)
+    }
+
+    func testLegacyPayloadWithoutAvailabilityStillUsesTransport() throws {
+        let state = State(callID: "", number: "", displayName: "", phase: .standby,
+            startedAt: .distantPast, transport: .bluetooth)
+        let decoded = try JSONDecoder().decode(State.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(decoded), .bluetooth)
+        let unknown = State(callID: "", number: "", displayName: "", phase: .standby, startedAt: .distantPast)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(unknown), .unknown)
+    }
+
+    func testDeviceListUsesEachDevicesOwnAvailability() {
+        let dual = State.AgentSummary(id: "a", name: "A", phoneNumber: nil, agentKind: nil,
+            vowlanOnline: true, bluetoothOnline: true, cloudOnline: true, isCurrent: false)
+        let offline = State.AgentSummary(id: "b", name: "B", phoneNumber: nil, agentKind: nil,
+            vowlanOnline: false, bluetoothOnline: false, cloudOnline: false, isCurrent: true)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(dual), .dualLocal)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(offline), .offline)
+    }
+
+    @MainActor
+    func testRenderConnectionIconsAtIslandAndBadgeSizes() throws {
+        let view = VStack(alignment: .leading, spacing: 24) {
+            Text("AirSIM · 灵动岛连接图标").font(.title2.bold()).foregroundStyle(.white)
+            Text("设备标签 / 最小态 / 紧凑态 / 展开态").font(.caption).foregroundStyle(.gray)
+            ForEach(Array(LiveActivityConnectionMark.allCases.enumerated()), id: \.offset) { _, mark in
+                HStack {
+                    Text(mark.title).font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white).frame(width: 155, alignment: .leading)
+                    ForEach([10.0, 14.0, 17.0, 24.0], id: \.self) { size in
+                        LiveActivityConnectionIcon(mark: mark, size: size)
+                            .frame(width: 50, height: 40)
+                    }
+                }
+            }
+        }
+        .padding(28).background(Color.black)
+        .environment(\.colorScheme, .dark)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 3
+        let image = try XCTUnwrap(renderer.uiImage)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AirSIMIslandRenders")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try XCTUnwrap(image.pngData()).write(to: folder.appendingPathComponent("connection-icons.png"))
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Connection icons at production sizes"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}
