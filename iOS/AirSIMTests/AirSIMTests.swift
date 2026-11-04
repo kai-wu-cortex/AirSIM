@@ -5250,3 +5250,122 @@ private actor OperationQueryTransport: AirSIMHTTPTransport {
         return .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
     }
 }
+
+
+final class MinimalSMSAndHangupTests: XCTestCase {
+    func testMissingOptionalAPIsAreNotRetriedOnEveryPoll() async throws {
+        let transport = MissingOptionalAPIBoundary()
+        let api = AirSIMAPI(route: .vowlan(endpoint: try VoWLANEndpoint(host: "10.0.0.19", controlPort: 15992, pcmPort: 15993),
+            credential: try VoWLANCredential(secret: Data(repeating: 3, count: 32))), transport: transport)
+        for _ in 0..<3 {
+            try await api.acknowledgeCallHistory(ids: ["fixture"])
+            do { _ = try await api.setCallRecording(true); XCTFail("unsupported recording succeeded") }
+            catch APIError.unsupportedFeature { }
+        }
+        let paths = await transport.paths
+        XCTAssertEqual(paths.filter { $0.hasSuffix("history/ack") }.count, 1)
+        XCTAssertEqual(paths.filter { $0.hasSuffix("audio/record") }.count, 1)
+    }
+
+
+    func testSMSLineSelectionIsPerConversationAndFallsBackWhenSIMRemoved() throws {
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let slots = try JSONDecoder().decode([AndroidSIMSlot].self, from: Data("""
+        [{"id":"one","label":"SIM 1"},{"id":"two","label":"SIM 2","is_default_sms":true}]
+        """.utf8))
+        SMSSIMPreference.select("one", agentID: "A", recipient: "202-555-0100", defaults: defaults)
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550100", defaults: defaults), "one")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550101", defaults: defaults), "two")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550101", suggestedID: "one", defaults: defaults), "one")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550100", suggestedID: "two", defaults: defaults), "one")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "B", slots: slots, recipient: "2025550100", defaults: defaults), "two")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: [slots[1]], recipient: "2025550100", defaults: defaults), "two")
+        XCTAssertFalse(String(describing: defaults.dictionaryRepresentation()).contains("2025550100"))
+        SMSSIMPreference.forget(agentID: "A", defaults: defaults)
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550100", defaults: defaults), "two")
+    }
+
+    func testSentSMSRetainsSelectedLineAndDeviceAfterPersistence() throws {
+        let sent = try XCTUnwrap(SMSHistoryPolicy.appendingSentMessage(
+            recipient: "10086", content: "synthetic", at: Date(), to: [], limit: 20,
+            sourceAgentID: "android-A", simSlot: "SIM 2").first)
+        let restored = try JSONDecoder().decode(SMSMessage.self, from: JSONEncoder().encode(sent))
+        XCTAssertEqual(restored.simDeliveryLabel, "通过 SIM 2")
+        XCTAssertEqual(restored.sourceAgentID, "android-A")
+    }
+
+    private func api(_ boundary: HangupHTTPBoundary) throws -> AirSIMAPI {
+        AirSIMAPI(route: .vowlan(endpoint: try VoWLANEndpoint(host: "10.0.0.7", controlPort: 7592, pcmPort: 7593),
+            credential: try VoWLANCredential(secret: Data(repeating: 7, count: 32))), transport: boundary)
+    }
+
+    func testLostHangupResponseIsConfirmedWithoutDuplicateCommand() async throws {
+        let boundary = HangupHTTPBoundary(scenario: .ended)
+        try await api(boundary).hangupCall(callID: "original")
+        let sent = await boundary.targets
+        XCTAssertEqual(sent, ["original"])
+    }
+
+    func testTransientHangupFailureRetriesOnlyCapturedIdentity() async throws {
+        let boundary = HangupHTTPBoundary(scenario: .retry)
+        try await api(boundary).hangupCall()
+        let sent = await boundary.targets
+        XCTAssertEqual(sent, ["original", "original"])
+    }
+
+    func testHangupNeverRetriesOnReplacementOrUncertainStatus() async throws {
+        for scenario in [HangupHTTPBoundary.Scenario.replacement, .pollError, .unauthorized] {
+            let boundary = HangupHTTPBoundary(scenario: scenario)
+            do { try await api(boundary).hangupCall(callID: "original"); XCTFail("unconfirmed end was accepted") } catch {}
+            let sent = await boundary.targets
+            XCTAssertEqual(sent, ["original"])
+        }
+    }
+
+    func testSMSPushRetainsReceivingSIMAndLegacyStaysUnknown() throws {
+        for slot in ["SIM 1", "SIM 2"] {
+            let incoming = try IncomingRemoteSMS(userInfo: ["event": "incoming_sms", "delivery_id": "fixture",
+                "sender": "fixture", "content": "synthetic", "timestamp": "2026-11-03T09:00:00Z", "sim_slot": slot])
+            XCTAssertEqual(incoming.message.simSlot, slot)
+            XCTAssertEqual(incoming.message.simDeliveryLabel, "接收于 \(slot)")
+            let data = try JSONEncoder().encode(incoming.message)
+            XCTAssertEqual(try JSONDecoder().decode(SMSMessage.self, from: data).simSlot, slot)
+        }
+        let legacy = try IncomingRemoteSMS(userInfo: ["event": "incoming_sms", "delivery_id": "legacy",
+            "sender": "fixture", "content": "synthetic", "timestamp": "2026-11-03T09:00:00Z"])
+        XCTAssertNil(legacy.message.simSlot)
+        XCTAssertEqual(legacy.message.simDeliveryLabel, "接收于 SIM 未知")
+    }
+}
+
+private actor HangupHTTPBoundary: AirSIMHTTPTransport {
+    enum Scenario { case ended, retry, replacement, pollError, unauthorized }
+    let scenario: Scenario
+    private(set) var targets: [String] = []
+    init(scenario: Scenario) { self.scenario = scenario }
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        if request.url?.path == "/api/calls/hangup" {
+            let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String]
+            targets.append(body?["call_id"] ?? "UNSCOPED")
+            let code = scenario == .unauthorized ? 401 : (scenario == .retry && targets.count == 2 ? 200 : 502)
+            return WiredHTTPResponse(statusCode: code, body: Data("{}".utf8))
+        }
+        let id: String? = targets.isEmpty || scenario != .ended ? (scenario == .replacement ? "replacement" : "original") : nil
+        let call = id.map { CallRecord(id: $0, index: 1, direction: "incoming", state: "active", number: nil,
+            startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false) }
+        let status = CallStatus(active: call, history: [], polling: true, eventDriven: true, pollIntervalSeconds: 2,
+            lastPollError: scenario == .pollError ? "stale" : "", revision: 1)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        return WiredHTTPResponse(statusCode: 200, body: try encoder.encode(status))
+    }
+}
+
+private actor MissingOptionalAPIBoundary: AirSIMHTTPTransport {
+    private(set) var paths: [String] = []
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        paths.append(request.url!.path)
+        return WiredHTTPResponse(statusCode: 404, body: Data("{}".utf8))
+    }
+}
