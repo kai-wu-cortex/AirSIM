@@ -244,7 +244,9 @@ public final class CallRepository {
             int expected = "answer".equals(command.action) ? Call.STATE_ACTIVE : Call.STATE_DISCONNECTED;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (System.nanoTime() < deadline) {
-                if (call.getState() == expected || (expected == Call.STATE_DISCONNECTED && !IDS.containsKey(call))) {
+                if (call.getState() == expected
+                        || (expected == Call.STATE_ACTIVE && call.getState() == Call.STATE_HOLDING)
+                        || (expected == Call.STATE_DISCONNECTED && !IDS.containsKey(call))) {
                     return ActionResult.success();
                 }
                 Thread.sleep(50);

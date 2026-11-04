@@ -157,6 +157,12 @@ final class StandaloneAgentGateway {
             case "/api/push/mode" -> ok(store.setCloudEnabled(
                     input.optBoolean("enabled", false)).toString());
             case "/api/calls/resolve" -> {
+                // This new endpoint requires the complete push identity. Do not
+                // inherit the legacy cloud-command default generation of 1.
+                long requestedGeneration;
+                try { requestedGeneration = Long.parseLong(input.optString("generation", "")); }
+                catch (NumberFormatException invalid) { yield error(409, "cloud_call_identity_mismatch"); }
+                if (requestedGeneration <= 0) yield error(409, "cloud_call_identity_mismatch");
                 String resolved = StandaloneCloudMediaManager.get(context).androidCallIDFor(input);
                 synchronized (callsLock) {
                     if (resolved.isEmpty() || activeCall == null

@@ -1231,6 +1231,7 @@ final class AppModel: ObservableObject {
         }
         // Block before awaiting unpair, so delayed discovery/status callbacks cannot restore it.
         PairedAndroidDeviceStore.forget(agentID)
+        SMSSIMPreference.forget(agentID: agentID)
         if CloudAgentTargetStore.last() == agentID {
             CloudAgentTargetStore.forget()
         }

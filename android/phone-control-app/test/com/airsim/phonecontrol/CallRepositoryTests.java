@@ -10,6 +10,7 @@ public final class CallRepositoryTests {
         lateDialCompletionAfterProxyLossEndsOnlyThatCall();
         lossOfOldDirectSessionCannotEndAnotherCall();
         answerNeverTargetsAnActiveCallWithoutRinging();
+        repeatedAnswerPreservesActiveAndHeldCalls();
         cloudRejectTargetsOnlyItsAuthenticatedCall();
         cloudCallEventsDriveOnlyTheirOwnCall();
         localRejectUsesPublishedCallIdentity();
@@ -107,6 +108,24 @@ public final class CallRepositoryTests {
         } finally {
             CallRepository.remove(ringing);
             CallRepository.remove(active);
+        }
+    }
+
+    private static void repeatedAnswerPreservesActiveAndHeldCalls() {
+        for (int state : new int[] { Call.STATE_ACTIVE, Call.STATE_HOLDING }) {
+            Call call = new Call(state) {
+                @Override public void answer(int videoState) {
+                    throw new AssertionError("duplicate answer must not invoke Telecom again");
+                }
+            };
+            String id = CallRepository.add(call);
+            try {
+                assertEquals(id, CallRepository.idForPublishedAction("answer", "published", "published", id));
+                CallRepository.ActionResult result = CallRepository.execute(
+                        null, new AgentCommand("retry-answer", "answer", id, ""));
+                assertTrue(result.success);
+                assertEquals(Integer.toString(state), Integer.toString(call.getState()));
+            } finally { CallRepository.remove(call); }
         }
     }
 

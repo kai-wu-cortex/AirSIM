@@ -7,6 +7,7 @@ import java.lang.reflect.*;
 public final class CloudCallManagerTests {
     public static void main(String[] args) throws Exception {
         RelayEgressGate.shared.enableAfterRestore();
+        localResolveRequiresCompleteIdentityAndCurrentPublishedCall();
         endedBeforeEventDrainStillReleasesOutgoing();
         callCanCompleteBeforeSessionCreation();
         lateOutgoingCannotBindUnownedSession("ended");
@@ -20,6 +21,47 @@ public final class CloudCallManagerTests {
         media401RetriesThenStopsWithoutReplacingLiveSlot();
         successfulHandshakeResetsMedia401Window();
         System.out.println("CloudCallManagerTests passed");
+    }
+
+    private static void localResolveRequiresCompleteIdentityAndCurrentPublishedCall() throws Exception {
+        var instance = StandaloneCloudMediaManager.class.getDeclaredField("instance");
+        instance.setAccessible(true);
+        Object previous = instance.get(null);
+        try (var f = new Fixture("telecom-owner")) {
+            instance.set(null, f.manager);
+            var constructor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
+            constructor.setAccessible(true);
+            var gateway = constructor.newInstance(new android.content.Context());
+            var published = new JSONObject().put("id", "local-owner").put("android_id", "telecom-owner")
+                    .put("state", "incoming");
+            set(gateway, "activeCall", published);
+            var identity = new JSONObject().put("call_id", "new-cloud-call")
+                    .put("call_uuid", "11111111-1111-4111-8111-111111111111").put("generation", "1");
+            var response = gateway.forward("POST", "/api/calls/resolve", identity.toString());
+            check(response.status() == 200 && "local-owner".equals(new JSONObject(response.payload())
+                    .getJSONObject("active").getString("id")), "resolve must return the owned local identity");
+            for (String key : new String[] { "call_id", "call_uuid", "generation" }) {
+                var incomplete = new JSONObject(identity.toString()); incomplete.remove(key);
+                check(gateway.forward("POST", "/api/calls/resolve", incomplete.toString()).status() == 409,
+                        "missing identity field accepted: " + key);
+            }
+            for (String key : new String[] { "call_id", "call_uuid", "generation" }) {
+                var stale = new JSONObject(identity.toString()); stale.put(key, "2");
+                check(gateway.forward("POST", "/api/calls/resolve", stale.toString()).status() == 409,
+                        "incorrect identity field accepted: " + key);
+            }
+            for (Object generation : new Object[] { JSONObject.NULL, true, 1.5, "bad", "9223372036854775808", "0", "-1" }) {
+                var invalid = new JSONObject(identity.toString()); invalid.put("generation", generation);
+                check(gateway.forward("POST", "/api/calls/resolve", invalid.toString()).status() == 409,
+                        "invalid generation accepted: " + generation);
+            }
+            published.put("android_id", "replacement-call");
+            check(gateway.forward("POST", "/api/calls/resolve", identity.toString()).status() == 409,
+                    "old mapping resolved replacement call");
+            set(gateway, "activeCall", null);
+            check(gateway.forward("POST", "/api/calls/resolve", identity.toString()).status() == 409,
+                    "ended mapping still resolved");
+        } finally { instance.set(null, previous); }
     }
 
     private static void oldMediaCannotRestartAfterPureLocalExit() throws Exception {
