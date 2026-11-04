@@ -286,6 +286,16 @@ final class CallKitController: NSObject {
         // Watch may own the shared route without an iPhone CallKit UUID.
         // Native presentation state alone is therefore not an admission gate.
         let model = handler as? AppModel
+        if currentUUID != nil,
+           ((currentUUID == call.uuid || (call.agentID != nil && currentIncomingPush?.agentID == call.agentID))
+                && currentIncomingPush?.callID == call.callID
+                || model?.ownsSystemPresentation(for: call) == true) {
+            // This real call is already reported. Reporting and then ending the
+            // duplicate UUID would otherwise end the active CallKit surface.
+            PushDiagnostics.record("PushKit 复用已有通话会话", fields: ["call_uuid": currentUUID!.uuidString])
+            completion(nil)
+            return
+        }
         let localOwnerBusy = model?.ownsLocalCallPresentation == true
             || model?.cloudCallOwnsPrimaryPresentation == true
             || model?.deviceCallContext.admissionReservation != nil
@@ -646,6 +656,13 @@ final class CallKitController: NSObject {
                 guard currentUUID == action.callUUID else { return }
             } catch {
                 guard currentUUID == action.callUUID else { return }
+                PushDiagnostics.record("CallKit 接听事务失败", error: error, fields: [
+                    "finish_source": "answer_backend_error", "failure_reason": String(describing: type(of: error)),
+                    "call_id": currentBackendID ?? "none", "call_uuid": action.callUUID.uuidString,
+                    "device_id": currentIncomingPush?.agentID ?? "none",
+                    "generation": String(currentIncomingPush?.generation ?? 0),
+                    "answer_source": origin == .system ? "callkit" : "app",
+                    "previous_state": currentState ?? "none", "next_state": "failed"])
                 finishCurrentCall(previous: nil, reason: .failed)
                 handler.callKitDidFail(error.localizedDescription)
             }

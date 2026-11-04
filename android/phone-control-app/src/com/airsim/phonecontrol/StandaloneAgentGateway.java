@@ -156,6 +156,15 @@ final class StandaloneAgentGateway {
             case "/api/push/register" -> ok(registerPairing(input.toString()));
             case "/api/push/mode" -> ok(store.setCloudEnabled(
                     input.optBoolean("enabled", false)).toString());
+            case "/api/calls/resolve" -> {
+                String resolved = StandaloneCloudMediaManager.get(context).androidCallIDFor(input);
+                synchronized (callsLock) {
+                    if (resolved.isEmpty() || activeCall == null
+                            || !resolved.equals(activeCall.optString("android_id")))
+                        yield error(409, "cloud_call_identity_mismatch");
+                    yield ok(callSnapshot().toString());
+                }
+            }
             case "/api/calls/dial" -> command("dial", "", input.optString("number", ""), "",
                     input.optString("sim_account", ""));
             case "/api/calls/answer" -> command("answer", localCallTarget("answer", input), "", "");

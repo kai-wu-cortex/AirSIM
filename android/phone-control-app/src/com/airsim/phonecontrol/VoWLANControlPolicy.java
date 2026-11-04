@@ -8,8 +8,8 @@ public final class VoWLANControlPolicy {
             "/api/calls/status", "/api/calls/events", "/api/calls/audio/host/config",
             "/api/push/status", "/api/sms", "/api/sms/status", "/api/feedback", "/api/local-mode");
     private static final Set<String> POST_ROUTES = Set.of(
-            "/api/calls/dial", "/api/calls/answer", "/api/calls/reject",
-            "/api/calls/hangup", "/api/calls/dtmf", "/api/calls/audio/mute",
+            "/api/calls/resolve", "/api/calls/dial", "/api/calls/answer", "/api/calls/reject",
+            "/api/calls/hangup", "/api/calls/history/ack", "/api/calls/dtmf", "/api/calls/audio/mute",
             "/api/calls/audio/host/warmup", "/api/calls/audio/host/register", "/api/push/register", "/api/push/mode",
 			"/api/sms/send", "/api/sms/ack", "/api/sms/refresh", "/api/local-mode");
 

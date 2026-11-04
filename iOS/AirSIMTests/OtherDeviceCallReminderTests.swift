@@ -18,7 +18,24 @@ final class FixtureToneOutput: CallToneOutput {
 
 @MainActor
 final class OtherDeviceCallReminderTests: XCTestCase {
-    func testCallWaitingOnSameAndroidIsNotAnotherDevice() {
+
+    func testRepeatedPushDoesNotReportOrEndCurrentSystemCall() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        defer { controller.setEnabled(false) }
+        let call = IncomingVoIPCall(bluetoothCallID: "same-real-call", uuid: UUID(), generation: 1, number: nil, agentID: "A")
+        let reported = expectation(description: "reported")
+        controller.reportIncomingPush(call, systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        var reports = 0, ends = 0
+        controller.reportRequiredVoIPPush(call, systemReport: { _, _, done in reports += 1; done(nil) },
+            systemEnd: { _ in ends += 1 }) { error in XCTAssertNil(error) }
+        XCTAssertEqual(reports, 0)
+        XCTAssertEqual(ends, 0)
+        XCTAssertEqual(controller.currentSystemCallUUID, call.uuid)
+    }
+
+    func testDistinctCallWaitingOnSameAndroidRemainsAvailable() {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.bluetooth)
         defer { ConnectionModePreference.set(old) }
         let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
@@ -29,7 +46,7 @@ final class OtherDeviceCallReminderTests: XCTestCase {
             _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: id, state: .ringing,
                 transport: .bluetooth, transportEpoch: 1))
         }
-        XCTAssertTrue(model.otherDeviceCallReminders.isEmpty)
+        XCTAssertEqual(model.otherDeviceCallReminders.count, 1)
     }
     func testSystemAnswerIsOwnedBeforeBackendAcknowledgesAndSurvivesLateRinging() async throws {
         let controller = CallKitController(observesSystemCallbacks: false)
@@ -67,7 +84,6 @@ final class OtherDeviceCallReminderTests: XCTestCase {
         controller.reportIncomingPush(next, systemReport: { _, _, done in done(nil) }) { _ in }
         XCTAssertFalse(controller.currentCallIsAnswered, "The next call must not inherit the previous answer")
     }
-
 
 
     func testRealCloudPushCannotBecomePrimaryWhenOwnedWatchHasNoPhoneUUID() async throws {
@@ -182,8 +198,10 @@ final class OtherDeviceCallReminderTests: XCTestCase {
         XCTAssertNil(model.incomingNotifier.currentCallID)
     }
     func testLocalDualPairingDefaultsToNoCloudConfiguration() {
-        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.localDual)
-        defer { ConnectionModePreference.set(old) }
+        let old = ConnectionModePreference.selected()
+        let signaling = CloudSignalingPreference.isEnabled()
+        ConnectionModePreference.set(.localDual); CloudSignalingPreference.set(false)
+        defer { ConnectionModePreference.set(old); CloudSignalingPreference.set(signaling) }
         XCTAssertTrue(SamsungPairingView.defaultLocalPairingOnly)
     }
     func testLegacySelectedWLANLossCannotEndAnOwnedOtherDeviceCall() async throws {

@@ -171,7 +171,8 @@ public final class CallRepository {
         if (call == null) return "";
         int state = call.getState();
         if (state == Call.STATE_DISCONNECTED || state == Call.STATE_DISCONNECTING
-                || ("answer".equals(action) && state != Call.STATE_RINGING)) return "";
+                || ("answer".equals(action) && state != Call.STATE_RINGING
+                    && state != Call.STATE_ACTIVE && state != Call.STATE_HOLDING)) return "";
         return androidID;
     }
 
@@ -202,7 +203,14 @@ public final class CallRepository {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 switch (command.action) {
-                    case "answer" -> call.answer(VideoProfile.STATE_AUDIO_ONLY);
+                    case "answer" -> {
+                        // A retry for this exact Telecom call must not re-answer or
+                        // disturb the established audio route.
+                        int state = call.getState();
+                        if (state == Call.STATE_RINGING) call.answer(VideoProfile.STATE_AUDIO_ONLY);
+                        else if (state != Call.STATE_ACTIVE && state != Call.STATE_HOLDING)
+                            throw new IllegalStateException("call is not answerable");
+                    }
                     case "reject" -> {
                         if (call.getState() == Call.STATE_RINGING) call.reject(false, null);
                         else call.disconnect();

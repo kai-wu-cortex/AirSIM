@@ -4,6 +4,8 @@ struct LockedDeviceCallRoute: Equatable, Sendable {
     let key: DeviceCallKey
     let transport: CallTransport
     let systemUUID: UUID
+    var presentationCallID: String? = nil
+    var presentationGeneration: UInt64? = nil
 }
 
 @MainActor
@@ -174,8 +176,8 @@ final class DeviceCallActionRouter {
     @discardableResult
     func ingestOwnedWLANClosure(_ call: CallRecord, agentID: String,
                                 mode: AirSIMConnectionMode) -> Bool {
-        guard call.isTerminal, let canonicalID = call.androidID,
-              let key = context.registry.key(agentID: agentID, callID: canonicalID),
+        let canonicalID = call.androidID ?? call.id
+        guard call.isTerminal, let key = context.registry.key(agentID: agentID, callID: canonicalID),
               let route = routes[key], route.transport == .vowlan,
               let target = targets[key], !pendingDials.contains(key),
               target.identity.callID == canonicalID, target.identity.backendID == call.id else { return false }
@@ -200,6 +202,13 @@ final class DeviceCallActionRouter {
             buffered.append(event); earlyEvents[pending] = buffered
             return []
         }
+        if event.state.isTerminal,
+           let key = context.registry.key(agentID: event.agentID, callID: event.callID),
+           context.registry.active == key, let route = routes[key], route.transport != event.transport {
+            // Generations belong to their lane. The owned backend must confirm
+            // its exact call mapping before another lane can terminate its media.
+            return []
+        }
         let effects = context.registry.apply(event)
         guard let key = context.registry.key(agentID: event.agentID, callID: event.callID),
               let latest = context.registry.latestEvent(for: key) else { return effects }
@@ -213,7 +222,10 @@ final class DeviceCallActionRouter {
         // Update the locked lane's backend target before replaying another
         // lane, whose revision/generation must not replace that target.
         defer { for delayed in buffered { _ = ingest(delayed, mode: mode) } }
-        if latest.state.isTerminal { finished(key, authoritative: true); return effects }
+        if latest.state.isTerminal {
+            if effects.contains(.ended(key)) { finished(key, authoritative: true) }
+            return effects
+        }
         guard latest.callID == event.callID, latest.state == event.state,
               latest.transport == event.transport, latest.transportEpoch == event.transportEpoch,
               latest.backendGeneration == event.backendGeneration else { return effects }
@@ -244,6 +256,22 @@ final class DeviceCallActionRouter {
             backendID: event.backendCallID ?? event.callID, generation: event.backendGeneration))
         return effects
     }
+    /// The signed local status supplies the real call; preserve the system UUID
+    /// when a PushKit-first answer adopts the local control lane.
+    func adoptIncoming(_ event: DeviceCallEvent, systemUUID: UUID,
+                       service: any DeviceCallBackend, presentationCallID: String? = nil,
+                       presentationGeneration: UInt64? = nil) throws -> LockedDeviceCallRoute {
+        guard context.registry.active == nil, context.media.owner == nil else { throw DeviceCallRoutingError.busy }
+        _ = context.registry.apply(event)
+        guard let key = context.registry.key(agentID: event.agentID, callID: event.callID),
+              context.registry.latestEvent(for: key)?.state == .ringing else { throw DeviceCallRoutingError.stale }
+        let route = LockedDeviceCallRoute(key: key, transport: event.transport, systemUUID: systemUUID,
+            presentationCallID: presentationCallID, presentationGeneration: presentationGeneration)
+        routes[key] = route
+        targets[key] = Target(backend: service, identity: .init(callID: event.callID,
+            backendID: event.backendCallID ?? event.callID, generation: event.backendGeneration))
+        return route
+    }
     func registerIncoming(_ event: DeviceCallEvent, mode: AirSIMConnectionMode) -> LockedDeviceCallRoute? {
         _ = ingest(event, mode: mode)
         return context.registry.key(agentID: event.agentID, callID: event.callID).flatMap { routes[$0] }
@@ -273,22 +301,41 @@ final class DeviceCallActionRouter {
               let target = targets[route.key], let service = target.backend as? WLANDeviceCallBackend else { return nil }
         return (route, service.api, target.identity.backendID)
     }
-    func answer(_ key: DeviceCallKey) async throws {
+    func answer(_ key: DeviceCallKey, source: String = "app") async throws {
+        traceAction(key, source: source, next: .connecting)
+        if context.registry.active == key, context.media.owner == key,
+           let state = context.registry.latestEvent(for: key)?.state,
+           state == .connecting || state == .active { return }
         guard context.admissionReservation == nil,
               context.registry.active == nil || context.registry.active == key,
               context.media.owner == nil || context.media.owner == key else { throw DeviceCallRoutingError.busy }
         guard let target = targets[key], let route = routes[key],
               context.registry.latestEvent(for: key)?.state == .ringing else { throw DeviceCallRoutingError.stale }
         guard context.registry.activate(key), context.media.acquire(key) else { throw DeviceCallRoutingError.busy }
+        let ringing = context.registry.latestEvent(for: key)!
+        _ = context.registry.apply(.init(agentID: ringing.agentID, callID: ringing.callID,
+            state: .connecting, transport: ringing.transport, transportEpoch: ringing.transportEpoch,
+            backendGeneration: ringing.backendGeneration, number: ringing.number,
+            direction: ringing.direction, backendCallID: ringing.backendCallID))
         onActivate?(route)
         do {
             try await target.backend.answer(callID: target.identity.backendID, generation: target.identity.generation)
             guard context.registry.active == key else { throw CancellationError() }
+            if let current = context.registry.latestEvent(for: key), current.state == .connecting {
+                var confirmed = current
+                confirmed = DeviceCallEvent(agentID: current.agentID, callID: current.callID, state: .active,
+                    transport: current.transport, transportEpoch: current.transportEpoch,
+                    backendGeneration: current.backendGeneration, number: current.number,
+                    direction: current.direction, backendCallID: current.backendCallID)
+                _ = context.registry.apply(confirmed)
+            }
         } catch {
             // An answer failure must not retire the ringing call. Release the
             // optimistic ownership only; a late agent .active (the Android
             // answered) still flows through the normal "answered elsewhere"
             // branch, and a definitive failure leaves the ringing UI usable.
+            if context.registry.latestEvent(for: key)?.state == .active { return }
+            context.registry.restoreRejectedAnswer(key, ringing: ringing)
             let stillRinging = context.registry.latestEvent(for: key)?.state == .ringing
             context.media.release(key)
             context.registry.deactivate(key)
@@ -296,7 +343,8 @@ final class DeviceCallActionRouter {
             throw error
         }
     }
-    func end(_ key: DeviceCallKey, rejectIfRinging: Bool) async throws {
+    func end(_ key: DeviceCallKey, rejectIfRinging: Bool, source: String = "app") async throws {
+        traceAction(key, source: source, next: .ended)
         guard let target = targets[key], context.registry.latestEvent(for: key)?.state.isTerminal == false else { return }
         pendingTerminations.insert(key)
         defer {
@@ -319,6 +367,16 @@ final class DeviceCallActionRouter {
         context.media.release(key)
         onFinish?(key, authoritative)
         pruneRetiredCalls()
+    }
+    private func traceAction(_ key: DeviceCallKey, source: String, next: CallLifecycleState) {
+        let state = context.registry.latestEvent(for: key)?.state
+        let nextState = next == .connecting && state != .ringing ? (state ?? next) : next
+        let fields = ["answer_source": source, "action_source": source,
+            "call_id": key.callID, "call_uuid": routes[key]?.systemUUID.uuidString ?? "none",
+            "device_id": key.agentID, "previous_state": context.registry.latestEvent(for: key)?.state.rawValue ?? "none",
+            "next_state": nextState.rawValue, "duplicate": String(next == .connecting && state != .ringing)]
+        Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "ios", category: "call",
+            phase: next == .connecting ? "answer_intent" : "end_intent", title: "设备通话操作", fields: fields) }
     }
     private func pruneRetiredCalls() {
         // Keep lightweight UUID tombstones only as long as the registry's

@@ -5253,6 +5253,21 @@ private actor OperationQueryTransport: AirSIMHTTPTransport {
 
 
 final class MinimalSMSAndHangupTests: XCTestCase {
+    func testMissingOptionalAPIsAreNotRetriedOnEveryPoll() async throws {
+        let transport = MissingOptionalAPIBoundary()
+        let api = AirSIMAPI(route: .vowlan(endpoint: try VoWLANEndpoint(host: "10.0.0.19", controlPort: 15992, pcmPort: 15993),
+            credential: try VoWLANCredential(secret: Data(repeating: 3, count: 32))), transport: transport)
+        for _ in 0..<3 {
+            try await api.acknowledgeCallHistory(ids: ["fixture"])
+            do { _ = try await api.setCallRecording(true); XCTFail("unsupported recording succeeded") }
+            catch APIError.unsupportedFeature { }
+        }
+        let paths = await transport.paths
+        XCTAssertEqual(paths.filter { $0.hasSuffix("history/ack") }.count, 1)
+        XCTAssertEqual(paths.filter { $0.hasSuffix("audio/record") }.count, 1)
+    }
+
+
     func testSMSLineSelectionIsPerConversationAndFallsBackWhenSIMRemoved() throws {
         let suite = UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -5344,5 +5359,13 @@ private actor HangupHTTPBoundary: AirSIMHTTPTransport {
             lastPollError: scenario == .pollError ? "stale" : "", revision: 1)
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
         return WiredHTTPResponse(statusCode: 200, body: try encoder.encode(status))
+    }
+}
+
+private actor MissingOptionalAPIBoundary: AirSIMHTTPTransport {
+    private(set) var paths: [String] = []
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        paths.append(request.url!.path)
+        return WiredHTTPResponse(statusCode: 404, body: Data("{}".utf8))
     }
 }
