@@ -1,0 +1,12 @@
+[Unit]
+Description=AirSIM stale device retention task
+After=airsim-relay.service
+
+[Service]
+Type=oneshot
+User=airsim-relay
+ExecStart=/usr/bin/curl --fail --silent --show-error --max-time 120 -X POST http://127.0.0.1:8789/scheduled
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

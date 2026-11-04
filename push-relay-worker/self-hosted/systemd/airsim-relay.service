@@ -1,0 +1,30 @@
+[Unit]
+Description=AirSIM independent Relay (workerd)
+After=network-online.target airsim-apns.service
+Wants=network-online.target airsim-apns.service
+
+[Service]
+Type=simple
+User=airsim-relay
+Group=airsim-relay
+WorkingDirectory=/opt/airsim-relay/current/push-relay-worker/self-hosted
+StateDirectory=airsim-relay
+StateDirectoryMode=0700
+RuntimeDirectory=airsim-relay
+RuntimeDirectoryMode=0700
+ExecStartPre=/opt/airsim-relay/node/bin/node configure.mjs /etc/airsim-relay/config.json /run/airsim-relay/config.capnp /var/lib/airsim-relay
+ExecStart=/opt/airsim-relay/workerd/bin/workerd serve /run/airsim-relay/config.capnp
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

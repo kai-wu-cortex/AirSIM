@@ -1,0 +1,12 @@
+{
+  "name": "airsim-relay-self-hosted",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "configure": "node configure.mjs"
+  },
+  "dependencies": { "workerd": "1.20261103.1" },
+  "devDependencies": { "ws": "8.18.3" },
+  "engines": { "node": ">=22" }
+}

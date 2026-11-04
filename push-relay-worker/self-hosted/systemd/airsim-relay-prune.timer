@@ -1,0 +1,9 @@
+[Unit]
+Description=AirSIM daily stale device retention
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

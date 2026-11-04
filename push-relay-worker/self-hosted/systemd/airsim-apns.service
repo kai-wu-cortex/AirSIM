@@ -1,0 +1,22 @@
+[Unit]
+Description=AirSIM private APNs HTTP/2 transport
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airsim-relay
+Group=airsim-relay
+ExecStart=/opt/airsim-relay/node/bin/node /opt/airsim-relay/current/push-relay-worker/self-hosted/apns-bridge.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
