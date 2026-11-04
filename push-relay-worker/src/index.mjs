@@ -259,6 +259,7 @@ async function enqueueDeviceCommand(request, env) {
     expires_at: new Date(Date.now() + (value.type === "send_sms" ? 5 : 2) * 60_000).toISOString(),
     number: normalizePhoneNumber(value.number),
     ...(value.type === "send_sms" ? { message: value.message.trim() } : {}),
+    ...(value.type === "send_sms" && value.sim_account ? { sim_account: value.sim_account } : {}),
     ...(dtmfCall ? {call:dtmfCall,owner:"iphone"} : {}),
   };
   let call = null;
@@ -484,6 +485,10 @@ function validateDeviceCommand(value) {
   if (value.type === "send_sms") {
     if (typeof value.message !== "string" || !value.message.trim() ||
         [...value.message].length > 2_000) return "invalid SMS content";
+    if (value.sim_account !== undefined &&
+        (typeof value.sim_account !== "string" ||
+         new TextEncoder().encode(value.sim_account).length > 512 ||
+         /[\u0000-\u001f\u007f]/.test(value.sim_account))) return "invalid SIM account";
   }
   return "";
 }
@@ -1450,6 +1455,8 @@ async function receiveSMS(request, env) {
     return jsonResponse(400, { error: "invalid incoming SMS" });
   }
   const sender = nonEmpty(message.sender) ? message.sender.trim() : "未知号码";
+  const simSlot = /^SIM [1-9][0-9]?$/.test(stringValue(message.sim_slot).trim())
+    ? stringValue(message.sim_slot).trim() : "";
   // Android's carrier timestamp can be old when the inbox provider restores a message,
   // or when an offline Agent flushes its durable queue after a long Relay outage.
   // Preserve the delivery ID for deduplication, but show the arrival time on iPhone.
@@ -1476,7 +1483,7 @@ async function receiveSMS(request, env) {
 
   const payload = encryptedPayload || fittedSMSPayload(message.content, (content, truncated) => ({
     aps: {
-      alert: { title: sender, body: content },
+      alert: { title: sender, subtitle: simSlot ? `接收于 ${simSlot}` : "SIM 未知", body: content },
       sound: "default",
       "thread-id": `airsim-sms-${sender}`.slice(0, 64),
       "content-available": 1,
@@ -1485,6 +1492,7 @@ async function receiveSMS(request, env) {
     delivery_id: message.delivery_id,
     agent_id: stringValue(message.agent_id),
     sender,
+    sim_slot: simSlot,
     content,
     content_truncated: truncated,
     code: stringValue(message.code),

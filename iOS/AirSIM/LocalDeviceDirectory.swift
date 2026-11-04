@@ -151,13 +151,10 @@ final class LocalDeviceDirectory: ObservableObject {
         guard !agentID.isEmpty, PairedAndroidDeviceStore.permits(agentID) else { throw VoWLANControllerError.notPaired }
         let token = UUID()
         verification[agentID] = token
-        if let old = peers[agentID], old.endpoint != endpoint {
-            old.poll?.cancel(); peers.removeValue(forKey: agentID); objectWillChange.send()
-        }
         let identity: VoWLANHealthIdentity
         do { identity = try await authenticatedHealth(agentID: agentID, endpoint: endpoint, credential: credential) }
         catch {
-            if !Task.isCancelled, verification[agentID] == token {
+            if !Task.isCancelled, verification[agentID] == token, peers[agentID]?.endpoint == endpoint {
                 peers[agentID]?.verified = false; objectWillChange.send()
             }
             throw error
@@ -303,6 +300,9 @@ final class LocalDeviceDirectory: ObservableObject {
                     try await Task.sleep(for: legacy ? .seconds(2) : .milliseconds(150))
                 } catch {
                     guard let self, self.peers[agentID] === peer, !Task.isCancelled else { return }
+                    if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                        try? await Task.sleep(for: .milliseconds(150)); continue
+                    }
                     if peer.verified { peer.verified = false; self.objectWillChange.send() }
                     do {
                         try await Task.sleep(for: .seconds(backoff))

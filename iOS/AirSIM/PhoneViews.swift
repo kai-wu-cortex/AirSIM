@@ -1264,6 +1264,9 @@ struct MessagesView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    if let latest = messages.last {
+                        Text(latest.simDeliveryLabel).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1274,6 +1277,41 @@ struct MessagesView: View {
                     .frame(width: PhoneListMetrics.timeColumnWidth, alignment: .trailing)
             }
             .frame(minHeight: PhoneListMetrics.rowHeight)
+        }
+    }
+}
+
+private struct SMSAccountPicker: View {
+    @EnvironmentObject private var model: AppModel
+    let recipient: String
+    var body: some View {
+        if let agentID = model.currentAndroidAgent?.id ?? AndroidAgentBindingPreference.selected() {
+            let slots = model.smsSIMSlots(for: agentID)
+            if !slots.isEmpty {
+                Menu {
+                    ForEach(slots) { slot in
+                        Button {
+                            model.selectSMSSlot(slot.id, for: agentID, recipient: recipient)
+                        } label: {
+                            if slot.id == model.selectedSMSSlotID(for: agentID, recipient: recipient) {
+                                Label(slot.displayName, systemImage: "checkmark")
+                            } else { Text(slot.displayName) }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(slots.first(where: { $0.id == model.selectedSMSSlotID(for: agentID, recipient: recipient) })?.label ?? "发送卡")
+                            .lineLimit(1)
+                        if slots.count > 1 { Image(systemName: "chevron.down").font(.caption2.weight(.semibold)) }
+                    }
+                    .font(.caption)
+                }
+                .disabled(slots.count < 2)
+                .accessibilityLabel("发送线路，\(slots.first(where: { $0.id == model.selectedSMSSlotID(for: agentID, recipient: recipient) })?.label ?? "安卓默认短信卡")")
+                .accessibilityIdentifier("sms.simSelector")
+            } else {
+                Label("安卓默认短信卡", systemImage: "simcard").font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -1400,6 +1438,12 @@ struct MessageThreadView: View {
         .navigationTitle(model.contacts.displayName(for: sender))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 2) {
+                    Text(model.contacts.displayName(for: sender)).font(.headline).lineLimit(1)
+                    SMSAccountPicker(recipient: sender)
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 if selection.isSelecting {
                     Button {
@@ -1602,6 +1646,12 @@ private struct MessageComposer: View {
         NavigationStack {
             VStack(spacing: 0) {
                 recipientBar
+                HStack(spacing: 8) {
+                    Text("发件线路：").font(.subheadline).foregroundStyle(.secondary)
+                    SMSAccountPicker(recipient: recipient).disabled(sending)
+                    Spacer()
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
 
                 if !suggestions.isEmpty {
                     Divider()

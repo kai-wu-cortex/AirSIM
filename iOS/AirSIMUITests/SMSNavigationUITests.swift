@@ -64,12 +64,23 @@ final class SMSNavigationUITests: XCTestCase {
             row.tap()
             let navigation = app.navigationBars["sms-navigation-fixture"]
             XCTAssertTrue(navigation.waitForExistence(timeout: 5))
-            XCTAssertFalse(app.buttons["短信"].isHittable, "conversation must cover the root tabs")
-            let systemBack = app.buttons["BackButton"]
-            if systemBack.exists {
-                systemBack.tap()
+            if compose.exists && compose.isHittable {
+                // Expanded Duo/iPad keeps the conversation beside the list and
+                // preserves tabs. Verify distinct columns, not just visible chrome.
+                XCTAssertTrue(row.isHittable)
+                let reply = app.descendants(matching: .any).matching(identifier: "sms.reply").firstMatch
+                XCTAssertTrue(reply.waitForExistence(timeout: 5))
+                XCTAssertLessThanOrEqual(row.frame.maxX, reply.frame.minX,
+                    "expanded conversation must occupy a separate detail column")
+                XCTAssertTrue(app.buttons["短信"].isHittable)
             } else {
-                navigation.buttons.firstMatch.tap()
+                XCTAssertFalse(app.buttons["短信"].isHittable, "compact conversation must cover the root tabs")
+                let systemBack = app.buttons["BackButton"]
+                if systemBack.exists {
+                    systemBack.tap()
+                } else {
+                    navigation.buttons.firstMatch.tap()
+                }
             }
             XCTAssertTrue(compose.waitForExistence(timeout: 5))
             XCTAssertTrue(app.buttons["短信"].isHittable)
