@@ -483,7 +483,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         dateLabel.text = date
         dateLabel.isHidden = !item.showsTimestamp
         var details: [String] = []
-        if let sim = item.message.simSlot, !sim.isEmpty { details.append(sim) }
+        details.append(item.message.simDeliveryLabel)
         if outgoing && item.showsTail { details.append(L10n.t("已发送")) }
         detailLabel.text = details.joined(separator: " · ")
         detailLabel.isHidden = details.isEmpty
@@ -551,8 +551,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
                                                                   options: [.usesLineFragmentOrigin, .usesFontLeading],
                                                                   attributes: [.font: font], context: nil)
         let dateHeight = Self.dateHeight(for: date, width: width)
-        let detailHeight: CGFloat = !(item.message.simSlot ?? "").isEmpty || (item.showsTail && item.message.isOutgoing)
-            ? ceil(UIFont.preferredFont(forTextStyle: .caption2).lineHeight) + 5 : 0
+        let detailHeight: CGFloat = ceil(UIFont.preferredFont(forTextStyle: .caption2).lineHeight) + 5
         return dateHeight + max(font.lineHeight, ceil(rect.height)) + 20 + detailHeight + (item.showsTail ? 10 : 3)
     }
 
@@ -576,7 +575,9 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         let x = item.message.isOutgoing ? max(left, width - 16 - bubbleWidth) : left
         bubble.frame = CGRect(x: x, y: dateHeight, width: bubbleWidth, height: bubbleHeight)
         body.frame = bubble.bounds.insetBy(dx: 14, dy: 10)
-        detailLabel.frame = CGRect(x: x, y: bubble.frame.maxY + 3, width: bubbleWidth, height: max(0, detailHeight - 3))
+        // Keep the receiving/sending line readable even for a one-character bubble.
+        let detailWidth = max(0, width - left - 16)
+        detailLabel.frame = CGRect(x: left, y: bubble.frame.maxY + 3, width: detailWidth, height: max(0, detailHeight - 3))
         check.frame = CGRect(x: 12, y: bubble.frame.midY - 12, width: 24, height: 24)
     }
 

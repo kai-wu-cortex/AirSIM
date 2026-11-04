@@ -460,7 +460,14 @@ final class AppModel: ObservableObject {
     }()
     var otherDeviceCallReminders: [OtherDeviceCallReminder] { otherCallReminders.reminders }
     private func lookupOtherCall(_ key: DeviceCallKey) -> OtherDeviceCallReminder? {
-        guard key != presentedDeviceCall, let event = deviceCalls.latestEvent(for: key), event.state == .ringing else { return nil }
+        let primaryAgent = (presentedDeviceCall ?? deviceCalls.active)?.agentID
+            ?? (cloudCallOwnsPrimaryPresentation
+                ? (pushedCallIdentity ?? callKit.currentIncomingPush ?? IPhoneCloudCallSession.shared.call)?.agentID
+                : nil)
+        // Another transport or call-waiting identity from the same Android
+        // must never become an "other device" notification.
+        guard key != presentedDeviceCall, key.agentID != primaryAgent,
+              let event = deviceCalls.latestEvent(for: key), event.state == .ringing else { return nil }
         let name = pairedAndroidAgents.first { $0.id == key.agentID }?.deviceName ?? "Android 手机"
         return .init(key: key, deviceName: name, number: event.number, stillRinging: true)
     }
@@ -1137,6 +1144,38 @@ final class AppModel: ObservableObject {
     func selectSIMSlot(_ id: String, for agentID: String) {
         guard simSlots(for: agentID).contains(where: { $0.id == id }) else { return }
         UserDefaults.standard.set(id, forKey: simSlotPreferenceKey(agentID))
+        objectWillChange.send()
+    }
+
+    func selectedSMSSlotID(for agentID: String, recipient: String? = nil) -> String? {
+        let slots = smsSIMSlots(for: agentID)
+        let lastLine = recipient.flatMap { recipient in
+            messages.filter { $0.sourceAgentID == agentID && $0.sender == recipient && $0.simSlot?.isEmpty == false }
+                .max { $0.timestamp < $1.timestamp }?.simSlot
+        }
+        let suggested = slots.first { slot in
+            guard let lastLine else { return false }
+            return slot.label == lastLine || slot.slotIndex.map { "SIM \($0 + 1)" == lastLine } == true
+        }?.id
+        return SMSSIMPreference.selectedID(agentID: agentID, slots: slots, recipient: recipient, suggestedID: suggested)
+    }
+
+    func smsSIMSlots(for agentID: String) -> [AndroidSIMSlot] {
+        let live = simSlotOverrides[agentID]
+            ?? vobleHub.retainedBundle(for: agentID)?.central.deviceInformation?.simSlots
+            ?? localDevices.metadata(for: agentID)?.simSlots
+            ?? (vobleHub.selected.central.authenticatedIdentity == agentID
+                ? vobleHub.selected.central.deviceInformation?.simSlots : nil)
+        if let live {
+            SMSSIMPreference.remember(agentID: agentID, slots: live)
+            return live
+        }
+        return SMSSIMPreference.rememberedSlots(agentID: agentID)
+    }
+
+    func selectSMSSlot(_ id: String, for agentID: String, recipient: String? = nil) {
+        guard smsSIMSlots(for: agentID).contains(where: { $0.id == id }) else { return }
+        SMSSIMPreference.select(id, agentID: agentID, recipient: recipient)
         objectWillChange.send()
     }
 
@@ -3193,8 +3232,8 @@ final class AppModel: ObservableObject {
             // A signed VoWLAN health check is the reachability authority. The global
             // polling flags can briefly lag during route switches and must not disable SMS.
             let localReachable = localAPI != nil
-            let smsSlot = (boundAtStart ?? currentAndroidAgent?.id)
-                .flatMap { selectedSIMSlotID(for: $0) }
+            let smsAgentID = boundAtStart ?? currentAndroidAgent?.id
+            let smsSlot = smsAgentID.flatMap { selectedSMSSlotID(for: $0, recipient: target) }
             let voBLEReady = voble.state == .ready
                 && (boundAtStart == nil || voble.authenticatedIdentity == boundAtStart)
             if localReachable {
@@ -3240,7 +3279,10 @@ final class AppModel: ObservableObject {
                                             requireOnline: false)
                     CloudAgentTargetStore.remember(route.agentID)
                 }
-                result = try await VoIPPushController.shared.sendCloudSMS(to: target, message: body, target: route)
+                if smsSlot != nil, route.agentID != smsAgentID {
+                    throw CloudCommandError.failed("短信发送设备已变化，请重新选择发送卡")
+                }
+                result = try await VoIPPushController.shared.sendCloudSMS(to: target, message: body, target: route, simAccount: smsSlot)
             } else {
                 throw CloudCommandError.cloudModeDisabled
             }
@@ -3260,7 +3302,13 @@ final class AppModel: ObservableObject {
                 )
             }
             if result.sent {
-                saveSentMessage(recipient: target, content: body)
+                if let smsAgentID, let smsSlot {
+                    SMSSIMPreference.select(smsSlot, agentID: smsAgentID, recipient: target)
+                }
+                let slotLabel = smsAgentID.flatMap { id in smsSIMSlots(for: id).first { $0.id == smsSlot }.map { slot in
+                    slot.slotIndex.map { "SIM \($0 + 1)" } ?? slot.label
+                } }
+                saveSentMessage(recipient: target, content: body, agentID: smsAgentID, simSlot: slotLabel)
             }
             if localReachable { await refreshMessages(silently: true) }
             return result.sent
@@ -3488,13 +3536,15 @@ final class AppModel: ObservableObject {
     }
 
     /// 模块不会在收件箱接口回传已发送短信，因此发送成功后立即写入手机本地历史。
-    private func saveSentMessage(recipient: String, content: String) {
+    private func saveSentMessage(recipient: String, content: String, agentID: String?, simSlot: String?) {
         let updatedMessages = SMSHistoryPolicy.appendingSentMessage(
             recipient: recipient,
             content: content,
             at: .now,
             to: messages,
-            limit: maxMessageCount
+            limit: maxMessageCount,
+            sourceAgentID: agentID,
+            simSlot: simSlot
         )
         messages = updatedMessages
         if !historyStore.saveMessages(updatedMessages) {

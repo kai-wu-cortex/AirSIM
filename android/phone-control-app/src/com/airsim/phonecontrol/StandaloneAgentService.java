@@ -437,6 +437,7 @@ public final class StandaloneAgentService extends Service {
             events.put(source.getString("delivery_id"), identity(registration).put("event", "incoming_sms")
                     .put("delivery_id", source.optString("delivery_id"))
                     .put("sender", source.optString("sender")).put("content", source.optString("content"))
+                    .put("sim_slot", source.optString("sim_slot"))
                     .put("timestamp", CloudSMSUploader.uploadTimestamp(source.optString("timestamp", ""), System.currentTimeMillis())));
         }
         // One SMS the Relay refuses or cannot push must neither stall the others nor fail the agent cycle.

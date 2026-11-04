@@ -135,6 +135,7 @@ final class StandaloneSMSStore {
         return new JSONObject().put("delivery_id", record.getString("delivery_id"))
                 .put("sender", record.optString("sender"))
                 .put("content", record.optString("content"))
+                .put("sim_slot", record.optString("sim_slot"))
                 .put("timestamp", record.optString("timestamp"));
     }
 

@@ -127,6 +127,7 @@ final class CallKitController: NSObject {
     private var handledOutgoingActions: Set<ObjectIdentifier> = []
     private var dialedOutgoingUUIDs: Set<UUID> = []
     private var appAnswerRequestUUID: UUID?
+    private var acceptedAnswerUUID: UUID?
     private var incomingReportCompletions: [(Error?) -> Void] = []
     private var incomingSystemReporter: RequiredSystemReporter?
     private var incomingDeduplicator = IncomingCallDeduplicator()
@@ -175,7 +176,8 @@ final class CallKitController: NSObject {
     }
 
     var currentCallIsAnswered: Bool {
-        ["active", "held"].contains(currentState)
+        (currentUUID != nil && acceptedAnswerUUID == currentUUID)
+            || ["active", "held"].contains(currentState)
     }
 
     /// 只公开不可变身份，生命周期状态由 CallLifecycleStore 统一管理。
@@ -612,6 +614,7 @@ final class CallKitController: NSObject {
         missingCallPolls = 0
         outgoingStartInFlight = false
         appAnswerRequestUUID = nil
+        acceptedAnswerUUID = nil
     }
 
     private func fail(_ action: CXAction, error: Error) {
@@ -623,6 +626,7 @@ final class CallKitController: NSObject {
         do {
             guard currentUUID == action.callUUID else { throw CallKitBridgeError.staleSystemCall }
             guard let handler else { throw CallKitBridgeError.handlerUnavailable }
+            if acceptedAnswerUUID == action.callUUID { action.fulfill(); return }
             let origin: CallAnswerOrigin = appAnswerRequestUUID == action.callUUID ? .app : .system
             appAnswerRequestUUID = nil
             currentState = "connecting"
@@ -635,6 +639,7 @@ final class CallKitController: NSObject {
             } catch {
                 debugLog("接听前音频预配置失败，继续系统接听：\(error.localizedDescription)")
             }
+            acceptedAnswerUUID = action.callUUID
             action.fulfill()
             do {
                 try await handler.callKitAnswer(uuid: action.callUUID, origin: origin)

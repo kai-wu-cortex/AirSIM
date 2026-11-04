@@ -18,6 +18,58 @@ final class FixtureToneOutput: CallToneOutput {
 
 @MainActor
 final class OtherDeviceCallReminderTests: XCTestCase {
+    func testCallWaitingOnSameAndroidIsNotAnotherDevice() {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.bluetooth)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in ReminderBackend() }, callKitController: controller)
+        defer { model.stop() }
+        for id in ["primary", "waiting"] {
+            _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: id, state: .ringing,
+                transport: .bluetooth, transportEpoch: 1))
+        }
+        XCTAssertTrue(model.otherDeviceCallReminders.isEmpty)
+    }
+    func testSystemAnswerIsOwnedBeforeBackendAcknowledgesAndSurvivesLateRinging() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        let handler = PendingSystemAnswerHandler()
+        controller.handler = handler
+        let call = IncomingVoIPCall(bluetoothCallID: "answer-race", uuid: UUID(), generation: 1,
+                                   number: nil, agentID: "A")
+        let reported = expectation(description: "incoming reported")
+        controller.reportIncomingPush(call, systemReport: { _, _, done in done(nil) }) { error in
+            XCTAssertNil(error); reported.fulfill()
+        }
+        await fulfillment(of: [reported], timeout: 2)
+        XCTAssertFalse(controller.currentCallIsAnswered)
+        let answering = expectation(description: "backend answer pending")
+        handler.onAnswer = { answering.fulfill() }
+        let provider = CXProvider(configuration: CXProviderConfiguration())
+        defer { provider.invalidate(); handler.release(); controller.setEnabled(false) }
+        controller.provider(provider, perform: CXAnswerCallAction(call: call.uuid))
+        await fulfillment(of: [answering], timeout: 2)
+        XCTAssertTrue(controller.currentCallIsAnswered,
+            "A fulfilled system answer owns this call before Android's HTTP reply")
+        let ringing = CallRecord(id: call.callID, index: 0, direction: "incoming", state: "incoming",
+            number: nil, startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false)
+        controller.synchronize(call: ringing, previous: nil, callerName: nil)
+        XCTAssertTrue(controller.currentCallIsAnswered, "A delayed ringing poll must not undo local answer ownership")
+        let active = DeviceCallEvent(agentID: "A", callID: call.callID, state: .active,
+                                    transport: .vowlan, transportEpoch: 1)
+        XCTAssertNil(PushedCallTerminationPolicy.action(event: active, call: call, state: .ringing,
+            answered: false, systemAnswered: controller.currentCallIsAnswered),
+            "Our own Android active receipt must not be treated as answered elsewhere")
+        controller.reportCurrentCallEnded(reason: .remoteEnded)
+        XCTAssertFalse(controller.currentCallIsAnswered)
+        let next = IncomingVoIPCall(bluetoothCallID: "next-call", uuid: UUID(), generation: 2, number: nil, agentID: "A")
+        controller.reportIncomingPush(next, systemReport: { _, _, done in done(nil) }) { _ in }
+        XCTAssertFalse(controller.currentCallIsAnswered, "The next call must not inherit the previous answer")
+    }
+
+
+
     func testRealCloudPushCannotBecomePrimaryWhenOwnedWatchHasNoPhoneUUID() async throws {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.automatic)
         defer { ConnectionModePreference.set(old) }
@@ -451,4 +503,22 @@ private final class ReminderBackend: DeviceCallBackend {
     func answer(callID: String, generation: UInt64?) async throws { answered.append(callID) }
     func end(callID: String, generation: UInt64?, reject: Bool) async throws { ended.append(callID) }
     func dtmf(_ digits: String, callID: String, generation: UInt64?) async throws {}
+}
+
+@MainActor
+private final class PendingSystemAnswerHandler: CallKitActionHandling {
+    var onAnswer: (() -> Void)?
+    private var continuation: CheckedContinuation<Void, Never>?
+    func release() { continuation?.resume(); continuation = nil }
+    func callKitStart(number: String) async throws {}
+    func callKitAnswer(origin: CallAnswerOrigin) async throws {
+        await withCheckedContinuation { continuation = $0; onAnswer?() }
+    }
+    func callKitEnd() async throws {}
+    func callKitSetMuted(_ muted: Bool) async {}
+    func callKitPlayDTMF(_ digits: String) async throws {}
+    func callKitAudioSessionDidActivate() async {}
+    func callKitAudioSessionDidDeactivate() {}
+    func callKitProviderDidReset() async {}
+    func callKitDidFail(_ message: String) {}
 }

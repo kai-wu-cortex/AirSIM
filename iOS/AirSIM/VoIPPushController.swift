@@ -862,6 +862,7 @@ struct IncomingRemoteSMS: Equatable, Sendable {
     let code: String?
     let timestamp: Date
     let contentTruncated: Bool
+    let simSlot: String?
 
     init(userInfo: [AnyHashable: Any]) throws {
         guard userInfo["event"] as? String == "incoming_sms" else {
@@ -883,6 +884,7 @@ struct IncomingRemoteSMS: Equatable, Sendable {
         code = Self.nonEmpty(userInfo["code"] as? String)
         self.timestamp = timestamp
         contentTruncated = userInfo["content_truncated"] as? Bool ?? false
+        simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
     }
 
     private static func parseTimestamp(_ value: String) -> Date? {
@@ -903,7 +905,8 @@ struct IncomingRemoteSMS: Equatable, Sendable {
             timestamp: timestamp,
             deliveryID: deliveryID,
             direction: .incoming,
-            sourceAgentID: agentID
+            sourceAgentID: agentID,
+            simSlot: simSlot
         )
     }
 
@@ -1508,7 +1511,8 @@ final class VoIPPushController: NSObject {
         )
     }
 
-    func sendCloudSMS(to number: String, message: String, target: CloudCommandTarget) async throws -> SMSSendResult {
+    func sendCloudSMS(to number: String, message: String, target: CloudCommandTarget,
+                      simAccount: String? = nil) async throws -> SMSSendResult {
         let commandID = UUID()
         guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
@@ -1516,7 +1520,8 @@ final class VoIPPushController: NSObject {
             commandID: commandID,
             type: "send_sms",
             number: number,
-            message: message
+            message: message,
+            simAccount: simAccount
         )
         guard enqueue.accepted else { throw CloudCommandError.invalidResponse }
         let outcome = try await waitForCloudCommand(commandID: commandID, target: target, registration: registration, timeout: 5 * 60)
@@ -1553,6 +1558,7 @@ final class VoIPPushController: NSObject {
         type: String,
         number: String,
         message: String?,
+        simAccount: String? = nil,
         mediaTransport: CloudMediaTransport? = nil,
         call: IncomingVoIPCall? = nil
     ) async throws -> CloudCommandEnqueueResponse {
@@ -1574,6 +1580,7 @@ final class VoIPPushController: NSObject {
             body.merge(CloudAgentRouting.callIdentity(call)) { _, new in new }
         }
         if let message { body["message"] = message }
+        if let simAccount, !simAccount.isEmpty { body["sim_account"] = simAccount }
         if let mediaTransport { body["media_transport"] = mediaTransport.rawValue }
         return try await relayRequest(url: url, body: body, as: CloudCommandEnqueueResponse.self)
     }

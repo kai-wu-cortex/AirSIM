@@ -897,6 +897,7 @@ final class IncomingSMSNotifier {
             agentID: message.sourceAgentID, deliveryID: message.deliveryID) else { return }
         let content = UNMutableNotificationContent()
         content.title = displayName
+        content.subtitle = message.simDeliveryLabel
         content.body = message.content
         content.sound = .default
         content.interruptionLevel = .active

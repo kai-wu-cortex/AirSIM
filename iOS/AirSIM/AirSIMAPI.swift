@@ -266,7 +266,41 @@ struct AirSIMAPI: Sendable {
         try await postDecoded("api/calls/reject", LocalCallControlBody(callID: callID))
     }
     func hangupCall(callID: String? = nil) async throws {
-        try await post("api/calls/hangup", LocalCallControlBody(callID: callID))
+        // Capture the backend identity before sending. Never retry an unscoped
+        // hangup: a replacement call may have arrived while the reply was lost.
+        let target: String
+        if let callID, !callID.isEmpty { target = callID }
+        else {
+            let status = try await callStatus()
+            guard status.lastPollError.isEmpty else { throw APIError.invalidResponse }
+            guard let active = status.active, !active.isTerminal else { return }
+            target = active.id
+        }
+        for attempt in 0..<2 {
+            do {
+                try await post("api/calls/hangup", LocalCallControlBody(callID: target))
+                return
+            } catch {
+                let originalError = error
+                let transient: Bool
+                if case let APIError.http(code, _) = error { transient = (500...599).contains(code) }
+                else { transient = error is URLError }
+                guard transient, !Task.isCancelled else { throw originalError }
+                // Android can disconnect successfully and lose the HTTP reply.
+                // Only an authoritative status from this same paired API can
+                // turn an uncertain reply into success.
+                var stillActive = false
+                for _ in 0..<3 {
+                    try await Task.sleep(for: .milliseconds(250))
+                    guard let status = try? await callStatus(), status.lastPollError.isEmpty else { continue }
+                    if status.active == nil || status.active?.isTerminal == true { return }
+                    if status.history?.contains(where: { $0.id == target && $0.isTerminal }) == true { return }
+                    guard status.active?.id == target else { throw originalError }
+                    stillActive = true
+                }
+                guard attempt == 0, stillActive else { throw originalError }
+            }
+        }
     }
     func sendDTMF(_ digit: String, callID: String? = nil) async throws {
         var body = ["digit": digit]
