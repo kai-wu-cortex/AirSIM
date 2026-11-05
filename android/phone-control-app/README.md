@@ -160,7 +160,7 @@ Shizuku 读收件箱不经 `ContentResolver`。UserService 是 `app_process` 起
 ## 端到端加密云端短信（Standalone，issue #24）
 
 - 配对：Standalone 在 `GET /pair/v1/info` 返回 `capabilities.e2e_sms: 1`，Bonjour TXT 带 `e2e=1`。新版 iPhone 只在安卓和 Relay 都声明支持时，才把 32 字节的 `e2e_key`（base64url、无填充）放进加密的配对包；每次云端配对都会替换钥匙，不带钥匙的云端配对会删掉旧钥匙，本地模式配对不保留钥匙。Relay 回滚到不认识 `e2e` 的版本时，加密短信留在队列里等待，不会被丢弃。安卓在任何模式下都会在 `registerPairing` 之前删掉它；只有 Standalone 会按「iPhone 设备编号＋Relay 地址」把它存进单独的偏好文件 `e2e_sms_keys`。经 `/api/push/register` 等其他途径带来的 `e2e_key` 一律丢弃。AVF 模式不声明、不保存。
-- 上传：当前云端注册有钥匙时，`/v1/events/sms` 只带 `event`、`delivery_id`、`timestamp` 和 `e2e` 信封（AES-256-GCM，附加数据绑定设备、Agent 和去重编号），不带发件人和正文。明文超过 2,400 字节时按码点截断，并标记 `truncated`。无法加密的短信留在队列里，绝不改发明文。Relay 返回 `{"error":"invalid encrypted SMS"}` 或 `{"error":"encrypted SMS too large"}` 时视为最终拒绝。
+- 上传：当前云端注册有钥匙时，`/v1/events/sms` 只带 `event`、`delivery_id`、`timestamp` 和 `e2e` 信封（AES-256-GCM，附加数据绑定设备、Agent 和去重编号），不带发件人、正文和接收卡槽。信封里的明文 JSON 依次是 `sender`、`content`、`timestamp`、`truncated`，已知接收卡槽时再加 `sim_slot`（如 `SIM 1`，明文上传时它在外层）。明文超过 2,400 字节时按码点截断，并标记 `truncated`。无法加密的短信留在队列里，绝不改发明文。Relay 返回 `{"error":"invalid encrypted SMS"}` 或 `{"error":"encrypted SMS too large"}` 时视为最终拒绝。
 - 去重编号：有钥匙时改为 `HMAC-SHA256(delivery-id 子密钥, 发件人\0时间\0正文)`，Relay 无法拿常见验证码去比对反推。广播、收件箱扫描和通知读取三条路径用同一算法，云端和局域网两份副本的编号一致。没有钥匙时与之前完全相同。
 - 注册上传：不论是否加密，`/v1/devices/register` 都只上传 Relay 读取的 13 个字段；VoWLAN 和 E2E 钥匙、通知转发配置、Relay 地址和安卓身份信息不再离开手机。
 - 依赖 Relay 支持（`/healthz` 的 `capabilities.e2e_sms`）和新版 iPhone App。任何一端没更新，iPhone 都不会下发钥匙，短信照旧明文上传。`sh android/phone-control-app/test-e2e-sms.sh` 运行加密、配对钥匙、注册白名单和上传正文的 JVM 测试，加密结果与 Node 独立计算的向量逐字节对照。

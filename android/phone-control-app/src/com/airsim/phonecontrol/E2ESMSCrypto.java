@@ -43,16 +43,21 @@ final class E2ESMSCrypto {
 
     /** {"sender","content","timestamp","truncated"}; content is cut on code points to fit the cap. */
     static String plaintext(String sender, String content, String timestamp) {
+        return plaintext(sender, content, timestamp, null);
+    }
+
+    /** The receiving SIM follows the other fields, and only when known, so the plaintext keeps its bytes without it. */
+    static String plaintext(String sender, String content, String timestamp, String simSlot) {
         String body = content == null ? "" : content;
-        String whole = json(sender, body, timestamp, false);
+        String whole = json(sender, body, timestamp, false, simSlot);
         if (utf8Length(whole) <= PLAINTEXT_LIMIT) return whole;
         int[] points = body.codePoints().toArray();
-        String fitted = json(sender, "…", timestamp, true);
+        String fitted = json(sender, "…", timestamp, true, simSlot);
         int low = 0;
         int high = points.length - 1;
         while (low < high) {
             int middle = (low + high + 1) >>> 1;
-            String candidate = json(sender, new String(points, 0, middle) + "…", timestamp, true);
+            String candidate = json(sender, new String(points, 0, middle) + "…", timestamp, true, simSlot);
             if (utf8Length(candidate) <= PLAINTEXT_LIMIT) {
                 fitted = candidate;
                 low = middle;
@@ -104,15 +109,20 @@ final class E2ESMSCrypto {
         }
     }
 
-    private static String json(String sender, String content, String timestamp, boolean truncated) {
-        StringBuilder out = new StringBuilder(content.length() + 96);
+    private static String json(String sender, String content, String timestamp, boolean truncated, String simSlot) {
+        StringBuilder out = new StringBuilder(content.length() + 112);
         out.append("{\"sender\":");
         quote(out, sender);
         out.append(",\"content\":");
         quote(out, content);
         out.append(",\"timestamp\":");
         quote(out, timestamp);
-        return out.append(",\"truncated\":").append(truncated).append('}').toString();
+        out.append(",\"truncated\":").append(truncated);
+        if (simSlot != null && !simSlot.isEmpty()) {
+            out.append(",\"sim_slot\":");
+            quote(out, simSlot);
+        }
+        return out.append('}').toString();
     }
 
     private static void quote(StringBuilder out, String value) {

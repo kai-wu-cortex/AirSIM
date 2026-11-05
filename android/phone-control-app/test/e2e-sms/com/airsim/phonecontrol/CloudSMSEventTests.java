@@ -42,15 +42,18 @@ public final class CloudSMSEventTests {
         JSONObject body = CloudSMSEvent.body(identity(), source(), TIMESTAMP, E2ESMSCrypto.keys(KEY));
         equal("[agent_id, delivery_id, device_id, device_secret, e2e, event, timestamp]",
                 new TreeSet<>(body.keySet()).toString(), "encrypted body has no sender, content or code");
-        if (body.toString().contains("95588") || body.toString().contains("123456")) {
+        if (body.toString().contains("95588") || body.toString().contains("123456") || body.toString().contains("SIM 2")) {
             throw new AssertionError("plaintext leaked into the encrypted body");
         }
         JSONObject e2e = body.getJSONObject("e2e");
         equal(1, e2e.getInt("v"), "envelope version");
         equal("3946e215", e2e.getString("kid"), "envelope kid");
         String aad = "AirSIM-E2E/v1|incoming_sms|iphone-air|android-A|" + source().getString("delivery_id");
-        equal(E2ESMSCrypto.plaintext("95588", "【银行】验证码 123456", TIMESTAMP), open(e2e, aad),
-                "the envelope opens to the plaintext of this SMS and timestamp");
+        JSONObject opened = new JSONObject(open(e2e, aad));
+        equal("95588", opened.getString("sender"), "sealed sender");
+        equal("【银行】验证码 123456", opened.getString("content"), "sealed content");
+        equal(TIMESTAMP, opened.getString("timestamp"), "sealed timestamp");
+        equal("SIM 2", opened.getString("sim_slot"), "the receiving SIM is sealed, not sent in clear");
         cases++;
     }
 

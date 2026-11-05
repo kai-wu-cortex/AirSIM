@@ -57,6 +57,13 @@ public final class E2ESMSCryptoTests {
                 E2ESMSCrypto.plaintext("s", "a\"b\\c\nd\u0001", "t"), "escaping");
         equal("{\"sender\":\"\",\"content\":\"\",\"timestamp\":\"t\",\"truncated\":false}",
                 E2ESMSCrypto.plaintext(null, null, "t"), "null fields become empty strings");
+        // The receiving SIM (PR #29) is sealed after the other fields; without one the bytes stay the vector's.
+        equal("{\"sender\":\"95588\",\"content\":\"x\",\"timestamp\":\"t\",\"truncated\":false,\"sim_slot\":\"SIM 2\"}",
+                E2ESMSCrypto.plaintext("95588", "x", "t", "SIM 2"), "sim_slot");
+        equal(PLAINTEXT, E2ESMSCrypto.plaintext("95588", "【银行】验证码 123456", "2024-10-27T03:33:20Z", ""),
+                "an empty sim_slot is left out");
+        equal(PLAINTEXT, E2ESMSCrypto.plaintext("95588", "【银行】验证码 123456", "2024-10-27T03:33:20Z", null),
+                "a missing sim_slot is left out");
         cases++;
     }
 
@@ -76,6 +83,11 @@ public final class E2ESMSCryptoTests {
         }
         if (!E2ESMSCrypto.plaintext("95588", "余额提醒", "t").endsWith("\"truncated\":false}")) {
             throw new AssertionError("a short SMS must not be marked truncated");
+        }
+        String withSlot = E2ESMSCrypto.plaintext("95588", "短".repeat(1000), "2024-10-27T03:33:20Z", "SIM 2");
+        if (withSlot.getBytes(StandardCharsets.UTF_8).length > E2ESMSCrypto.PLAINTEXT_LIMIT
+                || !withSlot.endsWith("\"truncated\":true,\"sim_slot\":\"SIM 2\"}")) {
+            throw new AssertionError("the SIM slot must fit inside the limit and survive truncation");
         }
         cases++;
     }

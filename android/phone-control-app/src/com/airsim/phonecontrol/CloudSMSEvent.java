@@ -15,7 +15,9 @@ final class CloudSMSEvent {
             return body.put("sender", source.optString("sender")).put("content", source.optString("content"))
                     .put("sim_slot", source.optString("sim_slot")).put("timestamp", timestamp);
         }
-        String plaintext = E2ESMSCrypto.plaintext(source.optString("sender"), source.optString("content"), timestamp);
+        // The receiving SIM goes inside the envelope too: the Relay learns nothing about the SMS.
+        String plaintext = E2ESMSCrypto.plaintext(source.optString("sender"), source.optString("content"), timestamp,
+                source.optString("sim_slot"));
         E2ESMSCrypto.Envelope envelope = keys.seal(plaintext, identity.getString("device_id"),
                 identity.getString("agent_id"), deliveryID);
         return body.put("timestamp", timestamp).put("e2e", new JSONObject().put("v", 1)
