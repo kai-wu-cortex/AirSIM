@@ -75,6 +75,11 @@ enum PCMRoute: Equatable, Sendable {
         }
     }
 
+    var usesTLS: Bool {
+        if case let .vowlan(endpoint, _) = self { return endpoint.usesTLS }
+        return false
+    }
+
     var requiresWiFi: Bool {
         if case let .vowlan(endpoint, _) = self { return !VoWLANNetworkRoutePolicy.usesSystemRouting(host: endpoint.host) }
         return false
@@ -89,6 +94,19 @@ enum PCMRoute: Equatable, Sendable {
     var isOverlayHost: Bool {
         if case let .vowlan(endpoint, _) = self { return VoWLANNetworkRoutePolicy.isOverlayHost(endpoint.host) }
         return false
+    }
+
+    func earlyMediaHandshake(_ grant: EarlyMediaGrant) throws -> Data {
+        guard case let .vowlan(_, credential) = self,
+              grant.permits(agentID: grant.agentID, callID: grant.callID,
+                  now: Int64(Date().timeIntervalSince1970 + credential.clockOffset)) else {
+            throw VoWLANAuthError.invalidSecret
+        }
+        let binding = "\(grant.agentID)\n\(grant.callID)\n\(grant.sessionID)\n\(grant.expiresAt)\nrecvonly\ns16le-8000-mono"
+        let signed = try VoWLANRequestSigner(credential: credential).sign(
+            method: "PCM", path: "/v1/pcm/early-media", body: Data(binding.utf8))
+        let payload = Data(binding.utf8).base64EncodedString()
+        return Data("AIRSIMEM1 \(signed.timestamp) \(signed.nonce) \(signed.signature) \(payload)\n".utf8)
     }
 
     func handshake() throws -> Data {
@@ -156,6 +174,7 @@ final class AudioSessionController: ObservableObject {
     @Published private(set) var active = false
     @Published private(set) var routeDescription = ""
     @Published private(set) var transportReady = false
+    @Published private(set) var hasReceivedEarlyMedia = false
     @Published private(set) var diagnosticDescription = ""
     @Published private(set) var moduleDiagnosticDescription = ""
     @Published private(set) var speakerEnabled = false
@@ -164,15 +183,23 @@ final class AudioSessionController: ObservableObject {
 
     private var engine: AVAudioEngine?
     private(set) var sessionOwner: UUID?
+    private(set) var receiveOnly = false
+    private var earlyMediaLease: EarlyMediaLeaseState?
+    private var earlyMediaClockOffset: TimeInterval = 0
+    private var captureInstalled = false
     private var player: AVAudioPlayerNode?
     private var transport: NetworkPCMTransport?
     private var encoder: VoicePCMEncoder?
     private let toneOutput: any CallToneOutput
     private var currentCallTone: CallTone?
+    private var endedToneTask: Task<Void, Never>?
     var hasCallTone: Bool { currentCallTone != nil }
     private var muted = false
     private var requestedSpeakerOverride = false
     private var speakerRouteRetryTask: Task<Void, Never>?
+    private var speakerRouteRetryID = UUID()
+    private let applySpeakerOverride: (Bool) throws -> Void
+    private let observesSpeakerOutput: () -> Bool
     private var sessionActivationManagedByCallKit = false
     private var routeChangeObserver: NSObjectProtocol?
     private var playbackQueue = PlaybackQueueTracker(maximumFrames: 4_000)
@@ -186,8 +213,15 @@ final class AudioSessionController: ObservableObject {
         ) }
     }
 
-    init(toneOutput: (any CallToneOutput)? = nil) {
+    init(toneOutput: (any CallToneOutput)? = nil,
+         applySpeakerOverride: @escaping (Bool) throws -> Void = {
+             try AVAudioSession.sharedInstance().overrideOutputAudioPort($0 ? .speaker : .none)
+         }, observesSpeakerOutput: @escaping () -> Bool = {
+             AVAudioSession.sharedInstance().currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+         }) {
         self.toneOutput = toneOutput ?? SystemCallToneOutput()
+        self.applySpeakerOverride = applySpeakerOverride
+        self.observesSpeakerOutput = observesSpeakerOutput
         // CallKit、蓝牙或系统控制中心都可能改变输出路由，按钮状态必须跟随真实会话。
         routeChangeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
@@ -228,14 +262,19 @@ final class AudioSessionController: ObservableObject {
         route: PCMRoute,
         sessionAlreadyActive: Bool = false,
         owner: UUID = UUID(),
+        earlyMedia: EarlyMediaGrant? = nil,
         isCurrent: () -> Bool = { true }
     ) async -> Bool {
         guard !Task.isCancelled, isCurrent() else { return false }
         guard !active else { return true }
         startupUptime = ProcessInfo.processInfo.systemUptime
         recordedFirstDownlink = false
+        hasReceivedEarlyMedia = false
         recordStartup("phone_start")
-        let permission = await requestMicrophonePermission()
+        let receiveOnly = earlyMedia != nil
+        let permission: Bool
+        if receiveOnly { permission = true }
+        else { permission = await requestMicrophonePermission() }
         // Authorization may outlive the call that asked for it.
         guard !Task.isCancelled, isCurrent() else { return false }
         guard permission else {
@@ -248,12 +287,16 @@ final class AudioSessionController: ObservableObject {
         do {
             let session = AVAudioSession.sharedInstance()
             sessionActivationManagedByCallKit = sessionAlreadyActive
-            try configureCallAudioSession()
+            if receiveOnly {
+                if !sessionAlreadyActive { try session.setCategory(.playback, mode: .default) }
+            } else { try configureCallAudioSession() }
             if !sessionAlreadyActive {
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             }
             // 每次通话默认使用听筒；仅在用户主动开启扬声器后覆盖输出路由。
-            try session.overrideOutputAudioPort(requestedSpeakerOverride ? .speaker : .none)
+            if !receiveOnly || sessionAlreadyActive {
+                try session.overrideOutputAudioPort(requestedSpeakerOverride ? .speaker : .none)
+            }
             refreshRouteDescription()
 
             let engine = AVAudioEngine()
@@ -261,14 +304,20 @@ final class AudioSessionController: ObservableObject {
             let encoder = VoicePCMEncoder()
             // 用户可能在权限弹窗或音频启动期间切换静音，新编码器必须继承期望状态。
             encoder.setMuted(muted)
-            let handshakeSequence = PCMHandshakeSequence { try route.handshake() }
+            let earlyLease = earlyMedia.map(EarlyMediaLeaseState.init)
+            let handshakeSequence = PCMHandshakeSequence {
+                if let earlyLease { return try route.earlyMediaHandshake(earlyLease.current()) }
+                return try route.handshake()
+            }
             let transport = NetworkPCMTransport(
                 host: NWEndpoint.Host(route.host),
                 port: NWEndpoint.Port(rawValue: route.port)!,
                 handshakeSequence: handshakeSequence,
                 requiresWiFi: route.requiresWiFi,
                 usesSystemRouting: route.usesSystemRouting,
+                usesTLS: route.usesTLS,
                 isOverlayHost: route.isOverlayHost,
+                receiveOnly: receiveOnly,
                 onPCM: { [weak self] pcm in
                     Task { @MainActor [weak self] in
                         guard self?.sessionOwner == owner else { return }
@@ -286,7 +335,7 @@ final class AudioSessionController: ObservableObject {
             engine.attach(player)
             startupPhase = "enable_voice_processing"
             // Switching I/O must precede all fixed-rate graph connections.
-            try engine.inputNode.setVoiceProcessingEnabled(true)
+            if !receiveOnly { try engine.inputNode.setVoiceProcessingEnabled(true) }
             guard let playbackFormat = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32,
                 sampleRate: 8_000,
@@ -298,6 +347,7 @@ final class AudioSessionController: ObservableObject {
             startupPhase = "connect_playback"
             try CallAudioGraph.connectPlayback(player, engine: engine, format: playbackFormat)
 
+            if !receiveOnly {
             let input = engine.inputNode
             // Read the final input format only after enabling VoiceProcessingIO.
             let inputFormat = input.outputFormat(forBus: 0)
@@ -311,6 +361,9 @@ final class AudioSessionController: ObservableObject {
                 if !pcm.isEmpty { transport.sendPCM(pcm) }
             }
 
+                captureInstalled = true
+            }
+
             startupPhase = "start_engine"
             engine.prepare()
             try engine.start()
@@ -318,6 +371,9 @@ final class AudioSessionController: ObservableObject {
             recordStartup("engine_ready")
 
             self.engine = engine
+            self.receiveOnly = receiveOnly
+            self.earlyMediaLease = earlyLease
+            if case let .vowlan(_, credential) = route { earlyMediaClockOffset = credential.clockOffset }
             sessionOwner = owner
             self.player = player
             self.encoder = encoder
@@ -330,7 +386,7 @@ final class AudioSessionController: ObservableObject {
             diagnosticDescription = "\(DeviceContext.displayName) PCM 尚未握手"
             moduleDiagnosticDescription = ""
             errorMessage = nil
-            retryRequestedSpeakerRoute()
+            if !receiveOnly { retryRequestedSpeakerRoute() }
             transport.start()
             return true
         } catch {
@@ -351,6 +407,11 @@ final class AudioSessionController: ObservableObject {
         sessionActivationManagedByCallKit = true
     }
 
+    func callKitDidActivate() {
+        sessionActivationManagedByCallKit = true
+        retryRequestedSpeakerRoute()
+    }
+
     func setMuted(_ muted: Bool) {
         self.muted = muted
         encoder?.setMuted(muted)
@@ -359,12 +420,16 @@ final class AudioSessionController: ObservableObject {
     /// 根据模块通话状态播放来电铃声或呼出等待音，接通后立即让位给网络 PCM。
     func updateCallTone(for call: CallRecord?) {
         guard !active else {
+            // Keep the existing waiting tone until the early stream actually
+            // delivers PCM. A lease/ACK alone is not an audible announcement.
+            if receiveOnly, !hasReceivedEarlyMedia { return }
             stopCallTone()
             return
         }
         guard let call else {
             // 设置页试听不属于通话状态，空闲轮询不能提前将它停止。
             if case .preview? = currentCallTone { return }
+            if case .outgoingEnded? = currentCallTone { return }
             stopCallTone()
             return
         }
@@ -379,6 +444,13 @@ final class AudioSessionController: ObservableObject {
         }
     }
 
+    /// The caller already verified the nonce-bound response proof. Renewal may
+    /// only update this exact receive-only audio owner and its pinned session.
+    func renewEarlyMedia(_ grant: EarlyMediaGrant, owner: UUID) -> Bool {
+        guard active, receiveOnly, sessionOwner == owner, let earlyMediaLease else { return false }
+        return earlyMediaLease.renew(grant, now: Int64(Date().timeIntervalSince1970 + earlyMediaClockOffset))
+    }
+
     /// 设置页只试听一遍，不能像真实来电一样无限循环。
     func previewRingtone(named ringtone: String) {
         guard !active else { return }
@@ -390,7 +462,18 @@ final class AudioSessionController: ObservableObject {
         stopCallTone()
     }
 
+    func playOutgoingEndedTone() {
+        guard !active else { return }
+        playCallTone(.outgoingEnded, looping: false)
+        endedToneTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(650)) } catch { return }
+            guard let self, case .outgoingEnded? = self.currentCallTone else { return }
+            self.stopCallTone() // release playback/ducking after the finite cue
+        }
+    }
+
     func stopCallTone(deactivateSession: Bool = true) {
+        endedToneTask?.cancel(); endedToneTask = nil
         let hadTone = currentCallTone != nil
         currentCallTone = nil
         // 空闲轮询会反复调用本方法；没有铃声时绝不能停用后台待机正在使用的会话。
@@ -401,6 +484,7 @@ final class AudioSessionController: ObservableObject {
     /// 切换当前通话的输出路由；关闭扬声器时交还给系统选择听筒或已连接的蓝牙设备。
     func setSpeakerEnabled(_ enabled: Bool) {
         requestedSpeakerOverride = enabled
+        recordSpeakerRoute("requested")
         speakerRoutePending = !SpeakerRoutePolicy.routeMatches(
             requestedSpeaker: enabled,
             currentRouteIsSpeaker: speakerEnabled
@@ -429,10 +513,12 @@ final class AudioSessionController: ObservableObject {
     func retryRequestedSpeakerRoute() {
         let requested = requestedSpeakerOverride
         speakerRouteRetryTask?.cancel()
+        let retryID = UUID()
+        speakerRouteRetryID = retryID
         speakerRouteRetryTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if requestedSpeakerOverride == requested {
+                if speakerRouteRetryID == retryID {
                     speakerRoutePending = false
                     speakerRouteRetryTask = nil
                 }
@@ -442,9 +528,7 @@ final class AudioSessionController: ObservableObject {
                 if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
                 guard !Task.isCancelled, requestedSpeakerOverride == requested else { return }
                 do {
-                    try AVAudioSession.sharedInstance().overrideOutputAudioPort(
-                        requested ? .speaker : .none
-                    )
+                    try applySpeakerOverride(requested)
                     // API 返回只表示系统接受了请求；currentRoute 的切换是异步的。
                     // 等待一个很短的确认窗口，再以真实输出端口决定按钮高亮。
                     try? await Task.sleep(for: .seconds(SpeakerRoutePolicy.routeVerificationDelay))
@@ -454,14 +538,26 @@ final class AudioSessionController: ObservableObject {
                         requestedSpeaker: requested,
                         currentRouteIsSpeaker: speakerEnabled
                     ) {
+                        recordSpeakerRoute("confirmed")
                         return
                     }
                 } catch {
                     // 音频会话还没由 CallKit 激活时保留选择，等待下一次短重试。
+                    recordSpeakerRoute("retry_failed", error: error as NSError)
                 }
             }
             refreshRouteDescription()
         }
+    }
+
+    private func recordSpeakerRoute(_ phase: String, error: NSError? = nil) {
+        let session = AVAudioSession.sharedInstance()
+        var fields = ["requested_speaker": String(requestedSpeakerOverride),
+                      "observed_speaker": String(observesSpeakerOutput()),
+                      "category": session.category.rawValue, "mode": session.mode.rawValue]
+        if let error { fields["error_domain"] = error.domain; fields["error_code"] = String(error.code) }
+        Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "call-audio",
+            phase: "speaker_" + phase, title: "通话输出切换", fields: fields, isFailure: error != nil) }
     }
 
     /// 合并模块侧 D5/D6 统计，避免把 TCP 连通误判为实际存在语音。
@@ -501,9 +597,14 @@ final class AudioSessionController: ObservableObject {
         transport = nil
         encoder = nil
         if let engine {
-            engine.inputNode.removeTap(onBus: 0)
+            if captureInstalled { engine.inputNode.removeTap(onBus: 0) }
             engine.stop()
         }
+        captureInstalled = false
+        receiveOnly = false
+        earlyMediaLease = nil
+        earlyMediaClockOffset = 0
+        hasReceivedEarlyMedia = false
         player?.stop()
         player = nil
         engine = nil
@@ -569,7 +670,7 @@ final class AudioSessionController: ObservableObject {
                 "uplink_bytes": String(statistics.uplinkBytes), "uplink_peak": String(statistics.uplinkPeak),
                 "downlink_bytes": String(statistics.downlinkBytes), "downlink_peak": String(statistics.downlinkPeak),
                 "capture_buffers": String(encoder?.capturedBuffers ?? 0),
-                "input_format": engine?.inputNode.outputFormat(forBus: 0).description ?? "none",
+                "input_format": receiveOnly ? "recvonly (no input node)" : (engine?.inputNode.outputFormat(forBus: 0).description ?? "none"),
                 "output_format": engine?.outputNode.inputFormat(forBus: 0).description ?? "none",
                 "system_output_volume": String(AVAudioSession.sharedInstance().outputVolume),
                 "player_volume": String(player?.volume ?? 0),
@@ -603,7 +704,7 @@ final class AudioSessionController: ObservableObject {
         let input = session.currentRoute.inputs.map { "\($0.portName)[\($0.portType.rawValue)]" }.joined(separator: ", ")
         let output = session.currentRoute.outputs.map { "\($0.portName)[\($0.portType.rawValue)]" }.joined(separator: ", ")
         let inputs = session.availableInputs?.map(\.portName).joined(separator: ", ") ?? "无"
-        let routedToSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        let routedToSpeaker = observesSpeakerOutput()
         if speakerEnabled != routedToSpeaker {
             speakerEnabled = routedToSpeaker
         }
@@ -611,7 +712,8 @@ final class AudioSessionController: ObservableObject {
             requestedSpeaker: requestedSpeakerOverride,
             currentRouteIsSpeaker: routedToSpeaker
         )
-        routeDescription = "\(input.isEmpty ? "无输入" : input) ↔ 网络 PCM ↔ \(output.isEmpty ? "无输出" : output)（可用输入：\(inputs)）"
+        routeDescription = receiveOnly ? "仅接收 → \(output.isEmpty ? "无输出" : output)"
+            : "\(input.isEmpty ? "无输入" : input) ↔ 网络 PCM ↔ \(output.isEmpty ? "无输出" : output)（可用输入：\(inputs)）"
         IPhoneCloudCallSession.shared.recordAudioRoute(output.isEmpty ? "unknown" : output)
     }
 
@@ -647,6 +749,10 @@ final class AudioSessionController: ObservableObject {
         buffer.frameLength = AVAudioFrameCount(frames)
         if !recordedFirstDownlink {
             recordedFirstDownlink = true
+            if receiveOnly {
+                stopCallTone(deactivateSession: false)
+                hasReceivedEarlyMedia = true
+            }
             recordStartup("first_downlink")
         }
         pcm.withUnsafeBytes { rawBuffer in
@@ -721,18 +827,20 @@ struct PCMFrameAccumulator {
 private enum CallTone: Equatable {
     case incoming(String)
     case outgoingWaiting
+    case outgoingEnded
     case preview(String)
 
     var ringtoneName: String {
         switch self {
         case let .incoming(name), let .preview(name): return name
         case .outgoingWaiting: return "呼出等待"
+        case .outgoingEnded: return "呼叫结束"
         }
     }
 
     var volume: Float {
         switch self {
-        case .outgoingWaiting: return 0.55
+        case .outgoingWaiting, .outgoingEnded: return 0.55
         case .incoming, .preview: return 0.85
         }
     }
@@ -782,6 +890,11 @@ private enum SynthesizedCallTone {
     }
 
     private static func pattern(for tone: CallTone) -> [Segment] {
+        if case .outgoingEnded = tone {
+            // A neutral local two-note cue, never a simulated carrier announcement.
+            return [Segment(frequencies: [660], duration: 0.12, amplitude: 0.3),
+                    .silence(0.08), Segment(frequencies: [440], duration: 0.2, amplitude: 0.3)]
+        }
         if case .outgoingWaiting = tone {
             // 425 Hz、1 秒响 4 秒停，接近国内常见呼叫等待节奏。
             return [
@@ -845,7 +958,7 @@ private enum SynthesizedCallTone {
 }
 
 /// 维护低延迟 TCP 字节流；每次连接尝试都生成新的认证握手。
-private final class NetworkPCMTransport: @unchecked Sendable {
+final class NetworkPCMTransport: @unchecked Sendable {
     enum Event: Sendable {
         case connected
         case statistics(NetworkPCMStatistics)
@@ -859,6 +972,8 @@ private final class NetworkPCMTransport: @unchecked Sendable {
     private let handshakeSequence: PCMHandshakeSequence
     private let requiresWiFi: Bool
     private let usesSystemRouting: Bool
+    private let usesTLS: Bool
+    private let receiveOnly: Bool
     private let isOverlayHost: Bool
     private let queue = DispatchQueue(label: "com.jieden.airsim.network-pcm")
     private let onPCM: @Sendable (Data) -> Void
@@ -887,7 +1002,9 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         handshakeSequence: PCMHandshakeSequence,
         requiresWiFi: Bool,
         usesSystemRouting: Bool,
+        usesTLS: Bool,
         isOverlayHost: Bool,
+        receiveOnly: Bool = false,
         onPCM: @escaping @Sendable (Data) -> Void,
         onEvent: @escaping @Sendable (Event) -> Void
     ) {
@@ -896,7 +1013,9 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         self.handshakeSequence = handshakeSequence
         self.requiresWiFi = requiresWiFi
         self.usesSystemRouting = usesSystemRouting
+        self.usesTLS = usesTLS
         self.isOverlayHost = isOverlayHost
+        self.receiveOnly = receiveOnly
         self.onPCM = onPCM
         self.onEvent = onEvent
     }
@@ -930,7 +1049,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
     }
 
     func sendPCM(_ pcm: Data) {
-        guard !pcm.isEmpty else { return }
+        guard !receiveOnly, !pcm.isEmpty else { return }
         queue.async { [self] in
             guard readyForPCM, let connection else { return }
             let attempt = generation
@@ -958,14 +1077,14 @@ private final class NetworkPCMTransport: @unchecked Sendable {
         tcp.noDelay = true
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 2
-        let parameters = NWParameters(tls: nil, tcp: tcp)
+        let parameters = NWParameters(tls: usesTLS ? NWProtocolTLS.Options() : nil, tcp: tcp)
         if requiresWiFi {
             parameters.requiredInterfaceType = .wifi
         }
         let connection = NWConnection(host: host, port: port, using: parameters)
         self.connection = connection
         readyForPCM = false
-        onEvent(.status(isOverlayHost ? "正在通过 VPN 直连 PCM" : (requiresWiFi ? "正在通过 VoWLAN 连接 PCM" : "正在回退到普通 TCP 连接 PCM")))
+        onEvent(.status(usesTLS ? "正在通过自建 TLS 网关连接音频" : isOverlayHost ? "正在通过 VPN 直连 PCM" : (requiresWiFi ? "正在通过 VoWLAN 连接 PCM" : "正在回退到普通 TCP 连接 PCM")))
         connection.pathUpdateHandler = { [weak self, weak connection] path in
             guard let self, connection != nil else { return }
             self.queue.async {
@@ -1152,7 +1271,7 @@ private final class NetworkPCMTransport: @unchecked Sendable {
     }
 }
 
-private struct NetworkPCMStatistics: Sendable {
+struct NetworkPCMStatistics: Sendable {
     let uplinkBytes: UInt64
     let uplinkPeak: Int
     let downlinkBytes: UInt64

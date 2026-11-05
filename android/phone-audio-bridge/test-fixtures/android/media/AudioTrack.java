@@ -3,8 +3,9 @@ package android.media;
 /** Only the platform buffer query is available; actual playback setup fails at the OS boundary. */
 public class AudioTrack {
     public static int live, released;
+    public static boolean reject8kMono;
     private int state = 1;
-    public static int getMinBufferSize(int rate, int channels, int encoding) { return 320; }
+    public static int getMinBufferSize(int rate, int channels, int encoding) { return reject8kMono && rate == 8000 ? -2 : 320; }
     public boolean setPreferredDevice(AudioDeviceInfo device) { return true; }
     public int getState() { return 1; }
     public int getPlayState() { return state; }

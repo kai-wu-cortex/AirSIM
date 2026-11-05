@@ -13,7 +13,7 @@ final class CloudSMSEvent {
         JSONObject body = identity.put("event", "incoming_sms").put("delivery_id", deliveryID);
         if (keys == null) {
             return body.put("sender", source.optString("sender")).put("content", source.optString("content"))
-                    .put("timestamp", timestamp);
+                    .put("sim_slot", source.optString("sim_slot")).put("timestamp", timestamp);
         }
         String plaintext = E2ESMSCrypto.plaintext(source.optString("sender"), source.optString("content"), timestamp);
         E2ESMSCrypto.Envelope envelope = keys.seal(plaintext, identity.getString("device_id"),

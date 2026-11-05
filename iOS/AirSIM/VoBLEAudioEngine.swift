@@ -29,12 +29,18 @@ final class VoBLEAudioEngine: ObservableObject {
     private var playbackQueue = PlaybackQueueTracker(maximumFrames: 480)
     private var pendingCapture = Data()
     private var muted = false
+    private(set) var receiveOnly = false
+    private var captureInstalled = false
+    var onEarlyPlayback: (() -> Void)?
 #if DEBUG
     private var capturedFrames = 0
     private var playedFrames = 0
 #endif
 
-    func prepareForCall(managedByCallKit: Bool, callKitAudioActive: Bool) async throws {
+    func prepareForCall(managedByCallKit: Bool, callKitAudioActive: Bool, receiveOnly: Bool = false) async throws {
+        if self.receiveOnly != receiveOnly { stopEngine(); gate.mediaReady = false }
+        self.receiveOnly = receiveOnly
+        if !receiveOnly {
         let granted: Bool
         if #available(iOS 17.0, *) {
             granted = await AVAudioApplication.requestRecordPermission()
@@ -46,10 +52,11 @@ final class VoBLEAudioEngine: ObservableObject {
             }
         }
         guard granted else { throw VoiceAudioError.microphoneUnavailable }
+        }
         gate.callKitAudioActive = callKitAudioActive
         if !managedByCallKit {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
+            try session.setCategory(receiveOnly ? .playback : .playAndRecord, mode: receiveOnly ? .default : .voiceChat, options: receiveOnly ? [] : [.allowBluetoothHFP])
             try session.setPreferredSampleRate(48_000)
             try session.setPreferredIOBufferDuration(0.02)
             try session.setActive(true)
@@ -117,7 +124,7 @@ final class VoBLEAudioEngine: ObservableObject {
             // VoiceProcessingIO replaces the I/O nodes. Configure it before
             // connecting the fixed-rate player graph (otherwise AVFAudio can
             // raise an Objective-C exception, which Swift catch cannot handle).
-            try enableVoiceProcessing(engine)
+            if !receiveOnly { try enableVoiceProcessing(engine) }
             guard let format = AVAudioFormat(
                 commonFormat: .pcmFormatFloat32, sampleRate: 8_000,
                 channels: 1, interleaved: false) else {
@@ -125,6 +132,8 @@ final class VoBLEAudioEngine: ObservableObject {
             }
             phase = "connect_playback"
             try CallAudioGraph.connectPlayback(player, engine: engine, format: format)
+            var inputRate: Double = 0
+            if !receiveOnly {
             let input = engine.inputNode
             let inputFormat = input.outputFormat(forBus: 0)
             guard inputFormat.channelCount > 0 else { throw VoiceAudioError.microphoneUnavailable }
@@ -133,6 +142,9 @@ final class VoBLEAudioEngine: ObservableObject {
                 [weak self, weak encoder] buffer, _ in
                 guard let encoded = encoder?.encode(buffer), !encoded.isEmpty else { return }
                 Task { @MainActor [weak self] in self?.acceptCaptured(encoded) }
+            }
+            captureInstalled = true
+            inputRate = inputFormat.sampleRate
             }
             phase = "start_engine"
             engine.prepare()
@@ -144,11 +156,11 @@ final class VoBLEAudioEngine: ObservableObject {
             running = true; errorMessage = nil
             Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "ios", category: "voble",
                 phase: "engine_ready", title: "蓝牙语音引擎已启动",
-                fields: ["input_rate": String(inputFormat.sampleRate)]) }
+                fields: ["input_rate": String(inputRate)]) }
 #if DEBUG
             capturedFrames = 0
             playedFrames = 0
-            print("[AirSIM VoBLE Audio] started inputRate=\(inputFormat.sampleRate) route=\(AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType.rawValue))")
+            print("[AirSIM VoBLE Audio] started inputRate=\(inputRate) route=\(AVAudioSession.sharedInstance().currentRoute.outputs.map(\.portType.rawValue))")
 #endif
             playbackTask = Task { @MainActor [weak self] in
                 var diagnosticTicks = 0
@@ -165,7 +177,7 @@ final class VoBLEAudioEngine: ObservableObject {
                         let fields = ["engine_running": String(self.engine?.isRunning == true),
                             "player_playing": String(self.player?.isPlaying == true),
                             "capture_buffers": String(self.encoder?.capturedBuffers ?? 0),
-                            "input_format": self.engine?.inputNode.outputFormat(forBus: 0).description ?? "none",
+                            "input_format": self.receiveOnly ? "recvonly" : (self.engine?.inputNode.outputFormat(forBus: 0).description ?? "none"),
                             "output_format": self.engine?.outputNode.inputFormat(forBus: 0).description ?? "none",
                             "system_output_volume": String(AVAudioSession.sharedInstance().outputVolume),
                             "player_volume": String(self.player?.volume ?? 0),
@@ -204,6 +216,7 @@ final class VoBLEAudioEngine: ObservableObject {
     }
 
     private func acceptCaptured(_ data: Data) {
+        guard !receiveOnly else { return }
         pendingCapture.append(data)
         while pendingCapture.count >= 320 {
             transport.enqueueCapturedPCM(Data(pendingCapture.prefix(320)))
@@ -223,6 +236,7 @@ final class VoBLEAudioEngine: ObservableObject {
 
     private func schedulePlayback(_ frame: VoBLEPlaybackFrame) {
         guard running, let player else { return }
+        if receiveOnly { onEarlyPlayback?() }
         let samples = frame.pcm.count / 2
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32, sampleRate: 8_000,
@@ -263,9 +277,10 @@ final class VoBLEAudioEngine: ObservableObject {
         playbackQueue.reset()
         pendingCapture.removeAll(keepingCapacity: true)
         if let engine {
-            engine.inputNode.removeTap(onBus: 0)
+            if captureInstalled { engine.inputNode.removeTap(onBus: 0) }
             engine.stop()
         }
+        captureInstalled = false
         player?.stop(); player = nil; engine = nil; encoder = nil; running = false
     }
 }

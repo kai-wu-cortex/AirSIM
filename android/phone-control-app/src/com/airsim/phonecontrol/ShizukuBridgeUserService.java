@@ -1,7 +1,6 @@
 package com.airsim.phonecontrol;
 
 import android.content.Context;
-import android.database.Cursor;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.provider.BaseColumns;
@@ -42,6 +41,8 @@ public final class ShizukuBridgeUserService extends Binder {
     private boolean standalonePCM;
     private java.lang.Process bridgeProcess;
     private boolean bridgeDesired;
+    private boolean shuttingDown;
+    private android.net.LocalServerSocket bridgeOwnership;
     private Context serviceContext;
     private volatile LocalOutputMuteController outputMute;
     private volatile String outputStrategy = "vowlan";
@@ -161,7 +162,7 @@ public final class ShizukuBridgeUserService extends Binder {
         int boundedLimit = Math.max(1, Math.min(200, limit));
         try {
             String[] projection = {BaseColumns._ID, Telephony.Sms.ADDRESS,
-                    Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.DATE_SENT};
+                    Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.DATE_SENT, "sub_id"};
             String selection;
             String[] args;
             if (afterId >= 0) {
@@ -173,20 +174,22 @@ public final class ShizukuBridgeUserService extends Binder {
             }
             Uri uri = Telephony.Sms.Inbox.CONTENT_URI.buildUpon()
                     .appendQueryParameter("limit", Integer.toString(boundedLimit)).build();
-            JSONArray rows = new JSONArray();
-            try (Cursor cursor = serviceContext.getContentResolver().query(
-                    uri, projection, selection, args, BaseColumns._ID + " ASC")) {
+            // A ContentResolver is rejected in this app_process; read the way `content` does.
+            return ShellProviderQuery.query(uri.getAuthority(), uri, projection, selection, args,
+                    BaseColumns._ID + " ASC", cursor -> {
                 if (cursor == null) return "error:provider";
+                JSONArray rows = new JSONArray();
                 while (cursor.moveToNext() && rows.length() < boundedLimit) {
                     rows.put(new JSONObject()
                             .put("id", cursor.getLong(0))
                             .put("address", cursor.getString(1) == null ? "" : cursor.getString(1))
                             .put("body", cursor.getString(2) == null ? "" : cursor.getString(2))
                             .put("date", cursor.getLong(3))
-                            .put("date_sent", cursor.getLong(4)));
+                            .put("date_sent", cursor.getLong(4))
+                            .put("sub_id", cursor.getInt(5)));
                 }
-            }
-            return rows.toString();
+                return rows.toString();
+            });
         } catch (Exception error) {
             Log.w(TAG, "shizuku_sms_inbox_failed type=" + error.getClass().getSimpleName());
             return "error:" + error.getClass().getSimpleName();
@@ -196,6 +199,7 @@ public final class ShizukuBridgeUserService extends Binder {
     private String ensureBridgeStarted() throws IOException {
         synchronized (lock) {
             verifyIdentity();
+            if (shuttingDown) throw new IOException("privileged service is stopping");
             bridgeDesired = true;
             if (bridgeProcess != null && bridgeProcess.isAlive()) return statusLocked();
             if (sourceApk.isEmpty()) throw new IOException("application source path unavailable");
@@ -204,6 +208,11 @@ public final class ShizukuBridgeUserService extends Binder {
             // loopback and does not require this interface.
             if (!standalonePCM && NetworkInterface.getByName("avf_tap_fixed") == null) {
                 throw new IOException("AVF interface unavailable: avf_tap_fixed");
+            }
+            // A supervisor must own the bridge before it can retire any PCM
+            // process. Root and Shizuku must never kill each other's live child.
+            if (bridgeOwnership == null) {
+                bridgeOwnership = new android.net.LocalServerSocket("airsim-pcm-owner-" + packageName);
             }
             stopStaleAudioBridges();
             List<String> command = new ArrayList<>();
@@ -295,7 +304,7 @@ public final class ShizukuBridgeUserService extends Binder {
         boolean restart;
         synchronized (lock) {
             if (bridgeProcess == launched) bridgeProcess = null;
-            restart = bridgeDesired;
+            restart = bridgeDesired && !shuttingDown;
         }
         Log.w(TAG, "PCM bridge exited code=" + exit + " restart=" + restart);
         if (restart) {
@@ -519,15 +528,35 @@ public final class ShizukuBridgeUserService extends Binder {
     }
 
     public void destroy() {
+        shutdown();
+        System.exit(0);
+    }
+
+    synchronized void shutdown() {
         synchronized (lock) {
+            if (shuttingDown) return;
+            shuttingDown = true;
             bridgeDesired = false;
-            if (bridgeProcess != null) bridgeProcess.destroy();
+            if (bridgeProcess != null) {
+                bridgeProcess.destroy();
+                try {
+                    if (!bridgeProcess.waitFor(1, TimeUnit.SECONDS)) {
+                        bridgeProcess.destroyForcibly();
+                        bridgeProcess.waitFor(1, TimeUnit.SECONDS);
+                    }
+                } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            }
             bridgeProcess = null;
         }
         try { setLocalOutputMuted(false); }
         catch (Throwable error) { Log.w(TAG, "restore output during destroy failed", error); }
         audioOperations.close();
-        System.exit(0);
+        synchronized (lock) {
+            if (bridgeOwnership != null) {
+                try { bridgeOwnership.close(); } catch (IOException ignored) {}
+                bridgeOwnership = null;
+            }
+        }
     }
 
     private static String safeMessage(Throwable error) {

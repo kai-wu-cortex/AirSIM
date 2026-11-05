@@ -85,6 +85,9 @@ public final class MainActivity extends Activity {
     private final List<TextView> navigationItems = new ArrayList<>();
     private Page currentPage = Page.STATUS;
     private HealthTile pcmHealthTile;
+    private HealthTile privilegeHealthTile;
+    private TextView audioCompatibilityTitle;
+    private TextView audioCompatibilityDetails;
     private LiveStatusPoller pcmStatusPoller;
     private boolean resumed;
     private AppUpdatePresenter appUpdates;
@@ -166,6 +169,9 @@ public final class MainActivity extends Activity {
         pcmStatusPoller = new LiveStatusPoller(() -> {
             ShizukuBridgeManager bridge = ShizukuBridgeManager.get(this);
             bridge.refreshBridgeStatus();
+            renderAudioCompatibility();
+            refreshPrivilegeTile();
+            if (currentPage == Page.SETTINGS) refreshShizukuStatus();
             return bridge.bridgeRunning();
         }, this::renderPCMStatus, new LiveStatusPoller.Scheduler() {
             @Override public void postDelayed(Runnable task, long delayMillis) {
@@ -321,6 +327,11 @@ public final class MainActivity extends Activity {
         voBLEDiagnosticsView = null;
         voBLEClearCredentialButton = null;
         pcmHealthTile = null;
+        privilegeHealthTile = null;
+        shizukuStatus = null;
+        privilegeChannelGroup = null;
+        audioCompatibilityTitle = null;
+        audioCompatibilityDetails = null;
         currentPage = page;
         handler.removeCallbacks(debugRefresh);
         bottomBar.setVisibility(View.VISIBLE);
@@ -337,7 +348,7 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         updateNavigation();
         if (page == Page.DEBUG && realtimeLogging) handler.post(debugRefresh);
-        if (page == Page.STATUS && resumed) pcmStatusPoller.start();
+        if ((page == Page.STATUS || page == Page.SETTINGS) && resumed) pcmStatusPoller.start();
     }
 
     private void updateNavigation() {
@@ -407,7 +418,7 @@ public final class MainActivity extends Activity {
         agentTile.view.setOnClickListener(ignored -> showFeatureDetails(Feature.AGENT));
         firstHealthRow.addView(agentTile.view, weightedWithEnd(5));
         pcmHealthTile = healthTile(
-                "PCM 音频桥", pcmBridgeRunning() ? "运行中" : "待启动",
+                "PCM 音频桥", pcmBridgeRunning() ? "进程运行" : "待启动",
                 android.R.drawable.ic_media_play, pcmBridgeRunning());
         pcmHealthTile.view.setOnClickListener(ignored -> showFeatureDetails(Feature.PCM));
         firstHealthRow.addView(pcmHealthTile.view, weightedWithStart(5));
@@ -420,11 +431,14 @@ public final class MainActivity extends Activity {
         pushTile.view.setOnClickListener(ignored -> showFeatureDetails(Feature.PUSH));
         secondHealthRow.addView(pushTile.view, weightedWithEnd(5));
         HealthTile shizukuTile = healthTile(
-                "Shizuku", shizukuReady() ? "已授权" : "待授权",
-                android.R.drawable.ic_lock_idle_lock, shizukuReady());
+                "权限通道", privilegeReady() ? ShizukuBridgeManager.get(this).activePrivilegeLabel() + " 已连接" : "待连接",
+                android.R.drawable.ic_lock_idle_lock, privilegeReady());
+        privilegeHealthTile = shizukuTile;
         shizukuTile.view.setOnClickListener(ignored -> showFeatureDetails(Feature.SHIZUKU));
         secondHealthRow.addView(shizukuTile.view, weightedWithStart(5));
         root.addView(secondHealthRow, matchWithTop(10));
+
+        root.addView(audioCompatibilityCard(), matchWithTop(12));
 
         root.addView(modeSelector(), matchWithTop(14));
 
@@ -1298,11 +1312,51 @@ public final class MainActivity extends Activity {
         HealthTile tile = pcmHealthTile;
         if (tile == null || currentPage != Page.STATUS) return;
         int color = running ? PRIMARY : WARNING;
-        tile.state.setText(running ? "运行中" : "待启动");
+        tile.state.setText(running ? "进程运行" : "待启动");
         tile.state.setTextColor(color);
         tile.icon.setImageTintList(ColorStateList.valueOf(color));
         tile.icon.setBackground(rounded(running ? Color.rgb(17, 66, 57) : Color.rgb(76, 58, 25),
                 21, Color.TRANSPARENT, 0));
+    }
+
+    private View audioCompatibilityCard() {
+        LinearLayout panel = card(SURFACE, 18);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(14), dp(16), dp(14));
+        panel.addView(overline("Agent 自动检测"));
+        audioCompatibilityTitle = label("等待音频桥检测", 17, WARNING, Gravity.START);
+        audioCompatibilityTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        panel.addView(audioCompatibilityTitle, matchWithTop(8));
+        audioCompatibilityDetails = label("", 13, MUTED, Gravity.START);
+        audioCompatibilityDetails.setTextIsSelectable(true);
+        panel.addView(audioCompatibilityDetails, matchWithTop(8));
+        TextView retry = label("重新检测", 15, BLUE, Gravity.START | Gravity.CENTER_VERTICAL);
+        retry.setMinHeight(dp(48));
+        retry.setOnClickListener(ignored -> {
+            ShizukuBridgeManager.get(this).refreshBridgeStatus();
+            renderAudioCompatibility();
+        });
+        panel.addView(retry, matchWithTop(4));
+        renderAudioCompatibility();
+        return panel;
+    }
+
+    private void renderAudioCompatibility() {
+        if (audioCompatibilityTitle == null || audioCompatibilityDetails == null) return;
+        AgentAudioCompatibility.Result result = AgentAudioCompatibility.evaluate(
+                ShizukuBridgeManager.get(this).freshAudioHealthReport(),
+                "active".equals(CallRepository.diagnosticState()));
+        int color = switch (result.level()) {
+            case INCOMPATIBLE -> DANGER;
+            case OBSERVED -> PRIMARY;
+            case ATTENTION -> WARNING;
+            case PENDING -> MUTED;
+        };
+        audioCompatibilityTitle.setText(result.title());
+        audioCompatibilityTitle.setTextColor(color);
+        if (!result.details().contentEquals(audioCompatibilityDetails.getText())) {
+            audioCompatibilityDetails.setText(result.details());
+        }
     }
 
     private LinearLayout pageTitle(String title, String badge) {
@@ -1736,7 +1790,7 @@ public final class MainActivity extends Activity {
             case AGENT -> RuntimeMode.agentLabel(this) + " 详情";
             case PCM -> "PCM 音频桥详情";
             case PUSH -> "Push / Relay 详情";
-            case SHIZUKU -> "Shizuku 详情";
+            case SHIZUKU -> "权限通道详情";
         };
     }
 
@@ -1780,11 +1834,11 @@ public final class MainActivity extends Activity {
             case PCM -> {
                 String shizuku = ShizukuBridgeManager.get(this).status();
                 String pcmBackend = RuntimeMode.isStandalone(this) ? "本机 PCM 端口 7580" : "AVF PCM 端口 7580";
-                String reason = !shizukuReady() ? "Shizuku 未连接或未授权，PCM 用户服务不可用"
+                String reason = !privilegeReady() ? "Root / Shizuku 权限通道尚未连接，PCM 用户服务不可用"
                         : currentVoWLAN.contains("pcm_ready=false") ? pcmBackend + "未响应"
                         : !pcmBridgeRunning() ? "PCM 音频桥进程尚未运行"
                         : "当前检查项满足；仍需实际通话验证双向音频";
-                details = "Shizuku：" + shizuku + "\n桥状态：" + (pcmBridgeRunning() ? "运行中" : "待启动")
+                details = "权限通道：" + shizuku + "\n桥状态：" + (pcmBridgeRunning() ? "运行中" : "待启动")
                         + "\n状态原因：" + reason
                         + "\n当前 VoWLAN 检查：" + currentVoWLAN
                         + "\n最近 VoWLAN 检查：" + (latestVoWLAN.isEmpty() ? "无" : latestVoWLAN);
@@ -1798,9 +1852,9 @@ public final class MainActivity extends Activity {
             }
             case SHIZUKU -> {
                 String shizuku = ShizukuBridgeManager.get(this).status();
-                details = "状态：" + shizuku + "\n原因：" + (shizukuReady()
-                        ? "Binder 已连接；是否有声音仍需检查 PCM 路由"
-                        : "检查 Shizuku 是否运行、AirSIM 授权及 PCM 用户服务是否成功绑定");
+                details = "状态：" + shizuku + "\n原因：" + (privilegeReady()
+                        ? "权限通道已连接；Root 与 Shizuku 只需一个，是否有声音仍需验证 PCM 路由"
+                        : "检查所选 Root / Shizuku 授权与 PCM 用户服务；启动超时可手动重试或切换通道");
                 keywords = new String[]{"shizuku", "local_output"};
             }
             default -> throw new IllegalStateException("未知功能");
@@ -2225,9 +2279,17 @@ public final class MainActivity extends Activity {
         return "";
     }
 
-    private boolean shizukuReady() {
-        String value = ShizukuBridgeManager.get(this).status();
-        return value.contains("Shizuku 已连接");
+    private void refreshPrivilegeTile() {
+        if (privilegeHealthTile == null) return;
+        ShizukuBridgeManager manager = ShizukuBridgeManager.get(this);
+        boolean ready = manager.privilegeConnected();
+        privilegeHealthTile.state.setText(ready ? manager.activePrivilegeLabel() + " 已连接" : "待连接");
+        privilegeHealthTile.state.setTextColor(ready ? PRIMARY : WARNING);
+        privilegeHealthTile.icon.setImageTintList(ColorStateList.valueOf(ready ? PRIMARY : WARNING));
+    }
+
+    private boolean privilegeReady() {
+        return ShizukuBridgeManager.get(this).privilegeConnected();
     }
 
     private boolean pcmBridgeRunning() {
@@ -2435,7 +2497,7 @@ public final class MainActivity extends Activity {
         }
         if (startupSetupPending) scheduleStartupSetup();
         if (currentPage == Page.SETTINGS && !voBLEAuthenticationVisible) showPage(Page.SETTINGS);
-        if (currentPage == Page.STATUS && pcmStatusPoller != null) pcmStatusPoller.start();
+        if ((currentPage == Page.STATUS || currentPage == Page.SETTINGS) && pcmStatusPoller != null) pcmStatusPoller.start();
         if (voBLEAuthenticationVisible) handler.post(voBLEAuthenticationRefresh);
         refreshShizukuStatus();
 		startSMSInboxBaselineIfAuthorized();

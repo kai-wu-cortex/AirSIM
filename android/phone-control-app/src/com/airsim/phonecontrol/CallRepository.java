@@ -22,6 +22,17 @@ public final class CallRepository {
     private static final java.util.Set<OutgoingCallObservation> OUTGOING =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
+    static final EarlyMediaLeases EARLY_MEDIA = new EarlyMediaLeases(() -> System.nanoTime()/1_000_000L, CallRepository::earlyMediaEligible);
+    static void revokeEarlyMedia(String id) { EARLY_MEDIA.revokeAndroid(id); }
+    static void earlyMediaCallStateChanged(String id, int state) {
+        // A dial receipt can precede repeated CONNECTING/details callbacks.
+        // Keep its identity through setup; only DIALING may actually open PCM.
+        if (!earlyMediaSetupState(state)) revokeEarlyMedia(id);
+    }
+    private static boolean earlyMediaSetupState(int state) {
+        return state == Call.STATE_DIALING || state == Call.STATE_CONNECTING
+            || state == Call.STATE_SELECT_PHONE_ACCOUNT;
+    }
     private CallRepository() {}
 
     public static String add(Call call) {
@@ -126,6 +137,17 @@ public final class CallRepository {
         });
     }
 
+    /** Only the one still-unconnected outgoing carrier call may expose early downlink. */
+    public static boolean earlyMediaEligible(String callId) {
+        Call call = CALLS.get(callId);
+        if (call == null || CALLS.size() != 1) return false;
+        int state = call.getState();
+        if (!earlyMediaSetupState(state)) return false;
+        Call.Details details = call.getDetails();
+        return details != null && details.getCallDirection() == Call.Details.DIRECTION_OUTGOING
+            && details.getConnectTimeMillis() == 0;
+    }
+
     public static int state(String callId) {
         Call call = CALLS.get(callId);
         return call == null ? -1 : call.getState();
@@ -171,7 +193,8 @@ public final class CallRepository {
         if (call == null) return "";
         int state = call.getState();
         if (state == Call.STATE_DISCONNECTED || state == Call.STATE_DISCONNECTING
-                || ("answer".equals(action) && state != Call.STATE_RINGING)) return "";
+                || ("answer".equals(action) && state != Call.STATE_RINGING
+                    && state != Call.STATE_ACTIVE && state != Call.STATE_HOLDING)) return "";
         return androidID;
     }
 
@@ -202,7 +225,14 @@ public final class CallRepository {
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
                 switch (command.action) {
-                    case "answer" -> call.answer(VideoProfile.STATE_AUDIO_ONLY);
+                    case "answer" -> {
+                        // A retry for this exact Telecom call must not re-answer or
+                        // disturb the established audio route.
+                        int state = call.getState();
+                        if (state == Call.STATE_RINGING) call.answer(VideoProfile.STATE_AUDIO_ONLY);
+                        else if (state != Call.STATE_ACTIVE && state != Call.STATE_HOLDING)
+                            throw new IllegalStateException("call is not answerable");
+                    }
                     case "reject" -> {
                         if (call.getState() == Call.STATE_RINGING) call.reject(false, null);
                         else call.disconnect();
@@ -236,7 +266,9 @@ public final class CallRepository {
             int expected = "answer".equals(command.action) ? Call.STATE_ACTIVE : Call.STATE_DISCONNECTED;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (System.nanoTime() < deadline) {
-                if (call.getState() == expected || (expected == Call.STATE_DISCONNECTED && !IDS.containsKey(call))) {
+                if (call.getState() == expected
+                        || (expected == Call.STATE_ACTIVE && call.getState() == Call.STATE_HOLDING)
+                        || (expected == Call.STATE_DISCONNECTED && !IDS.containsKey(call))) {
                     return ActionResult.success();
                 }
                 Thread.sleep(50);

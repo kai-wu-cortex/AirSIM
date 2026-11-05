@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // MARK: - 通话与短信
 
@@ -19,6 +20,7 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     var historyEstimated: Bool? = nil
     var slotIndex: Int? = nil
     var slotID: Int? = nil
+    var isTerminal: Bool { endedAt != nil || state == "ended" || state == "failed" }
 
     enum CodingKeys: String, CodingKey {
         case id, index, direction, state, number, missed
@@ -95,6 +97,7 @@ struct AgentHealth: Codable, Sendable {
 
 /// Relay 最近一次收到的 Agent 心跳。该对象只包含可展示状态，不包含设备密钥。
 struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
+    var battery: AndroidBatteryReading? = nil
     var commandRoutingVersion: Int? = nil
     let agentID: String
     let agentKind: String?
@@ -108,6 +111,7 @@ struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
     var id: String { agentID }
 
     enum CodingKeys: String, CodingKey {
+        case battery
         case agentID = "agent_id"
         case agentKind = "agent_kind"
         case deviceName = "device_name"
@@ -206,6 +210,7 @@ struct AndroidSIMSlot: Codable, Equatable, Identifiable, Sendable {
 }
 
 struct AndroidAgentMetadata: Decodable, Equatable, Sendable {
+    var battery: AndroidBatteryReading? = nil
     let agentID: String
     let deviceName: String
     let phoneNumber: String?
@@ -213,11 +218,13 @@ struct AndroidAgentMetadata: Decodable, Equatable, Sendable {
     let callGeneration: UInt64?
     let simSlots: [AndroidSIMSlot]?
     init(agentID: String, deviceName: String, phoneNumber: String?, agentKind: String?,
-         callGeneration: UInt64? = nil, simSlots: [AndroidSIMSlot]? = nil) {
+         callGeneration: UInt64? = nil, simSlots: [AndroidSIMSlot]? = nil, battery: AndroidBatteryReading? = nil) {
         self.agentID = agentID; self.deviceName = deviceName; self.phoneNumber = phoneNumber
         self.agentKind = agentKind; self.callGeneration = callGeneration; self.simSlots = simSlots
+        self.battery = battery
     }
     enum CodingKeys: String, CodingKey {
+        case battery
         case agentID = "agent_id", deviceName = "device_name"
         case phoneNumber = "phone_number", agentKind = "agent_kind"
         case callGeneration = "call_generation"
@@ -229,7 +236,7 @@ struct AndroidAgentMetadata: Decodable, Equatable, Sendable {
         let number = value.phoneNumber?.trimmingCharacters(in: .whitespacesAndNewlines)
         return Self(agentID: value.agentID, deviceName: value.deviceName,
                     phoneNumber: number?.isEmpty == false ? number : nil, agentKind: value.agentKind,
-                    callGeneration: value.callGeneration, simSlots: value.simSlots ?? [])
+                    callGeneration: value.callGeneration, simSlots: value.simSlots ?? [], battery: value.battery)
     }
 }
 
@@ -330,6 +337,11 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
 
     var isOutgoing: Bool { direction == .outgoing }
 
+    var simDeliveryLabel: String {
+        let line = simSlot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "\(isOutgoing ? "通过" : "接收于") \(line.isEmpty ? "SIM 未知" : line)"
+    }
+
     /// 新版 Agent 用 delivery_id 对齐 APNs 与本地同步；旧版仍回退到内容指纹。
     var id: String {
         if let deliveryID, !deliveryID.isEmpty { return scopedIdentity("delivery:\(deliveryID)") }
@@ -375,7 +387,9 @@ enum SMSHistoryPolicy {
         content: String,
         at timestamp: Date,
         to messages: [SMSMessage],
-        limit: Int
+        limit: Int,
+        sourceAgentID: String? = nil,
+        simSlot: String? = nil
     ) -> [SMSMessage] {
         let sentMessage = SMSMessage(
             sender: recipient,
@@ -383,7 +397,9 @@ enum SMSHistoryPolicy {
             code: nil,
             timestamp: timestamp,
             deliveryID: nil,
-            direction: .outgoing
+            direction: .outgoing,
+            sourceAgentID: sourceAgentID,
+            simSlot: simSlot
         )
         return Array((messages + [sentMessage])
             .sorted { $0.timestamp > $1.timestamp }
@@ -1150,5 +1166,228 @@ struct VoicePCMStatistics: Codable, Sendable {
         case downlinkFrames = "downlink_frames"
         case downlinkPeak = "downlink_peak"
         case downlinkDroppedFrames = "downlink_dropped_frames"
+    }
+}
+
+/// Explicit opt-in grant. Unknown/missing protocol or an unsigned grant is not media permission.
+struct EarlyMediaGrant: Codable, Equatable, Sendable {
+    let version: Int
+    let agentID: String
+    let callID: String
+    let sessionID: String
+    let expiresAt: Int64
+    let state: String
+    let direction: String
+    let format: String
+    let proof: String
+    enum CodingKeys: String, CodingKey {
+        case version, state, direction, format, proof
+        case agentID = "agent_id", callID = "call_id", sessionID = "session_id", expiresAt = "expires_at"
+    }
+    func permits(agentID: String, callID: String, now: Int64) -> Bool {
+        version == 1 && self.agentID == agentID && self.callID == callID
+            && !sessionID.isEmpty && sessionID.utf8.count <= 128
+            && [agentID, callID, sessionID].allSatisfy { !$0.contains("\n") && !$0.contains("\r") }
+            && state == "early_media" && direction == "recvonly" && format == "s16le-8000-mono"
+            && expiresAt > now && expiresAt <= now + 30
+    }
+    func proofMessage(nonce: String) -> Data {
+        Data("AIRSIM-EARLY-MEDIA1\n\(nonce)\n\(agentID)\n\(callID)\n\(sessionID)\n\(expiresAt)\n\(state)\n\(direction)\n\(format)".utf8)
+    }
+}
+
+enum EarlyMediaProbeResult: Equatable, Sendable {
+    case ready(EarlyMediaGrant)
+    case pending
+    case unsupported
+    case revoked
+}
+
+/// Audio callbacks reconnect off the main actor. Keep the newest verified
+/// lease available to their handshake without sharing mutable call state.
+final class EarlyMediaLeaseState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var grant: EarlyMediaGrant
+    init(_ grant: EarlyMediaGrant) { self.grant = grant }
+    func current() -> EarlyMediaGrant {
+        lock.lock(); defer { lock.unlock() }
+        return grant
+    }
+    func renew(_ next: EarlyMediaGrant, now: Int64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard next.permits(agentID: grant.agentID, callID: grant.callID, now: now),
+              next.sessionID == grant.sessionID, next.expiresAt >= grant.expiresAt else { return false }
+        grant = next
+        return true
+    }
+}
+
+/// Bounded control negotiation only. It never dials, answers or changes call
+/// state. Playback leases are independently enforced by the audio owner.
+@MainActor
+enum EarlyMediaNegotiator {
+    enum Outcome: String { case cancelled, unsupported, revoked, unavailable, timedOut }
+
+    static func run(
+        clockOffset: TimeInterval,
+        now: () -> TimeInterval = { Date().timeIntervalSince1970 },
+        uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+        isCurrent: () -> Bool,
+        onPending: () -> Void = {},
+        probe: () async throws -> EarlyMediaProbeResult,
+        accept: (EarlyMediaGrant) async -> Bool
+    ) async -> Outcome {
+        let deadline = uptime() + 120
+        var failures = 0
+        while !Task.isCancelled, isCurrent(), uptime() < deadline {
+            var delay: TimeInterval = 2
+            do {
+                let result = try await probe()
+                guard !Task.isCancelled, isCurrent() else { return .cancelled }
+                guard uptime() < deadline else { return .timedOut }
+                switch result {
+                case .ready(let grant):
+                    guard grant.expiresAt > Int64(now() + clockOffset),
+                          await accept(grant) else { return .unavailable }
+                    failures = 0
+                    // Renew before the independent playback deadline expires.
+                    delay = min(15, max(0.5, Double(grant.expiresAt) - now() - clockOffset - 8))
+                case .pending:
+                    failures = 0
+                    onPending()
+                case .unsupported: return .unsupported
+                case .revoked: return .revoked
+                }
+            } catch {
+                if Task.isCancelled || !isCurrent() { return .cancelled }
+                failures += 1
+                if failures >= 3 { return .unavailable }
+            }
+            guard !Task.isCancelled, isCurrent() else { return .cancelled }
+            do { try await sleep(max(0, min(delay, deadline - uptime()))) }
+            catch { return .cancelled }
+        }
+        return Task.isCancelled || !isCurrent() ? .cancelled : .timedOut
+    }
+}
+
+/// Read-only recovery receipt. Ownership and present state have separate proofs.
+struct DialOperationStatus: Codable, Equatable, Sendable {
+    let version: Int
+    let agentID: String
+    let operationID: String
+    let status: String
+    let androidID: String?
+    let backendID: String?
+    let callState: String
+    let endedAt: String?
+    let operationProof: String?
+    let statusProof: String
+    enum CodingKeys: String, CodingKey {
+        case version, status
+        case agentID = "agent_id", operationID = "operation_id", androidID = "android_id"
+        case backendID = "backend_id", callState = "call_state", endedAt = "ended_at"
+        case operationProof = "operation_proof", statusProof = "status_proof"
+    }
+    func matches(agentID: String, operationID: String) -> Bool {
+        func token(_ value: String) -> Bool {
+            !value.isEmpty && value.utf8.count <= 128 && !value.contains(where: { "\r\n\0".contains($0) })
+        }
+        guard version == 1, self.agentID == agentID, self.operationID == operationID,
+              token(agentID), token(operationID),
+              ["confirmed", "unknown", "rejected"].contains(status),
+              ["unknown", "dialing", "alerting", "active", "held", "ended"].contains(callState) else { return false }
+        let ended = endedAt ?? ""
+        guard ended.utf8.count <= 64, !ended.contains(where: { "\r\n\0".contains($0) }),
+              (callState == "ended") == !ended.isEmpty else { return false }
+        if callState == "ended" {
+            let date = ISO8601DateFormatter()
+            date.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if date.date(from: ended) == nil {
+                date.formatOptions = [.withInternetDateTime]
+                guard date.date(from: ended) != nil else { return false }
+            }
+        }
+        if status == "confirmed" { return token(androidID ?? "") && token(backendID ?? "") }
+        return (androidID ?? "").isEmpty && (backendID ?? "").isEmpty
+            && (operationProof ?? "").isEmpty && callState == "unknown" && ended.isEmpty
+    }
+    func proofMessage(nonce: String) -> Data {
+        Data(["AIRSIM-OPERATION1", nonce, agentID, operationID, status,
+              androidID ?? "", backendID ?? "", callState, endedAt ?? ""].joined(separator: "\n").utf8)
+    }
+    var lifecycleState: CallLifecycleState? {
+        guard status == "confirmed" else { return nil }
+        switch callState {
+        case "dialing", "alerting": return .connecting
+        case "active", "held": return .active
+        case "ended": return .ended
+        default: return nil
+        }
+    }
+}
+
+enum DialOperationRecoveryError: LocalizedError {
+    case unknown, rejected, invalidProof
+    var errorDescription: String? {
+        switch self {
+        case .unknown: return "拨号结果尚未确认。未自动重拨，请先检查设备通话状态。"
+        case .rejected: return "设备确认未执行本次拨号。请检查设备提示后手动重试。"
+        case .invalidProof: return "无法验证拨号状态回执，未恢复通话，也未自动重拨。"
+        }
+    }
+}
+
+enum SMSSIMPreference {
+    static func key(_ agentID: String) -> String { "airsim.sms-sim-account.\(agentID)" }
+    private static func conversationsKey(_ agentID: String) -> String { "airsim.sms-conversation-lines.\(agentID)" }
+    private static func recipientKey(_ recipient: String) -> String {
+        let normalized = recipient.filter { !$0.isWhitespace && !"()-".contains($0) }
+        return SHA256.hash(data: Data(normalized.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    static func select(_ id: String, agentID: String, recipient: String?, defaults: UserDefaults = .standard) {
+        guard let recipient, !recipient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            defaults.set(id, forKey: key(agentID)); return
+        }
+        var lines = defaults.dictionary(forKey: conversationsKey(agentID)) as? [String: String] ?? [:]
+        lines[recipientKey(recipient)] = id
+        defaults.set(lines, forKey: conversationsKey(agentID))
+    }
+    static func remember(agentID: String, slots: [AndroidSIMSlot], defaults: UserDefaults = .standard) {
+        // Cloud-only cold launches still need the previously authenticated
+        // opaque handles. Do not persist SIM phone numbers. Android validates
+        // the selected handle again and fails if that SIM has been removed.
+        let sanitized = slots.prefix(8).map { slot in
+            AndroidSIMSlot(id: slot.id, label: slot.label, number: nil, isDefault: slot.isDefault,
+                slotIndex: slot.slotIndex, subID: slot.subID, carrierName: slot.carrierName,
+                isEmbedded: slot.isEmbedded, isDefaultVoice: slot.isDefaultVoice, isDefaultSMS: slot.isDefaultSMS)
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        if let data = try? encoder.encode(sanitized), data != defaults.data(forKey: "airsim.sms-sim-slots.\(agentID)") {
+            defaults.set(data, forKey: "airsim.sms-sim-slots.\(agentID)")
+        }
+    }
+    static func rememberedSlots(agentID: String, defaults: UserDefaults = .standard) -> [AndroidSIMSlot] {
+        guard let data = defaults.data(forKey: "airsim.sms-sim-slots.\(agentID)"),
+              let slots = try? JSONDecoder().decode([AndroidSIMSlot].self, from: data) else { return [] }
+        return slots
+    }
+    static func forget(agentID: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key(agentID))
+        defaults.removeObject(forKey: "airsim.sms-sim-slots.\(agentID)")
+        defaults.removeObject(forKey: conversationsKey(agentID))
+    }
+    static func selectedID(agentID: String, slots: [AndroidSIMSlot], recipient: String? = nil,
+                           suggestedID: String? = nil,
+                           defaults: UserDefaults = .standard) -> String? {
+        let saved: String?
+        if let recipient, !recipient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            saved = (defaults.dictionary(forKey: conversationsKey(agentID)) as? [String: String])?[recipientKey(recipient)]
+        } else { saved = defaults.string(forKey: key(agentID)) }
+        if let saved, slots.contains(where: { $0.id == saved }) { return saved }
+        if let suggestedID, slots.contains(where: { $0.id == suggestedID }) { return suggestedID }
+        return slots.first(where: { $0.isDefaultSMS == true })?.id
+            ?? slots.first(where: { $0.isDefault == true })?.id ?? slots.first?.id
     }
 }

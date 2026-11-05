@@ -28,9 +28,10 @@ public final class CloudSMSEventTests {
 
     private static void plaintextWithoutKey() throws Exception {
         JSONObject body = CloudSMSEvent.body(identity(), source(), TIMESTAMP, null);
-        equal("[agent_id, content, delivery_id, device_id, device_secret, event, sender, timestamp]",
+        equal("[agent_id, content, delivery_id, device_id, device_secret, event, sender, sim_slot, timestamp]",
                 new TreeSet<>(body.keySet()).toString(), "plaintext body fields stay as today");
         equal("95588", body.getString("sender"), "sender");
+        equal("SIM 2", body.getString("sim_slot"), "the receiving SIM (PR #29)");
         equal("【银行】验证码 123456", body.getString("content"), "content");
         equal(TIMESTAMP, body.getString("timestamp"), "timestamp");
         equal("incoming_sms", body.getString("event"), "event");
@@ -79,7 +80,8 @@ public final class CloudSMSEventTests {
 
     private static JSONObject source() throws Exception {
         return new JSONObject().put("delivery_id", "android-sms-ff317720dfc84a7be3125b7af8e2f3f5a0351aba73f515b48d111eb126fc0394")
-                .put("sender", "95588").put("content", "【银行】验证码 123456").put("timestamp", "2024-10-27T03:33:20.000Z");
+                .put("sender", "95588").put("content", "【银行】验证码 123456").put("timestamp", "2024-10-27T03:33:20.000Z")
+                .put("sim_slot", "SIM 2");
     }
 
     private static String open(JSONObject e2e, String aad) throws Exception {

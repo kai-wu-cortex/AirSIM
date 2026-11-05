@@ -363,6 +363,7 @@ final class VoBLEGATTMediaTransport {
     private let writer: any VoBLEMediaWriting
     private var identity: VoBLEMediaSessionIdentity?
     private var epoch: UInt64 = 0
+    private var receiveOnly = false
     private var queued: [QueuedFrame] = []
     private var captured: [CapturedFrame] = []
     private var downlink: [VoBLEMediaCodecWorker.ReceivedFragment] = []
@@ -388,12 +389,17 @@ final class VoBLEGATTMediaTransport {
     var diagnosticSummary: String { diagnostics.summary }
     var jitterTargetFrames: Int { diagnostics.jitterTarget }
 
-    func start(identity: VoBLEMediaSessionIdentity, mediaKey: Data) throws {
+    static func earlyMediaKey(_ key: Data, nonce: String) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(for: Data(("airsim-early-media-v1:" + nonce).utf8), using: SymmetricKey(data: key)))
+    }
+
+    func start(identity: VoBLEMediaSessionIdentity, mediaKey: Data, receiveOnly: Bool = false) throws {
         guard !identity.callID.isEmpty, identity.generation > 0, mediaKey.count == 32 else {
             throw VoBLEPairingError.invalidKey
         }
         epoch &+= 1
         self.identity = identity
+        self.receiveOnly = receiveOnly
         queued.removeAll(); captured.removeAll(); downlink.removeAll(); playback.removeAll()
         localDroppedFrameCount = 0; diagnostics = .init()
         codec.start(identity: identity, epoch: epoch, mediaKey: mediaKey)
@@ -407,7 +413,7 @@ final class VoBLEGATTMediaTransport {
     }
 
     func enqueueCapturedPCM(_ pcm: Data) {
-        guard identity != nil, pcm.count == 320 else { return }
+        guard !receiveOnly, identity != nil, pcm.count == 320 else { return }
         let discontinuity = queued.count + captured.count + (encodingEpoch == epoch ? 1 : 0) >= 8
         if discontinuity {
             if !queued.isEmpty { queued.removeFirst() }

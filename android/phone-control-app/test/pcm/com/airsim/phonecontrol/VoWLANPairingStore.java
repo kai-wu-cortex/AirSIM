@@ -5,9 +5,11 @@ public final class VoWLANPairingStore {
         public String id() { return "test-pairing"; }
         public byte[] secretCopy() { return new byte[32]; }
     }
+    public static boolean paired = true;
+    public static java.util.List<Record> records(Context ignored) { return paired ? java.util.List.of(new Record()) : java.util.List.of(); }
     public static byte[] load(Context ignored) { return new byte[32]; }
     public static Record match(Context ignored, String signature, String canonical,
                                long timestamp, long now) {
-        return signature == null || signature.isEmpty() ? null : new Record();
+        return paired && VoWLANAuth.verify(new byte[32], signature, canonical, timestamp, now) ? new Record() : null;
     }
 }

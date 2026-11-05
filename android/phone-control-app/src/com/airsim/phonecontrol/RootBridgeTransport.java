@@ -31,40 +31,54 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
     private final Process process;
     private final int port;
     private final String token;
+    private final File ownerFile;
     private volatile boolean closed;
 
-    private RootBridgeTransport(Process process, int port, String token) {
+    private RootBridgeTransport(Process process, int port, String token, File ownerFile) {
         this.process = process;
         this.port = port;
         this.token = token;
+        this.ownerFile = ownerFile;
     }
 
     static RootBridgeTransport start(Context context) throws Exception {
         int port = 20000 + new SecureRandom().nextInt(30000);
         String token = randomToken();
-        File tokenFile = new File(context.getCacheDir(),
+        int ownerPid = android.os.Process.myPid();
+        String ownerStart = RootHelperIdentity.startTime(new String(java.nio.file.Files.readAllBytes(
+                new File("/proc/" + ownerPid + "/stat").toPath()), StandardCharsets.UTF_8));
+        if (ownerStart.isEmpty()) throw new IOException("app process identity unavailable");
+        File tokenFile = new File(context.getNoBackupFilesDir(),
                 "root-bridge-" + UUID.randomUUID() + ".token");
         try (FileOutputStream out = new FileOutputStream(tokenFile)) {
             out.write(token.getBytes(StandardCharsets.UTF_8));
+        } catch (IOException error) {
+            tokenFile.delete();
+            throw error;
         }
         String apk = context.getApplicationInfo().sourceDir;
         String command = "CLASSPATH='" + shellEscape(apk)
                 + "' /system/bin/app_process /system/bin com.airsim.phonecontrol.RootBridgeMain '"
                 + shellEscape(context.getPackageName()) + "' " + port + " '"
-                + shellEscape(tokenFile.getAbsolutePath()) + "'";
+                + shellEscape(tokenFile.getAbsolutePath()) + "' " + ownerPid + " " + ownerStart;
         String su = new File("/system/bin/su").canExecute() ? "/system/bin/su" : "su";
-        Process process = new ProcessBuilder(su, "-c", command)
-                .redirectErrorStream(true)
-                .redirectOutput(new File("/dev/null"))
-                .start();
-        RootBridgeTransport transport = new RootBridgeTransport(process, port, token);
+        Process process;
+        try {
+            process = new ProcessBuilder(su, "-c", command)
+                    .redirectErrorStream(true)
+                    .redirectOutput(new File("/dev/null"))
+                    .start();
+        } catch (IOException | RuntimeException error) {
+            tokenFile.delete();
+            throw error;
+        }
+        RootBridgeTransport transport = new RootBridgeTransport(process, port, token, tokenFile);
         long deadline = SystemClock.elapsedRealtime() + STARTUP_TIMEOUT_MS;
         while (SystemClock.elapsedRealtime() < deadline) {
             try {
                 transport.request("status", new JSONObject());
-                // The helper has read the token; the app-private copy is no longer needed.
-                //noinspection ResultOfMethodCallIgnored
-                tokenFile.delete();
+                // Keep the private file as a lifetime lease. Its removal also stops
+                // the helper if an authenticated shutdown request cannot get through.
                 BridgeLog.info("root_bridge_connected port=" + port);
                 return transport;
             } catch (Exception error) {
@@ -82,7 +96,15 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
     }
 
     @Override public String startBridge() throws Exception {
-        return request("start_bridge", new JSONObject());
+        // A removed Shizuku daemon may still be releasing the ownership socket.
+        // Bounded retry permits that handover without killing its PCM process.
+        for (int attempt = 0; ; attempt++) {
+            try { return request("start_bridge", new JSONObject()); }
+            catch (IOException error) {
+                if (attempt >= 9 || closed || !ownerFile.exists()) throw error;
+                Thread.sleep(250);
+            }
+        }
     }
 
     @Override public String status() throws Exception {
@@ -130,9 +152,19 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
         }
     }
 
-    void close() {
-        closed = true;
-        process.destroy();
+    synchronized void close() {
+        if (closed) return;
+        try {
+            // Killing su alone can leave app_process and its PCM supervisor alive.
+            // The authenticated shutdown waits for the owned PCM child to stop.
+            request("shutdown", new JSONObject());
+        } catch (Exception ignored) {
+            // The helper also watches the removed lease file and app process identity.
+        } finally {
+            ownerFile.delete();
+            closed = true;
+            process.destroy();
+        }
     }
 
     private static String randomToken() {

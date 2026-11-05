@@ -96,6 +96,16 @@ enum ConnectionModePreference {
     }
 }
 
+enum WidgetConnectionModeCycle {
+    static func next(after mode: AirSIMConnectionMode, pureLocal: Bool) -> AirSIMConnectionMode {
+        let modes: [AirSIMConnectionMode] = pureLocal
+            ? [.vowlan, .bluetooth, .localDual]
+            : [.vowlan, .bluetooth, .localDual, .cloud, .automatic]
+        guard let index = modes.firstIndex(of: mode) else { return modes[0] }
+        return modes[(index + 1) % modes.count]
+    }
+}
+
 /// The user-selected Android agent is a routing constraint, not just UI state.
 /// Keeping it independent from the connection mode lets automatic mode choose
 /// VoWLAN/VoBLE/cloud for one phone without silently jumping to another phone.

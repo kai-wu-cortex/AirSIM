@@ -992,7 +992,7 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
     const sms = await worker.fetch(post("/v1/events/sms", {
       event: "incoming_sms", device_id: registration.device_id,
       device_secret: registration.device_secret, delivery_id: "sms-1",
-      sender: "10010", content: "余额提醒", timestamp: now.toISOString(),
+      sender: "10010", content: "余额提醒", sim_slot: "SIM 2", timestamp: now.toISOString(),
     }), env);
     assert.equal(sms.status, 202);
   } finally {
@@ -1022,6 +1022,8 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   assert.equal(captured[4].options.headers["apns-push-type"], "alert");
   assert.equal(captured[4].options.headers["apns-topic"], "com.example.airsim");
   assert.equal(captured[4].payload.aps.alert.body, "余额提醒");
+  assert.equal(captured[4].payload.aps.alert.subtitle, "接收于 SIM 2");
+  assert.equal(captured[4].payload.sim_slot, "SIM 2");
 
   const storedCall = JSON.parse(await env.DEVICES.get("call:d9b59660-05bb-4ea8-9aeb-4505b35c93f9"));
   assert.equal(storedCall.device_id, registration.device_id);
@@ -1628,6 +1630,53 @@ test("Agent call-state end returns the current Live Activity to cloud standby", 
   assert.equal(captured[0].payload.aps["content-state"].displayName, "公网中继已连接");
 });
 
+test("status-only clients keep CallKit delivery without starting or overwriting device activities", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", {
+    ...registration, live_activity_presentation: "agent_status",
+  }), env);
+  // An older Android/Agent re-registering tokens must not undo the iOS capability.
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const captured = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    captured.push(options.headers["apns-push-type"]);
+    return new Response("", { status: 200 });
+  };
+  try {
+    const now = Date.now();
+    const call = {
+      device_id: registration.device_id, device_secret: registration.device_secret,
+      call_id: "status-surface-call", call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9",
+    };
+    // No registered update token: the legacy implementation would push-to-start.
+    const incoming = await worker.fetch(post("/v1/events/call", {
+      ...call, event: "incoming_call", number: "10086",
+      issued_at: new Date(now).toISOString(), expires_at: new Date(now + 45000).toISOString(),
+    }), env);
+    assert.equal(incoming.status, 202);
+    assert.equal((await incoming.json()).voip_pushed, true);
+    assert.ok(captured.includes("voip"));
+    assert.ok(!captured.includes("liveactivity"));
+    // Existing status activity: neither ownership nor terminal events may erase
+    // its verified device rows or replace local availability with cloud standby.
+    await worker.fetch(post("/v1/live-activities/register", {
+      device_id: registration.device_id, device_secret: registration.device_secret,
+      activity_id: "status-card", call_id: "", update_token: "f".repeat(64),
+    }), env);
+    const owner = await worker.fetch(post("/v1/events/call-owner", {
+      ...call, event: "call_owner", phase: "active", owner: "iphone",
+    }), env);
+    assert.equal(owner.status, 202);
+    const ended = await worker.fetch(post("/v1/events/call-state", {
+      ...call, event: "call_state", phase: "ended",
+    }), env);
+    assert.equal(ended.status, 202);
+    assert.ok(captured.includes("background"));
+    assert.ok(!captured.includes("liveactivity"));
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("call lifecycle reducer rejects stale and terminal resurrection events", () => {
   const base = {
     call_id: "call-state", call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9",
@@ -1700,4 +1749,172 @@ test("relay shortens long SMS until the APNs payload fits 4096 bytes", async () 
     assert.equal(captured.at(-1).payload.content, "余额提醒");
     assert.equal(captured.at(-1).payload.content_truncated, false);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("battery travels through authenticated heartbeat and disappears when the producer omits it", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const sample = { percent: 0, charging: true, observed_at_ms: Date.now() };
+  const base = { event: "agent_heartbeat", device_id: registration.device_id,
+    device_secret: registration.device_secret, agent_id: "battery-phone", at_ok: true, cellular_state: "registered" };
+  assert.equal((await worker.fetch(post("/v1/events/heartbeat", {...base, battery: sample}), env)).status, 202);
+  const status = async () => (await worker.fetch(post("/v1/devices/status", {
+    device_id: registration.device_id, device_secret: registration.device_secret }), env)).json();
+  assert.deepEqual((await status()).agents.find(a => a.agent_id === "battery-phone").battery, sample);
+  assert.equal((await worker.fetch(post("/v1/events/heartbeat", base), env)).status, 202);
+  assert.equal((await status()).agents.find(a => a.agent_id === "battery-phone").battery, undefined);
+});
+
+const ENVELOPE = { v: 1, kid: "3f9c1a7e", n: "AAECAwQFBgcICQoL", ct: "Y2lwaGVydGV4dC1hbmQtdGFnLWZvci10ZXN0cw" };
+
+async function withCapturedPushes(run) {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const pushes = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    pushes.push({ body: options.body, bytes: new TextEncoder().encode(options.body).byteLength });
+    return new Response("", { status: 200 });
+  };
+  const sms = (fields) => worker.fetch(post("/v1/events/sms", {
+    event: "incoming_sms", device_id: registration.device_id, device_secret: registration.device_secret,
+    agent_id: "android-A", delivery_id: "e2e-1", timestamp: new Date().toISOString(), ...fields,
+  }), env);
+  try { await run(sms, pushes); } finally { globalThis.fetch = originalFetch; }
+}
+
+test("healthz advertises end-to-end encrypted SMS support", async () => {
+  const health = await worker.fetch(new Request("https://relay.example/healthz"), testEnvironment());
+  const body = await health.json();
+  assert.deepEqual(body.capabilities, { agent_command_routing: 1, e2e_sms: 1 });
+  assert.equal(body.version, "0.2.1");
+});
+
+test("encrypted SMS reaches iPhone without any plaintext", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const response = await sms({
+      e2e: { ...ENVELOPE, extra: "x" }, sender: "95588", content: "验证码 123456", code: "123456",
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { pushed: true });
+    assert.equal(pushes.length, 1);
+    const payload = JSON.parse(pushes[0].body);
+    assert.deepEqual(payload.aps.alert, { title: "AirSIM", body: "新短信" });
+    assert.equal(payload.aps["mutable-content"], 1);
+    assert.equal(payload.aps["content-available"], 1);
+    assert.equal(payload.aps["thread-id"], "airsim-sms-agent-android-A");
+    assert.equal(payload.event, "incoming_sms");
+    assert.equal(payload.delivery_id, "e2e-1");
+    assert.equal(payload.agent_id, "android-A");
+    assert.equal(typeof payload.timestamp, "string");
+    assert.deepEqual(payload.e2e, ENVELOPE);
+    for (const key of ["sender", "content", "content_truncated", "code"]) {
+      assert.equal(key in payload, false, `${key} is not pushed`);
+    }
+    for (const text of ["95588", "123456", "验证码"]) {
+      assert.equal(pushes[0].body.includes(text), false, `${text} is not pushed`);
+    }
+  });
+});
+
+test("encrypted SMS needs no plaintext fields", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const response = await sms({ e2e: ENVELOPE });
+    assert.equal(response.status, 202);
+    assert.equal(pushes.length, 1);
+  });
+});
+
+test("malformed encryption envelopes are rejected before any push", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const { ct: _ct, ...withoutCiphertext } = ENVELOPE;
+    const malformed = [
+      null, "x", { ...ENVELOPE, v: 2 }, { ...ENVELOPE, v: "1" },
+      { ...ENVELOPE, kid: "3F9C1A7E" }, { ...ENVELOPE, kid: "3f9c1a7" },
+      { ...ENVELOPE, n: "AAECAwQFBgcICQo" }, { ...ENVELOPE, n: "AAECAwQFBgcICQo+" },
+      { ...ENVELOPE, ct: "A".repeat(22) }, { ...ENVELOPE, ct: "Y2lwaGVy=" + "A".repeat(20) },
+      withoutCiphertext,
+    ];
+    for (const [index, e2e] of malformed.entries()) {
+      const response = await sms({ e2e, delivery_id: `bad-${index}` });
+      assert.equal(response.status, 400, `envelope ${index}`);
+      assert.deepEqual(await response.json(), { error: "invalid encrypted SMS" }, `envelope ${index}`);
+    }
+    assert.equal(pushes.length, 0);
+  });
+});
+
+test("an envelope at Android's plaintext cap still fits the APNs limit", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    // 2,400 bytes of plaintext plus the 16-byte GCM tag, base64url-encoded.
+    const response = await sms({
+      e2e: { ...ENVELOPE, ct: "A".repeat(3222) },
+      agent_id: "android-" + "a".repeat(56), delivery_id: "android-sms-" + "f".repeat(64),
+    });
+    assert.equal(response.status, 202);
+    assert.equal(pushes.length, 1);
+    assert.ok(pushes[0].bytes <= 4096, `payload is ${pushes[0].bytes} bytes`);
+  });
+});
+
+test("an oversized envelope is a final 400 and does not burn its delivery id", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    const big = await sms({ e2e: { ...ENVELOPE, ct: "A".repeat(4000) }, delivery_id: "big-1" });
+    assert.equal(big.status, 400);
+    assert.deepEqual(await big.json(), { error: "encrypted SMS too large" });
+    assert.equal(pushes.length, 0);
+    const retry = await sms({ e2e: ENVELOPE, delivery_id: "big-1" });
+    assert.equal(retry.status, 202);
+    assert.deepEqual(await retry.json(), { pushed: true });
+    assert.equal(pushes.length, 1);
+  });
+});
+
+
+test("encrypted SMS rejects impossible and noncanonical base64url without consuming IDs", async () => {
+  await withCapturedPushes(async (sms, pushes) => {
+    for (const [i, ct] of ["A".repeat(25), "A".repeat(22) + "B"].entries()) {
+      const delivery_id = `encoding-${i}`;
+      const rejected = await sms({ e2e: { ...ENVELOPE, ct }, delivery_id });
+      assert.equal(rejected.status, 400);
+      assert.deepEqual(await rejected.json(), { error: "invalid encrypted SMS" });
+      assert.equal(pushes.length, i);
+      const corrected = await sms({ e2e: ENVELOPE, delivery_id });
+      assert.equal(corrected.status, 202);
+      assert.equal(pushes.length, i + 1);
+    }
+  });
+});
+
+test("SMS SIM selection survives durable delivery only to its target Android", async () => {
+  const env = testEnvironment(); env.COMMANDS = new MemoryCommandNamespace();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const payload = {device_id: registration.device_id, device_secret: registration.device_secret,
+    command_id: crypto.randomUUID(), target_agent_id: "android-A", type: "send_sms",
+    number: "10086", message: "synthetic SMS", sim_account: "opaque:SIM-2"};
+  assert.equal((await worker.fetch(post("/v2/commands/enqueue", payload), env)).status, 202);
+  const b = await worker.fetch(post("/v2/commands/pull", {...payload, agent_id: "android-B"}), env);
+  assert.deepEqual((await b.json()).commands, []);
+  const a = await worker.fetch(post("/v2/commands/pull", {...payload, agent_id: "android-A"}), env);
+  const commands = (await a.json()).commands;
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0].sim_account, "opaque:SIM-2");
+  for (const bad of [3, "bad\nslot", "x".repeat(513)]) {
+    assert.equal((await worker.fetch(post("/v2/commands/enqueue", {
+      ...payload, command_id: crypto.randomUUID(), sim_account: bad}), env)).status, 400);
+  }
+});
+
+test("relay preserves optional early media negotiation and scoped status without changing call state", () => {
+  const agent = new MemoryMediaSocket("agent");
+  const iphone = new MemoryMediaSocket("iphone");
+  const state = new MemoryMediaState([agent, iphone]);
+  const session = new CallMediaSession(state, {});
+  const identity = { call_id: "carrier", call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9", generation: 8 };
+  session.webSocketMessage(iphone, JSON.stringify({ action: "answer", ...identity, early_media_version: 1 }));
+  assert.equal(JSON.parse(agent.sent.at(-1)).early_media_version, 1);
+  const ready = JSON.stringify({ status: "early_media_ready_v1", ...identity });
+  session.webSocketMessage(agent, ready);
+  assert.equal(iphone.sent.at(-1), ready);
+  assert.equal(iphone.sent.some(message => typeof message === "string" && JSON.parse(message).status === "active"), false);
 });

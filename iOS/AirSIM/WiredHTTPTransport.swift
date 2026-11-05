@@ -83,7 +83,8 @@ enum VoWLANNetworkRoutePolicy {
     }
 
     static func usesSystemRouting(host: String, isLocalSubnet: Bool) -> Bool {
-        permitsDirectIPv4(host) && !isLocalSubnet
+        // DNS routes are admitted only by the explicit TLS endpoint constructor.
+        (NetworkRoutePreferences.parseIPv4(host) == nil || permitsDirectIPv4(host)) && !isLocalSubnet
     }
 
     /// True only for tailnet/CGNAT addresses. A plain 192.168/10 LAN must not be
@@ -120,6 +121,15 @@ final class WiredHTTPTransport: @unchecked Sendable {
         }
     }
 
+    /// Permits a read-only operation-status lookup, NEVER replaying a POST.
+    static func permitsOperationStatusLookup(after error: Error) -> Bool {
+        guard let error = error as? WiredHTTPError else { return false }
+        switch error {
+        case .invalidRequest, .unreadableUpload: return false
+        default: return true
+        }
+    }
+
     static func allowsInterfaceFallback(httpMethod: String?) -> Bool {
         switch httpMethod?.uppercased() ?? "GET" {
         case "GET", "HEAD": return true
@@ -135,9 +145,10 @@ final class WiredHTTPTransport: @unchecked Sendable {
     func send(_ request: URLRequest, uploadFileURL: URL? = nil) async throws -> WiredHTTPResponse {
         try Task.checkCancellation()
         guard let url = request.url,
-              url.scheme?.lowercased() == "http",
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = url.host,
-              let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? 80)) else {
+              let rawPort = UInt16(exactly: url.port ?? (scheme == "https" ? 443 : 80)),
+              let port = NWEndpoint.Port(rawValue: rawPort) else {
             throw WiredHTTPError.invalidRequest
         }
 
@@ -154,6 +165,10 @@ final class WiredHTTPTransport: @unchecked Sendable {
             body = .none
         }
 
+        if scheme == "https" {
+            return try await sendOnce(request, host: NWEndpoint.Host(host), port: port,
+                                      body: body, route: .system, tls: true)
+        }
         if VoWLANNetworkRoutePolicy.usesSystemRouting(host: host) {
             return try await sendOnce(
                 request, host: NWEndpoint.Host(host), port: port, body: body, route: .system)
@@ -178,7 +193,8 @@ final class WiredHTTPTransport: @unchecked Sendable {
         host: NWEndpoint.Host,
         port: NWEndpoint.Port,
         body: WiredHTTPBody,
-        route: WiredInterfaceRoute
+        route: WiredInterfaceRoute,
+        tls: Bool = false
     ) async throws -> WiredHTTPResponse {
         let cancellation = WiredHTTPRequestCancellation()
         return try await withTaskCancellationHandler {
@@ -186,7 +202,7 @@ final class WiredHTTPTransport: @unchecked Sendable {
             return try await withCheckedThrowingContinuation { continuation in
                 let operation = WiredHTTPRequestOperation(
                     request: request, host: host, port: port, body: body,
-                    route: route, queue: queue, continuation: continuation)
+                    route: route, tls: tls, queue: queue, continuation: continuation)
                 cancellation.install(operation)
             }
         } onCancel: { cancellation.cancel() }
@@ -282,6 +298,7 @@ private final class WiredHTTPRequestOperation: @unchecked Sendable {
         port: NWEndpoint.Port,
         body: WiredHTTPBody,
         route: WiredInterfaceRoute,
+        tls: Bool,
         queue: DispatchQueue,
         continuation: CheckedContinuation<WiredHTTPResponse, Error>
     ) {
@@ -297,7 +314,9 @@ private final class WiredHTTPRequestOperation: @unchecked Sendable {
         tcp.noDelay = true
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 5
-        let parameters = NWParameters(tls: nil, tcp: tcp)
+        // Default Network.framework trust evaluation validates the DNS name and
+        // certificate chain. Never install a permissive verify block or downgrade.
+        let parameters = NWParameters(tls: tls ? NWProtocolTLS.Options() : nil, tcp: tcp)
         switch route {
         case .system: break // Let iOS select the active VPN route, including cellular underlay.
         case let .type(type): parameters.requiredInterfaceType = type

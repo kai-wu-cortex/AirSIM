@@ -1,6 +1,7 @@
 package android.content;
 
 public class Context {
+    public Intent registerReceiver(Object receiver, IntentFilter filter) { return null; }
     private final android.content.pm.PackageManager packageManager = new android.content.pm.PackageManager();
     public android.content.pm.PackageManager getPackageManager() { return packageManager; }
     public static final int MODE_PRIVATE = 0;
@@ -9,6 +10,7 @@ public class Context {
     private final java.util.Set<String> permissions = new java.util.HashSet<>();
     private java.util.Map<String, SharedPreferences> storage = new java.util.HashMap<>();
     public Context getApplicationContext() { return this; }
+    public java.util.concurrent.Executor getMainExecutor() { return Runnable::run; }
     public java.io.File getFilesDir() { throw new UnsupportedOperationException("test files directory required"); }
     public Object getContentResolver() { return null; }
     public String getPackageName() { return "com.airsim.test"; }

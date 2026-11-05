@@ -143,6 +143,10 @@ assert_contains "$ROOT/src/com/airsim/phonecontrol/FeedbackUploader.java" \
   "$ROOT"/test/android/content/SharedPreferences.java \
   "$ROOT"/test/android/content/ComponentName.java \
   "$ROOT"/test/android/content/Intent.java \
+  "$ROOT"/test/android/content/IntentFilter.java \
+  "$ROOT"/test/android/os/BatteryManager.java \
+  "$ROOT"/src/com/airsim/phonecontrol/AndroidBatteryStatus.java \
+  "$ROOT"/test/com/airsim/phonecontrol/AndroidBatteryStatusTests.java \
   "$ROOT"/test/android/content/pm/PackageManager.java \
   "$ROOT"/test/android/content/pm/PackageInfo.java \
   "$ROOT"/test/android/os/Bundle.java \
@@ -169,6 +173,8 @@ assert_contains "$ROOT/src/com/airsim/phonecontrol/FeedbackUploader.java" \
   "$ROOT"/test/com/airsim/phonecontrol/PureLocalModeCoordinator.java \
   "$ROOT"/test/com/airsim/phonecontrol/PureLocalModeProof.java \
   "$ROOT"/test/com/airsim/phonecontrol/PureLocalModeWire.java \
+  "$ROOT"/src/com/airsim/phonecontrol/SIMSlotObserver.java \
+  "$ROOT"/test/com/airsim/phonecontrol/SIMSlotObserverTests.java \
   "$ROOT"/src/com/airsim/phonecontrol/AgentClient.java \
   "$ROOT"/src/com/airsim/phonecontrol/InstallerClient.java \
   "$ROOT"/src/com/airsim/phonecontrol/ReleaseAssetSelector.java \
@@ -187,6 +193,16 @@ assert_contains "$ROOT/src/com/airsim/phonecontrol/FeedbackUploader.java" \
 	"$ROOT"/src/com/airsim/phonecontrol/PrivilegedBridgeCoordinator.java \
   "$ROOT"/src/com/airsim/phonecontrol/AudioWatchdogSnapshot.java \
   "$ROOT"/src/com/airsim/phonecontrol/PCMHealthEvidence.java \
+  "$ROOT"/src/com/airsim/phonecontrol/AgentAudioCompatibility.java \
+  "$ROOT"/src/com/airsim/phonecontrol/AudioHealthReportCache.java \
+  "$ROOT"/src/com/airsim/phonecontrol/RootHelperIdentity.java \
+  "$ROOT"/src/com/airsim/phonecontrol/PrivilegeChannelGate.java \
+  "$ROOT"/src/com/airsim/phonecontrol/EarlyMediaLeases.java \
+  "$ROOT"/test/com/airsim/phonecontrol/EarlyMediaLeaseTests.java \
+  "$ROOT"/src/com/airsim/phonecontrol/ServiceBindAttempt.java \
+  "$ROOT"/test/com/airsim/phonecontrol/ServiceBindAttemptTests.java \
+  "$ROOT"/test/com/airsim/phonecontrol/RootHelperLifecycleTests.java \
+  "$ROOT"/test/com/airsim/phonecontrol/AgentAudioCompatibilityTests.java \
   "$ROOT"/test/com/airsim/phonecontrol/PCMHealthEvidenceTests.java \
 	"$ROOT"/src/com/airsim/phonecontrol/PhoneAudioBridgeProcessPolicy.java \
   "$ROOT"/src/com/airsim/phonecontrol/WireJson.java \
@@ -256,16 +272,22 @@ assert_contains "$ROOT/src/com/airsim/phonecontrol/FeedbackUploader.java" \
   "$ROOT"/test/com/airsim/phonecontrol/AndroidAgentIdentityTests.java
 sh "$ROOT/verify-io-api.sh" "$OUT"
 "$JAVA" -cp "$OUT:$CRYPTO_JAR" com.airsim.phonecontrol.CoreTests
+"$JAVA" -cp "$OUT:$CRYPTO_JAR" com.airsim.phonecontrol.SIMSlotObserverTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.PairingPeerPolicyTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.PrivateNetworkPolicyTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.HealthIdentityProofTests
 "$JAVA" -cp "$OUT:$CRYPTO_JAR" com.airsim.phonecontrol.PairingCryptoCompatibilityTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.PCMHealthEvidenceTests
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.AgentAudioCompatibilityTests
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.RootHelperLifecycleTests
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.ServiceBindAttemptTests
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.EarlyMediaLeaseTests
 sh "$ROOT/test-voble-gatt.sh"
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.NotificationUpdateGateTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.CallRepositoryTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.DefaultCallAccountTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.AndroidAgentIdentityTests
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.AndroidBatteryStatusTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.ShizukuStartupPolicyTests
 
 # Keep the real diagnostics class ahead of the unrelated suite's BridgeLog test double.
@@ -334,9 +356,12 @@ mkdir -p "$PCM_OUT"
 "$JAVAC" --release 17 -cp "$OUT:$ANDROID_JAR" -d "$PCM_OUT" \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/VoWLANPairingStore.java \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/RemoteAudioSessionRegistry.java \
+  "$ROOT"/src/com/airsim/phonecontrol/AndroidEarlyMedia.java \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANPCMRelay.java \
-  "$ROOT"/test/com/airsim/phonecontrol/DirectPCMIntegrationTests.java
+  "$ROOT"/test/com/airsim/phonecontrol/DirectPCMIntegrationTests.java \
+  "$ROOT"/test/com/airsim/phonecontrol/EarlyMediaRelayIntegrationTests.java
 "$JAVA" -cp "$PCM_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.DirectPCMIntegrationTests
+"$JAVA" -cp "$PCM_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.EarlyMediaRelayIntegrationTests
 
 sh "$ROOT/test-audio-policy.sh"
 

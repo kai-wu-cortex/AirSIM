@@ -1,5 +1,7 @@
 # AirSIM Cloudflare Relay 部署手册
 
+> ECS / VPS 第二种部署方式：见 [独立 Relay 部署说明](self-hosted/README.md)。复用本目录业务代码，独立存储与域名；公网启用需另行验证 HTTPS/WSS、备案和推送。
+
 2026-10-29 未部署候选：[反馈仅允许手动上传](../docs/manual-feedback-policy.md)。`/v1/feedback` 仅接受 `trigger=manual`，其他触发类型在写入 Notion 前拒绝；线上需部署后生效，不改变 APNs、心跳或通话媒体。
 
 未发布的 v2 定向命令协议、v1 安全兼容与上线顺序见 [多安卓路由说明](../docs/relay-agent-routing.md)。本轮未部署生产；媒体连接路径及存储 namespace 不变。
@@ -391,6 +393,12 @@ npx wrangler tail
 - Dashboard token 与设备 Secret 分离，设备不能调用 Dashboard 管理 API。
 - Worker 只保存设备 Secret 哈希；媒体连接还会校验 call UUID、角色、generation 和单次 call secret。
 - APNs payload 在本实现中统一限制为 4096 字节。短信正文在推送里出现两次（`aps.alert.body` 与 `content`），超长时截到仍能放进 4096 字节的最长前缀（最多 700 个码点，末尾加「…」），并标记 `content_truncated: true`；中文大约 600 字以上就会被截断。
+- 端到端加密短信（`/v1/events/sms` 带 `e2e` 信封，见 issue #24）：
+  - 信封格式：`v` 为数字 `1`；`kid` 为 8 位小写十六进制；`n` 为无填充 base64url，恰好 16 个字符（12 字节 nonce）；`ct` 为无填充 base64url，23–8192 个字符（密文加 16 字节 GCM tag）。还会解码并重新编码验证 ct 为规范 base64url，拒绝不可能的长度与非零尾部填充位；其他键丢弃。
+  - 推送只含顶层 `event`、`delivery_id`、`agent_id`、`timestamp`、`e2e`。`aps` 为占位文案「AirSIM／新短信」，带 `mutable-content: 1`、`content-available: 1`，`thread-id` 为 `airsim-sms-agent-<agent_id>`（最多 64 字符），由 iPhone 解密后替换。请求里即使带了 `sender`、`content` 或 `code`，也不会放进推送。
+  - 信封格式不对返回 `400 {"error":"invalid encrypted SMS"}`；推送超过 4096 字节（Relay 无法截断密文）返回 `400 {"error":"encrypted SMS too large"}`。两者都在记录去重之前处理，修正后用同一 `delivery_id` 重发仍会推送。
+  - 这两个正文是与安卓的接口，字面量不能改：安卓只在 Relay 返回确切的规范正文时放弃一条短信（`CloudSMSUploader.rejected()`），支持加密的安卓版本必须把它们加入放弃名单，否则会一直重试。
+  - `/healthz` 的 `capabilities.e2e_sms` 表示 Relay 支持该格式。
 - 发布前保留上一 Worker version。故障时优先回滚 Worker version，不要删除 KV namespace 或 Durable Object migration。
 - Worker、Agent、iOS/watchOS 的 JSON 和媒体协议变更必须兼容旧客户端或同步发布。
 
@@ -402,3 +410,7 @@ npx wrangler tail
 
 - Apple：[使用认证 token 与 APNs 通信](https://developer.apple.com/help/account/capabilities/communicate-with-apns-using-authentication-tokens)、[注册 App 接收远程通知](https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns)、[响应 PushKit VoIP 通知](https://developer.apple.com/documentation/pushkit/responding-to-voip-notifications-from-pushkit)、[使用 CallKit 收发 VoIP 通话](https://developer.apple.com/documentation/callkit/making-and-receiving-voip-calls)。
 - Cloudflare：[Wrangler 配置](https://developers.cloudflare.com/workers/wrangler/configuration/)、[Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)、[Workers Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)、[创建 KV namespace](https://developers.cloudflare.com/kv/get-started/)、[Durable Object migrations](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)。
+
+### 加密短信上线边界
+
+Relay 的 `e2e_sms: 1` 仅声明信封转发能力；本 PR 不生成内容密钥，也不启用安卓加密或 iOS 解密。当前客户端继续发送原有明文短信。只有后续 Android/iOS 的双端能力协商、密钥隔离与 Notification Service Extension 完成后，才可面向用户宣称端到端加密。不要仅依据 Relay 能力打开加密开关，也不要将缺少解密能力的旧客户端切换到密文。

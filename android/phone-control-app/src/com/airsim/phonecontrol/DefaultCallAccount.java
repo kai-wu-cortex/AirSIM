@@ -87,6 +87,14 @@ public final class DefaultCallAccount {
                 } catch (RuntimeException ignored) {
                     // A missing number or OEM metadata restriction must not block an enabled account.
                 }
+                if (context.checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS)
+                        == PackageManager.PERMISSION_GRANTED && (number == null || number.trim().isEmpty())) {
+                    // Telecom can expose this exact SIM's number even when the OEM
+                    // subscription service is unavailable. Never infer a subscription
+                    // from the opaque handle, slot order or another card's number.
+                    number = accountNumber(account);
+                    if (number.isEmpty()) number = scopedNumber(context, subscriptionId);
+                }
                 String key = handle.getComponentName().flattenToString() + "\n"
                         + handle.getId() + "\n" + handle.getUserHandle();
                 accounts.add(new Account(key, label, number == null ? "" : number, handle,
@@ -96,6 +104,31 @@ public final class DefaultCallAccount {
         } catch (RuntimeException error) {
             return new Snapshot(List.of(), "无法读取通话卡，请检查电话状态权限及系统设置");
         }
+    }
+
+    private static String accountNumber(PhoneAccount account) {
+        try {
+            String number = telephoneAddress(account.getSubscriptionAddress());
+            return number.isEmpty() ? telephoneAddress(account.getAddress()) : number;
+        } catch (RuntimeException ignored) { return ""; }
+    }
+
+    private static String telephoneAddress(android.net.Uri address) {
+        if (address == null || !"tel".equalsIgnoreCase(address.getScheme())) return "";
+        String value = address.getSchemeSpecificPart();
+        return value == null ? "" : value.trim();
+    }
+
+    static String scopedNumber(Context context, int subscriptionId) {
+        if (subscriptionId < 0 || context.checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS)
+                != PackageManager.PERMISSION_GRANTED) return "";
+        try {
+            TelephonyManager manager = context.getSystemService(TelephonyManager.class);
+            if (manager == null) return "";
+            TelephonyManager scoped = manager.createForSubscriptionId(subscriptionId);
+            String value = scoped == null ? null : scoped.getLine1Number();
+            return value == null ? "" : value.trim();
+        } catch (RuntimeException ignored) { return ""; }
     }
 
     public static int slotIndex(Context context, PhoneAccountHandle handle) {

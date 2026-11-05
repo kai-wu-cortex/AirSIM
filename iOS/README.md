@@ -1,6 +1,8 @@
 # AirSIM iOS 与 watchOS
 
-2026-10-31 发布准备：[Apps v0.9.8.20](../docs/releases/0.9.8.20.md)，iOS／Watch／Live Activity `0.9.8 (152)`。包含 PR #18、后台 VoWLAN 恢复与 CallKit 无区号号码原样展示；TestFlight 使用 production APNs，上传、处理及外测可用状态见发布说明。下文旧候选状态仅作历史记录，不能代表当前发布状态。
+2026-11-05：[Apps v0.9.8.23](../docs/releases/0.9.8.23.md)，iOS／Watch／Widget `0.9.8（172）`。包含兼容设备的跨模式早期媒体和 iPhone 云端扬声器恢复；AVF Linux Agent 未更新，不能仅通过更新 Bridge 获得新媒体能力。发布及实机验证范围见说明；以下旧版本记录保留追溯。
+
+2026-10-31 发布准备：[Apps v0.9.8.21](../docs/releases/0.9.8.21.md)，iOS／Watch／Live Activity `0.9.8 (162)`。包含 PR #18、后台 VoWLAN 恢复与 CallKit 无区号号码原样展示；TestFlight 使用 production APNs，上传、处理及外测可用状态见发布说明。下文旧候选状态仅作历史记录，不能代表当前发布状态。
 
 2026-10-30 未发布修复：[APNs 接听后的本地音频启动竞态](../docs/vowlan-first-call-startup.md)。兼容通话的音频任务独立于轮询；前后台刷新不再因轮询世代或调用方取消而关闭已握手的 PCM。挂断、停止、CallKit 停用／重置仍取消在途启动，回滚记录固定原因码，不记录通话身份或 PCM。未安装、发布或上传 TestFlight，锁屏 APNs 接听与双向声音须真机复验。
 
@@ -130,7 +132,7 @@ iOS/AirSIM.xcodeproj
 - 四阶段云端自检：本机 Push 凭据、Relay 身份、设备注册、Agent 心跳
 - 本地通话记录、单条滑动删除、详情删除、诊断和媒体健康状态
 
-VoWLAN 接听、拒接和挂断请求在已知当前通话时携带 `/api/calls/status` 返回的 `call_id`（JSON 字段 `call_id`）。Standalone 与新版 AVF Agent 会校验它，避免旧来电通知误操作后续通话；未取得通话 ID 时仍可发送兼容旧版 Agent 的空请求。
+VoWLAN 接听、拒接和挂断请求在已知当前通话时将 `/api/calls/status` 返回的 `active.id` 填入请求的 `call_id` 字段。Standalone 与新版 AVF Agent 校验该编号，避免旧来电通知误操作后续通话。操作 Android Telecom 时，由 Agent 解析对应的 `android_id`。未取得通话 ID 时仍可发送兼容旧版 Agent 的空请求。
 
 ### APNs 来电的远端挂断（未发布）
 
@@ -168,6 +170,10 @@ PushKit VoIP push 仅用于真实来电并交给 CallKit，不能拿它承载短
 删除会清除本机列表项、手动绑定与该设备的蓝牙凭据，并保留拒绝自动重连的设备标记；其他设备、通话记录和短信不受影响。在线蓝牙设备会尝试同时撤销 Android 凭据；离线删除不等同远端授权撤销，远端旧凭据可能需要在 Android「VoBLE 认证配置」中清除。删除的设备必须显式重新配对，不能被广播或云端旧状态自动加回。
 
 重连使用当前广播和认证检查，不再凭缓存外设 UUID 建立连接。新版 Android APK 支持经认证的 BLE `device_info` 查询；旧 APK 不支持时不会借用 VoWLAN/Relay 的历史号码。Standalone 云端心跳及本地健康检查读取当前通话卡，不采用首次配对保存的号码。旧 AVF Linux Agent 的云端号码心跳尚未迁移到这一读取流程。
+
+## 自建域名直连（试验性）
+
+支持在「配对安卓手机 → 公网域名」通过临时 HTTPS 入口完成首次配对；也可在「设置 → 安卓连接 → 自建域名直连（试验性）」为每台安卓配置 DDNS 域名及控制、音频 TLS 端口。默认关闭；NAS 终止 TLS 并转发到现有安卓私网网关，不修改安卓协议。保存前验证证书和该设备的 nonce 绑定身份签名；局域网优先，通话中不换地址。此功能不新增后台推送。网关示例、Watch 兼容和验收边界见 [自建域名 TLS 直连](../docs/self-hosted-tls-direct.md)。
 
 ## 构建与测试
 
@@ -246,3 +252,13 @@ sh iOS/scripts/test-package-unsigned.sh
 ## 当前状态
 
 模拟器构建与测试已覆盖主要协议和传输选择。正式发布前仍需完成 Apple 签名、实体 iPhone/Apple Watch 安装、三星实机拨号接听、双向语音、短信与后台推送验收。
+
+### 可变尺寸窗口与 iPhone Duo
+
+拨号与通话页面随窗口宽高调整排列，短信使用原生分栏，并支持 iPhone 横屏。已通过 Xcode 27.2 构建与 10 项定向测试，并在 Duo 专用模拟器验证折叠／展开后的短信草稿和拨号内容保留、深色与大字号布局；同时修复通话覆盖层被原生导航抢占点击的问题。真机音频、硬件折叠与帧率尚未验收。实现与验收清单见 [iPhone Duo 适配说明](../docs/iphone-duo-adaptive-ui.md)。
+
+### 桌面与锁屏小组件
+
+已按「系统原生」方案实现桌面小、中、大、iPad 超大，以及锁屏圆形、矩形、内联小组件。展示最近同步的设备状态、更新时间与脱敏通话记录，入口跳转到 App 对应页面。超过 5 分钟未更新显示「状态待刷新」，不据此判定设备离线。小组件不会直接请求 Relay、拨号或发送短信。
+
+真机重签需为主 App 和 Live Activity / Widget 扩展配置同一个 App Group，并将构建设置 `AIRSIM_WIDGET_APP_GROUP` 替换为自己开发者账号下的组标识；默认 `group.com.example.airsim.widgets` 仅为示例。详见 [小组件实现、签名和验收](../docs/widgets.md)。

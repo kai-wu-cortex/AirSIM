@@ -43,7 +43,37 @@ public final class AndroidAgentIdentityTests {
         context.revoke(Manifest.permission.READ_PHONE_NUMBERS);
         assertNumber("", AndroidAgentIdentity.phoneNumber(context));
         SubscriptionManager.defaultVoiceId = -1;
+        telecomFallbackUsesOnlyTheChosenOrDefaultAccount();
         System.out.println("Android agent current SIM identity tests passed");
+    }
+
+    private static void telecomFallbackUsesOnlyTheChosenOrDefaultAccount() {
+        var one = new PhoneAccountHandle(new ComponentName("phone", "Service"), "opaque-one");
+        var two = new PhoneAccountHandle(new ComponentName("phone", "Service"), "opaque-two");
+        var telecom = new TelecomManager();
+        telecom.enabled = List.of(one, two);
+        telecom.accounts.put(one, new PhoneAccount(one, "SIM 1", PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION,
+                android.net.Uri.parse("tel:+10000000001"), null));
+        telecom.accounts.put(two, new PhoneAccount(two, "SIM 2", PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION,
+                android.net.Uri.parse("tel:+10000000002"), null));
+        var context = new Context();
+        context.grant(Manifest.permission.READ_PHONE_STATE);
+        context.grant(Manifest.permission.READ_PHONE_NUMBERS);
+        context.setSystemService(TelecomManager.class, telecom);
+        context.setSystemService(SubscriptionManager.class, new SubscriptionManager() {
+            @Override public List<SubscriptionInfo> getActiveSubscriptionInfoList() { throw new IllegalStateException("OEM unavailable"); }
+        });
+        assertNumber("", AndroidAgentIdentity.phoneNumber(context)); // multiple cards, no default
+        telecom.defaultOutgoing = two;
+        assertNumber("+10000000002", AndroidAgentIdentity.phoneNumber(context));
+        DefaultCallAccount.select(context, DefaultCallAccount.snapshot(context).accounts().get(0));
+        assertNumber("+10000000001", AndroidAgentIdentity.phoneNumber(context));
+        telecom.enabled = List.of(two);
+        assertNumber("", AndroidAgentIdentity.phoneNumber(context)); // removed explicit selection
+        DefaultCallAccount.followSystem(context);
+        assertNumber("+10000000002", AndroidAgentIdentity.phoneNumber(context));
+        context.revoke(Manifest.permission.READ_PHONE_NUMBERS);
+        assertNumber("", AndroidAgentIdentity.phoneNumber(context));
     }
     private static void assertNumber(String expected, String actual) {
         if (!expected.equals(actual)) throw new AssertionError("must report current selected SIM, never another or cached SIM");

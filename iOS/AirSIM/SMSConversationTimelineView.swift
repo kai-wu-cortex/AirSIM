@@ -41,7 +41,8 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
     private var pendingMenuAction: MenuAction?
     private var outsideTap: UITapGestureRecognizer?
     private var initializedPosition = false
-    private var previousSize: CGSize = .zero
+    private var previousCollectionSize: CGSize = .zero
+    private var applyingGeometryChange = false
     private var sizeAnchor: Anchor?
     private var restoringPosition = false
     private struct Anchor {
@@ -68,7 +69,6 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
         collection.backgroundColor = .systemBackground
         collection.alwaysBounceVertical = true
         collection.keyboardDismissMode = .interactive
-        collection.contentInsetAdjustmentBehavior = .never
         collection.allowsSelection = false
         collection.dataSource = self
         collection.delegate = self
@@ -76,10 +76,10 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
         collection.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(collection)
         NSLayoutConstraint.activate([
-            collection.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            collection.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            collection.topAnchor.constraint(equalTo: view.topAnchor),
-            collection.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            collection.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            collection.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            collection.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            collection.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
         ])
         let tap = UITapGestureRecognizer(target: self, action: #selector(tappedElsewhere(_:)))
         tap.cancelsTouchesInView = false
@@ -161,28 +161,44 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
-        if initializedPosition, view.bounds.size != previousSize, sizeAnchor == nil {
+        guard !applyingGeometryChange else { return }
+        // Capture before constraints resize the collection, including changes
+        // caused by a side bar with no change to the parent view's bounds.
+        if initializedPosition, sizeAnchor == nil {
             sizeAnchor = captureAnchor()
-        }
-        if view.bounds.width != previousSize.width {
-            heights.removeAll(keepingCapacity: true)
-            collection.collectionViewLayout.invalidateLayout()
         }
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        previousSize = view.bounds.size
-        guard view.bounds.width > 0, view.bounds.height > 0 else { return }
+        guard !applyingGeometryChange else { return }
+        let size = collection.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        let changed = size != previousCollectionSize
+        let widthChanged = size.width != previousCollectionSize.width
+        let anchor = sizeAnchor
+        previousCollectionSize = size
+        sizeAnchor = nil
+        guard !initializedPosition || changed else { return }
+
+        applyingGeometryChange = true
+        defer { applyingGeometryChange = false }
+        if widthChanged {
+            heights.removeAll(keepingCapacity: true)
+            collection.collectionViewLayout.invalidateLayout()
+        }
+        collection.layoutIfNeeded()
         if !initializedPosition {
             initializedPosition = true
-            collection.layoutIfNeeded()
             scrollToBottom()
-        } else if let anchor = sizeAnchor {
-            sizeAnchor = nil
-            collection.layoutIfNeeded()
+        } else if let anchor {
             restore(anchor)
         }
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        view.setNeedsLayout()
     }
 
     private func rebuildItems() {
@@ -467,7 +483,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         dateLabel.text = date
         dateLabel.isHidden = !item.showsTimestamp
         var details: [String] = []
-        if let sim = item.message.simSlot, !sim.isEmpty { details.append(sim) }
+        details.append(item.message.simDeliveryLabel)
         if outgoing && item.showsTail { details.append(L10n.t("已发送")) }
         detailLabel.text = details.joined(separator: " · ")
         detailLabel.isHidden = details.isEmpty
@@ -535,8 +551,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
                                                                   options: [.usesLineFragmentOrigin, .usesFontLeading],
                                                                   attributes: [.font: font], context: nil)
         let dateHeight = Self.dateHeight(for: date, width: width)
-        let detailHeight: CGFloat = !(item.message.simSlot ?? "").isEmpty || (item.showsTail && item.message.isOutgoing)
-            ? ceil(UIFont.preferredFont(forTextStyle: .caption2).lineHeight) + 5 : 0
+        let detailHeight: CGFloat = ceil(UIFont.preferredFont(forTextStyle: .caption2).lineHeight) + 5
         return dateHeight + max(font.lineHeight, ceil(rect.height)) + 20 + detailHeight + (item.showsTail ? 10 : 3)
     }
 
@@ -560,7 +575,9 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         let x = item.message.isOutgoing ? max(left, width - 16 - bubbleWidth) : left
         bubble.frame = CGRect(x: x, y: dateHeight, width: bubbleWidth, height: bubbleHeight)
         body.frame = bubble.bounds.insetBy(dx: 14, dy: 10)
-        detailLabel.frame = CGRect(x: x, y: bubble.frame.maxY + 3, width: bubbleWidth, height: max(0, detailHeight - 3))
+        // Keep the receiving/sending line readable even for a one-character bubble.
+        let detailWidth = max(0, width - left - 16)
+        detailLabel.frame = CGRect(x: left, y: bubble.frame.maxY + 3, width: detailWidth, height: max(0, detailHeight - 3))
         check.frame = CGRect(x: 12, y: bubble.frame.midY - 12, width: 24, height: 24)
     }
 

@@ -108,6 +108,7 @@ public final class PhoneAudioBridge {
                         "sample_rate", SAMPLE_RATE,
                         "frame_bytes", BridgeProtocol.FRAME_BYTES,
                         "result", "ok"));
+                    emit(started, "audio_capabilities", AudioCapabilityProbe.inspect());
                     while (!server.isClosed()) {
                         Socket client = server.accept();
                         if (!gate.tryAcquire(client)) {
@@ -163,8 +164,9 @@ public final class PhoneAudioBridge {
             // Validate the hello before touching audio endpoints. A bare TCP
             // liveness probe (VoWLANGatewayService.portOpen) closes immediately;
             // never start AudioRecord/AudioTrack or record a session failure for it.
-            BridgeProtocol.readHello(client.getInputStream());
-            streamCallAudio(client, started, stats);
+            boolean receiveOnly = BridgeProtocol.readMediaHello(client.getInputStream());
+            if (receiveOnly) streamEarlyAudio(client, started, stats);
+            else streamCallAudio(client, started, stats);
         } catch (BridgeProtocol.ProbeClosed closed) {
             probe = true;
         } catch (Throwable error) {
@@ -178,6 +180,58 @@ public final class PhoneAudioBridge {
         }
     }
 
+    private static void streamEarlyAudio(Socket client, long started, BridgeStats stats) throws Exception {
+        String phase="select_capture_route";
+        try {
+            AudioDeviceInfo rx=findTelephonyDevice(true);
+            if(rx==null || !TelephonyDownlinkProfile.supports(rx.getSampleRates(),rx.getChannelCounts(),rx.getEncodings()))
+                throw new IllegalStateException("Telephony Rx unavailable");
+            phase="create_capture";
+            int buffer=AudioRecord.getMinBufferSize(SAMPLE_RATE,CHANNEL_IN,ENCODING);
+            if(buffer<=0) throw new IllegalStateException("invalid capture buffer");
+            AudioRecord recorder=new AudioRecord(captureSource(),SAMPLE_RATE,CHANNEL_IN,ENCODING,Math.max(buffer,BridgeProtocol.FRAME_BYTES*10));
+            Object lifecycle=new Object();
+            AtomicBoolean running=new AtomicBoolean(true);
+            Runnable stop=() -> {
+                if(!running.compareAndSet(true,false)) return;
+                try { client.close(); } catch(IOException ignored) {}
+                synchronized(lifecycle) {
+                    try { if(recorder.getRecordingState()==AudioRecord.RECORDSTATE_RECORDING) recorder.stop(); }
+                    catch(RuntimeException ignored) {}
+                }
+            };
+            try (AudioEndpointLease capture = new AudioEndpointLease(() -> {
+                    synchronized(lifecycle) { if(recorder.getRecordingState()==AudioRecord.RECORDSTATE_RECORDING) recorder.stop(); }
+                }, () -> { synchronized(lifecycle) { recorder.release(); } })) {
+                try {
+                phase="bind_capture_route";
+                if(!recorder.setPreferredDevice(rx)) throw new IllegalStateException("Telephony Rx rejected");
+                phase="validate_capture";
+                if(recorder.getState()!=AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("capture unavailable");
+                phase="start_capture";
+                recorder.startRecording();
+                phase="verify_capture";
+                if(recorder.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING) throw new IOException("capture not recording");
+                phase="send_ready";
+                BridgeProtocol.writeReady(client.getOutputStream());
+                stats.resetAudio();
+                emit(started,"audio_profile",Map.of("profile","telephony_downlink","direction","recvonly","capture_rate",8000,"capture_source","voice_downlink"));
+                emit(started,"client_ready",Map.of("result","receive_only_capture","route_verified",false));
+                client.setSoTimeout(0);
+                Thread disconnect=new Thread(() -> {
+                    try { client.getInputStream().read(); } catch(IOException ignored) {}
+                    finally { stop.run(); }
+                },"airsim-early-disconnect");
+                disconnect.setDaemon(true); disconnect.start();
+                Thread reporter=new Thread(() -> reportStats(started,stats,running),"airsim-early-stats");
+                reporter.setDaemon(true); reporter.start();
+                try { captureDownlink(recorder,true,client,stats,running,stop,true); }
+                finally { stop.run(); reporter.interrupt(); }
+                } finally { stop.run(); }
+            }
+        } catch (Exception | LinkageError error) { throw new AudioStartupFailure(phase,error); }
+    }
+
     private static void streamCallAudio(Socket client, long started, BridgeStats stats)
             throws Exception {
         // Only the synchronous handshake callback mutates this phase holder.
@@ -185,8 +239,12 @@ public final class PhoneAudioBridge {
         try {
             stats.resetAudio();
             emit(started, "audio_initializing", Map.of("result", "starting"));
+            boolean redmi9 = Redmi9PCMProfile.matches(Build.MANUFACTURER, Build.DEVICE, Build.HARDWARE);
             int recordBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING);
-            int trackBufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, ENCODING);
+            // Redmi's playback size is queried after selecting its declared HAL
+            // profile; rejecting 8k mono here would prevent the native-format path.
+            int trackBufferSize = redmi9 ? BridgeProtocol.FRAME_BYTES
+                    : AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, ENCODING);
             if (recordBufferSize <= 0 || trackBufferSize <= 0) {
                 throw new IllegalStateException("invalid Android audio buffer sizes");
             }
@@ -198,6 +256,15 @@ public final class PhoneAudioBridge {
             try (AudioEndpointLease capture = new AudioEndpointLease(() -> {
                     if (recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) recorder.stop();
                 }, recorder::release)) {
+                if (redmi9) {
+                    phase[0] = "select_capture_route";
+                    AudioDeviceInfo rx = findTelephonyDevice(true);
+                    if (rx == null || !Redmi9PCMProfile.supports(rx.getSampleRates(), rx.getChannelCounts(), rx.getEncodings(), 8000, 1)) {
+                        throw new IllegalStateException("Redmi 9 Telephony Rx 8k mono PCM16 unavailable");
+                    }
+                    phase[0] = "bind_capture_route";
+                    if (!recorder.setPreferredDevice(rx)) throw new IllegalStateException("Telephony Rx route rejected");
+                }
                 phase[0] = "create_attributes";
                 AudioAttributes.Builder attributeBuilder = new AudioAttributes.Builder()
                     .setUsage(playbackUsage())
@@ -211,15 +278,22 @@ public final class PhoneAudioBridge {
                     throw new IllegalStateException(
                         "neither Samsung VOICE_TX nor Android Telephony Tx is available");
                 }
+                phase[0] = "select_playback_format";
+                int playbackRate = redmi9 && telephonyTx != null ? Redmi9PCMProfile.playbackRate(
+                        telephonyTx.getSampleRates(), telephonyTx.getChannelCounts(), telephonyTx.getEncodings()) : SAMPLE_RATE;
+                boolean convertUplink = playbackRate == 48000;
+                int playbackChannels = convertUplink ? AudioFormat.CHANNEL_OUT_STEREO : CHANNEL_OUT;
+                trackBufferSize = AudioTrack.getMinBufferSize(playbackRate, playbackChannels, ENCODING);
+                if (trackBufferSize <= 0) throw new IllegalStateException("invalid playback format buffer");
                 phase[0] = "create_playback";
                 AudioTrack track = new AudioTrack.Builder()
                     .setAudioAttributes(attributeBuilder.build())
                     .setAudioFormat(new AudioFormat.Builder()
                         .setEncoding(ENCODING)
-                        .setSampleRate(SAMPLE_RATE)
-                        .setChannelMask(CHANNEL_OUT)
+                        .setSampleRate(playbackRate)
+                        .setChannelMask(playbackChannels)
                         .build())
-                    .setBufferSizeInBytes(Math.max(trackBufferSize, BridgeProtocol.FRAME_BYTES * 10))
+                    .setBufferSizeInBytes(Math.max(trackBufferSize, BridgeProtocol.FRAME_BYTES * (convertUplink ? 48 : 10)))
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build();
                 try (AudioEndpointLease playback = new AudioEndpointLease(() -> {
@@ -245,6 +319,9 @@ public final class PhoneAudioBridge {
                         "record_buffer_bytes", recordBufferSize,
                         "track_buffer_bytes", trackBufferSize,
                         "result", "ok"));
+                    emit(started, "audio_profile", Map.of("profile", redmi9 ? "redmi9_mtk_experimental" : "standard",
+                        "wire_rate", SAMPLE_RATE, "capture_source", "voice_downlink", "capture_rate", SAMPLE_RATE,
+                        "playback_rate", playbackRate, "playback_channels", convertUplink ? 2 : 1));
 
                     // The hello was validated before any audio endpoint was created.
                     // Start the real endpoints, then send READY; a successful TCP
@@ -272,10 +349,10 @@ public final class PhoneAudioBridge {
                         }
                     };
                     Thread downlink = new Thread(
-                        () -> captureDownlink(recorder, client, stats, running, stop),
+                        () -> captureDownlink(recorder, redmi9, client, stats, running, stop),
                         "airsim-phone-downlink");
                     Thread uplink = new Thread(
-                        () -> playUplink(track, playbackRoute, client, started, stats, running, stop),
+                        () -> playUplink(track, playbackRoute, redmi9, convertUplink, client, started, stats, running, stop),
                         "airsim-phone-uplink");
                     Thread reporter = new Thread(
                         () -> reportStats(started, stats, running),
@@ -297,11 +374,18 @@ public final class PhoneAudioBridge {
 
     private static void captureDownlink(
             AudioRecord recorder,
+            boolean strictTelephony,
             Socket client,
             BridgeStats stats,
             AtomicBoolean running,
             Runnable stop) {
+        captureDownlink(recorder, strictTelephony, client, stats, running, stop, false);
+    }
+
+    private static void captureDownlink(AudioRecord recorder, boolean strictTelephony, Socket client,
+            BridgeStats stats, AtomicBoolean running, Runnable stop, boolean awaitAudibleFrame) {
         byte[] frame = new byte[BridgeProtocol.FRAME_BYTES];
+        long nextRouteProbe = 0;
         try {
             OutputStream output = client.getOutputStream();
             while (running.get()) {
@@ -313,6 +397,25 @@ public final class PhoneAudioBridge {
                 if (evenCount == 0) {
                     continue;
                 }
+                if (strictTelephony && SystemClock.elapsedRealtime() >= nextRouteProbe) {
+                    nextRouteProbe = SystemClock.elapsedRealtime() + 1000;
+                    String route = "unknown", silenced = "unknown";
+                    try {
+                        AudioDeviceInfo device = recorder.getRoutedDevice();
+                        route = device == null ? "unknown" : device.isSource() && device.getType() == AudioDeviceInfo.TYPE_TELEPHONY
+                                ? "telephony" : "other";
+                        android.media.AudioRecordingConfiguration config = recorder.getActiveRecordingConfiguration();
+                        if (config != null) silenced = config.isClientSilenced() ? "yes" : "no";
+                    } catch (RuntimeException | LinkageError ignored) { /* Missing metadata is not verified routing. */ }
+                    emit(0, "capture_route_observed", Map.of("capture_route", route, "capture_silenced", silenced));
+                    if (strictTelephony && (route.equals("other") || silenced.equals("yes"))) throw new IOException("capture is not routed to Telephony Rx");
+                }
+                if (awaitAudibleFrame) {
+                    if (!hasSignal(frame, evenCount)) continue;
+                    awaitAudibleFrame = false;
+                    emit(0, "early_media_signal_observed", Map.of("direction", "recvonly"));
+                }
+                if (!running.get()) break;
                 output.write(frame, 0, evenCount);
                 stats.recordDownlink(frame, evenCount);
             }
@@ -328,22 +431,35 @@ public final class PhoneAudioBridge {
         }
     }
 
+    static boolean hasSignal(byte[] frame, int count) {
+        for (int i=0;i+1<count;i+=2) {
+            int sample=(short)((frame[i]&255)|(frame[i+1]<<8));
+            if(sample>1 || sample<-1) return true;
+        }
+        return false;
+    }
+
     private static void playUplink(
             AudioTrack track,
             PlaybackRoute playbackRoute,
+            boolean strictTelephony,
+            boolean convertUplink,
             Socket client,
             long started,
             BridgeStats stats,
             AtomicBoolean running,
             Runnable stop) {
         byte[] frame = new byte[BridgeProtocol.FRAME_BYTES];
+        byte[] nativeFrame = convertUplink ? new byte[BridgeProtocol.FRAME_BYTES * 12] : frame;
+        PCM8kTo48kStereo converter = convertUplink ? new PCM8kTo48kStereo() : null;
         long firstPlaybackAt = 0;
         // A vendor tag is a routing request, not proof of the route actually used.
         // Hidden Samsung routes may remain unverified: report that honestly,
         // without destroying a working downlink or falling back to the loudspeaker.
         boolean routeVerified = false;
         boolean routeWarningEmitted = false;
-        boolean routeObserved = false;
+        int observedRouteID = -1;
+        int observedRouteType = -1;
         try {
             client.setSoTimeout(250);
             InputStream input = client.getInputStream();
@@ -364,21 +480,34 @@ public final class PhoneAudioBridge {
                 if (count < 0) {
                     return;
                 }
-                writeTrackFrame(track, frame, count);
+                AudioDeviceInfo beforeWrite = strictTelephony ? track.getRoutedDevice() : null;
+                if (beforeWrite != null && beforeWrite.getType() != AudioDeviceInfo.TYPE_TELEPHONY)
+                    throw new IOException("playback is not routed to Telephony Tx");
+                int nativeCount = converter == null ? count : converter.convert(frame, count, nativeFrame);
+                writeTrackFrame(track, nativeFrame, nativeCount);
                 stats.recordUplink(frame, count);
                 if (firstPlaybackAt == 0) {
                     firstPlaybackAt = SystemClock.elapsedRealtime();
                 }
                 AudioDeviceInfo routed = track.getRoutedDevice();
-                if (!routeObserved && routed != null) {
-                    routeObserved = true;
+                int routedID = routed == null ? -1 : routed.getId();
+                int routedType = routed == null ? -1 : routed.getType();
+                if (routedID != observedRouteID || routedType != observedRouteType) {
+                    observedRouteID = routedID;
+                    observedRouteType = routedType;
+                    // A route may change mid-call. Old verification is not evidence
+                    // for the new destination, even while PCM bytes still advance.
+                    routeVerified = false;
                     emit(started, "voice_tx_route_observed", Map.of(
                         "playback_route", playbackRoute.name().toLowerCase(),
-                        "device_id", routed.getId(),
-                        "device_type", routed.getType(),
-                        "telephony_sink", routed.getType() == AudioDeviceInfo.TYPE_TELEPHONY,
+                        "device_id", routedID,
+                        "device_type", routedType,
+                        "telephony_sink", routedType == AudioDeviceInfo.TYPE_TELEPHONY,
+                        "route_kind", routed == null ? "unknown" : routedType == AudioDeviceInfo.TYPE_TELEPHONY ? "telephony" : "other",
                         "result", "observed"));
                 }
+                if (strictTelephony && routed != null && routedType != AudioDeviceInfo.TYPE_TELEPHONY)
+                    throw new IOException("playback changed away from Telephony Tx");
                 if (!routeVerified && routed != null
                         && routed.getType() == AudioDeviceInfo.TYPE_TELEPHONY) {
                     routeVerified = true;
@@ -406,6 +535,7 @@ public final class PhoneAudioBridge {
             }
         } finally {
             Arrays.fill(frame, (byte) 0);
+            Arrays.fill(nativeFrame, (byte) 0);
             stop.run();
         }
     }
@@ -454,12 +584,16 @@ public final class PhoneAudioBridge {
     }
 
     private static AudioDeviceInfo findTelephonyTxDevice() {
+        return findTelephonyDevice(false);
+    }
+
+    private static AudioDeviceInfo findTelephonyDevice(boolean input) {
         try {
             Method getDevices = AudioManager.class.getMethod("getDevicesStatic", int.class);
             AudioDeviceInfo[] devices = (AudioDeviceInfo[]) getDevices.invoke(
-                null, AudioManager.GET_DEVICES_OUTPUTS);
+                null, input ? AudioManager.GET_DEVICES_INPUTS : AudioManager.GET_DEVICES_OUTPUTS);
             for (AudioDeviceInfo device : devices) {
-                if (device.isSink() && device.getType() == AudioDeviceInfo.TYPE_TELEPHONY) {
+                if ((input ? device.isSource() : device.isSink()) && device.getType() == AudioDeviceInfo.TYPE_TELEPHONY) {
                     return device;
                 }
             }

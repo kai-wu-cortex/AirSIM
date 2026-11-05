@@ -7,6 +7,7 @@ import WidgetKit
 struct AirSIMLiveActivityBundle: WidgetBundle {
     var body: some Widget {
         AirSIMLiveActivityWidget()
+        AirSIMDeviceWidget()
     }
 }
 
@@ -68,10 +69,9 @@ struct AirSIMLiveActivityWidget: Widget {
             } compactTrailing: {
                 compactTrailingView(state)
             } minimal: {
-                Image(systemName: compactSymbolName(for: state))
-                    .foregroundStyle(tint(for: state.phase))
+                LiveActivityConnectionIcon(mark: .resolve(state), size: 14)
             }
-            .keylineTint(tint(for: state.phase))
+            .keylineTint(LiveActivityConnectionMark.resolve(state).color)
         }
     }
 
@@ -80,11 +80,11 @@ struct AirSIMLiveActivityWidget: Widget {
         for state: AirSIMCallActivityAttributes.ContentState
     ) -> some View {
         if state.phase == .standby || state.phase == .cloudStandby {
-            statusMark(for: state.phase, size: 32)
+            statusMark(for: state, size: 32)
         } else if state.phase == .incoming || state.phase == .active || state.phase == .held {
             callerMark(size: 32)
         } else {
-            statusMark(for: state.phase, size: 32)
+            statusMark(for: state, size: 32)
         }
     }
 
@@ -92,14 +92,7 @@ struct AirSIMLiveActivityWidget: Widget {
     private func compactLeadingView(
         _ state: AirSIMCallActivityAttributes.ContentState
     ) -> some View {
-        if state.phase == .standby || state.phase == .cloudStandby {
-            Image(systemName: compactSymbolName(for: state))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(tint(for: state.phase))
-        } else {
-            Image(systemName: symbolName(for: state.phase))
-                .foregroundStyle(tint(for: state.phase))
-        }
+        LiveActivityConnectionIcon(mark: .resolve(state), size: 17)
     }
 
     @ViewBuilder
@@ -138,11 +131,11 @@ struct AirSIMLiveActivityWidget: Widget {
         return VStack(spacing: callPhase ? 10 : 12) {
             HStack(spacing: 10) {
                 if state.phase == .standby || state.phase == .cloudStandby {
-                    statusMark(for: state.phase, size: 44)
+                    statusMark(for: state, size: 44)
                 } else if state.phase == .incoming || state.phase == .active || state.phase == .held {
                     callerMark(size: 44)
                 } else {
-                    statusMark(for: state.phase, size: 44)
+                    statusMark(for: state, size: 44)
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(idleTitle(state))
@@ -464,12 +457,11 @@ struct AirSIMLiveActivityWidget: Widget {
         compact: Bool
     ) -> some View {
         let transport = agent.transport
-        let color = transportColor(transport)
-        let title = transport?.title ?? "离线"
-        let symbol = transport?.systemImage ?? "wifi.slash"
+        let mark = LiveActivityConnectionMark.resolve(agent)
+        let color = mark.color
+        let title = mark.title
         return HStack(spacing: compact ? 3 : 4) {
-            Image(systemName: symbol)
-                .font(.system(size: compact ? 8 : 9, weight: .semibold))
+            LiveActivityConnectionIcon(mark: mark, size: compact ? 9 : 10)
             Text(title)
                 .font(.system(size: compact ? 8.5 : 10, weight: .semibold))
                 .lineLimit(1)
@@ -676,11 +668,11 @@ struct AirSIMLiveActivityWidget: Widget {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
         case .cloudStandby:
-            Image(systemName: "checkmark.icloud.fill")
+            Image(systemName: "checkmark")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.cyan)
         case .offline:
-            Image(systemName: "antenna.radiowaves.left.and.right.slash")
+            Image(systemName: "minus")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -810,14 +802,13 @@ struct AirSIMLiveActivityWidget: Widget {
     }
 
     private func statusMark(
-        for phase: AirSIMCallActivityAttributes.ContentState.Phase,
+        for state: AirSIMCallActivityAttributes.ContentState,
         size: CGFloat
     ) -> some View {
-        Image(systemName: symbolName(for: phase))
-            .font(.system(size: size * 0.42, weight: .semibold))
-            .foregroundStyle(tint(for: phase))
+        let mark = LiveActivityConnectionMark.resolve(state)
+        return LiveActivityConnectionIcon(mark: mark, size: size * 0.48)
             .frame(width: size, height: size)
-            .background(tint(for: phase).opacity(0.2), in: Circle())
+            .background(mark.color.opacity(0.16), in: Circle())
     }
 
     private func callerMark(size: CGFloat) -> some View {
@@ -828,30 +819,6 @@ struct AirSIMLiveActivityWidget: Widget {
             .background(Color.white.opacity(0.18), in: Circle())
             .overlay(Circle().stroke(Color.white.opacity(0.12), lineWidth: 1))
             .accessibilityHidden(true)
-    }
-
-    private func symbolName(
-        for phase: AirSIMCallActivityAttributes.ContentState.Phase
-    ) -> String {
-        switch phase {
-        case .standby: return "antenna.radiowaves.left.and.right"
-        case .cloudStandby: return "icloud.fill"
-        case .incoming: return "phone.arrow.down.left.fill"
-        case .active: return "waveform"
-        case .held: return "pause.fill"
-        case .offline: return "antenna.radiowaves.left.and.right.slash"
-        }
-    }
-
-    private func compactSymbolName(
-        for state: AirSIMCallActivityAttributes.ContentState
-    ) -> String {
-        if state.transport == .vowlan || state.transport == .bluetooth,
-           state.phase != .offline,
-           state.phase != .cloudStandby {
-            return state.transport?.systemImage ?? "wifi"
-        }
-        return symbolName(for: state.phase)
     }
 
     private func activityStatusLine(

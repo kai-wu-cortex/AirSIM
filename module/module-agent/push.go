@@ -116,6 +116,7 @@ type callStatePushEvent struct {
 }
 
 type agentHeartbeatSnapshot struct {
+	Battery              *androidBatteryReading
 	ATOK                 bool
 	CellularState        string
 	CellularRegistration string
@@ -125,23 +126,24 @@ type agentHeartbeatSnapshot struct {
 }
 
 type agentHeartbeatEvent struct {
-	CommandRoutingVersion int    `json:"command_routing_version"`
-	Event                 string `json:"event"`
-	DeviceID              string `json:"device_id"`
-	DeviceSecret          string `json:"device_secret"`
-	AgentVersion          string `json:"agent_version"`
-	AgentID               string `json:"agent_id,omitempty"`
-	AgentKind             string `json:"agent_kind,omitempty"`
-	DeviceName            string `json:"device_name,omitempty"`
-	Manufacturer          string `json:"manufacturer,omitempty"`
-	Model                 string `json:"model,omitempty"`
-	PhoneNumber           string `json:"phone_number,omitempty"`
-	ATOK                  bool   `json:"at_ok"`
-	CellularState         string `json:"cellular_state"`
-	CellularRegistration  string `json:"cellular_registration,omitempty"`
-	CellularRecovery      string `json:"cellular_recovery,omitempty"`
-	ECMCarrier            string `json:"ecm_carrier,omitempty"`
-	SignalDBM             *int   `json:"signal_dbm,omitempty"`
+	Battery               *androidBatteryReading `json:"battery,omitempty"`
+	CommandRoutingVersion int                    `json:"command_routing_version"`
+	Event                 string                 `json:"event"`
+	DeviceID              string                 `json:"device_id"`
+	DeviceSecret          string                 `json:"device_secret"`
+	AgentVersion          string                 `json:"agent_version"`
+	AgentID               string                 `json:"agent_id,omitempty"`
+	AgentKind             string                 `json:"agent_kind,omitempty"`
+	DeviceName            string                 `json:"device_name,omitempty"`
+	Manufacturer          string                 `json:"manufacturer,omitempty"`
+	Model                 string                 `json:"model,omitempty"`
+	PhoneNumber           string                 `json:"phone_number,omitempty"`
+	ATOK                  bool                   `json:"at_ok"`
+	CellularState         string                 `json:"cellular_state"`
+	CellularRegistration  string                 `json:"cellular_registration,omitempty"`
+	CellularRecovery      string                 `json:"cellular_recovery,omitempty"`
+	ECMCarrier            string                 `json:"ecm_carrier,omitempty"`
+	SignalDBM             *int                   `json:"signal_dbm,omitempty"`
 }
 
 type pushManager struct {
@@ -723,6 +725,7 @@ func (p *pushManager) sendHeartbeatRequired(snapshot agentHeartbeatSnapshot, req
 		return nil
 	}
 	return p.postJSON(client, registration.RelayURL+"/v1/events/heartbeat", agentHeartbeatEvent{
+		Battery:               snapshot.Battery,
 		CommandRoutingVersion: 1,
 		Event:                 "agent_heartbeat", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, AgentVersion: agentVersion,
@@ -936,6 +939,7 @@ func (a *agent) pushHeartbeat(response http.ResponseWriter, request *http.Reques
 		CellularRecovery: a.modem.RecoveryState, SignalDBM: a.modem.SignalDBM,
 	}
 	a.mu.RUnlock()
+	snapshot.Battery = a.android.batterySnapshot(time.Now())
 	if snapshot.CellularState == "" {
 		snapshot.CellularState = "unregistered"
 	}

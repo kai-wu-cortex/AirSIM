@@ -9,6 +9,8 @@ public class TelecomManager {
     public java.util.List<PhoneAccountHandle> enabled = java.util.List.of();
     public Bundle lastExtras;
     public int dialCount;
+    public PhoneAccountHandle defaultOutgoing;
+    public PhoneAccountHandle getDefaultOutgoingPhoneAccount(String scheme) { return defaultOutgoing; }
     public java.util.List<PhoneAccountHandle> getCallCapablePhoneAccounts() { return enabled; }
     public PhoneAccount getPhoneAccount(PhoneAccountHandle handle) { return accounts.get(handle); }
     public void placeCall(Uri address, Bundle extras) { lastExtras = extras; dialCount++; }

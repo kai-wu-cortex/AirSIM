@@ -215,6 +215,7 @@ public final class StandaloneAgentService extends Service {
 
     private void sendHeartbeat(JSONObject registration, RelayEgressGate.Generation generation) throws Exception {
         JSONObject heartbeat = identity(registration)
+                .put("battery", AndroidBatteryStatus.snapshot(this))
                 .put("event", "agent_heartbeat").put("agent_version", "standalone-0.1.0")
                 .put("agent_id", registration.optString("android_agent_id", AndroidAgentIdentity.agentID(this)))
                 .put("agent_kind", "standalone")

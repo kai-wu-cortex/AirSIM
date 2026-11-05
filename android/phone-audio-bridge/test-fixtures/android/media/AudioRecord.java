@@ -3,13 +3,25 @@ package android.media;
 /** External OS boundary: allocating capture succeeds, later Android setup is unavailable. */
 public class AudioRecord {
     public static int live, released;
-    private int state = 1;
+    public static boolean rejectPreferred;
+    public static AudioDeviceInfo preferred;
+    public static int requestedSource, requestedRate;
+    private volatile int state = 1;
     public static final int RECORDSTATE_RECORDING = 3;
-    public AudioRecord(int source, int rate, int channels, int encoding, int bytes) { live++; }
+    public AudioRecord(int source, int rate, int channels, int encoding, int bytes) { live++; requestedSource = source; requestedRate = rate; }
+    public boolean setPreferredDevice(AudioDeviceInfo device) { preferred = device; return !rejectPreferred; }
     public static int getMinBufferSize(int rate, int channels, int encoding) { return 320; }
     public int getState() { return 1; }
     public int getAudioSessionId() { return 100; }
     public int getRecordingState() { return state; }
+    public AudioDeviceInfo getRoutedDevice() { return preferred; }
+    public AudioRecordingConfiguration getActiveRecordingConfiguration() { return null; }
+    public int read(byte[] data,int offset,int size,int mode) {
+        try { Thread.sleep(5); } catch(InterruptedException ignored) { return -3; }
+        if(state!=3) return -3;
+        for(int i=offset;i<offset+size;i+=2) { data[i]=64; data[i+1]=0; }
+        return size;
+    }
     public void startRecording() { state = 3; }
     public void stop() { state = 1; }
     public void release() { released++; live--; }

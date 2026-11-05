@@ -214,7 +214,8 @@ func (a *agent) cloudHeartbeatLoop() {
 		}
 		atHealth := a.at.healthSnapshot()
 		err := a.push.sendHeartbeat(agentHeartbeatSnapshot{
-			ATOK: atHealth.ConsecutiveFailures < 3, CellularState: state,
+			Battery: a.android.batterySnapshot(time.Now()),
+			ATOK:    atHealth.ConsecutiveFailures < 3, CellularState: state,
 			CellularRegistration: registration, CellularRecovery: recovery,
 			ECMCarrier: readDebugFile(usbCarrierPath), SignalDBM: signal,
 		})

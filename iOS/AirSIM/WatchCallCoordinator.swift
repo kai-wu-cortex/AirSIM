@@ -286,6 +286,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
                     "call_id": owned.presentationID, "call_uuid": owned.route.systemUUID.uuidString,
                     "agent_id": owned.route.key.agentID, "number": number, "media_route": "vowlan",
                     "pcm_host": endpoint.host, "pcm_port": Int(endpoint.pcmPort), "pcm_secret": credential.encodedSecret,
+                    "pcm_tls": endpoint.usesTLS,
                     "expires_at": Date().addingTimeInterval(300).timeIntervalSince1970])
                 return
             }
@@ -295,7 +296,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
                     replyHandler(["ok": false, "error": "已取消拨号"])
                     return
                 }
-                try await api.dial(number: number)
+                try await api.dial(number: number, operationID: requestID)
                 guard let record = await waitForOutgoingCall(api: api, number: number) else {
                     try? await api.hangupCall()
                     replyHandler(["ok": false, "error": "VoWLAN 未确认拨号状态"])
@@ -316,6 +317,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
                     "call_id": record.id, "call_uuid": uuid.uuidString,
                     "number": number, "media_route": "vowlan",
                     "pcm_host": endpoint.host, "pcm_port": Int(endpoint.pcmPort),
+                    "pcm_tls": endpoint.usesTLS,
                     "pcm_secret": credential.encodedSecret,
                     "expires_at": Date().addingTimeInterval(300).timeIntervalSince1970,
                 ])
@@ -335,7 +337,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
             }
             // 没有可验证的本地 VoWLAN 时才回退公网 PCM。
             let outgoing = try await VoIPPushController.shared.startCloudOutgoingCall(
-                number: number, target: target, mediaTransport: .legacyPCM, timeout: 15
+                number: number, target: target, operationID: requestID, mediaTransport: .legacyPCM, timeout: 15
             )
             guard !cancelledWatchDialIDs.contains(requestID) else {
                 await endAbandonedWatchCall(outgoing)
@@ -458,6 +460,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
                 "ok": true, "call_id": callID, "call_uuid": uuid.uuidString,
                 "media_route": "vowlan", "pcm_host": endpoint.host,
                 "pcm_port": Int(endpoint.pcmPort), "pcm_secret": credential.encodedSecret,
+                "pcm_tls": endpoint.usesTLS,
                 "cloud_media_allowed": CloudModePreference.isEnabled(),
             ])
         } catch {

@@ -5,6 +5,19 @@ import CryptoKit
 final class LocalHistoryStore {
     // Background push persistence and the foreground model use separate store instances.
     private static let messageLock = NSRecursiveLock()
+    private struct AttentionState: Codable {
+        var readMessages: Set<String> = []
+        var legacyReadMessages: Set<String> = []
+        var seenCalls: Set<String> = []
+        mutating func read(_ messages: [SMSMessage]) {
+            for message in messages where !message.isOutgoing {
+                readMessages.formUnion(LocalHistoryStore.visibilityKeys(message))
+                if message.deliveryID?.isEmpty != false {
+                    legacyReadMessages.formUnion(LocalHistoryStore.deletionKeys(message))
+                }
+            }
+        }
+    }
     private struct MessageState: Codable {
         var messages: [SMSMessage]
         var deletedKeys: Set<String>
@@ -15,6 +28,7 @@ final class LocalHistoryStore {
     private let directoryURL: URL
     private let callHistoryURL: URL
     private let messagesURL: URL
+    private let attentionURL: URL
 
     init(fileManager: FileManager = .default, directoryURL: URL? = nil) {
         self.fileManager = fileManager
@@ -30,6 +44,7 @@ final class LocalHistoryStore {
         self.directoryURL = resolvedDirectoryURL
         callHistoryURL = resolvedDirectoryURL.appendingPathComponent("call-history.json")
         messagesURL = resolvedDirectoryURL.appendingPathComponent("messages.json")
+        attentionURL = resolvedDirectoryURL.appendingPathComponent("history-attention.json")
 
         do {
             try fileManager.createDirectory(
@@ -54,12 +69,15 @@ final class LocalHistoryStore {
 
     @discardableResult
     func saveCallHistory(_ records: [CallRecord]) -> Bool {
-        save(records, to: callHistoryURL)
+        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        _ = readAttentionState() // Migrate old history before inserting new records.
+        return save(records, to: callHistoryURL)
     }
 
     @discardableResult
     func saveMessages(_ records: [SMSMessage]) -> Bool {
         Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        _ = readAttentionState()
         guard var state = readMessageState() else { return false }
         // A background push can arrive after another store instance captured its input array.
         // Merge under the lock; deletion is explicit and never inferred from missing records.
@@ -96,6 +114,66 @@ final class LocalHistoryStore {
         return Set([message.id, legacy].map {
             SHA256.hash(data: Data($0.utf8)).map { String(format: "%02x", $0) }.joined()
         })
+    }
+
+    private static func attentionCallKey(_ call: CallRecord) -> String {
+        let identity = "\(call.sourceAgentID ?? "")\u{0}\(call.androidID ?? call.sourceCallID ?? call.id)"
+        return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Existing history has no read information: baseline it once, before new
+    /// push/local deliveries are saved. Never turn a corrupt file into empty state.
+    private func readAttentionState() -> AttentionState? {
+        do {
+            return try JSONDecoder().decode(AttentionState.self, from: Data(contentsOf: attentionURL))
+        } catch CocoaError.fileReadNoSuchFile {
+            guard let existingMessages = readMessageState()?.messages else { return nil }
+            var state = AttentionState()
+            state.read(existingMessages)
+            state.seenCalls = Set(loadCallHistory().filter { $0.missed && $0.endedAt != nil }.map(Self.attentionCallKey))
+            return writeAttentionState(state) ? state : nil
+        } catch { return nil }
+    }
+
+    private func writeAttentionState(_ state: AttentionState) -> Bool {
+        do {
+            try JSONEncoder().encode(state).write(to: attentionURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            return true
+        } catch { return false }
+    }
+
+    func unreadMessageIDs(in records: [SMSMessage]) -> Set<String> {
+        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        guard let state = readAttentionState() else { return [] }
+        return Set(SMSHistoryPolicy.deduplicated(records).filter {
+            !$0.isOutgoing && Self.visibilityKeys($0).isDisjoint(with: state.readMessages)
+                && Self.deletionKeys($0).isDisjoint(with: state.legacyReadMessages)
+        }.map(\.id))
+    }
+
+    func unseenMissedCallIDs(in records: [CallRecord]) -> Set<String> {
+        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        guard let state = readAttentionState() else { return [] }
+        return Set(records.filter {
+            $0.missed && $0.direction == "incoming" && $0.endedAt != nil
+                && !state.seenCalls.contains(Self.attentionCallKey($0))
+        }.map(\.id))
+    }
+
+    @discardableResult
+    func markMessagesRead(_ records: [SMSMessage]) -> Bool {
+        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        guard var state = readAttentionState() else { return false }
+        state.read(records)
+        return writeAttentionState(state)
+    }
+
+    @discardableResult
+    func markMissedCallsSeen(_ records: [CallRecord]) -> Bool {
+        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        guard var state = readAttentionState() else { return false }
+        state.seenCalls.formUnion(records.filter { $0.missed && $0.endedAt != nil }.map(Self.attentionCallKey))
+        return writeAttentionState(state)
     }
 
     private static func visibilityKeys(_ message: SMSMessage) -> Set<String> {

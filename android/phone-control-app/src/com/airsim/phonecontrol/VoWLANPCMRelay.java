@@ -74,6 +74,10 @@ public final class VoWLANPCMRelay implements Closeable {
             }
             BufferedInputStream peerInput = new BufferedInputStream(peer.getInputStream());
             String line = readLine(peerInput);
+            if (line.startsWith("AIRSIMEM1 ")) {
+                handleEarly(peer, peerInput, line, owner);
+                return;
+            }
             VoWLANPCMProtocol.Preface preface = VoWLANPCMProtocol.parse(line);
             long now = System.currentTimeMillis() / 1000L;
             String canonical = VoWLANPCMProtocol.canonical(preface);
@@ -125,6 +129,58 @@ public final class VoWLANPCMRelay implements Closeable {
                     + " uplink_frames=" + uplink.frames.get() + " uplink_peak=" + uplink.peak.get()
                     + " downlink_bytes=" + downlink.bytes.get() + " downlink_frames=" + downlink.frames.get()
                     + " downlink_peak=" + downlink.peak.get());
+        }
+    }
+
+    private void handleEarly(Socket peer, BufferedInputStream input, String line, String owner) throws Exception {
+        if (!AndroidEarlyMedia.supported(context)) throw new SecurityException("early media unsupported");
+        var preface = VoWLANPCMProtocol.parseEarly(line);
+        long now = System.currentTimeMillis()/1000L;
+        var matched = VoWLANPairingStore.match(context, preface.signature(), VoWLANPCMProtocol.canonical(preface), preface.timestamp(), now);
+        if (matched == null || !replayCache.accept(preface.nonce(), now)) throw new SecurityException("early media authentication");
+        String androidID = AndroidEarlyMedia.LEASES.authorize(matched.id(), preface.binding(), now);
+        if (androidID == null || CallRepository.state(androidID) != android.telecom.Call.STATE_DIALING || !gate.tryAcquire(owner)) throw new SecurityException("early media expired or busy");
+        String[] binding = preface.binding().split("\n", -1);
+        Socket internal = new Socket();
+        java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean(true);
+        PCMStats stats = new PCMStats();
+        Object audioOwner = new Object();
+        Thread guard = new Thread(() -> {
+            try {
+                while (running.get() && CallRepository.state(androidID) == android.telecom.Call.STATE_DIALING && AndroidEarlyMedia.LEASES.live(matched.id(), binding[1], binding[2], System.currentTimeMillis()/1000L)
+                        && AndroidEarlyMedia.paired(context, matched.id())) Thread.sleep(100);
+            } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            finally { closeQuietly(peer); closeQuietly(internal); }
+        }, "airsim-early-lease");
+        try (internal) {
+            activeSession = true;
+            if (!track(internal)) return;
+            guard.start();
+            internal.connect(shellPCM, 3000); internal.setSoTimeout(3000); internal.setTcpNoDelay(true);
+            internal.getOutputStream().write("AIRSIMRX01\n".getBytes(StandardCharsets.US_ASCII));
+            if (!VoWLANPCMProtocol.acceptReady(internal.getInputStream())) throw new IOException("early capture unavailable");
+            if (CallRepository.state(androidID) != android.telecom.Call.STATE_DIALING
+                    || !AndroidEarlyMedia.LEASES.live(matched.id(), binding[1], binding[2], System.currentTimeMillis()/1000L)) return;
+            peer.getOutputStream().write(VoWLANPCMProtocol.READY.getBytes(StandardCharsets.US_ASCII));
+            peer.getOutputStream().flush(); peer.setSoTimeout(0); internal.setSoTimeout(0);
+            // No uplink forwarding: even one byte from the peer revokes this channel.
+            Thread rejectUplink = new Thread(() -> {
+                try { input.read(); } catch (IOException ignored) {}
+                finally { closeQuietly(peer); closeQuietly(internal); }
+            }, "airsim-early-recvonly");
+            rejectUplink.setDaemon(true); rejectUplink.start();
+            RemoteCallAudioScope.SHARED.bind(audioOwner, androidID);
+            RemoteAudioSessionRegistry.setVoWLAN(true);
+            BridgeLog.info("vowlan_early_media_started direction=recvonly");
+            copy(internal.getInputStream(), peer, stats, peer, internal, new CountDownLatch(1));
+        } finally {
+            running.set(false); guard.interrupt();
+            closeQuietly(internal); sockets.remove(internal);
+            RemoteCallAudioScope.SHARED.release(audioOwner);
+            RemoteAudioSessionRegistry.setVoWLAN(false);
+            activeSession = false;
+            gate.release(owner);
+            BridgeLog.info("vowlan_early_media_closed uplink_bytes=0 downlink_bytes=" + stats.bytes.get());
         }
     }
 

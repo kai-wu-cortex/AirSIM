@@ -1,0 +1,10 @@
+[Unit]
+Description=Check AirSIM six-day IP certificate every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
