@@ -401,7 +401,37 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
     }
 }
 
-private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInteractionDelegate {
+/// Context-bound codes used only for bubble highlighting; no backend field is required.
+enum SMSCodeHighlight {
+    static func renderedBody(in text: String, outgoing: Bool) -> (text: NSAttributedString, code: String)? {
+        guard let match = match(in: text) else { return nil }
+        let attributed = NSMutableAttributedString(string: text, attributes: [
+            .font: UIFont.preferredFont(forTextStyle: .body), .foregroundColor: outgoing ? UIColor.white : UIColor.label])
+        attributed.addAttributes([.font: UIFont.preferredFont(forTextStyle: .headline),
+            .backgroundColor: UIColor.systemYellow.withAlphaComponent(0.22),
+            .link: URL(string: "airsim-code://copy/" + match.code)!], range: match.range)
+        return (attributed, match.code)
+    }
+    static func match(in text: String) -> (code: String, range: NSRange)? {
+        let keyword = #"(?:验证码|校验码|动态码|确认码|verification\s+code|security\s+code|one[- ]time(?:\s+(?:code|password))?|(?<![A-Za-z])otp(?![A-Za-z])|(?<![A-Za-z])code(?![A-Za-z]))"#
+        let patterns = [keyword + #"([^0-9\r\n]{0,24})(?<![0-9])([0-9]{4,8})(?![0-9])"#,
+                        #"(?<![0-9])([0-9]{4,8})(?![0-9])([^0-9\r\n]{0,16})"# + keyword]
+        let full = NSRange(text.startIndex..., in: text)
+        for (index, pattern) in patterns.enumerated() {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            for match in regex.matches(in: text, range: full) {
+                let codeRange = match.range(at: index == 0 ? 2 : 1)
+                let gapRange = match.range(at: index == 0 ? 1 : 2)
+                guard let code = Range(codeRange, in: text), let gap = Range(gapRange, in: text),
+                      text[gap].range(of: #"订单|物流|运单|order|tracking"#, options: [.regularExpression, .caseInsensitive]) == nil else { continue }
+                return (String(text[code]), codeRange)
+            }
+        }
+        return nil
+    }
+}
+
+private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInteractionDelegate, UITextViewDelegate, UIContextMenuInteractionDelegate {
     private(set) var messageID: String?
     let bubble = SMSBubbleView()
     private let body = SMSReadOnlyTextView()
@@ -409,6 +439,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
     private let detailLabel = UILabel()
     private let check = UIImageView()
     private var item: SMSTimelineItem?
+    private var highlightedCode: String?
     private var selecting = false
     private var measuredWidth: CGFloat = 0
     private var measuredSelecting = false
@@ -437,6 +468,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         detailLabel.adjustsFontForContentSizeCategory = true
         detailLabel.textColor = .secondaryLabel
         body.backgroundColor = .clear
+        body.delegate = self
         body.isEditable = false
         body.isSelectable = true
         body.isScrollEnabled = false
@@ -445,6 +477,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         body.dataDetectorTypes = [.link, .phoneNumber]
         body.adjustsFontForContentSizeCategory = true
         body.addInteraction(editMenu)
+        bubble.addInteraction(UIContextMenuInteraction(delegate: self))
         check.contentMode = .scaleAspectFit
         isAccessibilityElement = false
         contentView.addGestureRecognizer(selectionTap)
@@ -458,6 +491,8 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         endTextSelection()
         messageID = nil
         item = nil
+        highlightedCode = nil
+        pendingContextAction = nil
         onCopy = nil
         onSelectText = nil
         onMore = nil
@@ -469,6 +504,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         self.item = item
         measuredWidth = 0
         messageID = item.id
+        body.attributedText = nil
         body.font = UIFont.preferredFont(forTextStyle: .body)
         body.text = item.message.content
         body.textAlignment = .natural
@@ -476,6 +512,11 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         let outgoing = item.message.isOutgoing
         body.accessibilityHint = outgoing ? L10n.t("已发送") : nil
         body.textColor = outgoing ? .white : .label
+        highlightedCode = nil
+        if let highlighted = SMSCodeHighlight.renderedBody(in: item.message.content, outgoing: outgoing) {
+            body.attributedText = highlighted.text
+            highlightedCode = highlighted.code
+        }
         body.linkTextAttributes = [.foregroundColor: outgoing ? UIColor.white : UIColor.link,
                                    .underlineStyle: NSUnderlineStyle.single.rawValue]
         bubble.outgoing = outgoing
@@ -483,7 +524,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         dateLabel.text = date
         dateLabel.isHidden = !item.showsTimestamp
         var details: [String] = []
-        if let sim = item.message.simSlot, !sim.isEmpty { details.append(sim) }
+        details.append(item.message.simDeliveryLabel)
         if outgoing && item.showsTail { details.append(L10n.t("已发送")) }
         detailLabel.text = details.joined(separator: " · ")
         detailLabel.isHidden = details.isEmpty
@@ -514,6 +555,44 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
             ]
         }
         setNeedsLayout()
+    }
+
+    func textView(_ textView: UITextView, shouldInteractWith URL: URL,
+                  in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
+        guard URL.scheme == "airsim-code", let code = highlightedCode,
+              URL.lastPathComponent == code else { return true }
+        UIPasteboard.general.string = code
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        return false
+    }
+
+    private var pendingContextAction: (() -> Void)?
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        guard !selecting, !body.textSelectionEnabled, bubble.bubblePath().contains(location) else { return nil }
+        return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
+            guard let self else { return nil }
+            var actions: [UIMenuElement] = []
+            if let code = self.highlightedCode {
+                actions.append(UIAction(title: L10n.t("复制验证码"), image: UIImage(systemName: "number")) { _ in
+                    UIPasteboard.general.string = code
+                })
+            }
+            actions += [
+                UIAction(title: L10n.t("复制"), image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.onCopy?() },
+                UIAction(title: L10n.t("选择文本"), image: UIImage(systemName: "text.cursor")) { [weak self] _ in self?.pendingContextAction = self?.onSelectText },
+                UIAction(title: L10n.t("更多…"), image: UIImage(systemName: "ellipsis.circle")) { [weak self] _ in self?.pendingContextAction = self?.onMore }
+            ]
+            return UIMenu(children: actions)
+        }
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction, willEndFor configuration: UIContextMenuConfiguration,
+                                animator: (any UIContextMenuInteractionAnimating)?) {
+        let action = pendingContextAction
+        pendingContextAction = nil
+        if let animator { animator.addCompletion { action?() } } else { action?() }
     }
 
     @objc private func toggleFromTap(_ recognizer: UITapGestureRecognizer) {
@@ -551,8 +630,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
                                                                   options: [.usesLineFragmentOrigin, .usesFontLeading],
                                                                   attributes: [.font: font], context: nil)
         let dateHeight = Self.dateHeight(for: date, width: width)
-        let detailHeight: CGFloat = !(item.message.simSlot ?? "").isEmpty || (item.showsTail && item.message.isOutgoing)
-            ? ceil(UIFont.preferredFont(forTextStyle: .caption2).lineHeight) + 5 : 0
+        let detailHeight: CGFloat = ceil(UIFont.preferredFont(forTextStyle: .caption2).lineHeight) + 5
         return dateHeight + max(font.lineHeight, ceil(rect.height)) + 20 + detailHeight + (item.showsTail ? 10 : 3)
     }
 
@@ -576,7 +654,9 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
         let x = item.message.isOutgoing ? max(left, width - 16 - bubbleWidth) : left
         bubble.frame = CGRect(x: x, y: dateHeight, width: bubbleWidth, height: bubbleHeight)
         body.frame = bubble.bounds.insetBy(dx: 14, dy: 10)
-        detailLabel.frame = CGRect(x: x, y: bubble.frame.maxY + 3, width: bubbleWidth, height: max(0, detailHeight - 3))
+        // Keep the receiving/sending line readable even for a one-character bubble.
+        let detailWidth = max(0, width - left - 16)
+        detailLabel.frame = CGRect(x: left, y: bubble.frame.maxY + 3, width: detailWidth, height: max(0, detailHeight - 3))
         check.frame = CGRect(x: 12, y: bubble.frame.midY - 12, width: 24, height: 24)
     }
 

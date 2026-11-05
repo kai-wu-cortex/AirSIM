@@ -156,6 +156,15 @@ final class StandaloneAgentGateway {
             case "/api/push/register" -> ok(registerPairing(input.toString()));
             case "/api/push/mode" -> ok(store.setCloudEnabled(
                     input.optBoolean("enabled", false)).toString());
+            case "/api/calls/resolve" -> {
+                String resolved = StandaloneCloudMediaManager.get(context).androidCallIDFor(input);
+                synchronized (callsLock) {
+                    if (resolved.isEmpty() || activeCall == null
+                            || !resolved.equals(activeCall.optString("android_id")))
+                        yield error(409, "cloud_call_identity_mismatch");
+                    yield ok(callSnapshot().toString());
+                }
+            }
             case "/api/calls/dial" -> command("dial", "", input.optString("number", ""), "",
                     input.optString("sim_account", ""));
             case "/api/calls/answer" -> command("answer", localCallTarget("answer", input), "", "");
@@ -356,7 +365,9 @@ final class StandaloneAgentGateway {
             String state = event.optString("state", "");
             if ("ended".equals(state)) {
                 if (activeCall != null) {
-                    activeCall.put("state", "ended").put("ended_at", Instant.now().toString())
+                    activeCall.put("missed", "incoming".equals(activeCall.optString("direction"))
+                                    && !activeCall.has("connected_at"))
+                            .put("state", "ended").put("ended_at", Instant.now().toString())
                             .put("updated_at", Instant.now().toString());
                     callHistory.put(activeCall);
                     activeCall = null;
@@ -370,6 +381,9 @@ final class StandaloneAgentGateway {
                 activeCall.put("direction", event.optString("direction"))
                         .put("state", state).put("number", event.optString("number"))
                         .put("updated_at", Instant.now().toString());
+                if (("active".equals(state) || "held".equals(state)) && !activeCall.has("connected_at")) {
+                    activeCall.put("connected_at", Instant.now().toString());
+                }
                 if (event.has("slot_index")) {
                     activeCall.put("slot_index", event.optInt("slot_index", -1))
                             .put("slot_id", event.optInt("slot_id", event.optInt("slot_index", -1)));

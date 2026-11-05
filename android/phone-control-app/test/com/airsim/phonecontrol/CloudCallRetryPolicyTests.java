@@ -12,6 +12,24 @@ public final class CloudCallRetryPolicyTests {
     private static RelayHTTPException http(int status, String body) { return new RelayHTTPException(status, body); }
 
     public static void main(String[] args) {
+        var identities = new CloudCallRetryPolicy.IncomingIdentities<String>();
+        int[] created = {0};
+        String first = identities.getOrCreate("configA/callA", () -> "uuid-" + (++created[0]));
+        for (int retry = 0; retry < 4; retry++) {
+            if (!first.equals(identities.getOrCreate("configA/callA", () -> "uuid-" + (++created[0]))))
+                throw new AssertionError("HTTP timeout retry changed identity");
+        }
+        if (created[0] != 1) throw new AssertionError("identity allocated more than once");
+        if (first.equals(identities.getOrCreate("configA/callB", () -> "uuid-" + (++created[0]))))
+            throw new AssertionError("different real call was merged");
+        if (first.equals(identities.getOrCreate("configB/callA", () -> "uuid-" + (++created[0]))))
+            throw new AssertionError("different registration was merged");
+        for (int i = 0; i < 130; i++) identities.getOrCreate("extra" + i, () -> "other");
+        if (identities.values().size() != 128 || identities.get("configA/callA") != null)
+            throw new AssertionError("identity retention is not bounded");
+        identities.clear();
+        if (!identities.values().isEmpty()) throw new AssertionError("configuration close retained identities");
+
         check(!CloudCallRetryPolicy.mediaRejected(http(401)), "initial media 401 may be temporary KV invisibility");
         for (int status : new int[]{400, 403, 404, 409, 410, 422}) {
             check(CloudCallRetryPolicy.eventRejected(http(status)), "call event " + status + " is final");

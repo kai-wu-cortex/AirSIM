@@ -60,8 +60,18 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+enum AppTheme: String, CaseIterable, Identifiable {
+    case forest, sky
+    var id: String { rawValue }
+    var title: String { self == .forest ? "墨绿" : "天蓝" }
+    var accent: Color { self == .forest ? Color(red: 0.12, green: 0.47, blue: 0.38) : Color(red: 0.12, green: 0.56, blue: 0.88) }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
+    @Published var theme: AppTheme {
+        didSet { UserDefaults.standard.set(theme.rawValue, forKey: "airsim.ui-theme") }
+    }
     @Published var appearance: AppAppearance {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: L10n.appearanceKey) }
     }
@@ -71,6 +81,7 @@ final class AppSettings: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
+        theme = AppTheme(rawValue: defaults.string(forKey: "airsim.ui-theme") ?? "sky") ?? .sky
         appearance = AppAppearance(rawValue: defaults.string(forKey: L10n.appearanceKey) ?? "") ?? .system
         language = AppLanguage(rawValue: defaults.string(forKey: L10n.languageKey) ?? "") ?? .system
     }

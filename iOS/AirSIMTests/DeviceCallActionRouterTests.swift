@@ -3,6 +3,65 @@ import XCTest
 
 @MainActor
 final class DeviceCallActionRouterTests: XCTestCase {
+    func testPushFirstAdoptionKeepsUUIDAndLifecycleThroughAnswerAndEnd() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in service }, callKitController: controller)
+        defer { model.stop() }
+        let uuid = UUID()
+        model.callKitDidReceiveIncoming(.init(bluetoothCallID: "backend", uuid: uuid,
+            generation: 7, number: nil, agentID: "A"))
+        let route = try model.deviceCallRouter.adoptIncoming(.init(agentID: "A", callID: "canonical",
+            state: .ringing, transport: .vowlan, transportEpoch: 1, backendCallID: "backend"),
+            systemUUID: uuid, service: service, presentationCallID: "backend", presentationGeneration: 7)
+        service.beforeAnswerReply = {
+            XCTAssertEqual(model.deviceCalls.latestEvent(for: route.key)?.state, .connecting)
+            _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "canonical", state: .ringing,
+                transport: .vowlan, transportEpoch: 1, backendCallID: "backend"))
+            XCTAssertTrue(model.otherDeviceCallReminders.isEmpty)
+            try? await model.deviceCallRouter.answer(route.key, source: "duplicate")
+        }
+        try await model.callKitAnswer(uuid: uuid, origin: .system)
+        XCTAssertEqual(model.deviceCalls.active, route.key)
+        XCTAssertEqual(model.callLifecycleSnapshot.callID, "backend")
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.generation, 7)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
+        try await model.callKitAnswer(uuid: uuid, origin: .system)
+        XCTAssertEqual(service.commands, ["answer:backend"])
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "unrelated-history", state: .ended,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
+        try await model.callKitEnd(uuid: uuid)
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+        XCTAssertNil(model.deviceCalls.active)
+        XCTAssertNil(model.deviceCallContext.media.owner)
+        XCTAssertEqual(service.commands, ["answer:backend", "end:backend"])
+    }
+
+    func testDuplicateAnswerIsIdempotentAndOldTerminalCannotEndNewCall() async throws {
+        let service = DeviceBackendProbe(id: "A")
+        let context = DeviceCallContext()
+        let router = DeviceCallActionRouter(context: context) { _, _ in service }
+        let first = try XCTUnwrap(router.registerIncoming(.init(agentID: "A", callID: "one",
+            state: .ringing, transport: .vowlan, transportEpoch: 1), mode: .vowlan))
+        try await router.answer(first.key)
+        try await router.answer(first.key)
+        XCTAssertEqual(service.commands, ["answer:one"])
+        XCTAssertTrue(context.registry.ringing.isEmpty)
+        try await router.end(first.key, rejectIfRinging: false)
+        let second = try XCTUnwrap(router.registerIncoming(.init(agentID: "A", callID: "two",
+            state: .ringing, transport: .vowlan, transportEpoch: 1), mode: .vowlan))
+        try await router.answer(second.key)
+        _ = router.ingest(.init(agentID: "A", callID: "one", state: .ended,
+            transport: .vowlan, transportEpoch: 1), mode: .vowlan)
+        XCTAssertEqual(context.registry.active, second.key)
+        XCTAssertEqual(context.media.owner, second.key)
+    }
+
     func testPreconnectPresentationNeverStartsConnectedClock() async throws {
         let service = DeviceBackendProbe(id: "A")
         let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()), deviceBackend: { _, _ in service })
@@ -646,6 +705,7 @@ private final class DeviceBackendProbe: DeviceCallBackend {
     var commands: [String] = []
     var beforeDialReply: () async -> Void = {}
     var beforeEndReply: () async -> Void = {}
+    var beforeAnswerReply: () async -> Void = {}
     var answerError: Error?
     var lastSimAccount: String?
     var lastOperationID: String?
@@ -667,6 +727,7 @@ private final class DeviceBackendProbe: DeviceCallBackend {
     }
     func answer(callID: String, generation: UInt64?) async throws {
         commands.append("answer:\(callID)")
+        await beforeAnswerReply()
         if let answerError { throw answerError }
     }
     func end(callID: String, generation: UInt64?, reject: Bool) async throws {

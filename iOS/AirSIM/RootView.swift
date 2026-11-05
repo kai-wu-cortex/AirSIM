@@ -66,6 +66,7 @@ struct RootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appUpdatePresentation: AppUpdatePresentation?
     @AppStorage("airsim.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
+    @State private var callbackSIMRequest: CallbackSIMDialRequest?
     @State private var pendingSMSRecipient: String?
     @State private var messageListState = SMSConversationListState()
     @State private var conversationSender: String?
@@ -138,7 +139,7 @@ struct RootView: View {
                 .accessibilityHidden(presentedCall != nil)
                 .phoneTabBarMinimizeOnScroll()
                 .phoneTabSelectionFeedback(selectedTabRawValue)
-                .tint(.blue)
+                .tint(settings.theme.accent)
 
             if let call = presentedCall {
                 ActiveCallView(call: call)
@@ -147,7 +148,11 @@ struct RootView: View {
             }
         }
         .background(PhoneBackdrop())
-        .animation(.easeInOut(duration: 0.2), value: model.inAppPresentedCall?.id)
+        .modifier(CallbackSIMDialChoice(request: $callbackSIMRequest, choose: confirmCallbackSIM))
+        .onChange(of: model.callLifecycleSnapshot.state.representsCall) { inCall in
+            if inCall { callbackSIMRequest = nil }
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.inAppPresentedCall?.id)
         .preferredColorScheme(settings.appearance.colorScheme)
         .safeAreaInset(edge: .top, spacing: 0) {
             if let reminder = model.otherDeviceCallReminders.first {
@@ -276,6 +281,31 @@ struct RootView: View {
     }
 
     private func dial(_ number: String) {
+        let agentID = AndroidAgentBindingPreference.selected() ?? model.currentAndroidAgent?.id
+        if let agentID {
+            let slots = model.simSlots(for: agentID)
+            if slots.count > 1 {
+                callbackSIMRequest = .init(agentID: agentID, number: number, slots: slots)
+                return
+            }
+        }
+        dialUsingCurrentSIM(number)
+    }
+
+    private func confirmCallbackSIM(_ request: CallbackSIMDialRequest, _ slot: AndroidSIMSlot) {
+        let agentID = AndroidAgentBindingPreference.selected() ?? model.currentAndroidAgent?.id
+        guard request.permits(agentID: agentID, liveSlots: agentID.map { model.simSlots(for: $0) } ?? [],
+                              slotID: slot.id, callInProgress: model.callLifecycleSnapshot.state.representsCall || model.pendingOutgoingCall != nil) else {
+            callbackSIMRequest = nil
+            model.errorMessage = "设备或 SIM 卡已变化，请重新选择后拨号"
+            return
+        }
+        model.selectSIMSlot(slot.id, for: request.agentID)
+        callbackSIMRequest = nil
+        dialUsingCurrentSIM(request.number)
+    }
+
+    private func dialUsingCurrentSIM(_ number: String) {
         showingConversation = false
         model.numberInput = number
         selectedTab = .dial
@@ -351,7 +381,7 @@ struct PhoneBackdrop: View {
                     endPoint: .bottom
                 )
             } else {
-                Color.white
+                Color(uiColor: .systemGroupedBackground)
             }
         }
         .ignoresSafeArea()
@@ -360,25 +390,9 @@ struct PhoneBackdrop: View {
 
 /// 关键内容表面使用系统原生 Liquid Glass，旧系统回退为系统材质。
 struct PhoneCard: ViewModifier {
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .glassEffect(
-                    .regular,
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
-        } else {
-            content
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    Color(uiColor: .secondarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                )
-        }
+        content.padding(18).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 
@@ -654,5 +668,35 @@ private struct AdaptiveMessagesView: View {
             }
         }
         .onAppear { compactColumn = showingConversation ? .detail : .sidebar }
+    }
+}
+
+
+/// UI-only callback intent. The existing model/router remains the dial owner.
+struct CallbackSIMDialRequest: Identifiable {
+    let id = UUID()
+    let agentID: String
+    let number: String
+    let slots: [AndroidSIMSlot]
+    func permits(agentID current: String?, liveSlots: [AndroidSIMSlot], slotID: String, callInProgress: Bool) -> Bool {
+        !callInProgress && current == agentID && slots.contains { $0.id == slotID }
+            && liveSlots.contains { $0.id == slotID }
+    }
+}
+
+private struct CallbackSIMDialChoice: ViewModifier {
+    @EnvironmentObject private var model: AppModel
+    @Binding var request: CallbackSIMDialRequest?
+    let choose: (CallbackSIMDialRequest, AndroidSIMSlot) -> Void
+    func body(content: Content) -> some View {
+        content.overlay {
+            Color.clear.frame(width: 1, height: 1)
+                .popover(item: $request) { captured in
+                    CompactSIMSelectionPanel(slots: captured.slots,
+                        selectedID: model.selectedSIMSlotID(for: captured.agentID), title: "拨号用卡") { slot in
+                        choose(captured, slot)
+                    }.compactSIMPopoverPresentation()
+                }
+        }
     }
 }

@@ -393,6 +393,7 @@ private struct RemoteDirectSettingsView: View {
 }
 
 struct AirSIMSettingsView: View {
+    var category: String? = nil
     private enum SelfTestPhase {
         case idle
         case running
@@ -441,8 +442,21 @@ struct AirSIMSettingsView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        SettingsNavigationContainer(isRoot: category == nil) {
             Form {
+                if category == "外观与偏好" {
+                    Section("外观") {
+                    Picker("主题", selection: $settings.theme) {
+                        ForEach(AppTheme.allCases) { theme in Text(theme.title).tag(theme) }
+                    }
+                    Picker("外观", selection: $settings.appearance) {
+                        ForEach(AppAppearance.allCases) { appearance in
+                            Text(appearance.title).tag(appearance)
+                        }
+                    }
+                    }
+                }
+                if category == "纯本地模式" || category == nil {
                 Section {
                     PureLocalSlideControl(
                         enabled: pureLocalEnabled,
@@ -454,12 +468,33 @@ struct AirSIMSettingsView: View {
                         }
                     )
                     if let pureLocalError { Text(pureLocalError).font(.footnote).foregroundStyle(.red) }
+                    if category != nil {
                     Text(pureLocalEnabled
                          ? "已硬阻断 AirSIM Relay、云端注册、心跳、命令、媒体与反馈；VoWLAN、VoBLE、Tailscale 和本地短信继续可用。"
                          : "滑到底启用。启用后不会因本地链路失败回退到 Relay；GitHub 版本检查不受影响。")
                         .font(.footnote).foregroundStyle(.secondary)
-                } header: { Text("纯本地模式") }
+                    } else {
+                        NavigationLink("了解纯本地模式") { AirSIMSettingsView(category: "纯本地模式") }
+                    }
+                } header: { if category != nil { Text("纯本地模式") } }
+                }
 
+                if category == nil {
+                    Section {
+                        ForEach(["连接与设备", "来电与短信", "灵动岛与小组件", "外观与偏好", "帮助与诊断"], id: \.self) { title in
+                            NavigationLink { AirSIMSettingsView(category: title) } label: {
+                                HStack(spacing: 14) {
+                                    Image(systemName: title == "连接与设备" ? "antenna.radiowaves.left.and.right" : title == "来电与短信" ? "phone" : title == "灵动岛与小组件" ? "rectangle.on.rectangle" : title == "外观与偏好" ? "paintpalette" : "questionmark.circle")
+                                        .font(.system(size: 20)).foregroundStyle(Color.accentColor)
+                                        .frame(width: 36, height: 36).background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                                    Text(title).font(.body).padding(.vertical, 8)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if category == "连接与设备" {
                 Section {
                     Toggle(isOn: $cloudSignalingEnabled) {
                         Label("云端通知（APNs）", systemImage: "bell.badge")
@@ -485,7 +520,9 @@ struct AirSIMSettingsView: View {
                 } footer: {
                     Text(selectedMode.detail + "\n云端通知只负责 APNs/PushKit 与 Relay 注册，不会改变当前媒体模式；VoWLAN 模式下通话仍只走局域网。")
                 }
+                }
 
+                if category == "来电与短信" {
                 Section {
                     Toggle("后台静音音频保活", isOn: $backgroundStandbyEnabled)
                         .onChange(of: backgroundStandbyEnabled) { enabled in
@@ -502,7 +539,9 @@ struct AirSIMSettingsView: View {
                 } footer: {
                     Text("这是全局开关，关闭后所有后台静音音频保活路径都会停止；不会关闭 VoWLAN、蓝牙或云端 Push 功能。")
                 }
+                }
 
+                if category == "连接与设备" {
                 Section("当前连接") {
                     LabeledContent("当前模式", value: model.connectionModePresentation.title)
                     LabeledContent("连接状态", value: model.connectionModePresentation.status)
@@ -527,7 +566,9 @@ struct AirSIMSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                }
 
+                if category == "连接与设备" {
                 Section {
                     // 单行输入 + 默认回车键：按“返回”直接收起键盘，多行输入会让回车变成换行。
                     TextField("例如 30.0.0.0/8, 100.64.0.0/10", text: $networkPrefixesText)
@@ -559,7 +600,9 @@ struct AirSIMSettingsView: View {
                     Text("内置支持 10/8、172.16/12、192.168/16、169.254/16 与 100.64/10（Tailscale）。"
                         + "公网地址始终不会被视为私有网段。")
                 }
+                }
 
+                if category == "连接与设备" {
                 Section("安卓连接") {
                     LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
                     NavigationLink {
@@ -579,7 +622,9 @@ struct AirSIMSettingsView: View {
                         Task { await model.vowlan.probeNow() }
                     }
                 }
+                }
 
+                if category == "连接与设备" {
                 Section("蓝牙连接") {
                     LabeledContent("VoBLE", value: voBLEStatus)
                     NavigationLink {
@@ -592,8 +637,9 @@ struct AirSIMSettingsView: View {
                     }
                     .disabled(!runtimePolicy.startsBluetooth)
                 }
+                }
 
-                if runtimePolicy.startsBluetooth {
+                if category == "帮助与诊断" && runtimePolicy.startsBluetooth {
                     Section("蓝牙诊断（已脱敏）") {
                         let diagnostics = model.vobleDiagnostics
                         LabeledContent("认证", value: diagnostics.peerAuthenticated ? "通过" : "未完成")
@@ -609,6 +655,7 @@ struct AirSIMSettingsView: View {
                     }
                 }
 
+                if category == "灵动岛与小组件" {
                 Section {
                     Toggle(isOn: $liveActivityEnabled) {
                         Label("显示灵动岛", systemImage: "platter.filled.top.iphone")
@@ -621,7 +668,9 @@ struct AirSIMSettingsView: View {
                 } footer: {
                     Text("关闭后结束 AirSIM 的灵动岛与锁屏实时活动；通话和短信仍可正常使用。")
                 }
+                }
 
+                if category == "灵动岛与小组件" {
                 Section {
                     ForEach(model.liveActivityOrderedAgents) { agent in
                         HStack(spacing: 8) {
@@ -665,7 +714,9 @@ struct AirSIMSettingsView: View {
                 } footer: {
                     Text("置顶设备固定在前；其余按这里排序。灵动岛每页最多显示 5 台，右上角按钮翻到下一页。")
                 }
+                }
 
+                if category == "连接与设备" {
                 Section {
                     LabeledContent("远程通话与短信", value: runtimePolicy.startsCloud ? "已启用" : "已关闭")
 
@@ -694,7 +745,9 @@ struct AirSIMSettingsView: View {
                 } footer: {
                     Text("云端关闭后，局域网内的三星 VoWLAN 仍可使用；公网拨打、接听和短信需要云端 Relay 与有效设备注册。")
                 }
+                }
 
+                if category == "纯本地模式" || category == nil {
                 Section {
                     Button {
                         startCloudSelfTest()
@@ -745,14 +798,18 @@ struct AirSIMSettingsView: View {
                         ? "纯本地模式已开启，禁止访问 Relay；关闭后可手动自检。"
                         : "依次验证本机 Push 凭据、Relay 身份、设备注册、Agent 记录、150 秒心跳和命令路由；失败步骤会给出具体卡点，不会拨号或发送短信。")
                 }
+                }
 
+                if category == "来电与短信" {
                 Section("短信") {
                     Toggle("自动复制验证码到剪贴板", isOn: $autoCopySMSCode)
                     Text("收到新验证码短信后自动复制，便于系统键盘显示粘贴建议。会覆盖当前剪贴板内容，可随时关闭。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                }
 
+                if category == "来电与短信" {
                 Section("通知转发") {
                     NavigationLink {
                         NotificationForwardingView()
@@ -766,7 +823,9 @@ struct AirSIMSettingsView: View {
                         } icon: { Image(systemName: "paperplane") }
                     }
                 }
+                }
 
+                if category == "帮助与诊断" {
                 Section("调试") {
                     NavigationLink {
                         AgentVerboseTraceView(api: model.verboseDiagnosticsAPI)
@@ -780,7 +839,9 @@ struct AirSIMSettingsView: View {
                         } icon: { Image(systemName: "waveform.path.ecg") }
                     }
                 }
+                }
 
+                if category == "外观与偏好" {
                 Section("关于") {
                     LabeledContent("项目", value: "AirSIM")
                     LabeledContent("版本", value: AppInformation.version)
@@ -799,13 +860,11 @@ struct AirSIMSettingsView: View {
                     LabeledContent("更新渠道", value: AppUpdateChannel.title)
                     Link("GitHub 仓库", destination: AppInformation.repositoryURL)
                     Link("版本发布与下载", destination: AppInformation.releasesURL)
-                    Picker("外观", selection: $settings.appearance) {
-                        ForEach(AppAppearance.allCases) { appearance in
-                            Text(appearance.title).tag(appearance)
-                        }
-                    }
+
+                }
                 }
 
+                if category == "帮助与诊断" {
                 Section("反馈") {
                     TextField("用户描述（可选）", text: $feedbackDescription, axis: .vertical)
                         .lineLimit(2...4)
@@ -844,6 +903,7 @@ struct AirSIMSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
@@ -877,7 +937,7 @@ struct AirSIMSettingsView: View {
             } message: { _ in
                 Text("清除本机记录、绑定和缓存；不会删除通话或短信。此设备需要重新配对才能自动连接，其他设备不受影响。离线设备的远端凭据不会因此自动撤销。")
             }
-            .navigationTitle("设置")
+            .navigationTitle(category ?? "设置")
             .onDisappear {
                 updateViewVisible = false
                 selfTestTask?.cancel()
@@ -1411,3 +1471,11 @@ final class FeedbackUploader {
     }
 }
 
+
+private struct SettingsNavigationContainer<Content: View>: View {
+    let isRoot: Bool
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        if isRoot { NavigationStack { content() } } else { content() }
+    }
+}

@@ -11,6 +11,22 @@ import java.util.regex.Pattern;
  * not hold the in-memory FIFO, and the "ended" queued behind it, for more than a minute.
  */
 final class CloudCallRetryPolicy {
+    /** Retain exact identities across ambiguous HTTP timeouts; never join by number. */
+    static final class IncomingIdentities<T> {
+        private final java.util.LinkedHashMap<String, T> entries = new java.util.LinkedHashMap<>();
+        synchronized T get(String key) { return entries.get(key); }
+        synchronized T getOrCreate(String key, java.util.function.Supplier<T> create) {
+            T value = entries.get(key);
+            if (value != null) return value;
+            value = create.get();
+            entries.put(key, value);
+            while (entries.size() > 128) entries.remove(entries.keySet().iterator().next());
+            return value;
+        }
+        synchronized java.util.List<T> values() { return new java.util.ArrayList<>(entries.values()); }
+        synchronized void clear() { entries.clear(); }
+    }
+
     static final long GIVE_UP_AFTER_MILLIS = 60_000L;
     private static final Pattern REASON = Pattern.compile("\"reason\"\\s*:\\s*\"([^\"]*)\"");
     private static final Pattern ERROR = Pattern.compile("\"error\"\\s*:\\s*\"([^\"]*)\"");

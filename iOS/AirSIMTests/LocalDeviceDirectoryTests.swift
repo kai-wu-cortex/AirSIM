@@ -8,6 +8,32 @@ import WatchConnectivity
 @MainActor
 final class LocalDeviceDirectoryTests: XCTestCase {
 
+    func testPushAnswerCannotTargetAnotherCallOnSameAndroid() async throws {
+        let mode = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.vowlan); AndroidAgentBindingPreference.set("A")
+        defer { ConnectionModePreference.set(mode); AndroidAgentBindingPreference.set(binding) }
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, callID: "different-call")
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
+            healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: "A", endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        let controller = CallKitController(observesSystemCallbacks: false)
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, callKitController: controller)
+        defer { model.stop() }
+        directory.stop()
+        let call = IncomingVoIPCall(bluetoothCallID: "original-call", uuid: UUID(), generation: 1, number: nil, agentID: "A")
+        let reported = expectation(description: "system push")
+        controller.reportIncomingPush(call, systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        do { try await model.callKitAnswer(uuid: call.uuid, origin: .system); XCTFail("answered a replacement call") }
+        catch { XCTAssertEqual(error as? DeviceCallRoutingError, .stale) }
+        XCTAssertFalse(peer.commands.contains { $0.path == "/api/calls/answer" })
+        XCTAssertNil(model.deviceCalls.active)
+    }
+
     func testSystemAnswerUsesPublishedBackendIDInsteadOfTelecomID() async throws {
         let previousMode = ConnectionModePreference.selected()
         let previousBinding = AndroidAgentBindingPreference.selected()
@@ -33,8 +59,10 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
                              localDirectory: directory, callKitController: controller)
         defer { model.stop() }
-        let push = try IncomingVoIPCall(userInfo: ["event": "incoming_call", "call_id": publishedID,
+        let push = try IncomingVoIPCall(userInfo: ["event": "incoming_call", "call_id": "independent-cloud-id",
             "call_uuid": UUID().uuidString, "generation": 1, "agent_id": "A"])
+        peer.cloudIdentity = push
+        peer.emptyStatus = true
         let reported = expectation(description: "incoming system call reported")
         controller.reportIncomingPush(push, systemReport: { _, _, completion in completion(nil) }) { error in
             XCTAssertNil(error)
@@ -239,6 +267,7 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         let epoch = directory.transportEpoch(for: "A")
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .ringing,
             transport: .vowlan, transportEpoch: epoch, backendCallID: "call-191"))
+        peer.setCallState("incoming")
         try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "call-191", state: .active,
             transport: .vowlan, transportEpoch: epoch, backendCallID: "call-191"))
@@ -299,7 +328,7 @@ final class LocalDeviceDirectoryTests: XCTestCase {
             ConnectionModePreference.set(old); AndroidAgentBindingPreference.set(binding)
             IPhoneCloudCallSession.shared.stop()
         }
-        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, callID: "answer-in-flight")
         peer.setCallState(nil)
         defer { peer.stop() }
         let endpoint = try await peer.start(), gate = ResponseGate()
@@ -323,6 +352,7 @@ final class LocalDeviceDirectoryTests: XCTestCase {
             XCTAssertNil(error); reported.fulfill()
         }
         await fulfillment(of: [reported], timeout: 2)
+        peer.setCallState("incoming")
         let answer = Task { try await model.callKitAnswer(uuid: pushed.uuid, origin: .system) }
         await fulfillment(of: [held], timeout: 2)
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "answer-in-flight", state: .ended,
@@ -379,6 +409,7 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         let epoch = directory.transportEpoch(for: "A")
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ringing,
             transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
+        peer.setCallState("incoming")
         if answered { try await model.callKitAnswer(uuid: pushed.uuid, origin: .system) }
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ended,
             transport: .bluetooth, transportEpoch: 5, backendGeneration: 11))
@@ -412,7 +443,7 @@ final class LocalDeviceDirectoryTests: XCTestCase {
             ConnectionModePreference.set(old); AndroidAgentBindingPreference.set(binding)
             IPhoneCloudCallSession.shared.stop()
         }
-        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, callID: "cold-call")
         peer.setCallState(nil)
         defer { peer.stop() }
         let endpoint = try await peer.start()
@@ -436,11 +467,12 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         directory.stop()
         XCTAssertEqual(model.callLifecycleSnapshot.state, .ringing)
         XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
+        peer.setCallState("incoming")
         try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
         XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
         XCTAssertTrue(peer.commands.contains { $0.path == "/api/calls/answer" })
         controller.reportCurrentCallEnded(reason: .remoteEnded)
-        XCTAssertEqual(model.callLifecycleSnapshot.state, .ending)
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "cold-call", state: .ended,
             transport: .vowlan, transportEpoch: directory.transportEpoch(for: "A")))
         XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
@@ -1031,6 +1063,8 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
     private let deviceName: String?
     struct Command { let path: String; let callID: String? }
     private var commandLog = [Command]()
+    var emptyStatus = false
+    var cloudIdentity: IncomingVoIPCall?
     private var callState: String? = "incoming"
     private let lock = NSLock()
     private var requestCount = 0
@@ -1117,7 +1151,7 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
                 "operation_proof": mac("AIRSIM-DIAL1\n\(nonce)\n\(includeProof ? operation : "other-operation")\ntelecom-\(agentID)\(dialSuffix)\nbackend-\(agentID)\(dialSuffix)")]
         }
         if path == "/api/sms/send" { json = ["sent": true, "segments": 1] }
-        if path == "/api/calls/events" {
+        if path == "/api/calls/events" || path == "/api/calls/status" || path == "/api/calls/resolve" {
             let state = lock.withLock { callState }
             var call: [String: Any] = ["id": backendCallID, "android_id": callID, "index": 1,
                     "direction": state == "incoming" ? "incoming" : "outgoing", "state": state ?? "ended",
@@ -1127,6 +1161,14 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
             json = ["active": state != nil && state != "ended" ? call : NSNull(),
                     "history": state == "ended" ? [call] : [], "polling": true, "poll_interval_s": 2,
                     "last_poll_error": "", "revision": 1]
+        }
+        if path == "/api/calls/status", emptyStatus { json["active"] = NSNull() }
+        if path == "/api/calls/resolve" {
+            let input = (try? JSONSerialization.jsonObject(with: Data(rawBody.utf8))) as? [String: String] ?? [:]
+            if let cloudIdentity, input["call_id"] == cloudIdentity.callID,
+               input["call_uuid"] == cloudIdentity.uuid.uuidString.lowercased(),
+               input["generation"] == String(cloudIdentity.generation) { }
+            else { responseStatus = 409; json = ["error": "cloud_call_identity_mismatch"] }
         }
         if responseStatus == 502 { json = ["error": "active call id mismatch"] }
         let body = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()

@@ -44,6 +44,15 @@ protocol AirSIMHTTPTransport: Sendable {
 }
 extension WiredHTTPTransport: AirSIMHTTPTransport {}
 
+/// Old gateways advertise no optional-API capability. Remember a 404 for this
+/// process so polling cannot hammer an absent route; a relaunch retries after upgrade.
+private actor OptionalAgentAPIs {
+    static let shared = OptionalAgentAPIs()
+    private var missing: [String: Set<String>] = [:]
+    func supports(_ base: String, _ path: String) -> Bool { missing[base]?.contains(path) != true }
+    func absent(_ base: String, _ path: String) { missing[base, default: []].insert(path) }
+}
+
 struct AirSIMAPI: Sendable {
     /// Android Telecom 最长等待 12 秒确认；VoWLAN 必须晚于 Agent 的确认窗口超时，
     /// 否则 iPhone 会把仍在执行的非幂等拨号误判为失败并可能触发重复呼叫。
@@ -97,6 +106,12 @@ struct AirSIMAPI: Sendable {
     // MARK: 通话与短信
 
     func health() async throws -> AgentHealth { try await get("api/health") }
+    func resolvePushedCall(_ call: IncomingVoIPCall) async throws -> CallStatus {
+        do { return try await postDecoded("api/calls/resolve", ["call_id": call.callID,
+            "call_uuid": call.uuid.uuidString.lowercased(), "generation": String(call.generation)]) }
+        catch APIError.http(404, _) { throw APIError.unsupportedFeature("请更新安卓 AirSIM：当前网关缺少云端与局域网通话身份映射接口") }
+        catch APIError.http(409, _) { throw DeviceCallRoutingError.stale }
+    }
     func callStatus() async throws -> CallStatus { try await get("api/calls/status") }
     func waitForAgentEvent(after revision: UInt64, timeout: TimeInterval = 15) async throws -> AgentEventStatus {
         let boundedTimeout = min(30, max(1, timeout))
@@ -131,7 +146,13 @@ struct AirSIMAPI: Sendable {
     func messages() async throws -> [SMSMessage] { try await get("api/sms") }
     func acknowledgeCallHistory(ids: [String]) async throws {
         guard !ids.isEmpty else { return }
-        try await post("api/calls/history/ack", ["ids": ids])
+        let path = "api/calls/history/ack"
+        guard await OptionalAgentAPIs.shared.supports(baseURL.absoluteString, path) else { return }
+        do { try await post(path, ["ids": ids]) }
+        catch APIError.http(404, _) {
+            // History is already persisted locally before this optional ACK.
+            await OptionalAgentAPIs.shared.absent(baseURL.absoluteString, path)
+        }
     }
     func acknowledgeMessages(ids: [String]) async throws {
         let validIDs = ids.filter { !$0.isEmpty }
@@ -266,7 +287,41 @@ struct AirSIMAPI: Sendable {
         try await postDecoded("api/calls/reject", LocalCallControlBody(callID: callID))
     }
     func hangupCall(callID: String? = nil) async throws {
-        try await post("api/calls/hangup", LocalCallControlBody(callID: callID))
+        // Capture the backend identity before sending. Never retry an unscoped
+        // hangup: a replacement call may have arrived while the reply was lost.
+        let target: String
+        if let callID, !callID.isEmpty { target = callID }
+        else {
+            let status = try await callStatus()
+            guard status.lastPollError.isEmpty else { throw APIError.invalidResponse }
+            guard let active = status.active, !active.isTerminal else { return }
+            target = active.id
+        }
+        for attempt in 0..<2 {
+            do {
+                try await post("api/calls/hangup", LocalCallControlBody(callID: target))
+                return
+            } catch {
+                let originalError = error
+                let transient: Bool
+                if case let APIError.http(code, _) = error { transient = (500...599).contains(code) }
+                else { transient = error is URLError }
+                guard transient, !Task.isCancelled else { throw originalError }
+                // Android can disconnect successfully and lose the HTTP reply.
+                // Only an authoritative status from this same paired API can
+                // turn an uncertain reply into success.
+                var stillActive = false
+                for _ in 0..<3 {
+                    try await Task.sleep(for: .milliseconds(250))
+                    guard let status = try? await callStatus(), status.lastPollError.isEmpty else { continue }
+                    if status.active == nil || status.active?.isTerminal == true { return }
+                    if status.history?.contains(where: { $0.id == target && $0.isTerminal }) == true { return }
+                    guard status.active?.id == target else { throw originalError }
+                    stillActive = true
+                }
+                guard attempt == 0, stillActive else { throw originalError }
+            }
+        }
     }
     func sendDTMF(_ digit: String, callID: String? = nil) async throws {
         var body = ["digit": digit]
@@ -275,7 +330,15 @@ struct AirSIMAPI: Sendable {
     }
     func setAudioMuted(_ muted: Bool) async throws { try await post("api/calls/audio/mute", ["muted": muted]) }
     func setCallRecording(_ recording: Bool) async throws -> CallRecordingResponse {
-        try await postDecoded("api/calls/audio/record", ["action": recording ? "start" : "stop"])
+        let path = "api/calls/audio/record"
+        guard await OptionalAgentAPIs.shared.supports(baseURL.absoluteString, path) else {
+            throw APIError.unsupportedFeature("当前安卓网关不支持通话录音")
+        }
+        do { return try await postDecoded(path, ["action": recording ? "start" : "stop"]) }
+        catch APIError.http(404, _) {
+            await OptionalAgentAPIs.shared.absent(baseURL.absoluteString, path)
+            throw APIError.unsupportedFeature("当前安卓网关不支持通话录音")
+        }
     }
     func setAudioHostEnabled(_ enabled: Bool) async throws {
         try await post("api/calls/audio/host/register", ["enabled": enabled])
@@ -453,6 +516,13 @@ struct AirSIMAPI: Sendable {
             }
             return response
         } catch {
+            if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                if let trace {
+                    await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "http",
+                        phase: "cancelled", title: "请求任务已取消", fields: ["trace_id": trace.id])
+                }
+                throw error
+            }
             if let trace {
                 await AgentVerboseTraceRecorder.shared.fail(trace, error: error.localizedDescription)
                 await AgentVerboseTraceRecorder.shared.recordFailure(category: route.credential == nil ? "http" : "vowlan",
@@ -480,11 +550,13 @@ struct AirSIMAPI: Sendable {
 
 enum APIError: LocalizedError {
     case invalidResponse
+    case unsupportedFeature(String)
     case http(Int, String?)
     case unreadablePayload(String)
 
     var errorDescription: String? {
         switch self {
+        case let .unsupportedFeature(message): return message
         case .invalidResponse: return "模块代理返回了无效响应"
         case let .http(status, message): return message?.isEmpty == false ? message : "请求失败（HTTP \(status)）"
         case let .unreadablePayload(message): return message

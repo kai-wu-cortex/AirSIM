@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 // MARK: - 通话与短信
 
@@ -12,13 +13,18 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     let startedAt: Date
     let updatedAt: Date
     let endedAt: Date?
-    let missed: Bool
+    var missed: Bool
+    var connectedAt: Date? = nil
     var androidID: String? = nil
     var sourceAgentID: String? = nil
     var sourceCallID: String? = nil
     var historyEstimated: Bool? = nil
     var slotIndex: Int? = nil
     var slotID: Int? = nil
+    var connectedDuration: TimeInterval? {
+        guard !missed, let connectedAt, let endedAt, endedAt >= connectedAt else { return nil }
+        return endedAt.timeIntervalSince(connectedAt)
+    }
     var isTerminal: Bool { endedAt != nil || state == "ended" || state == "failed" }
 
     enum CodingKeys: String, CodingKey {
@@ -26,15 +32,32 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
         case startedAt = "started_at"
         case updatedAt = "updated_at"
         case endedAt = "ended_at"
+        case connectedAt = "connected_at"
         case androidID = "android_id"
         case sourceAgentID = "source_agent_id", sourceCallID = "source_call_id"
         case historyEstimated = "history_estimated"
         case slotIndex = "slot_index", slotID = "slot_id"
     }
+    // Merge history facts only. Missing legacy connected_at is not evidence
+    // that every incoming call was missed; retain an already observed outcome.
+    func preservingHistoryEvidence(from previous: CallRecord) -> CallRecord {
+        guard id == previous.id, sourceAgentID == previous.sourceAgentID else { return self }
+        var result = self
+        if result.connectedAt == nil { result.connectedAt = previous.connectedAt }
+        if result.slotIndex == nil { result.slotIndex = previous.slotIndex }
+        if result.slotID == nil { result.slotID = previous.slotID }
+        if result.direction == "incoming", result.isTerminal {
+            if result.connectedAt != nil { result.missed = false }
+            else if previous.missed { result.missed = true }
+        }
+        return result
+    }
     func scopedHistory(to agentID: String) -> CallRecord {
         var copy = CallRecord(id: "agent-call:\(Data(agentID.utf8).base64EncodedString()):\(Data((androidID ?? id).utf8).base64EncodedString())",
             index: index, direction: direction, state: state, number: number, startedAt: startedAt,
             updatedAt: updatedAt, endedAt: endedAt, missed: missed, androidID: androidID)
+        copy.connectedAt = connectedAt
+        copy.slotIndex = slotIndex; copy.slotID = slotID
         copy.sourceAgentID = agentID; copy.sourceCallID = id; copy.historyEstimated = historyEstimated
         return copy
     }
@@ -336,6 +359,11 @@ struct SMSMessage: Codable, Equatable, Sendable, Identifiable {
 
     var isOutgoing: Bool { direction == .outgoing }
 
+    var simDeliveryLabel: String {
+        let line = simSlot?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return "\(isOutgoing ? "通过" : "接收于") \(line.isEmpty ? "SIM 未知" : line)"
+    }
+
     /// 新版 Agent 用 delivery_id 对齐 APNs 与本地同步；旧版仍回退到内容指纹。
     var id: String {
         if let deliveryID, !deliveryID.isEmpty { return scopedIdentity("delivery:\(deliveryID)") }
@@ -381,7 +409,9 @@ enum SMSHistoryPolicy {
         content: String,
         at timestamp: Date,
         to messages: [SMSMessage],
-        limit: Int
+        limit: Int,
+        sourceAgentID: String? = nil,
+        simSlot: String? = nil
     ) -> [SMSMessage] {
         let sentMessage = SMSMessage(
             sender: recipient,
@@ -389,7 +419,9 @@ enum SMSHistoryPolicy {
             code: nil,
             timestamp: timestamp,
             deliveryID: nil,
-            direction: .outgoing
+            direction: .outgoing,
+            sourceAgentID: sourceAgentID,
+            simSlot: simSlot
         )
         return Array((messages + [sentMessage])
             .sorted { $0.timestamp > $1.timestamp }
@@ -1326,5 +1358,86 @@ enum DialOperationRecoveryError: LocalizedError {
         case .rejected: return "设备确认未执行本次拨号。请检查设备提示后手动重试。"
         case .invalidProof: return "无法验证拨号状态回执，未恢复通话，也未自动重拨。"
         }
+    }
+}
+
+enum SMSSIMPreference {
+    static func key(_ agentID: String) -> String { "airsim.sms-sim-account.\(agentID)" }
+    private static func conversationsKey(_ agentID: String) -> String { "airsim.sms-conversation-lines.\(agentID)" }
+    private static func recipientKey(_ recipient: String) -> String {
+        let normalized = recipient.filter { !$0.isWhitespace && !"()-".contains($0) }
+        return SHA256.hash(data: Data(normalized.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    static func select(_ id: String, agentID: String, recipient: String?, defaults: UserDefaults = .standard) {
+        guard let recipient, !recipient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            defaults.set(id, forKey: key(agentID)); return
+        }
+        var lines = defaults.dictionary(forKey: conversationsKey(agentID)) as? [String: String] ?? [:]
+        lines[recipientKey(recipient)] = id
+        defaults.set(lines, forKey: conversationsKey(agentID))
+    }
+    static func remember(agentID: String, slots: [AndroidSIMSlot], defaults: UserDefaults = .standard) {
+        // Cloud-only cold launches still need the previously authenticated
+        // opaque handles. Do not persist SIM phone numbers. Android validates
+        // the selected handle again and fails if that SIM has been removed.
+        let sanitized = slots.prefix(8).map { slot in
+            AndroidSIMSlot(id: slot.id, label: slot.label, number: nil, isDefault: slot.isDefault,
+                slotIndex: slot.slotIndex, subID: slot.subID, carrierName: slot.carrierName,
+                isEmbedded: slot.isEmbedded, isDefaultVoice: slot.isDefaultVoice, isDefaultSMS: slot.isDefaultSMS)
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        if let data = try? encoder.encode(sanitized), data != defaults.data(forKey: "airsim.sms-sim-slots.\(agentID)") {
+            defaults.set(data, forKey: "airsim.sms-sim-slots.\(agentID)")
+        }
+    }
+    static func rememberedSlots(agentID: String, defaults: UserDefaults = .standard) -> [AndroidSIMSlot] {
+        guard let data = defaults.data(forKey: "airsim.sms-sim-slots.\(agentID)"),
+              let slots = try? JSONDecoder().decode([AndroidSIMSlot].self, from: data) else { return [] }
+        return slots
+    }
+    static func forget(agentID: String, defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key(agentID))
+        defaults.removeObject(forKey: "airsim.sms-sim-slots.\(agentID)")
+        defaults.removeObject(forKey: conversationsKey(agentID))
+    }
+    static func selectedID(agentID: String, slots: [AndroidSIMSlot], recipient: String? = nil,
+                           suggestedID: String? = nil,
+                           defaults: UserDefaults = .standard) -> String? {
+        let saved: String?
+        if let recipient, !recipient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            saved = (defaults.dictionary(forKey: conversationsKey(agentID)) as? [String: String])?[recipientKey(recipient)]
+        } else { saved = defaults.string(forKey: key(agentID)) }
+        if let saved, slots.contains(where: { $0.id == saved }) { return saved }
+        if let suggestedID, slots.contains(where: { $0.id == suggestedID }) { return suggestedID }
+        return slots.first(where: { $0.isDefaultSMS == true })?.id
+            ?? slots.first(where: { $0.isDefault == true })?.id ?? slots.first?.id
+    }
+}
+
+
+/// Presentation grouping never drops or mutates the source history.
+struct RecentCallGroup: Identifiable {
+    let id: String
+    let records: [CallRecord]
+    var latest: CallRecord { records[0] }
+    var recordIDs: Set<String> { Set(records.map(\.id)) }
+    static func normalizedNumber(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let allowed = CharacterSet(charactersIn: "+0123456789")
+        let separators = CharacterSet(charactersIn: " -().\u{00a0}")
+        guard value.unicodeScalars.allSatisfy({ allowed.contains($0) || separators.contains($0) }) else { return value }
+        let number = value.unicodeScalars.filter { allowed.contains($0) }.map(String.init).joined()
+        let national = number.hasPrefix("+86") ? String(number.dropFirst(3)) : number
+        if number.hasPrefix("+86"), (national.count == 11 && national.hasPrefix("1"))
+            || (number.hasPrefix("+86") && national.hasPrefix("0") && (10...12).contains(national.count)) { return national }
+        return number.isEmpty ? nil : number
+    }
+    static func grouped(_ calls: [CallRecord]) -> [Self] {
+        Dictionary(grouping: calls, by: { normalizedNumber($0.number) ?? "unknown:" + $0.id })
+            .map { key, calls in Self(id: key, records: calls.sorted {
+                $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt > $1.startedAt
+            }) }.sorted { $0.latest.startedAt == $1.latest.startedAt ? $0.id < $1.id : $0.latest.startedAt > $1.latest.startedAt }
     }
 }
