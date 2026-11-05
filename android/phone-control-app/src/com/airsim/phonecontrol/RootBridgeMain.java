@@ -32,37 +32,41 @@ public final class RootBridgeMain {
             // constructs a Handler and otherwise throws
             // "Can't create handler inside thread ... that has not called Looper.prepare()".
             if (Looper.myLooper() == null) Looper.prepareMainLooper();
-            if (args.length != 5) throw new IllegalArgumentException("usage: package port token-file owner-pid owner-start");
+            boolean daemon = args.length == 3;
+            if (!daemon && args.length != 5) throw new IllegalArgumentException("usage: package port token-file [owner-pid owner-start]");
             String packageName = args[0];
             int port = Integer.parseInt(args[1]);
             String token = readToken(args[2]);
             Context app = appContext(packageName);
-            int ownerPid = Integer.parseInt(args[3]);
-            String ownerStart = args[4];
-            if (!ownerAlive(ownerPid, ownerStart, args[2])) throw new IllegalStateException("app owner unavailable");
+            int ownerPid = daemon ? 0 : Integer.parseInt(args[3]);
+            String ownerStart = daemon ? "" : args[4];
+            if (!daemon && !ownerAlive(ownerPid, ownerStart, args[2])) throw new IllegalStateException("app owner unavailable");
             retireLegacyHelpers(packageName, app.getCacheDir().getAbsolutePath());
+            HeadlessIncomingCallBridge.ensureSimCallManagerRegistered(app, packageName);
             ShizukuBridgeUserService service = new ShizukuBridgeUserService(app);
             try (ServerSocket server = new ServerSocket(port, 4, InetAddress.getLoopbackAddress())) {
-                Thread ownerMonitor = new Thread(() -> {
-                    try {
-                        while (!server.isClosed() && ownerAlive(ownerPid, ownerStart, args[2])) Thread.sleep(500);
-                    } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    try { server.close(); } catch (Exception ignored) {}
-                    service.shutdown();
-                }, "airsim-root-owner");
-                ownerMonitor.setDaemon(true);
-                ownerMonitor.start();
+                if (!daemon) {
+                    Thread ownerMonitor = new Thread(() -> {
+                        try {
+                            while (!server.isClosed() && ownerAlive(ownerPid, ownerStart, args[2])) Thread.sleep(500);
+                        } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                        try { server.close(); } catch (Exception ignored) {}
+                        service.shutdown();
+                    }, "airsim-root-owner");
+                    ownerMonitor.setDaemon(true);
+                    ownerMonitor.start();
+                }
                 while (!server.isClosed()) {
                     try (Socket client = server.accept()) {
                         client.setSoTimeout(6_000);
-                        if (!handle(client, service, token)) break;
+                        if (!handle(client, service, token) && !daemon) break;
                     } catch (Throwable error) {
                         // A malformed or timed-out client must not take down PCM.
                     }
                 }
             } finally {
                 service.shutdown();
-                new File(args[2]).delete();
+                if (!daemon) new File(args[2]).delete();
             }
             System.exit(0); // Binder pool threads otherwise keep this app_process alive.
         } catch (Throwable error) {

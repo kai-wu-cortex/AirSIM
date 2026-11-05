@@ -8,4 +8,5 @@ public class TelephonyManager {
     public String getNetworkSpecifier() { return Integer.toString(subscriptionId); }
     public TelephonyManager createForSubscriptionId(int subscriptionId) { return this; }
     public String getLine1Number() { return ""; }
+    public boolean isVoiceCapable() { return true; }
 }

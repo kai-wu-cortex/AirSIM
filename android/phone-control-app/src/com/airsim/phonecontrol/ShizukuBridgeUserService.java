@@ -481,8 +481,17 @@ public final class ShizukuBridgeUserService extends Binder {
             holders = runCommand(PrivilegedBridgeProtocol.dialerRoleQueryCommand());
         }
         if (!PrivilegedBridgeProtocol.isDialerRoleHolder(holders, packageName)) {
+            runCommand(new String[]{"cmd", "telecom", "set-default-dialer", packageName});
+            holders = runCommand(new String[]{"cmd", "telecom", "get-default-dialer"});
+        }
+        if (!PrivilegedBridgeProtocol.isDialerRoleHolder(holders, packageName)) {
             throw new IOException("dialer role was not applied by the system");
         }
+        try {
+            Class.forName("com.airsim.phonecontrol.HeadlessIncomingCallBridge")
+                    .getMethod("ensureSimCallManagerRegistered", Context.class, String.class)
+                    .invoke(null, serviceContext, packageName);
+        } catch (Throwable ignored) {}
         return "dialer_role=granted verified=true";
     }
 

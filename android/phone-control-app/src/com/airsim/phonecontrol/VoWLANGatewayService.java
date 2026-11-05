@@ -52,6 +52,7 @@ public final class VoWLANGatewayService extends Service {
     private volatile long advertisementRetryAt;
     private String activeHotspot = "";
     private String lastDiagnosticState = "";
+    private volatile PairingServer backgroundPairingServer;
     private static volatile String currentDiagnosticState = "尚未检查";
 
     static String currentDiagnosticState() {
@@ -71,6 +72,7 @@ public final class VoWLANGatewayService extends Service {
         startForeground(BridgeNotification.VOWLAN_ID, BridgeNotification.vowlan(this, "正在发现 VoWLAN 网络"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
         running = true;
+        HeadlessIncomingCallBridge.ensureStarted(this);
         observeWiFiNetworks();
         worker.execute(this::lifecycleLoop);
     }
@@ -90,6 +92,9 @@ public final class VoWLANGatewayService extends Service {
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && intent.getBooleanExtra("start_pairing", false)) {
+            startBackgroundPairing();
+        }
         if (intent != null && ACTION_RELOAD_SETTINGS.equals(intent.getAction())) {
             NetworkSettings.apply(this);
             if ((control != null && control.ownsCall()) || (pcm != null && pcm.hasActiveSession())) {
@@ -105,11 +110,57 @@ public final class VoWLANGatewayService extends Service {
         }
         return START_STICKY;
     }
+
+    private synchronized void startBackgroundPairing() {
+        PairingServer old = backgroundPairingServer;
+        backgroundPairingServer = null;
+        if (old != null) {
+            try { old.close(); } catch (Exception ignored) {}
+        }
+        PairingServer server = new PairingServer(this, new PairingServer.Listener() {
+            @Override public void onStarted(String code, String address, long expiresAtMillis) {
+                BridgeLog.info("pairing_started address=" + address + " expires_at=" + expiresAtMillis);
+                try {
+                    java.nio.file.Files.write(new java.io.File(getFilesDir(), "pairing-session.txt").toPath(),
+                            ("code=" + MainScreenPresentation.formatPairingCode(code) + "\naddress="
+                                    + address.replace('\n', ' ') + "\nexpires_at=" + expiresAtMillis + "\n")
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception ignored) {}
+            }
+
+            @Override public void onSucceeded(String agentResponse) {
+                BridgeLog.info("pairing_completed");
+                backgroundPairingServer = null;
+                try {
+                    java.nio.file.Files.write(new java.io.File(getFilesDir(), "pairing-session.txt").toPath(),
+                            "status=paired\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception ignored) {}
+                synchronized (networkSignal) {
+                    networkWakeRequested = true;
+                    networkSignal.notifyAll();
+                }
+            }
+
+            @Override public void onFailed(String message) {
+                BridgeLog.error("pairing_failed", new IllegalStateException(message));
+                backgroundPairingServer = null;
+            }
+        });
+        backgroundPairingServer = server;
+        server.start();
+    }
+
     @Override public IBinder onBind(Intent intent) { return null; }
 
     private void lifecycleLoop() {
         while (running) {
             try {
+                ShizukuBridgeManager.get(this).refreshBridgeStatus();
+                HeadlessIncomingCallBridge.ensureStarted(this);
+                if (new java.io.File(getFilesDir(), "request-pairing.flag").delete()
+                        || (!VoWLANPairingStore.configured(this) && backgroundPairingServer == null)) {
+                    startBackgroundPairing();
+                }
                 if (networkRecovery.consume(android.os.SystemClock.elapsedRealtime())) {
                     // Re-register discovery only. Never tear down a working control/PCM socket.
                     invalidateAdvertisementForNetworkChange();
@@ -126,9 +177,11 @@ public final class VoWLANGatewayService extends Service {
                 }
                 boolean paired = VoWLANPairingStore.configured(this);
                 RoleManager roleManager = getSystemService(RoleManager.class);
-                boolean dialerRoleHeld = roleManager != null
+                android.telecom.TelecomManager telecomManager = getSystemService(android.telecom.TelecomManager.class);
+                boolean dialerRoleHeld = (roleManager != null
                         && roleManager.isRoleAvailable(RoleManager.ROLE_DIALER)
-                        && roleManager.isRoleHeld(RoleManager.ROLE_DIALER);
+                        && roleManager.isRoleHeld(RoleManager.ROLE_DIALER))
+                        || (telecomManager != null && getPackageName().equals(telecomManager.getDefaultDialerPackage()));
                 boolean agentReady = false;
                 boolean pcmReady = false;
                 if (avf != null && paired && AppConfig.configured(this)) {

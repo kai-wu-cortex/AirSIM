@@ -128,6 +128,15 @@ public final class AirSIMInCallService extends InCallService {
 	}
 
     private void showFullScreenIncoming(String callId) {
+        if ("remote_silent".equals(AppConfig.mode(this))) {
+            BridgeLog.info("incoming_full_screen_skipped reason=remote_silent");
+            return;
+        }
+        android.telephony.TelephonyManager tm = getSystemService(android.telephony.TelephonyManager.class);
+        if (tm != null && !tm.isVoiceCapable()) {
+            BridgeLog.info("incoming_full_screen_skipped reason=headless_non_voice_capable");
+            return;
+        }
         try {
             Intent intent = new Intent(this, CallScreenActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK

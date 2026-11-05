@@ -41,7 +41,8 @@ final class RootSmsSender {
             String command = "CLASSPATH='" + escapedApk
                     + "' /system/bin/app_process /system/bin com.airsim.phonecontrol.RootSmsMain '"
                     + escapedPayload + "'";
-            String su = new File("/system/bin/su").canExecute() ? "/system/bin/su" : "su";
+            String su = new File("/system/bin/su").canExecute() ? "/system/bin/su"
+                    : (new File("/debug_ramdisk/su").canExecute() ? "/debug_ramdisk/su" : "su");
             process = new ProcessBuilder(su, "-c", command)
                     .redirectErrorStream(true)
                     .start();
