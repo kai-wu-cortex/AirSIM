@@ -41,7 +41,28 @@ public final class CloudPCMMediaPumpTests {
         int before = playback.size();
         pump.receive(new byte[320 * 12]);
         check(playback.size() == before, "closed old stream must not accept PCM into another session");
+        receiveOnlyRejectsUplink();
         System.out.println("CloudPCMMediaPumpTests passed (synthetic PCM only)");
+    }
+    private static void receiveOnlyRejectsUplink() throws Exception {
+        var workers = Executors.newCachedThreadPool();
+        var capture = new PipedInputStream(4096);
+        var source = new PipedOutputStream(capture);
+        var downlink = new CountDownLatch(1);
+        var writes = new java.util.concurrent.atomic.AtomicInteger();
+        var playback = new java.io.OutputStream() {
+            @Override public void write(int ignored) { writes.incrementAndGet(); }
+        };
+        var pump = new CloudPCMMediaPump(capture, playback, frame -> downlink.countDown(),
+                error -> {}, workers, true);
+        try {
+            pump.start();
+            for (int j=0;j<8;j++) pump.receive(new byte[320]);
+            source.write(new byte[320]); source.flush();
+            check(downlink.await(2, TimeUnit.SECONDS), "recvonly downlink must reach network");
+            Thread.sleep(150);
+            check(writes.get()==0, "recvonly must never inject uplink, including queue concealment");
+        } finally { pump.close(); source.close(); workers.shutdownNow(); workers.awaitTermination(2, TimeUnit.SECONDS); }
     }
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
 }

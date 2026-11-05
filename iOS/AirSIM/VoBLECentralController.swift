@@ -926,6 +926,9 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
                     success: body["ok"] as? Bool ?? false,
                     code: body["code"] as? String ?? "invalid_response",
                     detail: body["detail"] as? String ?? ""))
+            } else if envelope.command == "early_media_stopped" {
+                onEvent?(VoBLEAndroidEvent(callID: envelope.callID, generation: envelope.generation,
+                    direction: "", state: "early_media_stopped", number: ""))
             } else if envelope.command == "call_state" {
                 onEvent?(VoBLEAndroidEvent(
                     callID: envelope.callID, generation: envelope.generation,

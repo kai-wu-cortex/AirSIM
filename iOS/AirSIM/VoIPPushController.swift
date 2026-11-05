@@ -53,7 +53,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
         }
 
         let expiresAt = Self.date(from: userInfo["expires_at"])
-        if let expiresAt, expiresAt <= now { throw VoIPPushPayloadError.expired }
+        if let expiresAt, expiresAt.timeIntervalSinceReferenceDate <= now.timeIntervalSinceReferenceDate { throw VoIPPushPayloadError.expired }
 
         callID = rawCallID
         agentID = userInfo["agent_id"] as? String
@@ -475,7 +475,7 @@ enum PushRegistrationRetryPolicy {
     }
 
     static func shouldAttemptRelay(now: Date, retryAfter: Date) -> Bool {
-        now >= retryAfter
+        now.timeIntervalSinceReferenceDate >= retryAfter.timeIntervalSinceReferenceDate
     }
 
     static func quotaRetryDate(now: Date) -> Date {
@@ -520,7 +520,7 @@ struct PushRegistrationLedger<Route: Equatable> {
     }
     func shouldAttempt(_ route: Route, fingerprint: String, now: Date = Date()) -> Bool {
         guard let entry = entries.first(where: { $0.route == route && $0.fingerprint == fingerprint }) else { return true }
-        return !entry.succeeded && now >= entry.retryAfter
+        return !entry.succeeded && now.timeIntervalSinceReferenceDate >= entry.retryAfter.timeIntervalSinceReferenceDate
     }
     mutating func record(_ route: Route, fingerprint: String, succeeded: Bool, now: Date = Date()) {
         entries.removeAll { $0.route == route }
@@ -877,6 +877,7 @@ struct IncomingRemoteSMS: Equatable, Sendable {
     let code: String?
     let timestamp: Date
     let contentTruncated: Bool
+    let simSlot: String?
 
     /// End-to-end encrypted pushes (issue #24) are opened with the agent's stored key; a plaintext
     /// push from an agent that has a key is refused, since only a forger sends one.
@@ -908,6 +909,7 @@ struct IncomingRemoteSMS: Equatable, Sendable {
         code = decrypted == nil ? Self.nonEmpty(userInfo["code"] as? String) : nil
         self.timestamp = timestamp
         contentTruncated = decrypted?.truncated ?? (userInfo["content_truncated"] as? Bool ?? false)
+        simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
     }
 
     private static func parseTimestamp(_ value: String) -> Date? {
@@ -928,7 +930,8 @@ struct IncomingRemoteSMS: Equatable, Sendable {
             timestamp: timestamp,
             deliveryID: deliveryID,
             direction: .incoming,
-            sourceAgentID: agentID
+            sourceAgentID: agentID,
+            simSlot: simSlot
         )
     }
 
@@ -962,10 +965,12 @@ final class VoIPPushController: NSObject {
     private var registrationInFlight = false
     private let pairingGate = SamsungPairingRegistrationGate()
     private var registrationPending = false
+    private var relayRegistrationFailures = 0
     private var nextRelayRegistrationAttempt = Date.distantPast
     private var registrationRetryTask: Task<Void, Never>?
     /// Supplies only currently authenticated, non-forgotten gateways.
     var registrationAPIs: (() -> [AirSIMAPI])?
+    var callInProgress: () -> Bool = { false }
     private var pendingRegistrationAPIs: [AirSIMAPI] = []
     private var registrationEpoch: UInt64 = 0
     private var activityKitRegistrationStarted = false
@@ -1126,7 +1131,9 @@ final class VoIPPushController: NSObject {
     }
 
     func storeAlertToken(_ token: Data) {
-        UserDefaults.standard.set(VoIPPushToken.hex(token), forKey: Keys.alertToken)
+        let value = VoIPPushToken.hex(token)
+        guard UserDefaults.standard.string(forKey: Keys.alertToken) != value else { return }
+        UserDefaults.standard.set(value, forKey: Keys.alertToken)
         resetRegistrationBackoff()
         Task { await syncRegistration() }
     }
@@ -1140,6 +1147,8 @@ final class VoIPPushController: NSObject {
         let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
         let bundleID = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty, !bundleID.isEmpty else { return }
+        guard UserDefaults.standard.string(forKey: Keys.watchVoIPToken) != token
+            || UserDefaults.standard.string(forKey: Keys.watchBundleID) != bundleID else { return }
         UserDefaults.standard.set(token, forKey: Keys.watchVoIPToken)
         UserDefaults.standard.set(bundleID, forKey: Keys.watchBundleID)
         resetRegistrationBackoff()
@@ -1172,6 +1181,16 @@ final class VoIPPushController: NSObject {
         )
     }
 
+    func resumeRegistrationAfterForeground() {
+        // A foreground transition starts a new bounded recovery attempt, without
+        // invalidating successfully registered fingerprints or APNs tokens.
+        if relayRegistrationFailures >= 5 {
+            relayRegistrationFailures = 0
+            nextRelayRegistrationAttempt = .distantPast
+        }
+        Task { await syncRegistration() }
+    }
+
     func syncRegistration(with requestedAPI: AirSIMAPI? = nil) async {
         guard CloudSignalingPreference.isEnabled(), !RelayEgressGate.shared.isBlocked else { return }
         var routes = registrationAPIs?() ?? []
@@ -1181,9 +1200,17 @@ final class VoIPPushController: NSObject {
         for api in routes where !pendingRegistrationAPIs.contains(where: { $0.route == api.route }) {
             pendingRegistrationAPIs.append(api)
         }
+        if callInProgress() || CallKitController.shared.currentCallIsAnswered {
+            scheduleRegistrationRetry(after: 30)
+            return
+        }
         if registrationInFlight {
             registrationPending = true
             return
+        }
+        if relayRegistrationFailures >= 5, UIApplication.shared.applicationState == .active,
+           Date().timeIntervalSinceReferenceDate >= nextRelayRegistrationAttempt.timeIntervalSinceReferenceDate {
+            relayRegistrationFailures = 0
         }
         guard let registration = currentRegistration() else { return }
         let epoch = registrationEpoch
@@ -1204,22 +1231,37 @@ final class VoIPPushController: NSObject {
         // Refresh APNs even without a reachable local gateway (e.g. Bluetooth
         // mode or immediately after a TestFlight token/environment change).
         var relayRegistered = lastRelayRegisteredFingerprint == fingerprint
-        if !relayRegistered, PushRegistrationRetryPolicy.shouldAttemptRelay(
+        if !relayRegistered, relayRegistrationFailures < 5, PushRegistrationRetryPolicy.shouldAttemptRelay(
             now: Date(), retryAfter: nextRelayRegistrationAttempt
         ) {
             do {
                 try await registerDirectlyWithRelay(registration)
+                relayRegistrationFailures = 0
                 lastRelayRegisteredFingerprint = fingerprint
                 relayRegistered = true
                 nextRelayRegistrationAttempt = .distantPast
                 PushDiagnostics.record("Relay 推送注册成功", fields: ["environment": registration.environment])
             } catch {
+                if error is CancellationError || (error as? URLError)?.code == .cancelled { return }
+                relayRegistrationFailures += 1
                 if case CloudAgentStatusError.requestLimitExceeded = error {
                     nextRelayRegistrationAttempt = PushRegistrationRetryPolicy.quotaRetryDate(now: Date())
                 } else {
-                    nextRelayRegistrationAttempt = Date().addingTimeInterval(30)
+                    nextRelayRegistrationAttempt = Date().addingTimeInterval(min(300, 15 * pow(2, Double(relayRegistrationFailures))))
                 }
-                PushDiagnostics.record("Relay 推送注册失败", error: error)
+                if relayRegistrationFailures >= 5 {
+                    nextRelayRegistrationAttempt = Date().addingTimeInterval(900)
+                }
+                var failureKind = error is URLError ? "relay_network" : "relay_registration"
+                if case let CloudAgentStatusError.relayHTTP(status) = error, status == 401 || status == 403 {
+                    failureKind = "relay_authentication"
+                }
+                PushDiagnostics.record("Relay 推送注册失败", error: error, fields: [
+                    "failure_kind": failureKind,
+                    "retry_attempt": String(relayRegistrationFailures),
+                    "retry_exhausted": String(relayRegistrationFailures >= 5),
+                    "environment": registration.environment
+                ])
             }
         }
         var needsAgentRetry = false
@@ -1255,12 +1297,12 @@ final class VoIPPushController: NSObject {
             } catch {
                 agentRegistrations.record(api.route, fingerprint: fingerprint, succeeded: false)
                 needsAgentRetry = true
-                PushDiagnostics.record("网关推送注册失败", error: error)
+                PushDiagnostics.record("网关推送注册失败", error: error, fields: ["failure_kind": "gateway_registration"])
             }
             pairingGate.endAgentWrite()
         }
         if let provider = registrationAPIs { agentRegistrations.retain(provider().map(\.route)) }
-        if needsAgentRetry || !relayRegistered {
+        if needsAgentRetry || (!relayRegistered && relayRegistrationFailures < 5) {
             scheduleRegistrationRetry(after: needsAgentRetry ? 30 : max(30, nextRelayRegistrationAttempt.timeIntervalSinceNow))
         } else {
             registrationRetryTask?.cancel()
@@ -1536,7 +1578,8 @@ final class VoIPPushController: NSObject {
         )
     }
 
-    func sendCloudSMS(to number: String, message: String, target: CloudCommandTarget) async throws -> SMSSendResult {
+    func sendCloudSMS(to number: String, message: String, target: CloudCommandTarget,
+                      simAccount: String? = nil) async throws -> SMSSendResult {
         let commandID = UUID()
         guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
@@ -1544,7 +1587,8 @@ final class VoIPPushController: NSObject {
             commandID: commandID,
             type: "send_sms",
             number: number,
-            message: message
+            message: message,
+            simAccount: simAccount
         )
         guard enqueue.accepted else { throw CloudCommandError.invalidResponse }
         let outcome = try await waitForCloudCommand(commandID: commandID, target: target, registration: registration, timeout: 5 * 60)
@@ -1581,6 +1625,7 @@ final class VoIPPushController: NSObject {
         type: String,
         number: String,
         message: String?,
+        simAccount: String? = nil,
         mediaTransport: CloudMediaTransport? = nil,
         call: IncomingVoIPCall? = nil
     ) async throws -> CloudCommandEnqueueResponse {
@@ -1602,6 +1647,7 @@ final class VoIPPushController: NSObject {
             body.merge(CloudAgentRouting.callIdentity(call)) { _, new in new }
         }
         if let message { body["message"] = message }
+        if let simAccount, !simAccount.isEmpty { body["sim_account"] = simAccount }
         if let mediaTransport { body["media_transport"] = mediaTransport.rawValue }
         return try await relayRequest(url: url, body: body, as: CloudCommandEnqueueResponse.self)
     }
@@ -1760,6 +1806,7 @@ final class VoIPPushController: NSObject {
     }
 
     private func store(token: String) {
+        guard UserDefaults.standard.string(forKey: Keys.token) != token else { return }
         UserDefaults.standard.set(token, forKey: Keys.token)
         resetRegistrationBackoff()
         Task { await syncRegistration() }
@@ -1770,6 +1817,7 @@ final class VoIPPushController: NSObject {
         agentRegistrations = PushRegistrationLedger()
         lastRelayRegisteredFingerprint = nil
         nextRelayRegistrationAttempt = .distantPast
+        relayRegistrationFailures = 0
     }
 
     func cloudCallControlCredentials() -> CloudCallControlCredentials? {
@@ -1915,6 +1963,7 @@ extension VoIPPushController: PKPushRegistryDelegate {
             print("[AirSIM PushKit] VoIP token 已失效")
 #endif
             UserDefaults.standard.removeObject(forKey: Keys.token)
+            PushDiagnostics.record("PushKit 推送令牌已失效", fields: ["failure_kind": "token_invalidated"])
             self?.resetRegistrationBackoff()
         }
     }

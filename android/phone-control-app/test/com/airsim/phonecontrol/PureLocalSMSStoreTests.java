@@ -19,19 +19,23 @@ public final class PureLocalSMSStoreTests {
         try { agent.setCloudEnabled(true); throw new AssertionError("old UI unblocked cloud"); }
         catch (IllegalStateException expected) {}
         var sms = new StandaloneSMSStore(context);
-        sms.add(new JSONObject().put("delivery_id", "local-1").put("content", "fixture"), true);
+        sms.add(new JSONObject().put("delivery_id", "local-1").put("content", "fixture").put("sim_slot", "SIM 1"), true);
         assert sms.localMessages().length() == 1;
+        assert "SIM 1".equals(sms.localMessages().getJSONObject(0).optString("sim_slot"));
         RelayEgressGate.shared.enableAfterRestore();
         assert agent.cloudEnabled() : "raw cloud preference was destroyed";
         assert sms.cloudPending().length() == 0 : "local-period SMS was queued for later cloud upload";
-        sms.add(new JSONObject().put("delivery_id", "before-2").put("content", "fixture"), true);
+        sms.add(new JSONObject().put("delivery_id", "before-2").put("content", "fixture").put("sim_slot", "SIM 2"), true);
         assert sms.cloudPending().length() == 1;
+        assert "SIM 2".equals(sms.cloudPending().getJSONObject(0).optString("sim_slot"));
         RelayEgressGate.shared.disableAndDrain(1000);
         sms.discardCloudBacklog();
         RelayEgressGate.shared.enableAfterRestore();
         var restarted = new StandaloneSMSStore(context.reopen());
         assert restarted.cloudPending().length() == 0;
         assert restarted.localMessages().length() == 2 : "cloud discard deleted local SMS";
+        assert "SIM 1".equals(restarted.localMessages().getJSONObject(0).optString("sim_slot"));
+        assert "SIM 2".equals(restarted.localMessages().getJSONObject(1).optString("sim_slot"));
         System.out.println("PureLocalSMSStoreTests passed");
     }
 }

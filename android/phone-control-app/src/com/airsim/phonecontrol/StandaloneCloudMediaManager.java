@@ -248,6 +248,8 @@ final class StandaloneCloudMediaManager implements Closeable {
         }
     }
 
+    private final InetSocketAddress pcmEndpoint = new InetSocketAddress("127.0.0.1", 7580);
+
     private final class CloudSession implements Runnable, Closeable {
         final Descriptor descriptor;
         final CloudCallRetryPolicy.MediaRetry mediaRetry = new CloudCallRetryPolicy.MediaRetry();
@@ -258,6 +260,8 @@ final class StandaloneCloudMediaManager implements Closeable {
         volatile CloudPCMMediaPump mediaPump;
         volatile String mediaProtocol = "";
         volatile boolean mediaStarted;
+        volatile boolean earlyMediaAccepted;
+        final long earlyMediaDeadline = System.nanoTime() + 120_000_000_000L;
         int sequence;
 
         CloudSession(Descriptor descriptor) { this(descriptor, RelayEgressGate.shared.generation()); }
@@ -345,7 +349,13 @@ final class StandaloneCloudMediaManager implements Closeable {
                 JSONObject control = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 String action = control.optString("action", "");
                 if (!"answer".equals(action) && !"reject".equals(action) && !"end".equals(action)) continue;
+                // The socket token scopes a session; the frame must also name that
+                // exact call. Never let a delayed control operate the replacement.
+                if (!descriptor.callID.equals(control.optString("call_id"))
+                        || !descriptor.callUUID.equalsIgnoreCase(control.optString("call_uuid"))
+                        || descriptor.generation != control.optLong("generation", -1)) continue;
                 mediaProtocol = control.optString("media_protocol", "");
+                earlyMediaAccepted = control.optInt("early_media_version", 0) == 1;
                 JSONObject command = new JSONObject().put("command_id",
                                 control.optString("command_id", UUID.randomUUID().toString()))
                         .put("type", "call_control").put("action", action)
@@ -370,60 +380,116 @@ final class StandaloneCloudMediaManager implements Closeable {
             }
         }
 
+        private boolean earlyEligible() {
+            return earlyMediaAccepted && System.nanoTime() < earlyMediaDeadline && "outgoing".equals(descriptor.direction)
+                    && AndroidEarlyMedia.supported(context)
+                    && CallRepository.earlyMediaEligible(descriptor.androidID)
+                    && CallRepository.state(descriptor.androidID) == android.telecom.Call.STATE_DIALING;
+        }
+
+        private boolean duplexEligible() {
+            int state = CallRepository.state(descriptor.androidID);
+            return state == android.telecom.Call.STATE_ACTIVE || state == android.telecom.Call.STATE_HOLDING;
+        }
+
         private void runPCM(StandaloneWebSocket owner) {
-            long deadline = System.currentTimeMillis() + 45_000;
-            while (running && webSocket == owner && mediaStarted && System.currentTimeMillis() < deadline) {
-                Socket connection = new Socket();
-                try {
-                    connection.connect(new InetSocketAddress("127.0.0.1", 7580), 2_000);
-                    connection.setTcpNoDelay(true);
-                    connection.setSoTimeout(5_000);
-                    OutputStream output = connection.getOutputStream();
-                    output.write("AIRSIMPCM1\n".getBytes(StandardCharsets.US_ASCII));
-                    output.flush();
-                    byte[] ready = new byte[11];
-                    new DataInputStream(connection.getInputStream()).readFully(ready);
-                    if (!"AIRSIMREADY".equals(new String(ready, StandardCharsets.US_ASCII))) {
-                        connection.close();
-                        throw new java.io.IOException("PCM handshake failed");
-                    }
-                    connection.setSoTimeout(0);
-                    synchronized (this) {
-                        if (!running || webSocket != owner || !mediaStarted) {
-                            closeSocket(connection); return;
+            long startupDeadline = 0; // Retry budget begins when duplex is actually needed.
+            Socket connection = null;
+            Boolean receiveOnly = null;
+            boolean earlyFailed = false;
+            try {
+                while (running && webSocket == owner && mediaStarted && relayGeneration.isCurrent()) {
+                    bindOutgoing(descriptor);
+                    boolean duplex = duplexEligible();
+                    boolean early = !duplex && !earlyFailed && earlyEligible();
+                    // Revoke the old media before opening a new direction. This
+                    // loop also observes Telecom independently of slow Relay POSTs.
+                    if (connection != null && (receiveOnly ? !early : !duplex)) {
+                        synchronized (this) {
+                            if (pcm == connection) {
+                                pcm = null;
+                                RemoteAudioSessionRegistry.setCloud(connection, false, "");
+                                closeSocket(mediaPump); mediaPump = null;
+                            }
                         }
-                        pcm = connection;
-                        boolean[] first = {true};
-                        mediaPump = new CloudPCMMediaPump(connection.getInputStream(), output, frame -> {
-                            owner.writeBinary(encodePCM(frame));
-                            if (first[0]) { first[0] = false; owner.writeText(status("pcm_first_frame", "")); }
-                        }, error -> {
-                            if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
-                            // Only the owning connection is closed; old workers cannot touch a new call/socket.
-                            closeSocket(owner);
-                        }, sessions);
-                        mediaPump.start();
-                        if (!descriptor.androidID.isBlank()) {
-                            RemoteAudioSessionRegistry.setCloud(connection, true, descriptor.androidID);
+                        closeSocket(connection); connection = null;
+                        if (Boolean.TRUE.equals(receiveOnly) && !duplex)
+                            owner.writeText(status("early_media_unavailable", "运营商下行已停止"));
+                    }
+                    if (connection == null && (duplex || early)) {
+                        final boolean rxOnly = early;
+                        if (!rxOnly && startupDeadline == 0) startupDeadline = System.nanoTime() + 45_000_000_000L;
+                        final Socket next = new Socket();
+                        try {
+                            next.connect(pcmEndpoint, 2_000);
+                            next.setTcpNoDelay(true); next.setSoTimeout(5_000);
+                            OutputStream output = next.getOutputStream();
+                            output.write((rxOnly ? "AIRSIMRX01\n" : "AIRSIMPCM1\n").getBytes(StandardCharsets.US_ASCII));
+                            output.flush();
+                            byte[] ready = new byte[11];
+                            new DataInputStream(next.getInputStream()).readFully(ready);
+                            if (!"AIRSIMREADY".equals(new String(ready, StandardCharsets.US_ASCII)))
+                                throw new java.io.IOException("PCM handshake failed");
+                            next.setSoTimeout(0);
+                            synchronized (this) {
+                                if (!running || webSocket != owner || !mediaStarted
+                                        || (rxOnly ? !earlyEligible() : !duplexEligible())) {
+                                    closeSocket(next); continue;
+                                }
+                                pcm = next;
+                                // Capability ACK precedes the first binary frame.
+                                // No ACTIVE is inferred from a successful audio handshake.
+                                owner.writeText(status(rxOnly ? "early_media_ready_v1" : "active", ""));
+                                boolean[] first = {true};
+                                mediaPump = new CloudPCMMediaPump(next.getInputStream(), output, frame -> {
+                                    if (!running || pcm != next || webSocket != owner
+                                            || (rxOnly ? !earlyEligible() : !duplexEligible())) return;
+                                    owner.writeBinary(encodePCM(frame));
+                                    if (first[0]) { first[0] = false; owner.writeText(status("pcm_first_frame", "")); }
+                                }, error -> {
+                                    if (running && pcm == next && webSocket == owner) {
+                                        BridgeLog.error("standalone_pcm_bridge_failed", error);
+                                        // Keep signaling alive even when optional early media fails.
+                                        closeSocket(next);
+                                    }
+                                }, sessions, rxOnly);
+                                mediaPump.start();
+                                RemoteAudioSessionRegistry.setCloud(next, true, descriptor.androidID);
+                            }
+                            connection = next; receiveOnly = rxOnly;
+                        } catch (Exception error) {
+                            closeSocket(next);
+                            if (rxOnly) {
+                                earlyFailed = true;
+                                owner.writeText(status("early_media_unavailable", "此设备未提供可用的运营商下行音频"));
+                            } else if (System.nanoTime() > startupDeadline) throw error;
                         }
                     }
-                    owner.writeText(status("pcm_listening", ""));
-                    owner.writeText(status("active", ""));
-                    owner.writeText(status("pcm_ready", ""));
-                    return;
-                } catch (Exception error) {
-                    closeSocket(connection);
-                    synchronized (this) {
-                        if (pcm == connection) {
-                            RemoteAudioSessionRegistry.setCloud(connection, false, "");
-                            closeSocket(mediaPump); mediaPump = null; pcm = null;
+                    if (connection != null && connection.isClosed()) {
+                        if (Boolean.TRUE.equals(receiveOnly)) {
+                            earlyFailed = true;
+                            owner.writeText(status("early_media_unavailable", "运营商下行已停止"));
                         }
+                        synchronized (this) {
+                            if (pcm == connection) {
+                                pcm = null;
+                                RemoteAudioSessionRegistry.setCloud(connection, false, "");
+                                closeSocket(mediaPump); mediaPump = null;
+                            }
+                        }
+                        connection = null;
                     }
-                    if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
+                    Thread.sleep(connection == null && duplex ? 750 : 50);
                 }
-                if (running) {
-                    try { Thread.sleep(750); }
-                    catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+            } catch (Exception error) {
+                if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
+            } finally {
+                synchronized (this) {
+                    if (webSocket == owner) {
+                        RemoteAudioSessionRegistry.setCloud(pcm, false, "");
+                        closeSocket(mediaPump); mediaPump = null; closeSocket(pcm); pcm = null;
+                        mediaStarted = false;
+                    }
                 }
             }
         }

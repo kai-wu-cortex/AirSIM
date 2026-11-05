@@ -1,0 +1,4 @@
+node_modules/
+*.capnp
+config.json
+data/

@@ -82,6 +82,21 @@ public final class VoWLANControlGateway implements Closeable {
                 respond(peer, 401, "{\"error\":\"authentication_failed\"}");
                 return;
             }
+            if (request.path.equals("/api/calls/early-media") || request.path.startsWith("/api/calls/early-media?")) {
+                if (!AndroidEarlyMedia.supported(context)) { BridgeLog.info("vowlan_early_media_probe result=unsupported"); respond(peer, 404, "{}"); return; }
+                String query = new java.net.URI(request.path).getRawQuery();
+                if (query == null || !query.startsWith("call_id=") || query.contains("&")) { respond(peer, 400, "{}"); return; }
+                String id = java.net.URLDecoder.decode(query.substring(8), "UTF-8");
+                var grant = AndroidEarlyMedia.LEASES.grant(matched.id(), id, now);
+                if (grant == null) { BridgeLog.info("vowlan_early_media_probe result=revoked"); respond(peer, 410, "{}"); return; }
+                String androidID = AndroidEarlyMedia.LEASES.authorize(matched.id(), grant.binding(), now);
+                if (CallRepository.state(androidID) != android.telecom.Call.STATE_DIALING
+                        || !ShizukuBridgeManager.get(context).bridgeRunning()) { BridgeLog.info("vowlan_early_media_probe result=pending"); respond(peer, 202, "{}"); return; }
+                byte[] secret = matched.secretCopy();
+                try { respond(peer, 200, AndroidEarlyMedia.response(grant, nonce, secret)); BridgeLog.info("vowlan_early_media_probe result=ready"); }
+                finally { Arrays.fill(secret, (byte) 0); }
+                return;
+            }
             if ("/api/local-mode".equals(request.path)) {
                 byte[] statusSecret = matched.secretCopy();
                 try {
@@ -183,6 +198,8 @@ public final class VoWLANControlGateway implements Closeable {
                                 if (status.status() == 200 && active != null
                                         && created.equals(active.optString("android_id")) && !active.optString("id").isEmpty()) {
                                     String backendID = active.optString("id");
+                                    if (AndroidEarlyMedia.supported(context)) AndroidEarlyMedia.LEASES.register(
+                                        matched.id(), AndroidAgentIdentity.agentID(context), backendID, created);
                                     byte[] responseSecret = matched.secretCopy();
                                     try {
                                         output = new org.json.JSONObject(output).put("operation_id", operationID)

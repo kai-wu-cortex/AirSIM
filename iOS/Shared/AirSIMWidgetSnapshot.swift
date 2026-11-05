@@ -35,6 +35,7 @@ struct AndroidBatteryReading: Codable, Equatable, Sendable {
 struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
     static let kind = "AirSIMDeviceWidget"
     static let freshness: TimeInterval = 300
+    static let recentRecordLimit = 5
     static func badgeText(_ count: Int) -> String? {
         count > 0 ? (count > 99 ? "99+" : String(count)) : nil
     }
@@ -62,6 +63,7 @@ struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
         let date: Date
         let incoming: Bool
         var contentPreview: String? = nil
+        var unread: Bool? = nil
 
         var displayText: String { contentPreview ?? "打开查看短信内容" }
     }
@@ -72,10 +74,26 @@ struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
     }
 
     func latestCall(for agentID: String) -> RecentCall? {
-        calls.filter { $0.agentID == agentID }.max { $0.date < $1.date }
+        recentCalls(for: agentID).first
     }
     func latestMessage(for agentID: String) -> RecentMessage? {
-        (messages ?? []).filter { $0.agentID == agentID }.max { $0.date < $1.date }
+        recentMessages(for: agentID).first
+    }
+
+    /// Limit per paired device, not globally: one busy phone must not evict another's history.
+    static func recentRecords<T>(_ records: [T], for agentID: String,
+                                 agent: KeyPath<T, String?>, date: KeyPath<T, Date>) -> [T] {
+        records.enumerated().filter { $0.element[keyPath: agent] == agentID }
+            .sorted {
+                let left = $0.element[keyPath: date], right = $1.element[keyPath: date]
+                return left == right ? $0.offset < $1.offset : left > right
+            }.prefix(recentRecordLimit).map(\.element)
+    }
+    func recentCalls(for agentID: String) -> [RecentCall] {
+        Self.recentRecords(calls, for: agentID, agent: \.agentID, date: \.date)
+    }
+    func recentMessages(for agentID: String) -> [RecentMessage] {
+        Self.recentRecords(messages ?? [], for: agentID, agent: \.agentID, date: \.date)
     }
 
     struct Device: Codable, Equatable, Identifiable, Sendable {
@@ -106,6 +124,7 @@ struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
         let date: Date
         let incoming: Bool
         let missed: Bool
+        var unseen: Bool? = nil
     }
     static var empty: Self { .init(generatedAt: .distantPast, devices: [], calls: []) }
     static func mask(_ number: String?) -> String {

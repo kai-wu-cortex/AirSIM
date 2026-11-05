@@ -9,6 +9,23 @@ import SwiftUI
 import WidgetKit
 @testable import AirSIM
 
+final class PhoneNavigationPolicyTests: XCTestCase {
+    func testMessageSearchMatchesContactNumberAndOlderBody() {
+        let contents = ["旧消息：会议改到周五", "最新消息：收到"]
+        XCTAssertTrue(SMSConversationSearch.matches("周五", sender: "138-0013-8000", contactName: "小王", contents: contents))
+        XCTAssertTrue(SMSConversationSearch.matches("小王", sender: "138-0013-8000", contactName: "小王", contents: contents))
+        XCTAssertTrue(SMSConversationSearch.matches("13800138000", sender: "+86 138-0013-8000", contactName: nil, contents: []))
+        XCTAssertTrue(SMSConversationSearch.matches("１３８００１３８０００", sender: "138-0013-8000", contactName: nil, contents: []))
+        XCTAssertTrue(SMSConversationSearch.matches("  \n ", sender: "", contactName: nil, contents: []))
+        XCTAssertTrue(SMSConversationSearch.contains("Résumé ABC", query: "resume abc"))
+        XCTAssertFalse(SMSConversationSearch.matches("code138", sender: "13800138000", contactName: nil, contents: contents))
+        XCTAssertFalse(SMSConversationSearch.matches("不存在", sender: "13800138000", contactName: nil, contents: contents))
+        XCTAssertFalse(SMSConversationSearch.contains("正文", query: " "))
+    }
+
+
+}
+
 @MainActor
 final class LiveActivityReconciliationTests: XCTestCase {
     private typealias State = AirSIMCallActivityAttributes.ContentState
@@ -4642,6 +4659,10 @@ final class AirSIMTests: XCTestCase {
         XCTAssertFalse(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(3)))
         XCTAssertTrue(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(10)))
         XCTAssertFalse(recovery.shouldAttempt(for: .unpaired, at: start.addingTimeInterval(20)))
+        XCTAssertFalse(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(19.999)))
+        XCTAssertTrue(recovery.shouldAttempt(for: unavailable, at: start.addingTimeInterval(20)))
+        recovery.reset()
+        XCTAssertTrue(recovery.shouldAttempt(for: unavailable, at: start))
     }
 
     func testForegroundRecoveryDoesNotRestartVoWLANDuringCall() {
@@ -4945,6 +4966,35 @@ final class AirSIMWidgetTests: XCTestCase {
         XCTAssertNil(old.controls)
         XCTAssertEqual(old.devices, sample.devices)
         XCTAssertEqual(old.calls, sample.calls)
+    }
+
+    func testWidgetKeepsFiveNewestRecordsForEachDevice() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var snapshot = AirSIMWidgetSnapshot.preview(at: now)
+        snapshot.calls = []
+        for index in 0..<8 {
+            for agent in ["preview-galaxy", "preview-redmi"] {
+                let record = AirSIMWidgetSnapshot.RecentCall(id: "\(agent)-\(index)", agentID: agent,
+                    maskedNumber: "138 •••• 6028", date: now.addingTimeInterval(Double(index)),
+                    incoming: true, missed: true, unseen: index == 7)
+                snapshot.calls.append(record)
+            }
+        }
+        snapshot.messages = snapshot.calls.map {
+            .init(agentID: $0.agentID, date: $0.date, incoming: true,
+                  contentPreview: $0.id, unread: $0.unseen)
+        }
+        for agent in ["preview-galaxy", "preview-redmi"] {
+            XCTAssertEqual(snapshot.recentCalls(for: agent).map(\.id), (3...7).reversed().map { "\(agent)-\($0)" })
+            XCTAssertEqual(snapshot.recentMessages(for: agent).map(\.displayText), (3...7).reversed().map { "\(agent)-\($0)" })
+            XCTAssertEqual(snapshot.recentMessages(for: agent).first?.unread, true)
+        }
+        XCTAssertTrue(snapshot.recentCalls(for: "unknown").isEmpty)
+        XCTAssertTrue(snapshot.recentMessages(for: "unknown").isEmpty)
+        XCTAssertEqual(try JSONDecoder().decode(AirSIMWidgetSnapshot.self,
+            from: JSONEncoder().encode(snapshot)), snapshot)
+        let oldMessage = Data(#"{"date":0,"incoming":true}"#.utf8)
+        XCTAssertNil(try JSONDecoder().decode(AirSIMWidgetSnapshot.RecentMessage.self, from: oldMessage).unread)
     }
 
     func testExpiredObservationBecomesUnknownWithoutChangingDeviceState() {
@@ -5309,5 +5359,512 @@ private actor OperationQueryTransport: AirSIMHTTPTransport {
         if mode == "newline" { value["backend_id"] = "original-backend\nforged" }
         if mode == "version2" { value["version"] = 2 }
         return .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
+    }
+}
+
+final class SettingsNavigationPolicyTests: XCTestCase {
+    func testCallLockAndPureLocalModeSelection() {
+        for mode in AirSIMConnectionMode.allCases {
+            XCTAssertFalse(AirSIMSettingsPolicy.canSelect(mode, pureLocal: false, callBusy: true))
+            XCTAssertFalse(AirSIMSettingsPolicy.canSelect(mode, pureLocal: true, callBusy: true))
+            XCTAssertTrue(AirSIMSettingsPolicy.canSelect(mode, pureLocal: false, callBusy: false))
+            XCTAssertEqual(AirSIMSettingsPolicy.canSelect(mode, pureLocal: true, callBusy: false), mode != .cloud)
+        }
+    }
+
+    func testInvalidRelayDoesNotFallBackToMaintainerServer() {
+        for raw in ["", "https:", "relay.example.com", "file:///tmp/relay", "https://user:password@example.com",
+                    "https://example.com?token=secret", "https://example.com#fragment", "http://192.168.1.2:0",
+                    "https://example.com:65536", "https://bad host.example"] {
+            XCTAssertNil(AirSIMSettingsPolicy.validRelayURL(raw), raw)
+        }
+        XCTAssertEqual(AirSIMSettingsPolicy.validRelayURL(" https://relay.example.com/api \n"), "https://relay.example.com/api")
+        XCTAssertEqual(AirSIMSettingsPolicy.validRelayURL("http://192.168.1.2:8787"), "http://192.168.1.2:8787")
+        XCTAssertEqual(AirSIMSettingsPolicy.validRelayURL("https://[::1]:8443"), "https://[::1]:8443")
+    }
+
+    func testDeviceDestinationsKeepIdentityAcrossNavigation() {
+        XCTAssertNotEqual(AirSIMSettingsPage.device("one"), .device("two"))
+        XCTAssertNotEqual(AirSIMSettingsPage.device("one").id, AirSIMSettingsPage.deviceInfo("one").id)
+    }
+}
+
+
+final class NotificationForwardingFormTests: XCTestCase {
+    func testWebhookAllowsServiceQueryButRejectsBrokenInput() {
+        var target = NotificationForwardingDestination()
+        XCTAssertNotNil(target.validationMessage)
+        target.webhookURL = "https://example.com/robot?key=placeholder"
+        XCTAssertNil(target.validationMessage)
+        target.webhookURL = "file:///tmp/log"
+        XCTAssertNotNil(target.validationMessage)
+        target.enabled = false
+        XCTAssertNil(target.validationMessage)
+    }
+    func testDefaultBarkAndTelegramRequireTheirRoutingFields() {
+        var target = NotificationForwardingDestination()
+        target.channel = .bark
+        XCTAssertNotNil(target.validationMessage)
+        target.deviceKey = "fixture-key"
+        XCTAssertNil(target.validationMessage)
+        target.webhookURL = "http://example.com/push"
+        XCTAssertNotNil(target.validationMessage)
+        target.channel = .telegram; target.webhookURL = ""
+        target.chatID = "fixture-chat"
+        XCTAssertNotNil(target.validationMessage)
+        target.token = "fixture-token"
+        XCTAssertNil(target.validationMessage)
+    }
+}
+
+final class MinimalSMSAndHangupTests: XCTestCase {
+    func testMissingOptionalAPIsAreNotRetriedOnEveryPoll() async throws {
+        let transport = MissingOptionalAPIBoundary()
+        let api = AirSIMAPI(route: .vowlan(endpoint: try VoWLANEndpoint(host: "10.0.0.19", controlPort: 15992, pcmPort: 15993),
+            credential: try VoWLANCredential(secret: Data(repeating: 3, count: 32))), transport: transport)
+        for _ in 0..<3 {
+            try await api.acknowledgeCallHistory(ids: ["fixture"])
+            do { _ = try await api.setCallRecording(true); XCTFail("unsupported recording succeeded") }
+            catch APIError.unsupportedFeature { }
+        }
+        let paths = await transport.paths
+        XCTAssertEqual(paths.filter { $0.hasSuffix("history/ack") }.count, 1)
+        XCTAssertEqual(paths.filter { $0.hasSuffix("audio/record") }.count, 1)
+    }
+
+
+    func testSMSLineSelectionIsPerConversationAndFallsBackWhenSIMRemoved() throws {
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let slots = try JSONDecoder().decode([AndroidSIMSlot].self, from: Data("""
+        [{"id":"one","label":"SIM 1"},{"id":"two","label":"SIM 2","is_default_sms":true}]
+        """.utf8))
+        SMSSIMPreference.select("one", agentID: "A", recipient: "202-555-0100", defaults: defaults)
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550100", defaults: defaults), "one")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550101", defaults: defaults), "two")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550101", suggestedID: "one", defaults: defaults), "one")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550100", suggestedID: "two", defaults: defaults), "one")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "B", slots: slots, recipient: "2025550100", defaults: defaults), "two")
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: [slots[1]], recipient: "2025550100", defaults: defaults), "two")
+        XCTAssertFalse(String(describing: defaults.dictionaryRepresentation()).contains("2025550100"))
+        SMSSIMPreference.forget(agentID: "A", defaults: defaults)
+        XCTAssertEqual(SMSSIMPreference.selectedID(agentID: "A", slots: slots, recipient: "2025550100", defaults: defaults), "two")
+    }
+
+    func testSentSMSRetainsSelectedLineAndDeviceAfterPersistence() throws {
+        let sent = try XCTUnwrap(SMSHistoryPolicy.appendingSentMessage(
+            recipient: "10086", content: "synthetic", at: Date(), to: [], limit: 20,
+            sourceAgentID: "android-A", simSlot: "SIM 2").first)
+        let restored = try JSONDecoder().decode(SMSMessage.self, from: JSONEncoder().encode(sent))
+        XCTAssertEqual(restored.simDeliveryLabel, "通过 SIM 2")
+        XCTAssertEqual(restored.sourceAgentID, "android-A")
+    }
+
+    private func api(_ boundary: HangupHTTPBoundary) throws -> AirSIMAPI {
+        AirSIMAPI(route: .vowlan(endpoint: try VoWLANEndpoint(host: "10.0.0.7", controlPort: 7592, pcmPort: 7593),
+            credential: try VoWLANCredential(secret: Data(repeating: 7, count: 32))), transport: boundary)
+    }
+
+    func testLostHangupResponseIsConfirmedWithoutDuplicateCommand() async throws {
+        let boundary = HangupHTTPBoundary(scenario: .ended)
+        try await api(boundary).hangupCall(callID: "original")
+        let sent = await boundary.targets
+        XCTAssertEqual(sent, ["original"])
+    }
+
+    func testTransientHangupFailureRetriesOnlyCapturedIdentity() async throws {
+        let boundary = HangupHTTPBoundary(scenario: .retry)
+        try await api(boundary).hangupCall()
+        let sent = await boundary.targets
+        XCTAssertEqual(sent, ["original", "original"])
+    }
+
+    func testHangupNeverRetriesOnReplacementOrUncertainStatus() async throws {
+        for scenario in [HangupHTTPBoundary.Scenario.replacement, .pollError, .unauthorized] {
+            let boundary = HangupHTTPBoundary(scenario: scenario)
+            do { try await api(boundary).hangupCall(callID: "original"); XCTFail("unconfirmed end was accepted") } catch {}
+            let sent = await boundary.targets
+            XCTAssertEqual(sent, ["original"])
+        }
+    }
+
+    func testSMSPushRetainsReceivingSIMAndLegacyStaysUnknown() throws {
+        for slot in ["SIM 1", "SIM 2"] {
+            let incoming = try IncomingRemoteSMS(userInfo: ["event": "incoming_sms", "delivery_id": "fixture",
+                "sender": "fixture", "content": "synthetic", "timestamp": "2026-11-03T09:00:00Z", "sim_slot": slot])
+            XCTAssertEqual(incoming.message.simSlot, slot)
+            XCTAssertEqual(incoming.message.simDeliveryLabel, "接收于 \(slot)")
+            let data = try JSONEncoder().encode(incoming.message)
+            XCTAssertEqual(try JSONDecoder().decode(SMSMessage.self, from: data).simSlot, slot)
+        }
+        let legacy = try IncomingRemoteSMS(userInfo: ["event": "incoming_sms", "delivery_id": "legacy",
+            "sender": "fixture", "content": "synthetic", "timestamp": "2026-11-03T09:00:00Z"])
+        XCTAssertNil(legacy.message.simSlot)
+        XCTAssertEqual(legacy.message.simDeliveryLabel, "接收于 SIM 未知")
+    }
+}
+
+private actor HangupHTTPBoundary: AirSIMHTTPTransport {
+    enum Scenario { case ended, retry, replacement, pollError, unauthorized }
+    let scenario: Scenario
+    private(set) var targets: [String] = []
+    init(scenario: Scenario) { self.scenario = scenario }
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        if request.url?.path == "/api/calls/hangup" {
+            let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String]
+            targets.append(body?["call_id"] ?? "UNSCOPED")
+            let code = scenario == .unauthorized ? 401 : (scenario == .retry && targets.count == 2 ? 200 : 502)
+            return WiredHTTPResponse(statusCode: code, body: Data("{}".utf8))
+        }
+        let id: String? = targets.isEmpty || scenario != .ended ? (scenario == .replacement ? "replacement" : "original") : nil
+        let call = id.map { CallRecord(id: $0, index: 1, direction: "incoming", state: "active", number: nil,
+            startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false) }
+        let status = CallStatus(active: call, history: [], polling: true, eventDriven: true, pollIntervalSeconds: 2,
+            lastPollError: scenario == .pollError ? "stale" : "", revision: 1)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        return WiredHTTPResponse(statusCode: 200, body: try encoder.encode(status))
+    }
+}
+
+private actor MissingOptionalAPIBoundary: AirSIMHTTPTransport {
+    private(set) var paths: [String] = []
+    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        paths.append(request.url!.path)
+        return WiredHTTPResponse(statusCode: 404, body: Data("{}".utf8))
+    }
+}
+
+final class LiveActivityConnectionMarkTests: XCTestCase {
+    private typealias State = AirSIMCallActivityAttributes.ContentState
+
+    func testOfflineOverridesStaleOnlineFlagsAndTransport() {
+        let state = State(callID: "", number: "", displayName: "", phase: .offline,
+            startedAt: .distantPast, transport: .vowlan, vowlanOnline: true, bluetoothOnline: true)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(state), .offline)
+    }
+
+    func testCloudRouteIsNotReplacedByAvailableLocalLinks() {
+        for phase in [State.Phase.standby, .cloudStandby] {
+            let state = State(callID: "", number: "", displayName: "", phase: phase,
+                startedAt: .distantPast, transport: .cloud, vowlanOnline: true, bluetoothOnline: true)
+            XCTAssertEqual(LiveActivityConnectionMark.resolve(state), .cloud)
+        }
+    }
+
+    func testDualMarkRequiresBothLocalLinksAndStalenessDoesNotMeanOffline() {
+        let dual = State(callID: "", number: "", displayName: "", phase: .standby,
+            startedAt: .distantPast, transport: .vowlan, vowlanOnline: true, bluetoothOnline: true)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(dual.liveActivityDisplayState(isStale: true)), .dualLocal)
+        let single = State(callID: "", number: "", displayName: "", phase: .standby,
+            startedAt: .distantPast, transport: .vowlan, vowlanOnline: true, bluetoothOnline: false)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(single), .vowlan)
+    }
+
+    func testLegacyPayloadWithoutAvailabilityStillUsesTransport() throws {
+        let state = State(callID: "", number: "", displayName: "", phase: .standby,
+            startedAt: .distantPast, transport: .bluetooth)
+        let decoded = try JSONDecoder().decode(State.self, from: JSONEncoder().encode(state))
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(decoded), .bluetooth)
+        let unknown = State(callID: "", number: "", displayName: "", phase: .standby, startedAt: .distantPast)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(unknown), .unknown)
+    }
+
+    func testDeviceListUsesEachDevicesOwnAvailability() {
+        let dual = State.AgentSummary(id: "a", name: "A", phoneNumber: nil, agentKind: nil,
+            vowlanOnline: true, bluetoothOnline: true, cloudOnline: true, isCurrent: false)
+        let offline = State.AgentSummary(id: "b", name: "B", phoneNumber: nil, agentKind: nil,
+            vowlanOnline: false, bluetoothOnline: false, cloudOnline: false, isCurrent: true)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(dual), .dualLocal)
+        XCTAssertEqual(LiveActivityConnectionMark.resolve(offline), .offline)
+    }
+
+    @MainActor
+    func testRenderConnectionIconsAtIslandAndBadgeSizes() throws {
+        let view = VStack(alignment: .leading, spacing: 24) {
+            Text("AirSIM · 灵动岛连接图标").font(.title2.bold()).foregroundStyle(.white)
+            Text("设备标签 / 最小态 / 紧凑态 / 展开态").font(.caption).foregroundStyle(.gray)
+            ForEach(Array(LiveActivityConnectionMark.allCases.enumerated()), id: \.offset) { _, mark in
+                HStack {
+                    Text(mark.title).font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white).frame(width: 155, alignment: .leading)
+                    ForEach([10.0, 14.0, 17.0, 24.0], id: \.self) { size in
+                        LiveActivityConnectionIcon(mark: mark, size: size)
+                            .frame(width: 50, height: 40)
+                    }
+                }
+            }
+        }
+        .padding(28).background(Color.black)
+        .environment(\.colorScheme, .dark)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 3
+        let image = try XCTUnwrap(renderer.uiImage)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AirSIMIslandRenders")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try XCTUnwrap(image.pngData()).write(to: folder.appendingPathComponent("connection-icons.png"))
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Connection icons at production sizes"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}
+
+@MainActor
+final class AllTransportEarlyMediaTests: XCTestCase {
+    func testCloudRouteNotificationsCoalesceAndStoppedAudioCannotRestart() {
+        var pending: [() -> Void] = []
+        var eligible = true
+        var rebuilt = 0
+        var completed = 0
+        let recovery = CloudAudioRouteRecovery(schedule: { _, work in pending.append(work) },
+            eligible: { eligible }, rebuild: { rebuilt += 1 }, completed: { error in
+                XCTAssertNil(error); completed += 1
+            })
+        recovery.request() // Session route change.
+        recovery.request() // Engine configuration change from the same switch.
+        pending.removeFirst()()
+        XCTAssertEqual(rebuilt, 0)
+        pending.removeFirst()()
+        XCTAssertEqual(rebuilt, 1)
+        XCTAssertEqual(completed, 1)
+        recovery.request()
+        eligible = false // CallKit deactivation / ended.
+        pending.removeFirst()()
+        recovery.request()
+        XCTAssertTrue(pending.isEmpty)
+        XCTAssertEqual(rebuilt, 1)
+    }
+
+    func testCloudRouteRecoveryCannotRestartPreviousCallOrAudioPhase() {
+        var pending: [() -> Void] = []
+        var rebuilt = 0
+        let recovery = CloudAudioRouteRecovery(schedule: { _, work in pending.append(work) },
+            eligible: { true }, rebuild: { rebuilt += 1 }, completed: { _ in })
+        recovery.request()
+        recovery.invalidate() // Early media stopped; duplex or a replacement call begins.
+        recovery.request()
+        pending.removeFirst()()
+        XCTAssertEqual(rebuilt, 0)
+        pending.removeFirst()()
+        XCTAssertEqual(rebuilt, 1)
+    }
+
+    func testCloudRouteRecoveryRetriesTransientHardwareFailureWithoutUnboundedLoop() {
+        var pending: [() -> Void] = []
+        var attempts = 0
+        var successes = 0
+        var failures = 0
+        var fail = true
+        let recovery = CloudAudioRouteRecovery(schedule: { _, work in pending.append(work) },
+            eligible: { true }, rebuild: {
+                attempts += 1
+                if fail { throw NSError(domain: "RouteFixture", code: 1) }
+            }, completed: { error in
+                if error == nil { successes += 1 } else { failures += 1 }
+            })
+        recovery.request()
+        while !pending.isEmpty { pending.removeFirst()() }
+        XCTAssertEqual(attempts, 3)
+        XCTAssertEqual(failures, 1)
+        XCTAssertEqual(successes, 0)
+        recovery.request()
+        pending.removeFirst()() // Route not stable yet.
+        fail = false
+        pending.removeFirst()()
+        XCTAssertEqual(attempts, 5)
+        XCTAssertEqual(successes, 1)
+        XCTAssertEqual(failures, 1)
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    func testCloudRouteRecoveryCancellationInvalidatesAlreadyScheduledRetry() {
+        var pending: [() -> Void] = []
+        var attempts = 0
+        var completions = 0
+        let recovery = CloudAudioRouteRecovery(schedule: { _, work in pending.append(work) },
+            eligible: { true }, rebuild: {
+                attempts += 1
+                throw NSError(domain: "RouteFixture", code: 1)
+            }, completed: { _ in completions += 1 })
+        recovery.request()
+        pending.removeFirst()()
+        recovery.invalidate()
+        pending.removeFirst()()
+        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(completions, 0)
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    func testReleasedU30AndVersionedEarlyMediaRequireSameLiveCall() throws {
+        let uuid = UUID()
+        for status in ["early_media", "early_media_ready_v1"] {
+            let wire = "{\"status\":\"\(status)\",\"call_id\":\"carrier\",\"call_uuid\":\"\(uuid)\",\"generation\":1}"
+            let message = try XCTUnwrap(CloudPCMControlMessage.decode(wire))
+            XCTAssertTrue(message.authorizesEarlyMedia(callID: "carrier", uuid: uuid, generation: 1, outgoing: true, state: .connecting))
+            for state: CallLifecycleState in [.idle, .ringing, .active, .ending, .ended, .failed] {
+                XCTAssertFalse(message.authorizesEarlyMedia(callID: "carrier", uuid: uuid, generation: 1, outgoing: true, state: state))
+            }
+            XCTAssertFalse(message.authorizesEarlyMedia(callID: "replacement", uuid: uuid, generation: 1, outgoing: true, state: .connecting))
+            XCTAssertFalse(message.authorizesEarlyMedia(callID: "carrier", uuid: UUID(), generation: 1, outgoing: true, state: .connecting))
+            XCTAssertFalse(message.authorizesEarlyMedia(callID: "carrier", uuid: uuid, generation: 2, outgoing: true, state: .connecting))
+            XCTAssertFalse(message.authorizesEarlyMedia(callID: "carrier", uuid: uuid, generation: 1, outgoing: false, state: .connecting))
+            let missing = try XCTUnwrap(CloudPCMControlMessage.decode("{\"status\":\"\(status)\"}"))
+            XCTAssertFalse(missing.authorizesEarlyMedia(callID: "carrier", uuid: uuid, generation: 1, outgoing: true, state: .connecting))
+        }
+    }
+
+    func testCloudToneDoesNotTakeSessionAndSpeakerSurvivesEngineReplacement() async throws {
+        let tone = FixtureToneOutput()
+        var speaker = false
+        var overrides: [Bool] = []
+        let audio = AudioSessionController(toneOutput: tone, applySpeakerOverride: {
+            overrides.append($0); speaker = $0
+        }, observesSpeakerOutput: { speaker })
+        audio.callKitDidActivate()
+        let call = CallRecord(id: "carrier", index: 0, direction: "outgoing", state: "dialing", number: nil,
+                              startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false)
+        audio.updateCallTone(for: call)
+        XCTAssertEqual(tone.sessionConfigurations, [false], "Cloud wait tone must not replace CallKit's playAndRecord category")
+        audio.setSpeakerEnabled(true)
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertTrue(audio.speakerEnabled)
+        speaker = false // Engine replacement temporarily resets the physical route.
+        audio.retryRequestedSpeakerRoute()
+        audio.retryRequestedSpeakerRoute() // A cancelled retry must not clear its replacement.
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertTrue(audio.speakerEnabled)
+        XCTAssertFalse(audio.speakerRoutePending)
+        audio.toggleSpeakerRoute()
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertFalse(audio.speakerEnabled)
+        XCTAssertEqual(overrides.last, false)
+        audio.stopCallTone(deactivateSession: false)
+    }
+
+    func testLateBLEEarlyAckAfterEndedCannotRestartMediaOrDialAgain() async throws {
+        let central = VoBLECallControlProbe()
+        let writer = VoBLEWriterProbe(canSend: true, maximumLength: 247)
+        let media = VoBLEGATTMediaTransport(writer: writer)
+        let audio = VoBLEAudioEngine(transport: media)
+        let suite = "EarlyMedia.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let calls = VoBLECallCoordinator(central: central, media: media, audio: audio, defaults: defaults)
+        var delayed: CheckedContinuation<VoBLEControlResponse, Never>?
+        var commands: [String] = []
+        central.sendOperation = { command, _, generation in
+            commands.append(command)
+            if command == "start_early_media" { return await withCheckedContinuation { delayed = $0 } }
+            return .init(requestID: "accepted", generation: generation, success: true, code: "ok", detail: "accepted")
+        }
+        let outgoing = try await calls.startOutgoing(number: "fixture")
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "dialing", number: "fixture"))
+        for _ in 0..<30 { await Task.yield() }
+        XCTAssertNotNil(delayed)
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "ended", number: "fixture"))
+        delayed?.resume(returning: .init(requestID: "early", generation: outgoing.generation,
+            success: true, code: "ok", detail: "early_media_ready_v1"))
+        for _ in 0..<30 { await Task.yield() }
+        XCTAssertNil(calls.currentIdentity)
+        XCTAssertFalse(media.isRunning)
+        XCTAssertFalse(audio.running)
+        XCTAssertEqual(commands.filter { $0 == "dial" }.count, 1)
+    }
+    func testBLEEarlyStopKeepsCallAndCannotStopActiveReplacement() async throws {
+        let central = VoBLECallControlProbe()
+        let media = VoBLEGATTMediaTransport(writer: VoBLEWriterProbe(canSend: true, maximumLength: 247))
+        let audio = VoBLEAudioEngine(transport: media)
+        let suite = "EarlyStop.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let calls = VoBLECallCoordinator(central: central, media: media, audio: audio, defaults: defaults)
+        central.sendOperation = { command, _, generation in
+            .init(requestID: command, generation: generation, success: true, code: "ok",
+                  detail: command == "start_early_media" ? "early_media_ready_v1" : "accepted")
+        }
+        let outgoing = try await calls.startOutgoing(number: "fixture")
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "dialing", number: "fixture"))
+        for _ in 0..<30 { await Task.yield() }
+        XCTAssertTrue(media.isRunning)
+        central.onEvent?(.init(callID: "other", generation: outgoing.generation,
+            direction: "", state: "early_media_stopped", number: ""))
+        XCTAssertTrue(media.isRunning, "Other call cannot revoke early audio")
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "", state: "early_media_stopped", number: ""))
+        XCTAssertFalse(media.isRunning)
+        XCTAssertNotNil(calls.currentIdentity, "Media failure is not a telephone terminal event")
+        calls.mediaPermission = { _ in false } // Do not start real duplex IO in a unit test.
+        var active = false
+        calls.onState = { _, state in active = state == .active }
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "active", number: "fixture"))
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "", state: "early_media_stopped", number: ""))
+        XCTAssertTrue(active)
+        XCTAssertNotNil(calls.currentIdentity)
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "ended", number: "fixture"))
+    }
+    func testCloudEarlyAuthorizationRequiresCompleteIdentity() throws {
+        let uuid = UUID()
+        for fields in ["", "\"call_id\":\"call\",", "\"call_id\":\"call\",\"call_uuid\":\"\(uuid)\","] {
+            let message = try XCTUnwrap(CloudPCMControlMessage.decode("{\(fields)\"status\":\"early_media_ready_v1\"}"))
+            XCTAssertFalse(message.exactlyMatches(callID: "call", uuid: uuid, generation: 1))
+        }
+        let message = try XCTUnwrap(CloudPCMControlMessage.decode("{\"call_id\":\"call\",\"call_uuid\":\"\(uuid)\",\"generation\":1,\"status\":\"early_media_ready_v1\"}"))
+        XCTAssertTrue(message.exactlyMatches(callID: "call", uuid: uuid, generation: 1))
+        XCTAssertFalse(message.exactlyMatches(callID: "replacement", uuid: uuid, generation: 1))
+        XCTAssertFalse(message.exactlyMatches(callID: "call", uuid: uuid, generation: 2))
+    }
+
+    func testBLEEarlyMediaKeyIsPhaseAndAttemptBound() {
+        let key = Data(repeating: 7, count: 32)
+        let early = VoBLEGATTMediaTransport.earlyMediaKey(key, nonce: "11111111-1111-4111-8111-111111111111")
+        XCTAssertEqual(early.map { String(format: "%02x", $0) }.joined(), "3a567c3aa24c0eeb769bb2dde0cfa83a8d1e73e91417202deef504f11698c6fd")
+        XCTAssertNotEqual(early, key)
+        XCTAssertNotEqual(early, VoBLEGATTMediaTransport.earlyMediaKey(key, nonce: "22222222-2222-4222-8222-222222222222"))
+    }
+    func testBLEReceiveOnlyCannotQueueMicrophoneFrames() async throws {
+        let writer = VoBLEWriterProbe(canSend: true, maximumLength: 247)
+        let media = VoBLEGATTMediaTransport(writer: writer)
+        let id = VoBLEMediaSessionIdentity(callID: "carrier", generation: 1)
+        try media.start(identity: id, mediaKey: Data(repeating: 7, count: 32), receiveOnly: true)
+        for _ in 0..<20 { media.enqueueCapturedPCM(Data(repeating: 1, count: 320)) }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(writer.writes.isEmpty)
+        XCTAssertEqual(media.queuedFrameCount, 0)
+        media.stop(identity: id)
+        try media.start(identity: id, mediaKey: Data(repeating: 8, count: 32))
+        media.enqueueCapturedPCM(Data(repeating: 1, count: 320))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(writer.writes.isEmpty, "Active duplex must still send")
+        media.stop(identity: id)
+    }
+    func testBLEEarlyPreparationDoesNotTouchCapture() async throws {
+        let media = VoBLEGATTMediaTransport(writer: VoBLEWriterProbe(canSend: true, maximumLength: 247))
+        var capture = false
+        let audio = VoBLEAudioEngine(transport: media, enableVoiceProcessing: { _ in capture = true },
+            installInputTap: { _, _, _ in capture = true })
+        try await audio.prepareForCall(managedByCallKit: true, callKitAudioActive: false, receiveOnly: true)
+        audio.setMediaReady(true)
+        XCTAssertTrue(audio.receiveOnly)
+        XCTAssertFalse(audio.running, "CallKit activation remains required")
+        XCTAssertFalse(capture)
+        audio.stop()
+    }
+    func testCloudCapabilityEnvelopeRemainsOptionalOnDecode() throws {
+        let envelope = CloudCallControlEnvelope(action: "answer", callID: "c", callUUID: UUID().uuidString,
+            generation: 3, commandID: "command", traceID: "trace")
+        let wire = try JSONEncoder().encode(envelope)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
+        XCTAssertEqual(object["early_media_version"] as? Int, 1)
+        object.removeValue(forKey: "early_media_version")
+        let old = try JSONDecoder().decode(CloudCallControlEnvelope.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(old.earlyMediaVersion)
+        XCTAssertEqual(old.callID, "c")
     }
 }

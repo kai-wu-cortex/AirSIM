@@ -7,6 +7,7 @@ import java.lang.reflect.*;
 public final class CloudCallManagerTests {
     public static void main(String[] args) throws Exception {
         RelayEgressGate.shared.enableAfterRestore();
+        localResolveRequiresCompleteIdentityAndCurrentPublishedCall();
         endedBeforeEventDrainStillReleasesOutgoing();
         callCanCompleteBeforeSessionCreation();
         lateOutgoingCannotBindUnownedSession("ended");
@@ -19,7 +20,104 @@ public final class CloudCallManagerTests {
         oldMediaCannotRestartAfterPureLocalExit();
         media401RetriesThenStopsWithoutReplacingLiveSlot();
         successfulHandshakeResetsMedia401Window();
+        cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
+    }
+
+    private static void cloudEarlyMediaTransitionsOnlyOnTelecomActive() throws Exception {
+        RuntimeMode.standalone = true;
+        var call = new android.telecom.Call(android.telecom.Call.STATE_DIALING, 1, "5550100");
+        String id = CallRepository.add(call);
+        var threads = java.util.concurrent.Executors.newCachedThreadPool();
+        var hellos = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        try (var f = new Fixture(id); var server = new java.net.ServerSocket(0, 2, java.net.InetAddress.getLoopbackAddress())) {
+            set(f.manager, "pcmEndpoint", new java.net.InetSocketAddress(server.getInetAddress(), server.getLocalPort()));
+            Object session = f.active();
+            var owner = new StandaloneWebSocket(() -> { throw new AssertionError("no network reads"); });
+            set(session, "webSocket", owner); set(session, "mediaStarted", true);
+            var eligible = session.getClass().getDeclaredMethod("earlyEligible"); eligible.setAccessible(true);
+            check(!(boolean)eligible.invoke(session), "old client cannot open early media");
+            set(session, "earlyMediaAccepted", true);
+            check((boolean)eligible.invoke(session), "generic standalone outgoing is eligible");
+            var other = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550199");
+            CallRepository.add(other);
+            check(!(boolean)eligible.invoke(session), "global carrier source cannot mix a second call");
+            CallRepository.remove(other);
+            threads.submit(() -> {
+                try {
+                    for (int index=0; index<2; index++) {
+                        final java.net.Socket socket = server.accept();
+                        threads.submit(() -> {
+                            try (socket) {
+                                hellos.add(new String(socket.getInputStream().readNBytes(11), java.nio.charset.StandardCharsets.US_ASCII));
+                                socket.getOutputStream().write("AIRSIMREADY".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                                for (int n=0;n<100;n++) {
+                                    socket.getOutputStream().write(new byte[320]); socket.getOutputStream().flush(); Thread.sleep(20);
+                                }
+                            } catch (Exception expectedOnClose) {}
+                        });
+                    }
+                } catch (Exception expectedOnClose) {}
+            });
+            var run = session.getClass().getDeclaredMethod("runPCM", StandaloneWebSocket.class); run.setAccessible(true);
+            var pump = threads.submit(() -> { try { run.invoke(session, owner); } catch (Exception e) { throw new RuntimeException(e); } });
+            await(() -> owner.frames.get()>0, "early downlink frame");
+            check(hellos.get(0).equals("AIRSIMRX01\n"), "early bridge must be recvonly");
+            check(owner.text.stream().anyMatch(v -> v.contains("early_media_ready_v1")), "capability ACK required");
+            check(owner.text.stream().noneMatch(v -> v.contains("\"status\":\"active\"")), "PCM READY cannot manufacture ACTIVE");
+            call.setStateForTest(android.telecom.Call.STATE_ACTIVE);
+            await(() -> hellos.size()==2 && owner.text.stream().anyMatch(v -> v.contains("\"status\":\"active\"")), "active duplex transition");
+            check(hellos.get(1).equals("AIRSIMPCM1\n"), "active must reopen duplex bridge");
+            ((java.io.Closeable)session).close();
+            pump.get(3, java.util.concurrent.TimeUnit.SECONDS);
+            check(field(session, "pcm")==null, "terminal must release bridge");
+        } finally { CallRepository.remove(call); RuntimeMode.standalone=false; threads.shutdownNow(); threads.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS); }
+    }
+    private static void await(java.util.function.BooleanSupplier ready, String description) throws Exception {
+        long until=System.nanoTime()+3_000_000_000L;
+        while(!ready.getAsBoolean() && System.nanoTime()<until) Thread.sleep(10);
+        check(ready.getAsBoolean(), description);
+    }
+
+    private static void localResolveRequiresCompleteIdentityAndCurrentPublishedCall() throws Exception {
+        var instance = StandaloneCloudMediaManager.class.getDeclaredField("instance");
+        instance.setAccessible(true);
+        Object previous = instance.get(null);
+        try (var f = new Fixture("telecom-owner")) {
+            instance.set(null, f.manager);
+            var constructor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
+            constructor.setAccessible(true);
+            var gateway = constructor.newInstance(new android.content.Context());
+            var published = new JSONObject().put("id", "local-owner").put("android_id", "telecom-owner")
+                    .put("state", "incoming");
+            set(gateway, "activeCall", published);
+            var identity = new JSONObject().put("call_id", "new-cloud-call")
+                    .put("call_uuid", "11111111-1111-4111-8111-111111111111").put("generation", "1");
+            var response = gateway.forward("POST", "/api/calls/resolve", identity.toString());
+            check(response.status() == 200 && "local-owner".equals(new JSONObject(response.payload())
+                    .getJSONObject("active").getString("id")), "resolve must return the owned local identity");
+            for (String key : new String[] { "call_id", "call_uuid", "generation" }) {
+                var incomplete = new JSONObject(identity.toString()); incomplete.remove(key);
+                check(gateway.forward("POST", "/api/calls/resolve", incomplete.toString()).status() == 409,
+                        "missing identity field accepted: " + key);
+            }
+            for (String key : new String[] { "call_id", "call_uuid", "generation" }) {
+                var stale = new JSONObject(identity.toString()); stale.put(key, "2");
+                check(gateway.forward("POST", "/api/calls/resolve", stale.toString()).status() == 409,
+                        "incorrect identity field accepted: " + key);
+            }
+            for (Object generation : new Object[] { JSONObject.NULL, true, 1.5, "bad", "9223372036854775808", "0", "-1" }) {
+                var invalid = new JSONObject(identity.toString()); invalid.put("generation", generation);
+                check(gateway.forward("POST", "/api/calls/resolve", invalid.toString()).status() == 409,
+                        "invalid generation accepted: " + generation);
+            }
+            published.put("android_id", "replacement-call");
+            check(gateway.forward("POST", "/api/calls/resolve", identity.toString()).status() == 409,
+                    "old mapping resolved replacement call");
+            set(gateway, "activeCall", null);
+            check(gateway.forward("POST", "/api/calls/resolve", identity.toString()).status() == 409,
+                    "ended mapping still resolved");
+        } finally { instance.set(null, previous); }
     }
 
     private static void oldMediaCannotRestartAfterPureLocalExit() throws Exception {
@@ -246,7 +344,7 @@ public final class CloudCallManagerTests {
             descriptor = descriptorConstructor.newInstance("new-cloud-call", "11111111-1111-4111-8111-111111111111", 1L,
                     "synthetic-secret", "https://example.invalid", "outgoing", androidID);
             var sessionType = Class.forName("com.airsim.phonecontrol.StandaloneCloudMediaManager$CloudSession");
-            var sessionConstructor = sessionType.getDeclaredConstructors()[0]; sessionConstructor.setAccessible(true);
+            var sessionConstructor = sessionType.getDeclaredConstructor(StandaloneCloudMediaManager.class, type); sessionConstructor.setAccessible(true);
             set(manager, "active", sessionConstructor.newInstance(manager, descriptor));
         }
         Object active() throws Exception { return field(manager, "active"); }

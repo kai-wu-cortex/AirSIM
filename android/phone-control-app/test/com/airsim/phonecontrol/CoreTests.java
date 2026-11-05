@@ -487,7 +487,10 @@ public final class CoreTests {
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/api/status"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/api/debug?after=0&limit=600"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/api/calls/events?after=1"));
-		assertTrue(VoWLANControlPolicy.allowed("POST", "/api/calls/answer"));
+		assertTrue(VoWLANControlPolicy.allowed("POST", "/api/calls/resolve"));
+        assertTrue(VoWLANControlPolicy.allowed("POST", "/api/calls/answer"));
+        assertTrue(VoWLANControlPolicy.allowed("POST", "/api/calls/history/ack"));
+        assertTrue(!VoWLANControlPolicy.allowed("POST", "/api/calls/audio/record"));
 		assertTrue(VoWLANControlPolicy.allowed("POST", "/api/calls/audio/host/register"));
 		assertTrue(VoWLANControlPolicy.allowed("POST", "/api/push/register"));
 		assertTrue(VoWLANControlPolicy.allowed("POST", "/api/push/mode"));
@@ -1074,7 +1077,20 @@ public final class CoreTests {
 				synchronized (input) { input.notifyAll(); }
 			}
 		}
-		BlockingDuplex duplex = new BlockingDuplex();
+        BlockingDuplex rxDuplex = new BlockingDuplex();
+        var rxIdentity = new com.airsim.phonecontrol.voble.VoBLEMediaSession.Identity("early", 2);
+        var rxKey = com.airsim.phonecontrol.voble.VoBLEMediaSession.earlyMediaKey(key, "11111111-1111-4111-8111-111111111111");
+        assertTrue(!java.util.Arrays.equals(key, rxKey));
+        assertTrue(!java.util.Arrays.equals(rxKey, com.airsim.phonecontrol.voble.VoBLEMediaSession.earlyMediaKey(key, "22222222-2222-4222-8222-222222222222")));
+        assertEquals("3a567c3aa24c0eeb769bb2dde0cfa83a8d1e73e91417202deef504f11698c6fd", java.util.HexFormat.of().formatHex(rxKey));
+        var rxMedia = new com.airsim.phonecontrol.voble.VoBLEMediaSession(standalone,
+                endpoint -> com.airsim.phonecontrol.voble.VoBLEPCMBridgeSession.open(endpoint, ignored -> rxDuplex, true), packet -> true);
+        rxMedia.start(rxIdentity, rxKey);
+        assertTrue(rxMedia.ready());
+        assertTrue(!rxMedia.onUplinkFragment(rxIdentity, new byte[]{1}));
+        assertEquals("AIRSIMRX01\n", new String(rxDuplex.output.toByteArray(), java.nio.charset.StandardCharsets.US_ASCII));
+        rxMedia.stop(); assertTrue(rxDuplex.closed);
+        BlockingDuplex duplex = new BlockingDuplex();
 		var identity = new com.airsim.phonecontrol.voble.VoBLEMediaSession.Identity("call-media", 3);
 		var media = new com.airsim.phonecontrol.voble.VoBLEMediaSession(
 				standalone,

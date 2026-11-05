@@ -303,7 +303,7 @@ enum ModuleConnectivityPolicy {
         now: Date,
         protectedUntil: Date
     ) -> Bool {
-        consecutiveFailures >= offlineFailureThreshold && now >= protectedUntil
+        consecutiveFailures >= offlineFailureThreshold && now.timeIntervalSinceReferenceDate >= protectedUntil.timeIntervalSinceReferenceDate
     }
 
     static func shouldMarkOffline(
@@ -460,7 +460,14 @@ final class AppModel: ObservableObject {
     }()
     var otherDeviceCallReminders: [OtherDeviceCallReminder] { otherCallReminders.reminders }
     private func lookupOtherCall(_ key: DeviceCallKey) -> OtherDeviceCallReminder? {
-        guard key != presentedDeviceCall, let event = deviceCalls.latestEvent(for: key), event.state == .ringing else { return nil }
+        guard key != presentedDeviceCall, key != deviceCalls.active,
+              let event = deviceCalls.latestEvent(for: key), event.state == .ringing else { return nil }
+        // A PushKit presentation may precede directory ownership. Match the
+        // authenticated device AND exact canonical/backend ID, never the number.
+        if let pushed = pushedCallIdentity ?? callKit.currentIncomingPush,
+           pushed.agentID == key.agentID, callLifecycleSnapshot.callUUID == pushed.uuid,
+           callLifecycleSnapshot.state.representsCall,
+           pushed.callID == event.callID || pushed.callID == event.backendCallID { return nil }
         let name = pairedAndroidAgents.first { $0.id == key.agentID }?.deviceName ?? "Android 手机"
         return .init(key: key, deviceName: name, number: event.number, stillRinging: true)
     }
@@ -487,7 +494,7 @@ final class AppModel: ObservableObject {
             presentedDeviceCall = nil; remoteCall = nil
         }
         try deviceCallRouter.renewIdlePresentation(for: key)
-        try await answerOwnedCall(key)
+        try await answerOwnedCall(key, source: "other_device")
         focusedOtherDeviceCall = nil
         otherCallReminders.consume([])
     }
@@ -495,6 +502,10 @@ final class AppModel: ObservableObject {
     @discardableResult
     func receiveDeviceCallEvent(_ event: DeviceCallEvent,
                                 presentation: CallLifecycleEvent? = nil) -> [DeviceCallEffect] {
+        if let key = deviceCalls.key(agentID: event.agentID, callID: event.callID),
+           deviceCallRouter.route(for: key) != nil {
+            return receiveOwnedCallEvent(event)
+        }
         let effects = deviceCalls.apply(event)
         guard let key = deviceCalls.key(agentID: event.agentID, callID: event.callID) else { return effects }
         if finishPushedCallIfNeeded(event, key: key) { return effects }
@@ -530,7 +541,7 @@ final class AppModel: ObservableObject {
     private func activateOwnedRoute(_ route: LockedDeviceCallRoute) {
         presentedDeviceCall = route.key
         currentCallTransport = route.transport
-        lockedCallTransport = LockedCallTransport(transport: route.transport, generation: route.key.generation)
+        lockedCallTransport = LockedCallTransport(transport: route.transport, generation: route.presentationGeneration ?? route.key.generation)
         if route.transport == .vowlan, let service = localDevices.api(for: route.key.agentID) {
             ownedWLANEpoch = localDevices.transportEpoch(for: route.key.agentID)
             currentLocalAPI = service
@@ -551,7 +562,9 @@ final class AppModel: ObservableObject {
                 "registry_terminal": String(key.flatMap { deviceCalls.latestEvent(for: $0)?.state.isTerminal } ?? false),
                 "lifecycle_terminal": String(callLifecycleSnapshot.state.isTerminal),
                 "matches_presentation": String(key != nil && key == presentedDeviceCall),
-                "transport_epoch": String(event.transportEpoch)
+                "transport_epoch": String(event.transportEpoch),
+                "end_source": "android_gateway", "device_id": event.agentID,
+                "call_id": event.callID, "call_uuid": key.flatMap { deviceCallRouter.route(for: $0)?.systemUUID.uuidString } ?? "none"
             ])
         }
         defer {
@@ -569,6 +582,9 @@ final class AppModel: ObservableObject {
                 startedAt: previousRecord?.startedAt ?? Date(), updatedAt: Date(), endedAt: nil, missed: false)
         }
         if finishPushedCallIfNeeded(event, key: key) { return effects }
+        // A rejected/duplicate snapshot is not a new presentation transition.
+        // In particular, a stale terminal must not republish the current .active.
+        guard !effects.isEmpty else { return effects }
         if latest.state.isTerminal {
             if presentedDeviceCall == key { presentOwnedCall(key, state: latest.state) }
             return effects
@@ -586,7 +602,7 @@ final class AppModel: ObservableObject {
             if let route = deviceCallRouter.route(for: key) {
                 callKit.withdrawLocalPresentation(uuid: route.systemUUID, reason: .answeredElsewhere)
                 _ = applyCallLifecycle(.init(callID: localPresentationID(key), callUUID: route.systemUUID,
-                    generation: key.generation, state: .ended, source: .agent, timestamp: Date(), traceID: nil, failure: nil))
+                    generation: route.presentationGeneration ?? key.generation, state: .ended, source: .agent, timestamp: Date(), traceID: nil, failure: nil))
             }
             remoteCall = nil; presentedDeviceCall = nil
             updateOwnedPrimaryAlerts(nil)
@@ -606,7 +622,8 @@ final class AppModel: ObservableObject {
     }
 
     private func localPresentationID(_ key: DeviceCallKey) -> String {
-        "local:\(Data(key.agentID.utf8).base64EncodedString()):\(key.generation):\(deviceCallRouter.route(for: key)?.systemUUID.uuidString ?? "")"
+        if let id = deviceCallRouter.route(for: key)?.presentationCallID { return id }
+        return "local:\(Data(key.agentID.utf8).base64EncodedString()):\(key.generation):\(deviceCallRouter.route(for: key)?.systemUUID.uuidString ?? "")"
     }
 
     /// Preserve the pushed UUID, backend ID and generation. A local registry
@@ -709,11 +726,19 @@ final class AppModel: ObservableObject {
 
     /// Captures the pre-answer lifecycle so a rejected direct answer can
     /// restore the ringing page instead of leaving a false "connecting" call.
-    private func answerOwnedCall(_ key: DeviceCallKey) async throws {
+    private func answerOwnedCall(_ key: DeviceCallKey, source: String = "app") async throws {
+        if deviceCalls.active == key, let state = deviceCalls.latestEvent(for: key)?.state,
+           state == .connecting || state == .active {
+            try await deviceCallRouter.answer(key, source: source)
+            return
+        }
         let previous = callLifecycleSnapshot
         answerSnapshot = previous
         defer { answerSnapshot = nil }
-        try await deviceCallRouter.answer(key)
+        try await deviceCallRouter.answer(key, source: source)
+        if deviceCalls.active == key, deviceCalls.latestEvent(for: key)?.state == .active {
+            presentOwnedCall(key, state: .active)
+        }
     }
 
     private func restoreRingingAfterAnswerFailure(_ key: DeviceCallKey) {
@@ -729,13 +754,13 @@ final class AppModel: ObservableObject {
     }
 
     func answerOwnedCallFromWatch(_ key: DeviceCallKey) async throws {
-        try await answerOwnedCall(key)
+        try await answerOwnedCall(key, source: "watch")
     }
     func performOwnedIncomingNotificationAction(_ action: String, callID: String) async throws -> Bool {
         guard callID.hasPrefix("local:") else { return false }
         guard let key = presentedDeviceCall, callID == localPresentationID(key),
               deviceCalls.latestEvent(for: key)?.state == .ringing else { throw DeviceCallRoutingError.stale }
-        if action == IncomingCallNotification.answerActionIdentifier { try await answerOwnedCall(key) }
+        if action == IncomingCallNotification.answerActionIdentifier { try await answerOwnedCall(key, source: "notification") }
         else { try await deviceCallRouter.end(key, rejectIfRinging: true) }
         return true
     }
@@ -752,7 +777,7 @@ final class AppModel: ObservableObject {
             state: state.callRecordState, number: event.number,
             startedAt: previous?.id == id ? previous!.startedAt : Date(), updatedAt: Date(),
             endedAt: state.isTerminal ? Date() : nil, missed: false)
-        guard applyCallLifecycle(.init(callID: id, callUUID: route.systemUUID, generation: key.generation,
+        guard applyCallLifecycle(.init(callID: id, callUUID: route.systemUUID, generation: route.presentationGeneration ?? key.generation,
             state: state, source: source, timestamp: Date(), traceID: nil, failure: nil)) else { return false }
         if state.isTerminal {
             if source != .app || event.callID != key.callID {
@@ -813,7 +838,8 @@ final class AppModel: ObservableObject {
     }
 
     private func updateOwnedPrimaryAlerts(_ call: CallRecord?) {
-        let suppressed = call?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone
+        let suppressed = (call?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone)
+            || carrierEarlyMediaAudible
         incomingNotifier.update(call: suppressed ? nil : call,
             callerName: call.map { contacts.displayName(for: $0.number) }, appIsActive: appIsActive)
         if suppressed || WatchCallCoordinator.shared.ownsMedia(callID: call?.id) { audio.stopCallTone() }
@@ -883,9 +909,14 @@ final class AppModel: ObservableObject {
         )
     }
 
+    private var carrierEarlyMediaAudible: Bool {
+        (currentCallTransport == .bluetooth && vobleCalls.earlyMediaAudible)
+            || (currentCallTransport == .cloud && IPhoneCloudCallSession.shared.earlyMediaAudible)
+    }
+
     var callAudioIsActive: Bool {
         (audio.active && audio.transportReady && !audio.receiveOnly) || bluetoothPCMConnected
-            || cloudCallAudioState.isConnected || VirtualCallTTSController.shared.isPrepared
+            || (cloudCallAudioState.isConnected && callLifecycleSnapshot.state == .active) || VirtualCallTTSController.shared.isPrepared
     }
 
     /// The actual BLE PCM path, not just the selected session. The engine and
@@ -893,7 +924,7 @@ final class AppModel: ObservableObject {
     /// vobleAudio.running can read a different session and leave the call page
     /// stuck at "establishing" after PCM is already flowing.
     private var bluetoothPCMConnected: Bool {
-        guard currentCallTransport == .bluetooth else { return false }
+        guard currentCallTransport == .bluetooth, callLifecycleSnapshot.state == .active else { return false }
         if let agent = deviceCalls.active?.agentID ?? presentedDeviceCall?.agentID,
            let bundle = vobleHub.retainedBundle(for: agent) {
             return bundle.audio.running || bundle.media.isRunning
@@ -1140,6 +1171,38 @@ final class AppModel: ObservableObject {
         objectWillChange.send()
     }
 
+    func selectedSMSSlotID(for agentID: String, recipient: String? = nil) -> String? {
+        let slots = smsSIMSlots(for: agentID)
+        let lastLine = recipient.flatMap { recipient in
+            messages.filter { $0.sourceAgentID == agentID && $0.sender == recipient && $0.simSlot?.isEmpty == false }
+                .max { $0.timestamp < $1.timestamp }?.simSlot
+        }
+        let suggested = slots.first { slot in
+            guard let lastLine else { return false }
+            return slot.label == lastLine || slot.slotIndex.map { "SIM \($0 + 1)" == lastLine } == true
+        }?.id
+        return SMSSIMPreference.selectedID(agentID: agentID, slots: slots, recipient: recipient, suggestedID: suggested)
+    }
+
+    func smsSIMSlots(for agentID: String) -> [AndroidSIMSlot] {
+        let live = simSlotOverrides[agentID]
+            ?? vobleHub.retainedBundle(for: agentID)?.central.deviceInformation?.simSlots
+            ?? localDevices.metadata(for: agentID)?.simSlots
+            ?? (vobleHub.selected.central.authenticatedIdentity == agentID
+                ? vobleHub.selected.central.deviceInformation?.simSlots : nil)
+        if let live {
+            SMSSIMPreference.remember(agentID: agentID, slots: live)
+            return live
+        }
+        return SMSSIMPreference.rememberedSlots(agentID: agentID)
+    }
+
+    func selectSMSSlot(_ id: String, for agentID: String, recipient: String? = nil) {
+        guard smsSIMSlots(for: agentID).contains(where: { $0.id == id }) else { return }
+        SMSSIMPreference.select(id, agentID: agentID, recipient: recipient)
+        objectWillChange.send()
+    }
+
     /// History retains identity/name only; numbers and online state come from the live session.
     var pairedDeviceHistory: [AndroidAgentPresentation] {
         var values = Dictionary(uniqueKeysWithValues: pairedDeviceRecords.map {
@@ -1174,6 +1237,7 @@ final class AppModel: ObservableObject {
         }
         // Block before awaiting unpair, so delayed discovery/status callbacks cannot restore it.
         PairedAndroidDeviceStore.forget(agentID)
+        SMSSIMPreference.forget(agentID: agentID)
         if CloudAgentTargetStore.last() == agentID {
             CloudAgentTargetStore.forget()
         }
@@ -1258,9 +1322,13 @@ final class AppModel: ObservableObject {
         await refreshLocalDeviceDirectory()
     }
 
+    private var localDirectoryRefreshRevision: UInt64 = 0
     private func refreshLocalDeviceDirectory() async {
         localDirectoryRefreshPending = true
-        if let localDirectoryRefresh { await localDirectoryRefresh.value; return }
+        // A new Bonjour address must not queue behind an old address's timeout.
+        localDirectoryRefresh?.cancel()
+        localDirectoryRefreshRevision &+= 1
+        let revision = localDirectoryRefreshRevision
         let task = Task { [weak self] in
             guard let self else { return }
             while self.localDirectoryRefreshPending, !Task.isCancelled {
@@ -1280,7 +1348,7 @@ final class AppModel: ObservableObject {
         }
         localDirectoryRefresh = task
         await task.value
-        localDirectoryRefresh = nil
+        if revision == localDirectoryRefreshRevision { localDirectoryRefresh = nil }
     }
 
     func rememberVerifiedLocalDevice(_ candidate: VoWLANDiscoveredAgent) {
@@ -1464,6 +1532,14 @@ final class AppModel: ObservableObject {
     }
 
     var callAudioStatusText: String {
+        if callLifecycleSnapshot.state == .connecting,
+           (currentCallTransport == .bluetooth && vobleCalls.earlyMediaUnavailable)
+            || (currentCallTransport == .cloud && IPhoneCloudCallSession.shared.earlyMediaUnavailable) {
+            return "等待接通 · 设备暂未提供运营商语音"
+        }
+        if callLifecycleSnapshot.state == .connecting, carrierEarlyMediaAudible {
+            return "运营商语音 · 尚未接通"
+        }
         if callLifecycleSnapshot.state == .connecting, audio.receiveOnly {
             return audio.hasReceivedEarlyMedia ? "运营商语音 · 尚未接通" : "正在连接运营商语音 · 尚未接通"
         }
@@ -1504,6 +1580,9 @@ final class AppModel: ObservableObject {
         audio.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
         let runtimePolicy = ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected())
+        VoIPPushController.shared.callInProgress = { [weak self] in
+            self?.callLifecycleSnapshot.state.representsCall == true
+        }
         VoIPPushController.shared.registrationAPIs = { [weak self] in
             guard let self else { return [] }
             var apis = self.localDevices.agentIDs.filter { PairedAndroidDeviceStore.permits($0) }
@@ -1535,6 +1614,9 @@ final class AppModel: ObservableObject {
         callKit.setEnabled(runtimePolicy.usesCallKit)
         WatchCallCoordinator.shared.configure(model: self)
         WatchCallCoordinator.shared.start()
+        IPhoneCloudCallSession.shared.onAudioEngineStarted = { [weak self] in
+            self?.audio.retryRequestedSpeakerRoute()
+        }
         IPhoneCloudCallSession.shared.onAudioStateChange = { [weak self] state in
             self?.cloudCallAudioState = state
             if state.isConnected { self?.audio.retryRequestedSpeakerRoute() }
@@ -1693,6 +1775,11 @@ final class AppModel: ObservableObject {
     private func configureVoBLECallCoordinator(_ bundle: VoBLEDeviceSession) {
         let calls = bundle.calls
         let central = bundle.central
+        calls.onEarlyPlayback = { [weak self, weak calls] in
+            guard let self, let calls, let identity = calls.currentIdentity,
+                  calls.mediaPermission(identity), calls.earlyMediaAudible else { return }
+            self.audio.stopCallTone()
+        }
         calls.onOutgoingIntent = { [weak self, weak central] identity in
             self?.vobleHub.setCallActive(true)
             self?.applyVoBLEState(identity: identity, state: .connecting, agentID: central?.authenticatedIdentity)
@@ -1922,6 +2009,7 @@ final class AppModel: ObservableObject {
         requestMicrophoneOnForegroundIfNeeded()
         startCloudStatusQueryIfNeeded()
         if discoveryWasAlreadyStarted {
+            VoIPPushController.shared.resumeRegistrationAfterForeground()
             if AppForegroundRecoveryPolicy.shouldRestartVoWLAN(
                 mode: selectedMode, callActive: callWasActive
             ) {
@@ -2363,7 +2451,7 @@ final class AppModel: ObservableObject {
                         appIsActive: appIsActive
                     )
                 }
-                if lifecycleCall?.direction == "incoming", callKit.suppressesInAppIncomingRingtone {
+                if carrierEarlyMediaAudible || (lifecycleCall?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone) {
                     // CallKit 已负责系统铃声，不能再叠加应用内铃声。
                     audio.stopCallTone()
                 } else {
@@ -2417,7 +2505,7 @@ final class AppModel: ObservableObject {
             guard !Task.isCancelled, generation == pollingGeneration,
                   callLifecycleSnapshot == callSyncSnapshot, outgoingAttemptID == callSyncAttempt else { return }
             if appIsActive, status.active?.state == "active",
-               Date() >= nextAudioDiagnosticRefresh,
+               Date().timeIntervalSinceReferenceDate >= nextAudioDiagnosticRefresh.timeIntervalSinceReferenceDate,
                let audioConfig = try? await AgentPollingRouteSelector.select(
                    primary: result.api,
                    lockedLocal: currentLocalAPI,
@@ -2433,7 +2521,8 @@ final class AppModel: ObservableObject {
                 )
             }
         } catch {
-            guard !Task.isCancelled, generation == pollingGeneration else { return }
+            guard !Task.isCancelled, !(error is CancellationError),
+                  (error as? URLError)?.code != .cancelled, generation == pollingGeneration else { return }
             if deviceCalls.active != nil { return }
 #if DEBUG
             print("[AirSIM Poll] module status failed: \(error.localizedDescription)")
@@ -2730,7 +2819,7 @@ final class AppModel: ObservableObject {
 
     /// 蜂窝状态和版本不必跟随每秒通话轮询；独立刷新避免慢 AT 状态接口拖住来电检测。
     private func scheduleModuleMetadataRefresh(generation: Int, api: AirSIMAPI) {
-        guard moduleMetadataTask == nil, Date() >= nextModuleMetadataRefresh else { return }
+        guard moduleMetadataTask == nil, Date().timeIntervalSinceReferenceDate >= nextModuleMetadataRefresh.timeIntervalSinceReferenceDate else { return }
         nextModuleMetadataRefresh = Date().addingTimeInterval(10)
         moduleMetadataTask = Task { [weak self] in
             await self?.refreshModuleMetadata(generation: generation, api: api)
@@ -2888,7 +2977,9 @@ final class AppModel: ObservableObject {
     func reject() async {
         localEndUUID = callLifecycleSnapshot.callUUID
         if let key = presentedDeviceCall, let route = deviceCallRouter.route(for: key) {
-            await perform(allowWhileBusy: true) { try await self.callKitEnd(uuid: route.systemUUID) }
+            await perform(allowWhileBusy: true) {
+                try await self.deviceCallRouter.end(key, rejectIfRinging: self.deviceCalls.latestEvent(for: key)?.state == .ringing, source: "app")
+            }
             return
         }
         outgoingAttemptID = UUID()
@@ -2910,7 +3001,9 @@ final class AppModel: ObservableObject {
     func hangup() async {
         localEndUUID = callLifecycleSnapshot.callUUID
         if let key = presentedDeviceCall, let route = deviceCallRouter.route(for: key) {
-            await perform(allowWhileBusy: true) { try await self.callKitEnd(uuid: route.systemUUID) }
+            await perform(allowWhileBusy: true) {
+                try await self.deviceCallRouter.end(key, rejectIfRinging: self.deviceCalls.latestEvent(for: key)?.state == .ringing, source: "app")
+            }
             return
         }
         outgoingAttemptID = UUID()
@@ -3194,8 +3287,8 @@ final class AppModel: ObservableObject {
             // A signed VoWLAN health check is the reachability authority. The global
             // polling flags can briefly lag during route switches and must not disable SMS.
             let localReachable = localAPI != nil
-            let smsSlot = (boundAtStart ?? currentAndroidAgent?.id)
-                .flatMap { selectedSIMSlotID(for: $0) }
+            let smsAgentID = boundAtStart ?? currentAndroidAgent?.id
+            let smsSlot = smsAgentID.flatMap { selectedSMSSlotID(for: $0, recipient: target) }
             let voBLEReady = voble.state == .ready
                 && (boundAtStart == nil || voble.authenticatedIdentity == boundAtStart)
             if localReachable {
@@ -3241,7 +3334,10 @@ final class AppModel: ObservableObject {
                                             requireOnline: false)
                     CloudAgentTargetStore.remember(route.agentID)
                 }
-                result = try await VoIPPushController.shared.sendCloudSMS(to: target, message: body, target: route)
+                if smsSlot != nil, route.agentID != smsAgentID {
+                    throw CloudCommandError.failed("短信发送设备已变化，请重新选择发送卡")
+                }
+                result = try await VoIPPushController.shared.sendCloudSMS(to: target, message: body, target: route, simAccount: smsSlot)
             } else {
                 throw CloudCommandError.cloudModeDisabled
             }
@@ -3261,7 +3357,13 @@ final class AppModel: ObservableObject {
                 )
             }
             if result.sent {
-                saveSentMessage(recipient: target, content: body)
+                if let smsAgentID, let smsSlot {
+                    SMSSIMPreference.select(smsSlot, agentID: smsAgentID, recipient: target)
+                }
+                let slotLabel = smsAgentID.flatMap { id in smsSIMSlots(for: id).first { $0.id == smsSlot }.map { slot in
+                    slot.slotIndex.map { "SIM \($0 + 1)" } ?? slot.label
+                } }
+                saveSentMessage(recipient: target, content: body, agentID: smsAgentID, simSlot: slotLabel)
             }
             if localReachable { await refreshMessages(silently: true) }
             return result.sent
@@ -3416,7 +3518,7 @@ final class AppModel: ObservableObject {
             var callsByID: [String: CallRecord] = [:]
             for record in callHistory { callsByID[record.id] = record }
             for record in storedCalls {
-                if let existing = callsByID[record.id], existing.updatedAt >= record.updatedAt {
+                if let existing = callsByID[record.id], existing.updatedAt.timeIntervalSinceReferenceDate >= record.updatedAt.timeIntervalSinceReferenceDate {
                     continue
                 }
                 callsByID[record.id] = record
@@ -3443,7 +3545,7 @@ final class AppModel: ObservableObject {
         }
         var byID: [String: CallRecord] = [:]
         for record in callHistory {
-            if let existing = byID[record.id], existing.updatedAt >= record.updatedAt { continue }
+            if let existing = byID[record.id], existing.updatedAt.timeIntervalSinceReferenceDate >= record.updatedAt.timeIntervalSinceReferenceDate { continue }
             byID[record.id] = record
         }
         for record in remote {
@@ -3489,13 +3591,15 @@ final class AppModel: ObservableObject {
     }
 
     /// 模块不会在收件箱接口回传已发送短信，因此发送成功后立即写入手机本地历史。
-    private func saveSentMessage(recipient: String, content: String) {
+    private func saveSentMessage(recipient: String, content: String, agentID: String?, simSlot: String?) {
         let updatedMessages = SMSHistoryPolicy.appendingSentMessage(
             recipient: recipient,
             content: content,
             at: .now,
             to: messages,
-            limit: maxMessageCount
+            limit: maxMessageCount,
+            sourceAgentID: agentID,
+            simSlot: simSlot
         )
         messages = updatedMessages
         if !historyStore.saveMessages(updatedMessages) {
@@ -3646,6 +3750,12 @@ final class AppModel: ObservableObject {
         guard !Task.isCancelled else { return }
         if callLifecycleSnapshot.state == .connecting { startEarlyMediaIfEligible() }
         let cloudSession = IPhoneCloudCallSession.shared
+        cloudSession.onEarlyPlayback = { [weak self, weak cloudSession] in
+            guard let self, let cloudSession, self.currentCallTransport == .cloud,
+                  cloudSession.earlyMediaAudible,
+                  self.callLifecycleSnapshot.callUUID == cloudSession.call?.uuid else { return }
+            self.audio.stopCallTone()
+        }
         if cloudSession.call != nil, cloudSession.answered {
             await performCallAudioStartup()
             return
@@ -3668,6 +3778,12 @@ final class AppModel: ObservableObject {
         }
         let managedByCallKit = callKit.managesCurrentCall
         let cloudSession = IPhoneCloudCallSession.shared
+        cloudSession.onEarlyPlayback = { [weak self, weak cloudSession] in
+            guard let self, let cloudSession, self.currentCallTransport == .cloud,
+                  cloudSession.earlyMediaAudible,
+                  self.callLifecycleSnapshot.callUUID == cloudSession.call?.uuid else { return }
+            self.audio.stopCallTone()
+        }
         if cloudSession.call != nil, cloudSession.answered {
             if CloudCallAudioStartupPolicy.shouldStart(
                 answered: true,
@@ -3754,21 +3870,20 @@ final class AppModel: ObservableObject {
     private func waitForLocalIncomingRoute() async -> (AirSIMAPI, PCMRoute)? {
         // Cold launch from CallKit can answer before Bonjour/VoWLAN discovery has
         // completed. Retry briefly instead of failing the call immediately.
-        for attempt in 0..<8 {
-            if let route = await readyVoWLANRoute() { return route }
+        for attempt in 0..<20 {
+            if let route = await readyVoWLANRoute(waitForProbe: false) { return route }
             // A cloud media URL in the APNs payload does not mean the local
             // route is ready. Keep waiting unless another call already owns
             // the local presentation.
             if activeCall != nil { return nil }
-            if attempt < 7 { try? await Task.sleep(for: .milliseconds(400)) }
+            if attempt < 19 { try? await Task.sleep(for: .milliseconds(400)) }
         }
         return nil
     }
 
-    func readyVoWLANRoute() async -> (AirSIMAPI, PCMRoute)? {
+    func readyVoWLANRoute(waitForProbe: Bool = true) async -> (AirSIMAPI, PCMRoute)? {
         if let api = selectedDirectoryAPI { return (api, Self.pcmRoute(for: api.route)) }
         vowlan.startBrowsing()
-        await vowlan.probeNow()
         if vowlan.availability.isReady(),
            let endpoint = vowlan.availability.endpoint,
            permitsVoWLANEndpoint(endpoint),
@@ -3777,6 +3892,12 @@ final class AppModel: ObservableObject {
                 AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential)),
                 .vowlan(endpoint: endpoint, credential: credential)
             )
+        }
+        if waitForProbe { await vowlan.probeNow() } else { vowlan.probeInBackground() }
+        if vowlan.availability.isReady(), let endpoint = vowlan.availability.endpoint,
+           permitsVoWLANEndpoint(endpoint), let credential = credentialForVoWLANEndpoint(endpoint) {
+            return (AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential)),
+                .vowlan(endpoint: endpoint, credential: credential))
         }
         // PushKit 可在后台先于 Bonjour 浏览器恢复。最近一次成功轮询若明确来自
         // VoWLAN，就复用同一已鉴权端点；绝不能把通用 isOnline 误当成 VoWLAN 可达。
@@ -3819,14 +3940,19 @@ final class AppModel: ObservableObject {
     private func endVoWLANCallAfterPathLoss() async {
         guard currentCallTransport == .vowlan else { return }
         let localAPI = currentLocalAPI
+        let ending = callLifecycleSnapshot
         audio.deactivate()
         try? await localAPI?.hangupCall(callID: localAPICallID)
+        guard callLifecycleSnapshot.callID == ending.callID,
+              callLifecycleSnapshot.callUUID == ending.callUUID,
+              callLifecycleSnapshot.generation == ending.generation else { return }
         errorMessage = "VoWLAN 局域网已断开；当前通话已结束，下一通将自动选择云端"
         await AgentVerboseTraceRecorder.shared.recordEvent(
             source: "ios", category: "call_transport", phase: "ended",
             title: "hotspot_lost_no_midcall_handover",
             detail: "VoWLAN 局域网路径丢失，结束当前通话；未迁移到云端",
-            fields: ["generation": String(lockedCallTransport?.generation ?? 0)],
+            fields: ["generation": String(ending.generation), "end_source": "vowlan_path_loss",
+                     "call_uuid": ending.callUUID?.uuidString ?? "none"],
             isFailure: true
         )
         try? await callKit.endCurrentCall()
@@ -4036,6 +4162,13 @@ final class AppModel: ObservableObject {
         forcedState: CallLifecycleState? = nil,
         agentID: String? = nil
     ) -> Bool {
+        if call.isTerminal, let agentID,
+           let key = deviceCalls.key(agentID: agentID, callID: call.androidID ?? call.id),
+           deviceCalls.latestEvent(for: key)?.state.isTerminal == true,
+           callLifecycleSnapshot.state.isTerminal,
+           deviceCallRouter.route(for: key)?.systemUUID == callLifecycleSnapshot.callUUID {
+            return true // This exact session has already completed and persisted.
+        }
         if call.isTerminal, let agentID,
            deviceCallRouter.ingestOwnedWLANClosure(call, agentID: agentID,
                mode: ConnectionModePreference.selected()) {
@@ -4371,7 +4504,7 @@ extension AppModel: CallKitActionHandling {
             audio.stopCallTone(deactivateSession: false)
             backgroundStandby.suspendForCall()
             callPresentationSurface = origin == .app ? .app : .system
-            try await answerOwnedCall(route.key)
+            try await answerOwnedCall(route.key, source: origin == .system ? "callkit" : "app")
             return
         }
         guard !deviceCallRouter.contains(uuid: uuid), callKit.currentSystemCallUUID == uuid else {
@@ -4385,7 +4518,7 @@ extension AppModel: CallKitActionHandling {
         if let route = deviceCallRouter.route(for: uuid) {
             let ringing = deviceCalls.latestEvent(for: route.key)?.state == .ringing
             // Retire UI before the asynchronous backend reply; target is held by Router.
-            try await deviceCallRouter.end(route.key, rejectIfRinging: ringing)
+            try await deviceCallRouter.end(route.key, rejectIfRinging: ringing, source: "callkit")
             return
         }
         if deviceCallRouter.contains(uuid: uuid) { return }
@@ -4415,12 +4548,9 @@ extension AppModel: CallKitActionHandling {
         try CallKitAudioPreparationCoordinator.prepare(
             suspendStandby: { backgroundStandby.suspendForCall() },
             configureCallAudio: {
-                if ConnectionModePreference.selected() == .cloud,
-                   callKit.currentIncomingPush?.authenticatedMediaURL != nil {
-                    try IPhoneCloudCallSession.shared.prepareAudioForCallKit()
-                } else {
-                    try audio.prepareForCallKit()
-                }
+                // Cloud, BLE and WLAN share the system session and tone controller.
+                // Mark its CallKit ownership even when a different engine plays PCM.
+                try audio.prepareForCallKit()
             },
             resumeStandby: { backgroundStandby.resumeAfterCall() }
         )
@@ -4668,7 +4798,7 @@ extension AppModel: CallKitActionHandling {
             // Do not probe VoWLAN from an explicit cloud answer. A local probe
             // timeout used to consume the answer path before any cloud request.
             var vowlanRoute: (AirSIMAPI, PCMRoute)? =
-                selectedMode == .cloud ? nil : await readyVoWLANRoute()
+                selectedMode == .cloud ? nil : await readyVoWLANRoute(waitForProbe: false)
             // APNs normally carries a cloud media URL. That must not make the
             // CallKit answer skip VoWLAN discovery: answering from the system
             // UI can happen before Bonjour/Tailscale has restored the route,
@@ -4689,10 +4819,45 @@ extension AppModel: CallKitActionHandling {
                 guard let (vowlanAPI, pcmRoute) = vowlanRoute else {
                     throw CallKitBridgeError.noReachableTransport
                 }
-                try audio.prepareForCallKit()
-                try await vowlanAPI.answerCall(callID: localAPICallID)
+                // Resolve the authenticated backend call before adopting a PushKit-first
+                // presentation. Never identify a call by its phone number or timing.
+                var status = try await vowlanAPI.callStatus()
+                var resolvedPushIdentity = false
+                if let pushedCall,
+                   ![status.active?.id, status.active?.androidID].compactMap({ $0 }).contains(pushedCall.callID) {
+                    status = try await vowlanAPI.resolvePushedCall(pushedCall)
+                    resolvedPushIdentity = true
+                }
                 guard isCurrent() else { throw CancellationError() }
+                guard status.lastPollError.isEmpty, let incoming = status.active,
+                      !incoming.isTerminal, let uuid = answeringCall.callUUID,
+                      case let .vowlan(endpoint, _) = vowlanAPI.route,
+                      let agentID = localDevices.agentIDs.first(where: { localDevices.api(for: $0)?.route == vowlanAPI.route })
+                        ?? vowlan.authenticatedAgentID(for: endpoint)
+                else { throw DeviceCallRoutingError.stale }
+                guard isCurrent() else { throw CancellationError() }
+                guard incoming.state == "incoming" || incoming.state == "waiting",
+                      resolvedPushIdentity || [incoming.id, incoming.androidID].compactMap({ $0 }).contains(answeringCall.callID ?? ""),
+                      pushedCall?.agentID == nil || pushedCall?.agentID == agentID else { throw DeviceCallRoutingError.stale }
+                await AgentVerboseTraceRecorder.shared.recordEvent(source: "ios", category: "call", phase: "answer_resolved",
+                    title: "来电身份已解析", fields: ["call_id": incoming.androidID ?? incoming.id,
+                        "call_uuid": uuid.uuidString, "device_id": agentID,
+                        "generation": String(answeringCall.generation), "status_revision": String(status.revision ?? 0),
+                        "answer_source": origin == .system ? "callkit" : "app", "previous_state": answeringCall.state.rawValue,
+                        "next_state": "connecting"])
+                guard isCurrent() else { throw CancellationError() }
+                let route = try deviceCallRouter.adoptIncoming(.init(agentID: agentID,
+                    callID: incoming.androidID ?? incoming.id, state: .ringing, transport: .vowlan,
+                    transportEpoch: localDevices.transportEpoch(for: agentID),
+                    number: incoming.number, direction: incoming.direction, backendCallID: incoming.id),
+                    systemUUID: uuid, service: WLANDeviceCallBackend(api: vowlanAPI,
+                        epoch: localDevices.transportEpoch(for: agentID), agentID: agentID),
+                    presentationCallID: answeringCall.callID, presentationGeneration: answeringCall.generation)
                 lockLocalTransport(.vowlan, api: vowlanAPI, pcmRoute: pcmRoute)
+                try await answerOwnedCall(route.key, source: origin == .system ? "callkit" : "app")
+                presentOwnedCall(route.key, state: .active)
+                await startCallAudioIfReady()
+                return
             case .bluetooth:
                 guard vobleCalls.currentIdentity != nil else {
                     throw CallKitBridgeError.noReachableTransport
@@ -4845,6 +5010,7 @@ extension AppModel: CallKitActionHandling {
     }
 
     func callKitAudioSessionDidActivate() async {
+        audio.callKitDidActivate()
         if VirtualCallTTSController.shared.isPrepared {
             VirtualCallTTSController.shared.start()
             return
@@ -4918,6 +5084,14 @@ extension AppModel: CallKitActionHandling {
             traceID: "callkit-failure-\(UUID().uuidString.lowercased())",
             failure: message
         ))
+    }
+
+    func ownsSystemPresentation(for call: IncomingVoIPCall) -> Bool {
+        guard let key = presentedDeviceCall, let event = deviceCalls.latestEvent(for: key),
+              !event.state.isTerminal, key.agentID == call.agentID,
+              let route = deviceCallRouter.route(for: key),
+              callKit.currentSystemCallUUID == route.systemUUID else { return false }
+        return call.callID == event.callID || call.callID == event.backendCallID
     }
 
     func callKitDidReceiveIncoming(_ call: IncomingVoIPCall) {
@@ -5015,22 +5189,25 @@ extension AppModel {
                          unreadMessages: messages.filter { $0.sourceAgentID == agent.id && unreadMessageIDs.contains($0.id) }.count,
                          unseenMissedCalls: callHistory.filter { $0.sourceAgentID == agent.id && unseenMissedCallIDs.contains($0.id) }.count)
         }
-        let allowedIDs = Set(agents.map(\.id))
-        let calls = callHistory.filter { call in
-            call.endedAt != nil && (call.sourceAgentID == nil || allowedIDs.contains(call.sourceAgentID!))
-        }.sorted { $0.startedAt > $1.startedAt }.prefix(6).map { call in
-            AirSIMWidgetSnapshot.RecentCall(id: call.id, agentID: call.sourceAgentID,
-                maskedNumber: AirSIMWidgetSnapshot.mask(call.number), date: call.startedAt,
-                incoming: call.direction == "incoming", missed: call.missed)
+        let completedCalls = callHistory.filter { $0.endedAt != nil }
+        let calls = devices.flatMap { device in
+            AirSIMWidgetSnapshot.recentRecords(completedCalls, for: device.id,
+                agent: \.sourceAgentID, date: \.startedAt).map { call in
+                AirSIMWidgetSnapshot.RecentCall(id: call.id, agentID: call.sourceAgentID,
+                    maskedNumber: AirSIMWidgetSnapshot.mask(call.number), date: call.startedAt,
+                    incoming: call.direction == "incoming", missed: call.missed,
+                    unseen: unseenMissedCallIDs.contains(call.id))
+            }
         }
-        let recentMessages = messages.filter { message in
-            message.sourceAgentID.map { allowedIDs.contains($0) } ?? false
-        }.sorted { $0.timestamp > $1.timestamp }.prefix(6).map { message in
-            // SMSMessage.id can contain the body and sender for legacy records.
-            // Export the requested bounded preview, never the legacy ID.
-            AirSIMWidgetSnapshot.RecentMessage(agentID: message.sourceAgentID,
-                date: message.timestamp, incoming: !message.isOutgoing,
-                contentPreview: AirSIMWidgetSnapshot.messagePreview(message.content))
+        let recentMessages = devices.flatMap { device in
+            AirSIMWidgetSnapshot.recentRecords(messages, for: device.id,
+                agent: \.sourceAgentID, date: \.timestamp).map { message in
+                // Legacy IDs may contain sender/body; export only the bounded preview.
+                AirSIMWidgetSnapshot.RecentMessage(agentID: message.sourceAgentID,
+                    date: message.timestamp, incoming: !message.isOutgoing,
+                    contentPreview: AirSIMWidgetSnapshot.messagePreview(message.content),
+                    unread: unreadMessageIDs.contains(message.id))
+            }
         }
         let mode = ConnectionModePreference.selected()
         let nextMode = WidgetConnectionModeCycle.next(after: mode, pureLocal: widgetPureLocalEnabled)

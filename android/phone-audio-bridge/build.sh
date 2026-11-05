@@ -32,6 +32,7 @@ find "$SCRIPT_DIR/test" -name '*.java' -type f -print | sort | sed 's/.*/"&"/' >
 "$JAVAC" --release 17 -cp "$ANDROID_JAR" -d "$TEST_CLASSES" \
     @"$BUILD_DIR/sources.args" @"$BUILD_DIR/tests.args"
 "$JAVA" -cp "$TEST_CLASSES:$ANDROID_JAR" com.airsim.bridge.BridgeUnitTests
+"$JAVA" -cp "$TEST_CLASSES:$ANDROID_JAR" com.airsim.bridge.Redmi9PCMTests
 find "$SCRIPT_DIR/test-fixtures" -name '*.java' -type f -print | sort | sed 's/.*/"&"/' > "$BUILD_DIR/failure-fixtures.args"
 "$JAVAC" --release 17 -cp "$TEST_CLASSES:$ANDROID_JAR" -d "$FAILURE_TEST_CLASSES" \
     @"$BUILD_DIR/failure-fixtures.args"

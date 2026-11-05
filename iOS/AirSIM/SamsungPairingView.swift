@@ -11,7 +11,7 @@ struct SamsungPairingView: View {
     @State private var code = ""
     @State private var pairingServiceID: String?
     @State private var message = ""
-    private enum Method { case automatic, privateIP, publicDomain }
+    enum Method { case automatic, privateIP, publicDomain }
     @State private var method: Method = .automatic
     private var manual: Bool { method != .automatic }
     private var usesTLS: Bool { method == .publicDomain }
@@ -22,19 +22,26 @@ struct SamsungPairingView: View {
     @State private var pairingTask: Task<Void, Never>?
     @State private var isVisible = false
 
+    init(initialMethod: Method = .automatic) {
+        _method = State(initialValue: initialMethod)
+        _port = State(initialValue: initialMethod == .publicDomain ? "9443" : "")
+    }
+
     var body: some View {
         Form {
             Section {
+              DisclosureGroup("本次配对的云端通知") {
                 Toggle(isOn: $localPairingOnly) {
                     Label("仅本次配对不写入云端", systemImage: "wifi")
                 }
-                .disabled(pairingServiceID != nil)
+                .disabled(pairingServiceID != nil || RelayEgressGate.shared.isBlocked)
                 .accessibilityIdentifier("localPairingOnly")
                 Text(localPairingOnly
                      ? "本次配对只写入 VoWLAN 密钥，不写入 Relay/APNs。不会改变当前通话媒体模式。"
                      : "本次配对额外写入 Relay/APNs；仅用于通知，不会改变当前通话媒体模式。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+              }
             }
 
             Section("连接步骤") {
@@ -54,11 +61,8 @@ struct SamsungPairingView: View {
                     Text("私网 IP").tag(Method.privateIP)
                     Text("公网域名").tag(Method.publicDomain)
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .disabled(pairingServiceID != nil)
-                Text("公网域名配对为试验性功能，真实公网配对与双向音频仍待真机验收。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
             if usesTLS {
@@ -94,7 +98,7 @@ struct SamsungPairingView: View {
                         Text("填写域名，不含 https:// 或路径。三个端口都是 NAS 对外提供的 TLS 端口；配对端口转发到安卓本次配对窗口，控制与音频各自转发。证书必须可信且匹配域名，不支持明文公网连接或跳过证书校验。无需开启 AirSIM 云端模式。")
                     } else {
                       Text("先在安卓打开一次性配对窗口，填写该页的配对端口，不是 ADB 或通话端口。使用 Tailscale 时填安卓的 Tailscale IPv4，两端须已接入且允许互访；无需开启 AirSIM 云端模式。"
-                        + "若局域网使用特殊网段（如 30.0.0.0/8），先在设置 → 私有网络中添加该网段。配对后选择 VoWLAN 或自动连接模式。")
+                        + "若局域网使用特殊网段（如 30.0.0.0/8），先在设置 → 连接与设备 → 局域网与 VPN中添加该网段。配对后选择 VoWLAN 或自动连接模式。")
                     }
                 }
                 .disabled(pairingServiceID != nil)
@@ -133,10 +137,12 @@ struct SamsungPairingView: View {
                 Section("结果") { Text(message) }
             }
         }
-        .navigationTitle("配对安卓手机")
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle(usesTLS ? "公网域名配对 · 试验性" : manual ? "手动地址配对" : "自动发现配对")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             isVisible = true
+            if RelayEgressGate.shared.isBlocked { localPairingOnly = true }
             if !manual { browser.start() }
         }
         .onChange(of: method) { value in
@@ -314,15 +320,20 @@ struct RemoteDirectGuideView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var context: RemoteDirectGuideContext
     @State private var copied = false
+    private let embedded: Bool
 
-    init(context: RemoteDirectGuideContext) {
+    init(context: RemoteDirectGuideContext, embedded: Bool = false) {
+        self.embedded = embedded
         _context = State(initialValue: context)
     }
 
     private var firstPairing: Bool { context == .firstPairing }
 
     var body: some View {
-        NavigationStack {
+        if embedded { content } else { NavigationStack { content } }
+    }
+
+    private var content: some View {
             Form {
                 Section {
                     Label("试验性功能", systemImage: "flask")
@@ -441,7 +452,6 @@ struct RemoteDirectGuideView: View {
                     .accessibilityIdentifier("dismissRemoteDirectGuide")
             }
             .onChange(of: context) { _ in copied = false }
-        }
     }
 
     private func requirement(_ title: String, symbol: String, detail: String) -> some View {

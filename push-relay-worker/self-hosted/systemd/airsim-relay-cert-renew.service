@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew AirSIM short-lived IP TLS certificate
+After=network-online.target airsim-relay-https.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/airsim-relay/certbot/bin/certbot renew --cert-name airsim-relay-ip --config-dir /etc/airsim-relay/letsencrypt --work-dir /var/lib/airsim-acme-state --logs-dir /var/log/airsim-acme --quiet
+TimeoutStartSec=300
+PrivateTmp=true
+ProtectHome=true

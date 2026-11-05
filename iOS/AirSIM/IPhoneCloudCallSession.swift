@@ -440,6 +440,19 @@ enum CloudCallTerminationCoordinator {
 }
 
 struct CloudPCMControlMessage: Equatable, Sendable {
+    // Released U30Air R21 uses early_media; v1-capable agents use the new name.
+    // Both must prove the same complete call identity and neither means ACTIVE.
+    func authorizesEarlyMedia(callID: String, uuid: UUID, generation: UInt64,
+                              outgoing: Bool, state: CallLifecycleState) -> Bool {
+        ["early_media", "early_media_ready_v1"].contains(status)
+            && outgoing && state == .connecting
+            && exactlyMatches(callID: callID, uuid: uuid, generation: generation)
+    }
+
+    func exactlyMatches(callID: String, uuid: UUID, generation: UInt64) -> Bool {
+        self.callID == callID && self.callUUID?.lowercased() == uuid.uuidString.lowercased()
+            && self.generation == generation
+    }
     func matches(callID: String, uuid: UUID, generation: UInt64) -> Bool {
         (self.callID == nil || self.callID == callID)
             && (callUUID == nil || callUUID?.lowercased() == uuid.uuidString.lowercased())
@@ -522,8 +535,10 @@ struct CloudCallControlEnvelope: Codable, Equatable, Sendable {
     let generation: UInt64
     let commandID: String
     let traceID: String
+    var earlyMediaVersion: Int? = 1
 
     enum CodingKeys: String, CodingKey {
+        case earlyMediaVersion = "early_media_version"
         case action, generation
         case callID = "call_id"
         case callUUID = "call_uuid"
@@ -752,6 +767,13 @@ final class IPhoneCloudCallSession {
     private var answerRetryGeneration = 0
     private var answerAcknowledged = false
     private var earlyAnswerEnvelope: CloudCallControlEnvelope?
+    private var earlyMediaReady = false
+    private var earlyPlaybackNotified = false
+    private(set) var earlyMediaUnavailable = false
+    var isReceivingEarlyMedia: Bool { call?.isOutgoing == true && lifecycleState == .connecting && earlyMediaReady }
+    var earlyMediaAudible: Bool { isReceivingEarlyMedia && media.isAudioRunning && media.hasReceivedDownlink }
+    var onEarlyPlayback: (() -> Void)?
+    var onAudioEngineStarted: (() -> Void)?
 
     var isPrepared: Bool { call != nil && media.isConnected }
     var hasActiveCall: Bool { call != nil && answered && lifecycleState == .active }
@@ -789,10 +811,27 @@ final class IPhoneCloudCallSession {
                 guard let call = session.call, session.media.isCurrentConnection(connection),
                       control.matches(callID: call.callID, uuid: call.uuid, generation: call.generation) else { return }
                 switch status {
+                case "early_media", "early_media_ready_v1":
+                    // New capability requires all identity fields (legacy controls
+                    // without them cannot authorize pre-connect media).
+                    guard control.authorizesEarlyMedia(callID: call.callID, uuid: call.uuid,
+                        generation: call.generation, outgoing: call.isOutgoing, state: session.lifecycleState) else { return }
+                    session.earlyMediaReady = true
+                    session.earlyMediaUnavailable = false
+                    if CallKitController.shared.audioSessionIsActive { session.startAudioWithRetry() }
+                case "early_media_unavailable":
+                    guard session.lifecycleState == .connecting,
+                          control.exactlyMatches(callID: call.callID, uuid: call.uuid, generation: call.generation) else { return }
+                    session.earlyMediaReady = false
+                    session.earlyMediaUnavailable = true
+                    session.media.stopAudio()
                 case _ where CloudCallAnswerPolicy.isAcknowledged(status: status):
                     session.confirmAnswer()
                     if status == "active" {
+                        session.earlyMediaReady = false
+                        if session.lifecycleState != .active { session.media.stopAudio() } // fence receive-only generation
                         session.emitLifecycle(.active, source: .agent, traceID: control.traceID)
+                        if CallKitController.shared.audioSessionIsActive { session.startAudioWithRetry() }
                     }
                 case _ where CloudCallAnswerPolicy.shouldReplayImmediately(status: status):
                     session.replayAnswerIfNeeded()
@@ -825,6 +864,10 @@ final class IPhoneCloudCallSession {
         media.onDownlinkPlayback = { connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
+                if session.media.isCurrentConnection(connection), session.earlyMediaAudible, !session.earlyPlaybackNotified {
+                    session.earlyPlaybackNotified = true
+                    session.onEarlyPlayback?()
+                }
                 if session.media.isCurrentConnection(connection), session.hasActiveCall, session.media.isAudioRunning {
                     session.audioState = .connected
                 }
@@ -869,6 +912,7 @@ final class IPhoneCloudCallSession {
         answered = true
         lifecycleState = .connecting
         answerAcknowledged = false
+        if callChanged { earlyMediaReady = false; earlyPlaybackNotified = false; earlyMediaUnavailable = false }
         if callChanged || mediaHealthTracker == nil {
             mediaHealthTracker = CloudMediaHealthTracker(startedAt: Date(), maximumRebuilds: 3)
             mediaHealthTracker?.recordRoute(media.audioRouteDescription)
@@ -1097,15 +1141,19 @@ final class IPhoneCloudCallSession {
     func startAudio() throws {
         guard isPrepared else { throw IPhoneCloudCallError.connectionClosed }
         Task { await AgentVerboseTraceRecorder.shared.recordAudioStartup(phase: "phone_start") }
-        try media.startAudio()
+        let receiveOnly = call?.isOutgoing == true && lifecycleState == .connecting
+        guard !receiveOnly || earlyMediaReady else { return }
+        try media.startAudio(receiveOnly: receiveOnly)
+        onAudioEngineStarted?()
         Task { await AgentVerboseTraceRecorder.shared.recordAudioStartup(phase: "engine_ready") }
         mediaHealthTracker?.recordRoute(media.audioRouteDescription)
         publishMediaHealth()
-        startMediaHealthMonitoring()
+        if !receiveOnly { startMediaHealthMonitoring() }
     }
 
     func startAudioWithRetry() {
         guard canAttemptAudio else { return }
+        if call?.isOutgoing == true && lifecycleState == .connecting && !earlyMediaReady { return }
         if media.isAudioRunning {
             audioState = .connected
             traceAudio(phase: "already_running", title: "iPhone 云端音频已在运行")
@@ -1221,6 +1269,8 @@ final class IPhoneCloudCallSession {
         call = nil
         answered = false
         lifecycleState = .idle
+        earlyMediaReady = false
+        earlyPlaybackNotified = false; earlyMediaUnavailable = false
         answerAcknowledged = false
         earlyAnswerEnvelope = nil
         audioState = .idle
@@ -1441,6 +1491,41 @@ private final class OneShotThrowingContinuation {
     }
 }
 
+/// Confined to the media queue. Coalesces route notifications and bounds local
+/// engine recovery; it never reconnects signaling, sends answer, or dials.
+final class CloudAudioRouteRecovery {
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    private let eligible: () -> Bool
+    private let rebuild: () throws -> Void
+    private let completed: (Error?) -> Void
+    private var generation = UUID()
+    private let delays: [TimeInterval] = [0.15, 0.35, 0.75]
+
+    init(schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
+         eligible: @escaping () -> Bool, rebuild: @escaping () throws -> Void,
+         completed: @escaping (Error?) -> Void) {
+        self.schedule = schedule; self.eligible = eligible
+        self.rebuild = rebuild; self.completed = completed
+    }
+    func request() {
+        guard eligible() else { return }
+        generation = UUID()
+        enqueue(generation, attempt: 0)
+    }
+    func invalidate() { generation = UUID() }
+    private func enqueue(_ token: UUID, attempt: Int) {
+        schedule(delays[attempt]) { [weak self] in
+            guard let self, self.generation == token, self.eligible() else { return }
+            do { try self.rebuild(); self.completed(nil) }
+            catch {
+                guard self.generation == token, self.eligible() else { return }
+                if attempt + 1 < self.delays.count { self.enqueue(token, attempt: attempt + 1) }
+                else { self.completed(error) }
+            }
+        }
+    }
+}
+
 private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     var onConnectionLost: ((UUID) -> Void)?
     var onControl: ((CloudPCMControlMessage, UUID) -> Void)?
@@ -1470,6 +1555,53 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     private var stopped = true
     private var controlOperations: [String: CloudCallControlOperationIdentity] = [:]
     private var lastQualityTraceAt: TimeInterval = 0
+    private var engineConfigurationObserver: NSObjectProtocol?
+    private var routeObserver: NSObjectProtocol?
+    private var audioRecoveryDesired = false
+    private var outputRouteSignature = ""
+    private lazy var routeRecovery = CloudAudioRouteRecovery(
+        schedule: { [weak self] delay, work in
+            self?.queue.asyncAfter(deadline: .now() + delay, execute: DispatchWorkItem(block: work))
+        }, eligible: { [weak self] in
+            guard let self else { return false }
+            return !self.stopped && self.webSocket != nil && self.audioRecoveryDesired
+        }, rebuild: { [weak self] in
+            guard let self else { return }
+            // Keep receiveOnly and mute intent, but discard stale engine buffers,
+            // capture callbacks and format. No shared AVAudioSession reconfiguration.
+            self.stopAudioLocked(invalidateRecovery: false)
+            try self.startAudioLocked()
+        }, completed: { [weak self] error in
+            guard let self else { return }
+            let fields = ["route": self.audioRouteDescription, "receive_only": String(self.receiveOnly),
+                          "engine_running": String(self.engine?.isRunning == true),
+                          "error_code": error.map { String(($0 as NSError).code) } ?? "0"]
+            Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "cloud-call-audio",
+                phase: error == nil ? "route_recovered" : "route_recovery_failed",
+                title: "云端音频输出恢复", fields: fields, isFailure: error != nil) }
+        })
+
+    init() {
+        routeObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(), queue: nil) { [weak self] _ in
+            self?.queue.async { [weak self] in
+                guard let self, self.audioRecoveryDesired, !self.stopped else { return }
+                let signature = self.currentOutputRouteSignature()
+                guard signature != self.outputRouteSignature else { return }
+                self.outputRouteSignature = signature
+                self.routeRecovery.request()
+            }
+        }
+    }
+    deinit {
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        if let engineConfigurationObserver { NotificationCenter.default.removeObserver(engineConfigurationObserver) }
+    }
+    private func currentOutputRouteSignature() -> String {
+        let session = AVAudioSession.sharedInstance()
+        return session.currentRoute.outputs.map { $0.uid + ":" + $0.portType.rawValue }.joined(separator: ",")
+            + ":" + String(session.sampleRate) + ":" + String(session.outputNumberOfChannels)
+    }
 
     var isConnected: Bool {
         queue.sync { webSocket != nil && !stopped }
@@ -1489,8 +1621,8 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
         try session.setPreferredSampleRate(48_000)
         try session.setPreferredIOBufferDuration(0.02)
-        // 每通电话从听筒开始；用户随后可在通话页切换扬声器。
-        try session.overrideOutputAudioPort(.none)
+        // The shared controller resets routing once per new CallKit call.
+        // Reconnection/preparation must not erase a later speaker selection.
     }
 
     func connect(to url: URL) async throws {
@@ -1651,10 +1783,22 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         }
     }
 
-    func startAudio() throws { try queue.sync { try startAudioLocked() } }
+    private var receiveOnly = false
+    private var captureInstalled = false
+    func startAudio(receiveOnly: Bool = false) throws {
+        try queue.sync {
+            if self.receiveOnly != receiveOnly { stopAudioLocked() }
+            self.receiveOnly = receiveOnly
+            try startAudioLocked()
+        }
+    }
 
     private func startAudioLocked() throws {
         if engine?.isRunning == true { return }
+        // A foreground/health retry can win the race with a route notification.
+        // Dispose its stopped graph and pending recovery before replacing it.
+        if engine != nil { stopAudioLocked() }
+        if !receiveOnly {
         if #available(iOS 17.0, *) {
             guard AVAudioApplication.shared.recordPermission == .granted else {
                 throw IPhoneCloudCallError.microphonePermissionDenied
@@ -1663,6 +1807,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
             throw IPhoneCloudCallError.microphonePermissionDenied
         }
 
+        }
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         let encoder = IPhoneCloudVoicePCMEncoder()
@@ -1674,25 +1819,29 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
             channels: 1,
             interleaved: false
         ) else { throw IPhoneCloudCallError.invalidAudioFormat }
-        engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+        // Configure VoiceProcessingIO before wiring playback; it replaces IO nodes.
+        if !receiveOnly { try engine.inputNode.setVoiceProcessingEnabled(true) }
+        try CallAudioGraph.connectPlayback(player, engine: engine, format: playbackFormat)
 
+        if !receiveOnly {
         let input = engine.inputNode
-        try input.setVoiceProcessingEnabled(true)
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.channelCount > 0, inputFormat.sampleRate >= 8_000 else {
             throw IPhoneCloudCallError.microphoneUnavailable
         }
         let generation = uplinkGeneration
-        input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { [weak self] buffer, _ in
+        try CallAudioGraph.installCapture(input, format: inputFormat) { [weak self] buffer, _ in
             guard let self else { return }
             let pcm = encoder.encode(buffer)
             if !pcm.isEmpty { enqueueUplink(pcm, generation: generation) }
+        }
+        captureInstalled = true
         }
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
+            if captureInstalled { engine.inputNode.removeTap(onBus: 0); captureInstalled = false }
             player.stop()
             engine.stop()
             throw error
@@ -1701,11 +1850,22 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         self.engine = engine
         self.player = player
         self.encoder = encoder
+        audioRecoveryDesired = true
+        outputRouteSignature = currentOutputRouteSignature()
+        engineConfigurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self, weak engine] _ in
+                self?.queue.async { [weak self, weak engine] in
+                    guard let self, let engine, self.engine === engine, self.audioRecoveryDesired else { return }
+                    self.routeRecovery.request()
+                }
+            }
+        if !receiveOnly {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(20), leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in self?.pumpUplink() }
         uplinkTimer = timer
         timer.resume()
+        }
         let playbackTimer = DispatchSource.makeTimerSource(queue: queue)
         playbackTimer.schedule(deadline: .now(), repeating: .milliseconds(20), leeway: .milliseconds(1))
         playbackTimer.setEventHandler { [weak self] in self?.drainPlayback() }
@@ -1715,7 +1875,15 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
 
     func stopAudio() { queue.sync { stopAudioLocked() } }
 
-    private func stopAudioLocked() {
+    private func stopAudioLocked(invalidateRecovery: Bool = true) {
+        if invalidateRecovery {
+            audioRecoveryDesired = false
+            routeRecovery.invalidate()
+        }
+        if let engineConfigurationObserver {
+            NotificationCenter.default.removeObserver(engineConfigurationObserver)
+            self.engineConfigurationObserver = nil
+        }
         playbackGeneration = UUID()
         uplinkGeneration = UUID()
         uplinkTimer?.cancel()
@@ -1724,7 +1892,8 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
         playbackTimer = nil
         uplinkSender = CloudPCMUplinkSendQueue()
         uplinkBuffer.removeAll(keepingCapacity: false)
-        if engine != nil { engine?.inputNode.removeTap(onBus: 0) }
+        if captureInstalled { engine?.inputNode.removeTap(onBus: 0) }
+        captureInstalled = false
         player?.stop()
         engine?.stop()
         engine = nil
@@ -1785,7 +1954,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     private func enqueueUplink(_ data: Data, generation: UUID) {
         let capturedAt = ProcessInfo.processInfo.systemUptime
         queue.async { [weak self] in
-            guard let self, !stopped, uplinkGeneration == generation else { return }
+            guard let self, !stopped, !receiveOnly, uplinkGeneration == generation else { return }
             uplinkBuffer.append(data)
             while uplinkBuffer.count >= 320 {
                 let frame = Data(uplinkBuffer.prefix(320))
@@ -1799,7 +1968,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     }
 
     private func pumpUplink() {
-        guard !stopped, let socket = webSocket else { return }
+        guard !stopped, !receiveOnly, let socket = webSocket else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if now - lastQualityTraceAt >= 5 {
             lastQualityTraceAt = now

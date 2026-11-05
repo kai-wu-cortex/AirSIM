@@ -10,6 +10,8 @@ struct AirSIMDeviceWidgetView: View {
     @Environment(\.widgetRenderingMode) private var renderingMode
     @Environment(\.dynamicTypeSize) private var textSize
     @Environment(\.colorScheme) private var colorScheme
+    @ScaledMetric(relativeTo: .caption) private var historyRowHeight: CGFloat = 26
+    @ScaledMetric(relativeTo: .caption) private var historyHeaderHeight: CGFloat = 18
     private var device: AirSIMWidgetSnapshot.Device? { snapshot.devices.first }
     private var accent: Color { colorScheme == .dark ? Color(red: 0.42, green: 0.70, blue: 1) : Color(red: 0, green: 0.32, blue: 0.78) }
     private var secondaryText: Color { colorScheme == .dark ? Color(red: 0.67, green: 0.71, blue: 0.78) : Color(red: 0.35, green: 0.40, blue: 0.47) }
@@ -170,11 +172,11 @@ struct AirSIMDeviceWidgetView: View {
     }
 
     private func large(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                if !textSize.isAccessibilitySize { brand(size: 48) }
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("设备状态").font(.title3.bold())
+                if !textSize.isAccessibilitySize { brand(size: 36) }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("设备状态").font(.caption2).foregroundStyle(secondaryText)
                     Text(d.name).font(.headline).lineLimit(1)
                     status(d)
                 }
@@ -189,38 +191,59 @@ struct AirSIMDeviceWidgetView: View {
     }
 
     private func recentDetails(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        let call = snapshot.latestCall(for: d.id)
-        let message = snapshot.latestMessage(for: d.id)
-        return HStack(alignment: .top, spacing: 12) {
-            recordDetail("最近通话", symbol: "phone.fill", to: .recents, agent: d.id, count: d.unseenMissedCalls ?? 0) {
-                if let call {
-                    Text(call.maskedNumber)
-                        .font(.subheadline.weight(.semibold)).lineLimit(2)
-                    if !textSize.isAccessibilitySize {
-                        Text(call.missed ? "未接来电" : call.incoming ? "呼入" : "呼出")
-                            .font(.caption2).foregroundStyle(call.missed ? Color.red : secondaryText)
-                        recordDate(call.date)
+        GeometryReader { geometry in
+            // Accommodate smaller widget sizes and accessibility text without clipping.
+            let capacity = max(1, min(AirSIMWidgetSnapshot.recentRecordLimit,
+                Int(max(0, geometry.size.height - historyHeaderHeight - 5 + 3) / (historyRowHeight + 3))))
+            let calls = Array(snapshot.recentCalls(for: d.id).prefix(capacity))
+            let messages = Array(snapshot.recentMessages(for: d.id).prefix(capacity))
+            HStack(alignment: .top, spacing: 12) {
+                recordDetail("最近通话", symbol: "phone.fill", to: .recents, agent: d.id, count: d.unseenMissedCalls ?? 0) {
+                    if calls.isEmpty {
+                        Text("暂无通话记录").font(.caption).foregroundStyle(secondaryText)
+                    } else {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(calls) { call in
+                                historyRecord(text: call.maskedNumber, date: call.date,
+                                    detail: call.missed ? "未接" : call.incoming ? "呼入" : "呼出",
+                                    attention: call.unseen == true, missed: call.missed)
+                            }
+                        }
                     }
-                } else {
-                    Text("暂无通话记录").font(.caption).foregroundStyle(secondaryText)
                 }
-            }
-            Divider()
-            recordDetail("最近短信", symbol: "message.fill", to: .messages, agent: d.id, count: d.unreadMessages ?? 0) {
-                if let message {
-                    Text(message.displayText).font(.subheadline)
-                        .lineLimit(textSize.isAccessibilitySize ? 2 : 3)
-                    if !textSize.isAccessibilitySize {
-                        Text(message.incoming ? "收到" : "发出")
-                            .font(.caption2).foregroundStyle(secondaryText)
-                        recordDate(message.date)
+                Divider()
+                recordDetail("最近短信", symbol: "message.fill", to: .messages, agent: d.id, count: d.unreadMessages ?? 0) {
+                    if messages.isEmpty {
+                        Text("暂无短信记录").font(.caption).foregroundStyle(secondaryText)
+                    } else {
+                        VStack(alignment: .leading, spacing: 3) {
+                            // Snapshot-local indices avoid exporting legacy IDs containing SMS bodies.
+                            ForEach(Array(messages.enumerated()), id: \.offset) { _, message in
+                                historyRecord(text: message.displayText, date: message.date,
+                                    detail: message.incoming ? "收到" : "发出",
+                                    attention: message.unread == true, missed: false)
+                            }
+                        }
                     }
-                } else {
-                    Text("暂无短信记录").font(.caption).foregroundStyle(secondaryText)
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func historyRecord(text: String, date: Date, detail: String,
+                               attention: Bool, missed: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 3) {
+                if attention { Circle().fill(missed ? Color.red : accent).frame(width: 5, height: 5) }
+                Text(text).font(.caption.weight(attention ? .semibold : .regular))
+                    .foregroundStyle(missed ? Color.red : primaryText).lineLimit(1)
+            }
+            Text("\(detail) · \(date.formatted(.dateTime.month().day().hour().minute()))")
+                .font(.caption2).foregroundStyle(secondaryText).lineLimit(1).minimumScaleFactor(0.85)
+        }
+        .frame(maxWidth: .infinity, minHeight: historyRowHeight, maxHeight: historyRowHeight, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(text)，\(detail)，\(date.formatted(date: .abbreviated, time: .shortened))\(attention ? (missed ? "，未查看" : "，未读") : "")")
     }
 
     private func recordDetail<Content: View>(_ title: String, symbol: String,

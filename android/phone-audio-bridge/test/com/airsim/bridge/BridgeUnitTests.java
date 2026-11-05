@@ -23,7 +23,22 @@ public final class BridgeUnitTests {
         testSamsungAudioContract();
         testListenerRecoveryPolicy();
         testVoiceTxRouteTimeoutPolicy();
+        testCapabilityFormats();
         System.out.println("PASS BridgeUnitTests checks=" + checks);
+    }
+
+    private static void testCapabilityFormats() {
+        check(AudioCapabilityProbe.format(new int[]{8000, 48000}, new int[]{1, 2}, new int[]{2}).equals("native"),
+            "8 kHz mono PCM16 compatibility lost");
+        check(AudioCapabilityProbe.format(new int[]{44100, 48000}, new int[]{2}, new int[]{2}).equals("conversion"),
+            "Redmi 9 declared transmit format requires conversion verification");
+        check(AudioCapabilityProbe.format(new int[]{8000}, new int[]{1}, new int[]{4}).equals("conversion"),
+            "PCM encoding mismatch ignored");
+        check(AudioCapabilityProbe.format(new int[]{}, new int[]{}, new int[]{}).equals("unknown"),
+            "dynamic formats must not imply incompatibility");
+        check(AudioCapabilityProbe.format(null, null, null).equals("unknown"), "missing formats must remain unknown");
+        check(AudioCapabilityProbe.inspect().get("capability_query").equals("unavailable"),
+            "unavailable framework query must not imply missing hardware");
     }
 
     private static void testEndpointCleanupPreservesStartupFailure() {

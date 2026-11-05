@@ -324,7 +324,7 @@ struct VoBLEMessageReassembler: Sendable {
     private var partials: [Key: Partial] = [:]
 
     mutating func append(_ fragment: Data, now: Date = Date()) throws -> VoBLEMessage? {
-        partials = partials.filter { $0.value.firstSeen >= now.addingTimeInterval(-2) }
+        partials = partials.filter { $0.value.firstSeen.timeIntervalSinceReferenceDate >= now.addingTimeInterval(-2).timeIntervalSinceReferenceDate }
         guard fragment.count >= VoBLEMessageFragmenter.headerLength else {
             throw VoBLEProtocolError.packetTooSmall
         }

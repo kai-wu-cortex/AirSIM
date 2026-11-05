@@ -1,0 +1,22 @@
+[Unit]
+Description=AirSIM HTTPS/WSS IP entrypoint
+After=network-online.target airsim-relay.service
+Wants=network-online.target airsim-relay.service
+
+[Service]
+Type=simple
+RuntimeDirectory=airsim-relay-https
+ExecStartPre=/usr/sbin/nginx -e stderr -t -c /etc/airsim-relay/nginx.conf
+ExecStart=/usr/sbin/nginx -e stderr -c /etc/airsim-relay/nginx.conf -g "daemon off;"
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+KillSignal=SIGQUIT
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/cache/airsim-relay-https
+
+[Install]
+WantedBy=multi-user.target

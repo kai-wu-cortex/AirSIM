@@ -45,6 +45,20 @@ final class BridgeProtocol {
         }
     }
 
+    /** Separate local-only receive path. Legacy handshake validation remains strict. */
+    static boolean readMediaHello(InputStream input) throws IOException {
+        byte[] hello = new byte[CLIENT_HELLO.length];
+        int offset=0;
+        while(offset<hello.length) {
+            int count=input.read(hello,offset,hello.length-offset);
+            if(count<0) throw new ProbeClosed();
+            offset+=count;
+        }
+        if(Arrays.equals(hello, CLIENT_HELLO)) return false;
+        if(Arrays.equals(hello, "AIRSIMRX01\n".getBytes(StandardCharsets.US_ASCII))) return true;
+        throw new IllegalArgumentException("invalid PCM handshake");
+    }
+
     static void writeReady(OutputStream output) throws IOException {
         output.write(SERVER_READY);
         output.flush();

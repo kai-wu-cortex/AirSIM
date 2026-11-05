@@ -1,5 +1,7 @@
 # AirSIM Cloudflare Relay 部署手册
 
+> ECS / VPS 第二种部署方式：见 [独立 Relay 部署说明](self-hosted/README.md)。复用本目录业务代码，独立存储与域名；公网启用需另行验证 HTTPS/WSS、备案和推送。
+
 2026-10-29 未部署候选：[反馈仅允许手动上传](../docs/manual-feedback-policy.md)。`/v1/feedback` 仅接受 `trigger=manual`，其他触发类型在写入 Notion 前拒绝；线上需部署后生效，不改变 APNs、心跳或通话媒体。
 
 未发布的 v2 定向命令协议、v1 安全兼容与上线顺序见 [多安卓路由说明](../docs/relay-agent-routing.md)。本轮未部署生产；媒体连接路径及存储 namespace 不变。

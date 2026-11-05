@@ -40,6 +40,23 @@ public final class VoWLANPCMProtocol {
         return Arrays.equals(actual, expected);
     }
 
+    public record EarlyPreface(long timestamp, String nonce, String signature, String binding) {}
+    public static EarlyPreface parseEarly(String line) {
+        if (line == null || line.length() > 1024 || !line.endsWith("\n")) throw new IllegalArgumentException("invalid early preface");
+        String[] f = line.substring(0, line.length()-1).split(" ", -1);
+        if (f.length != 5 || !f[0].equals("AIRSIMEM1") || f[2].length()<7 || f[2].length()>128
+                || f[3].length()<40 || f[3].length()>128) throw new IllegalArgumentException("invalid early preface");
+        byte[] body = java.util.Base64.getDecoder().decode(f[4]);
+        String binding = new String(body, StandardCharsets.UTF_8);
+        if (body.length > 640 || !Arrays.equals(body, binding.getBytes(StandardCharsets.UTF_8)))
+            throw new IllegalArgumentException("invalid early binding");
+        return new EarlyPreface(Long.parseLong(f[1]), f[2], f[3], binding);
+    }
+    public static String canonical(EarlyPreface preface) {
+        return VoWLANAuth.canonicalRequest("PCM", "/v1/pcm/early-media",
+            preface.binding().getBytes(StandardCharsets.UTF_8), preface.timestamp(), preface.nonce());
+    }
+
     public record Preface(long timestamp, String nonce, String signature) {}
 
     public static final class SessionGate {

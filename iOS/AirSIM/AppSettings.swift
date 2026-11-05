@@ -100,6 +100,7 @@ enum L10n {
         "短信内容": "Message", "发送": "Send", "已发送": "Sent", "取消": "Cancel", "刷新": "Refresh", "暂无短信": "No Messages",
         "读取后自动清理模块短信": "Auto-clean module SMS after reading", "清空全部短信": "Clear all SMS",
         "搜索姓名或号码": "Search name or number", "授权访问通讯录": "Allow Contacts Access", "通讯录为空": "No contacts",
+        "搜索姓名、号码或短信内容": "Search name, number or message", "未找到匹配的短信": "No matching messages",
         "状态": "Status", "通用": "General", "网络": "Network", "定位": "Location", "eSIM / 卡片": "eSIM / Card",
         "AT 调试": "AT Debug", "网络诊断": "Network Diagnostics", "运营商": "Operator", "SIM 卡": "SIM Card",
         "网络模式": "Network Mode", "信号强度": "Signal", "下载速度": "Download", "上传速度": "Upload",

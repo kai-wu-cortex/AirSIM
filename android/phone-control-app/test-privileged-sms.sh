@@ -23,6 +23,7 @@ mkdir -p "$OUT"
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.PrivilegedSMSTests
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.ShellProviderQueryTests
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.PrivilegedInboxTests
+"$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.PCMOwnershipTests
 
 "$TASK_JAVA_HOME/bin/javac" --release 17 -d "$OUT" \
   "$ROOT/src/com/airsim/phonecontrol/SMSInboxCursor.java" \
