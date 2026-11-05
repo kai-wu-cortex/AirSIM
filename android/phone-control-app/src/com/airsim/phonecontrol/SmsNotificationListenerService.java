@@ -50,7 +50,7 @@ public final class SmsNotificationListenerService extends NotificationListenerSe
         if (previous != null) return;
         try {
             long timestamp = sbn.getPostTime() > 0 ? sbn.getPostTime() : now;
-            String deliveryID = SMSDeliveryIdentity.id(sender, body, timestamp);
+            String deliveryID = SMSDeliveryIdentity.id(StandaloneAgentStore.currentE2EKey(this), sender, body, timestamp);
             JSONObject event = new JSONObject(WireJson.smsEvent(UUID.randomUUID().toString(),
                     deliveryID, sender, body, Instant.ofEpochMilli(timestamp).toString()));
             StandaloneAgentGateway.get(this).sendSMSEvent(event.toString());

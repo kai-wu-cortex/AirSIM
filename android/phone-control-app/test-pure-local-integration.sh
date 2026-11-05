@@ -24,5 +24,7 @@ CP="$OUT:$JSON_JAR:$BASE:$BUILT:$ANDROID_JAR"
   "$ROOT/src/com/airsim/phonecontrol/StandaloneAgentStore.java" \
   "$ROOT/src/com/airsim/phonecontrol/StandaloneSMSStore.java" \
   "$ROOT/src/com/airsim/phonecontrol/SMSRecentDeliveryIDs.java" \
-  "$ROOT/test/com/airsim/phonecontrol/PureLocalSMSStoreTests.java"
+  "$ROOT/test/com/airsim/phonecontrol/PureLocalSMSStoreTests.java" \
+  "$ROOT/test/com/airsim/phonecontrol/RegistrationE2EKeyTests.java"
 "$TASK_JAVA_HOME/bin/java" -ea -cp "$CP" com.airsim.phonecontrol.PureLocalSMSStoreTests
+"$TASK_JAVA_HOME/bin/java" -ea -cp "$CP" com.airsim.phonecontrol.RegistrationE2EKeyTests

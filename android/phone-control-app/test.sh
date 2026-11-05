@@ -181,6 +181,7 @@ assert_contains "$ROOT/src/com/airsim/phonecontrol/FeedbackUploader.java" \
   "$ROOT"/src/com/airsim/phonecontrol/AVFStartupPolicy.java \
 	"$ROOT"/src/com/airsim/phonecontrol/RuntimePermissionPolicy.java \
 	"$ROOT"/src/com/airsim/phonecontrol/SMSDeliveryIdentity.java \
+	"$ROOT"/src/com/airsim/phonecontrol/E2ESMSCrypto.java \
 	"$ROOT"/src/com/airsim/phonecontrol/SMSRecentDeliveryIDs.java \
 	"$ROOT"/src/com/airsim/phonecontrol/SMSInboxCursor.java \
   "$ROOT"/src/com/airsim/phonecontrol/TelecomStateMapper.java \
@@ -365,3 +366,4 @@ mkdir -p "$PCM_OUT"
 sh "$ROOT/test-audio-policy.sh"
 
 sh "$ROOT/test-privileged-sms.sh"
+sh "$ROOT/test-e2e-sms.sh"

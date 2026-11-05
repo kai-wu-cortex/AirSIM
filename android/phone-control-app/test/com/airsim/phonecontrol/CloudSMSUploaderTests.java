@@ -188,6 +188,26 @@ public final class CloudSMSUploaderTests {
         check(!lifetime.attach(epoch, () -> {}), "stale epoch cannot attach a new connection");
         check(!CloudSMSUploader.rejected(new RelayHTTPException(400, "<html>Bad Request</html>")),
                 "proxy 400 must not discard SMS");
+        // Sealed uploads (issue #24) are final only on the Relay's e2e bodies. An old or rolled-back
+        // Relay answers "invalid incoming SMS" because it cannot read e2e yet: wait, never drop.
+        check(CloudSMSUploader.rejected(new RelayHTTPException(400, "{\"error\":\"invalid encrypted SMS\"}"), true),
+                "a malformed encrypted SMS is final");
+        check(CloudSMSUploader.rejected(new RelayHTTPException(400, "{\"error\":\"encrypted SMS too large\"}"), true),
+                "an encrypted SMS that cannot fit a push is final");
+        check(!CloudSMSUploader.rejected(new RelayHTTPException(400, "{\"error\":\"invalid incoming SMS\"}"), true),
+                "a Relay without e2e support does not discard an encrypted SMS");
+        check(!CloudSMSUploader.rejected(new RelayHTTPException(502, "{\"error\":\"encrypted SMS too large\"}"), true),
+                "only a 400 is final");
+        check(!CloudSMSUploader.rejected(new RelayHTTPException(400, "{\"error\":\"invalid encrypted SMS\"}")),
+                "e2e bodies are not final for a plaintext upload");
+        List<String> sealedOutcomes = new ArrayList<>();
+        uploader().flush(List.of("sealed"), id -> {
+            throw new RelayHTTPException(400, "{\"error\":\"invalid incoming SMS\"}");
+        }, new CloudSMSUploader.Ledger() {
+            public void settled(String id) { sealedOutcomes.add("settled:" + id); }
+            public void rejected(String id) { sealedOutcomes.add("rejected:" + id); }
+        }, quiet, () -> clock[0], () -> true, true);
+        check(sealedOutcomes.isEmpty(), "a sealed SMS stays queued while the Relay cannot read e2e: " + sealedOutcomes);
         List<String> rejected = new ArrayList<>();
         uploader().flush(List.of("invalid"), id -> {
             throw new RelayHTTPException(400, "{\"error\":\"invalid incoming SMS\"}");
