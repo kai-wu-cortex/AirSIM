@@ -909,7 +909,12 @@ struct IncomingRemoteSMS: Equatable, Sendable {
         code = decrypted == nil ? Self.nonEmpty(userInfo["code"] as? String) : nil
         self.timestamp = timestamp
         contentTruncated = decrypted?.truncated ?? (userInfo["content_truncated"] as? Bool ?? false)
-        simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
+        // A decrypted SMS takes its SIM slot only from the sealed text: the Relay could add a clear one.
+        if let decrypted {
+            simSlot = E2ESMSPush.simSlot(decrypted.simSlot)
+        } else {
+            simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
+        }
     }
 
     private static func parseTimestamp(_ value: String) -> Date? {

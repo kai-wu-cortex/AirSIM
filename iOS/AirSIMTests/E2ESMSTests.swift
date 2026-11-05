@@ -99,8 +99,9 @@ final class E2ESMSTests: XCTestCase {
     func testOpenDecryptsVectorPush() throws {
         let outcome = E2ESMSPush.open(try E2ESMSFixture.push(), store: E2ESMSFixture.store())
         XCTAssertEqual(outcome, .decrypted(E2ESMSFixture.plaintext))
+        // The vector predates sim_slot, so the subtitle is the Relay's "SIM 未知".
         XCTAssertEqual(E2ESMSPush.notification(for: outcome),
-                       E2ESMSPush.Notification(title: "95588", body: "【银行】验证码 123456",
+                       E2ESMSPush.Notification(title: "95588", subtitle: "SIM 未知", body: "【银行】验证码 123456",
                                                threadIdentifier: "airsim-sms-95588"))
     }
 
@@ -108,8 +109,26 @@ final class E2ESMSTests: XCTestCase {
         for sender in ["", "  "] {
             let push = try E2ESMSFixture.sealedPush(#"{"sender":"\#(sender)","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
             XCTAssertEqual(E2ESMSPush.notification(for: E2ESMSPush.open(push, store: E2ESMSFixture.store())),
-                           E2ESMSPush.Notification(title: "未知号码", body: "正文", threadIdentifier: "airsim-sms-未知号码"))
+                           E2ESMSPush.Notification(title: "未知号码", subtitle: "SIM 未知", body: "正文",
+                                                   threadIdentifier: "airsim-sms-未知号码"))
         }
+    }
+
+    func testSealedSIMSlotBecomesTheSubtitle() throws {
+        let push = try E2ESMSFixture.sealedPush(#"{"sender":"95588","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false,"sim_slot":"SIM 2"}"#)
+        let outcome = E2ESMSPush.open(push, store: E2ESMSFixture.store())
+        guard case .decrypted(let sms) = outcome else { return XCTFail("not decrypted: \(outcome)") }
+        XCTAssertEqual(sms.simSlot, "SIM 2")
+        XCTAssertEqual(E2ESMSPush.notification(for: outcome)?.subtitle, "接收于 SIM 2")
+        // The Relay's rule for plaintext pushes: "SIM 1"…"SIM 99", anything else is unknown.
+        let cases: [(String?, String?)] = [(" SIM 12 ", "SIM 12"), ("SIM 0", nil), ("SIM 100", nil),
+                                           ("卡 1", nil), ("", nil), (nil, nil)]
+        for (raw, slot) in cases {
+            XCTAssertEqual(E2ESMSPush.simSlot(raw), slot, raw ?? "nil")
+        }
+        let odd = try E2ESMSFixture.sealedPush(#"{"sender":"95588","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false,"sim_slot":"SIM 100"}"#)
+        XCTAssertEqual(E2ESMSPush.notification(for: E2ESMSPush.open(odd, store: E2ESMSFixture.store()))?.subtitle,
+                       "SIM 未知")
     }
 
     func testThreadIdentifierCutsAt64UTF16Units() throws {

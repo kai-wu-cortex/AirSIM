@@ -179,6 +179,23 @@ final class E2ESMSAppTests: XCTestCase {
         XCTAssertEqual(try IncomingRemoteSMS(userInfo: push, keyStore: E2ESMSFixture.store()).sender, "未知号码")
     }
 
+    func testDecryptedSIMSlotComesOnlyFromTheSealedText() throws {
+        // Replies use the SIM that received the conversation, so a clear sim_slot added by the
+        // Relay must not steer them.
+        var sealed = try E2ESMSFixture.sealedPush(#"{"sender":"95588","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false,"sim_slot":"SIM 2"}"#)
+        sealed["sim_slot"] = "SIM 1"
+        let pushed = try IncomingRemoteSMS(userInfo: sealed, keyStore: E2ESMSFixture.store())
+        XCTAssertEqual(pushed.simSlot, "SIM 2")
+        XCTAssertEqual(pushed.message.simSlot, "SIM 2")
+        var unsealed = try E2ESMSFixture.sealedPush(#"{"sender":"95588","content":"正文","timestamp":"2026-11-03T08:00:00Z","truncated":false}"#)
+        unsealed["sim_slot"] = "SIM 1"
+        XCTAssertNil(try IncomingRemoteSMS(userInfo: unsealed, keyStore: E2ESMSFixture.store()).simSlot)
+        // A plaintext push keeps the Relay's clear field.
+        var plain = E2ESMSFixture.plaintextPush(agentID: "android-B")
+        plain["sim_slot"] = "SIM 1"
+        XCTAssertEqual(try IncomingRemoteSMS(userInfo: plain, keyStore: E2ESMSFixture.store()).simSlot, "SIM 1")
+    }
+
     func testRegistrationNeverEncodesE2EKey() throws {
         // The same registration is later sent unsealed to /api/push/register and the Relay.
         let cloud = AgentPushRegistration(cloudModeEnabled: true, deviceID: "iphone-air", deviceSecret: "device-secret",

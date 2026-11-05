@@ -19,6 +19,8 @@ enum E2ESMSPush {
 
     struct Notification: Equatable {
         let title: String
+        /// nil keeps the subtitle the push arrived with.
+        var subtitle: String? = nil
         let body: String
         /// nil keeps the thread the push arrived with.
         let threadIdentifier: String?
@@ -59,7 +61,8 @@ enum E2ESMSPush {
         switch outcome {
         case .decrypted(let sms):
             let sender = displaySender(sms.sender)
-            return Notification(title: sender, body: sms.content, threadIdentifier: thread(for: sender))
+            return Notification(title: sender, subtitle: simSlot(sms.simSlot).map { "接收于 \($0)" } ?? "SIM 未知",
+                                body: sms.content, threadIdentifier: thread(for: sender))
         case .undecryptable:
             return Notification(title: "AirSIM", body: "收到一条加密短信，但无法解密，请在同一 Wi-Fi 下重新配对",
                                 threadIdentifier: nil)
@@ -75,6 +78,13 @@ enum E2ESMSPush {
     /// The Relay's sender rule for plaintext pushes.
     static func displaySender(_ sender: String) -> String {
         nonEmpty(sender) ?? "未知号码"
+    }
+
+    /// The Relay's SIM slot rule for plaintext pushes: "SIM 1"…"SIM 99", otherwise unknown.
+    static func simSlot(_ value: String?) -> String? {
+        guard let slot = nonEmpty(value),
+              slot.range(of: #"^SIM [1-9][0-9]?$"#, options: .regularExpression) != nil else { return nil }
+        return slot
     }
 
     /// The Relay's thread rule for plaintext pushes ("airsim-sms-<sender>", at most 64 UTF-16

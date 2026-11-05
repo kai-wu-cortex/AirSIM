@@ -39,6 +39,14 @@ enum E2ESMS {
         let content: String
         let timestamp: String
         let truncated: Bool
+        /// The receiving SIM ("SIM 1"), which plaintext pushes carry in clear. Older Android
+        /// builds leave it out.
+        var simSlot: String? = nil
+
+        enum CodingKeys: String, CodingKey {
+            case sender, content, timestamp, truncated
+            case simSlot = "sim_slot"
+        }
     }
 
     enum Failure: Error, Equatable {

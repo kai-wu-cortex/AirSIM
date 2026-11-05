@@ -14,6 +14,7 @@ final class NotificationService: UNNotificationServiceExtension {
         let outcome = E2ESMSPush.open(request.content.userInfo, store: KeychainE2EKeyStore.shared)
         if let notification = E2ESMSPush.notification(for: outcome) {
             content.title = notification.title
+            if let subtitle = notification.subtitle { content.subtitle = subtitle }
             content.body = notification.body
             if let thread = notification.threadIdentifier { content.threadIdentifier = thread }
         }
