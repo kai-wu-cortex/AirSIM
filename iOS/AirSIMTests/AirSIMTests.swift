@@ -626,6 +626,26 @@ final class RemoteDirectTests: XCTestCase {
         XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
     }
 
+    func testPublicPairingCommitsTheNegotiatedSMSKey() async throws {
+        let id = "public-e2e-" + UUID().uuidString
+        defer {
+            PairedAndroidDeviceStore.forget(id)
+            VoWLANPairingRecordStore.remove(agentID: id)
+            VoWLANManualRouteStore.remove(agentID: id)
+        }
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: RemoteTestCredentials(agentID: id, credential: credential),
+            e2eKeys: keys, healthTransport: { _ in throw URLError(.badServerResponse) })
+        let model = AppModel(localDirectory: directory,
+            callKitController: CallKitController(observesSystemCallbacks: false))
+        let endpoint = try VoWLANEndpoint(host: "phone.example.com", controlPort: 443, pcmPort: 17593, usesTLS: true)
+        let record = E2EKeyRecord(key: Data(repeating: 0x2E, count: 32), deviceID: "iphone-public")
+        try await model.completeLocalPairing(agentID: id,
+            registration: .local(vowlanSecret: credential.encodedSecret), endpoint: endpoint, e2e: .save(record))
+        // The claim's route proof authenticated this Android, as on the private-network path.
+        XCTAssertEqual(try keys.record(agentID: id), record)
+    }
+
     func testLegacyRouteDecodingAndRemoteCoexistenceRemoval() throws {
         let suite = "remote-routes-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
@@ -2223,16 +2243,27 @@ private actor ManualPairingPeerProbe {
     let secret = Data(0..<32)
     let corruptRoute: Bool
     let expectedEndpoint: NWEndpoint
-    init(corruptRoute: Bool = false, endpoint: NWEndpoint = .hostPort(host: "100.64.1.2", port: 38000)) {
+    /// Standalone advertises `capabilities.e2e_sms: 1` in /pair/v1/info.
+    let advertiseE2E: Bool
+    let badCapability: Bool
+    /// The decrypted registration JSON of the last claim.
+    private(set) var lastRegistration: Data?
+    init(corruptRoute: Bool = false, endpoint: NWEndpoint = .hostPort(host: "100.64.1.2", port: 38000),
+         advertiseE2E: Bool = false, badCapability: Bool = false) {
         self.corruptRoute = corruptRoute
         self.expectedEndpoint = endpoint
+        self.advertiseE2E = advertiseE2E
+        self.badCapability = badCapability
     }
     func exchange(endpoint: NWEndpoint, body: Data, method: String, path: String, timeout: TimeInterval) throws -> Data {
         guard endpoint == expectedEndpoint else { throw URLError(.badURL) }
         if method == "GET", path == "/pair/v1/info" {
-            return try JSONSerialization.data(withJSONObject: ["product": "airsim-pair", "version": 1,
+            var info: [String: Any] = ["product": "airsim-pair", "version": 1,
                 "session_id": "fixture-session", "server_public_key": key.publicKey.rawRepresentation.base64EncodedString(),
-                "expires_at": Date().addingTimeInterval(120).timeIntervalSince1970 * 1000])
+                "expires_at": Date().addingTimeInterval(120).timeIntervalSince1970 * 1000]
+            if advertiseE2E { info["capabilities"] = ["e2e_sms": 1] }
+            if badCapability { info["capabilities"] = ["e2e_sms": "1", "x": [1]] }
+            return try JSONSerialization.data(withJSONObject: info)
         }
         guard method == "POST", path == "/pair/v1/claim",
               let claim = try JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -2250,6 +2281,7 @@ private actor ManualPairingPeerProbe {
             sharedInfo: Data("AirSIMPair/v1:123456".utf8), outputByteCount: 32)
         let plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: decode(sealedText)), using: aes,
                                          authenticating: Data("fixture-session".utf8))
+        lastRegistration = plaintext
         let registration = try XCTUnwrap(JSONSerialization.jsonObject(with: plaintext) as? [String: Any])
         XCTAssertTrue(registration["local_mode"] as? Bool == true)
         XCTAssertNil(registration["relay_url"])
@@ -2472,6 +2504,35 @@ final class AirSIMTests: XCTestCase {
             XCTFail("tampered port must not become a dial route")
         } catch {
             XCTAssertEqual(error as? SamsungPairingClientError, .directGatewayUnavailable)
+        }
+    }
+    func testManualClaimCarriesKeyOnlyWhenNegotiated() async throws {
+        let registration = AgentPushRegistration.local(vowlanSecret: Data(0..<32).base64EncodedString())
+        let address = try SamsungManualPairingAddress(host: "100.64.1.2", port: "38000")
+        func pair(_ peer: ManualPairingPeerProbe, offer: Bool) async throws -> (SymmetricKey?, [String: Any]) {
+            let result = try await SamsungPairingClient.pairManually(address: address, code: "123456",
+                registration: registration, offerE2E: offer,
+                transport: { endpoint, body, method, path, timeout in
+                    try await peer.exchange(endpoint: endpoint, body: body, method: method, path: path, timeout: timeout)
+                })
+            let sealed = await peer.lastRegistration
+            let claim = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(sealed)) as? [String: Any])
+            return (result.e2eKey, claim)
+        }
+        let (sentKey, claim) = try await pair(ManualPairingPeerProbe(advertiseE2E: true), offer: true)
+        let encoded = try XCTUnwrap(claim["e2e_key"] as? String)
+        XCTAssertEqual(encoded.count, 43)
+        XCTAssertEqual(E2ESMS.data(base64URL: encoded)?.count, 32)
+        XCTAssertEqual(E2ESMS.data(base64URL: encoded), sentKey?.withUnsafeBytes { Data($0) })
+        XCTAssertEqual(claim["vowlan_secret"] as? String, registration.vowlanSecret)
+        XCTAssertEqual(claim["local_mode"] as? Bool, true)
+        // Only one side supports it, or the capability is malformed: pair without a key.
+        for (peer, offer) in [(ManualPairingPeerProbe(advertiseE2E: true), false),
+                              (ManualPairingPeerProbe(), true),
+                              (ManualPairingPeerProbe(badCapability: true), true)] {
+            let (key, claim) = try await pair(peer, offer: offer)
+            XCTAssertNil(key)
+            XCTAssertNil(claim["e2e_key"])
         }
     }
     func testPairingHTTPResponseDistinguishesBadCodeFromMissingManualSupport() throws {

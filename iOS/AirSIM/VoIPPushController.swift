@@ -268,10 +268,18 @@ enum RelayHealthValidation {
         let ok: Bool
         let service: String
         let version: String
+        let capabilities: CapabilityFlags?
     }
 
     static func accepts(statusCode: Int, data: Data) -> Bool {
         version(statusCode: statusCode, data: data) != nil
+    }
+
+    /// The Relay forwards end-to-end encrypted SMS (`capabilities.e2e_sms: 1`, issue #24).
+    static func supportsE2ESMS(statusCode: Int, data: Data) -> Bool {
+        guard version(statusCode: statusCode, data: data) != nil,
+              let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return false }
+        return payload.capabilities?.e2eSMS == true
     }
 
     static func version(statusCode: Int, data: Data) -> String? {
@@ -844,12 +852,19 @@ enum RemoteSMSPushError: LocalizedError {
     case unsupportedEvent
     case incomplete
     case invalidTimestamp
+    case undecryptable
+    case locked
+    /// A plaintext push naming an agent whose SMS arrive encrypted (issue #24).
+    case unencryptedFromEncryptedAgent
 
     var errorDescription: String? {
         switch self {
         case .unsupportedEvent: return "不是有效的新短信推送"
         case .incomplete: return "短信推送缺少必要字段"
         case .invalidTimestamp: return "短信推送时间无效"
+        case .undecryptable: return "加密短信无法解密"
+        case .locked: return "解锁前无法读取短信密钥"
+        case .unencryptedFromEncryptedAgent: return "已忽略未加密的短信推送"
         }
     }
 }
@@ -864,13 +879,22 @@ struct IncomingRemoteSMS: Equatable, Sendable {
     let contentTruncated: Bool
     let simSlot: String?
 
-    init(userInfo: [AnyHashable: Any]) throws {
-        guard userInfo["event"] as? String == "incoming_sms" else {
-            throw RemoteSMSPushError.unsupportedEvent
+    /// End-to-end encrypted pushes (issue #24) are opened with the agent's stored key; a plaintext
+    /// push from an agent that has a key is refused, since only a forger sends one.
+    init(userInfo: [AnyHashable: Any], keyStore: any E2EKeyStoring = KeychainE2EKeyStore.shared) throws {
+        let decrypted: E2ESMS.Plaintext?
+        switch E2ESMSPush.open(userInfo, store: keyStore) {
+        case .notSMS: throw RemoteSMSPushError.unsupportedEvent
+        case .plaintext: decrypted = nil
+        case .decrypted(let sms): decrypted = sms
+        case .locked: throw RemoteSMSPushError.locked
+        case .undecryptable: throw RemoteSMSPushError.undecryptable
+        case .unencryptedFromEncryptedAgent: throw RemoteSMSPushError.unencryptedFromEncryptedAgent
         }
         guard let deliveryID = Self.nonEmpty(userInfo["delivery_id"] as? String),
-              let sender = Self.nonEmpty(userInfo["sender"] as? String),
-              let content = Self.nonEmpty(userInfo["content"] as? String) else {
+              let sender = decrypted.map({ E2ESMSPush.displaySender($0.sender) })
+                ?? Self.nonEmpty(userInfo["sender"] as? String),
+              let content = Self.nonEmpty(decrypted?.content ?? (userInfo["content"] as? String)) else {
             throw RemoteSMSPushError.incomplete
         }
         guard let rawTimestamp = userInfo["timestamp"] as? String,
@@ -881,10 +905,16 @@ struct IncomingRemoteSMS: Equatable, Sendable {
         agentID = Self.nonEmpty(userInfo["agent_id"] as? String)
         self.sender = sender
         self.content = content
-        code = Self.nonEmpty(userInfo["code"] as? String)
+        // Only plaintext pushes carry an extracted code.
+        code = decrypted == nil ? Self.nonEmpty(userInfo["code"] as? String) : nil
         self.timestamp = timestamp
-        contentTruncated = userInfo["content_truncated"] as? Bool ?? false
-        simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
+        contentTruncated = decrypted?.truncated ?? (userInfo["content_truncated"] as? Bool ?? false)
+        // A decrypted SMS takes its SIM slot only from the sealed text: the Relay could add a clear one.
+        if let decrypted {
+            simSlot = E2ESMSPush.simSlot(decrypted.simSlot)
+        } else {
+            simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
+        }
     }
 
     private static func parseTimestamp(_ value: String) -> Date? {
@@ -1131,6 +1161,7 @@ final class VoIPPushController: NSObject {
     }
 
     func updateRelayURL(_ value: String) {
+        let previous = configuredRelayURL()
         let normalized = RelayConfiguration.effectiveURL(
             stored: value,
             buildSetting: nil,
@@ -1141,6 +1172,8 @@ final class VoIPPushController: NSObject {
         } else {
             UserDefaults.standard.set(normalized, forKey: Keys.relayURL)
         }
+        // E2E SMS keys belong to the Relay they were negotiated through (issue #24).
+        E2EPairingPolicy.relayChanged(from: previous, to: configuredRelayURL(), store: KeychainE2EKeyStore.shared)
         resetRegistrationBackoff()
         Task { await syncRegistration() }
     }
@@ -1694,6 +1727,30 @@ final class VoIPPushController: NSObject {
         throw lastError ?? CloudAgentStatusError.invalidResponse
     }
 
+    /// Whether the Relay that a pairing registers with forwards encrypted SMS. `/healthz` needs no
+    /// registration, so this works before the first cloud pairing. A "no" makes Android drop an
+    /// existing key, so dropped connections and 5xx are retried like the self-test's health probe;
+    /// any other answer is final.
+    nonisolated static func relaySupportsE2ESMS(
+        relayURL: String,
+        send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
+            try await RelayEgressGate.shared.send($0)
+        }
+    ) async -> Bool {
+        guard let url = RelayEndpoint.url(base: relayURL, path: "healthz") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 6
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        for attempt in 1...3 {
+            if attempt > 1 { try? await Task.sleep(for: .milliseconds(300 * (attempt - 1))) }
+            guard let (data, response) = try? await send(request),
+                  let http = response as? HTTPURLResponse, http.statusCode < 500 else { continue }
+            return RelayHealthValidation.supportsE2ESMS(statusCode: http.statusCode, data: data)
+        }
+        return false
+    }
+
     private static let selfTestSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 8
@@ -1780,15 +1837,22 @@ final class VoIPPushController: NSObject {
         )
     }
 
+    /// `offerE2E` tells the pairing client it may put an E2E SMS key into the claim (issue #24).
     func performAndroidPairing<T>(
         localOnly: Bool,
-        operation: (AgentPushRegistration) async throws -> T
+        operation: (AgentPushRegistration, _ offerE2E: Bool) async throws -> T
     ) async throws -> T {
         try await pairingGate.withPairing {
             guard let registration = self.pairingRegistration(localOnly: localOnly) else {
                 throw SamsungPairingClientError.registrationUnavailable
             }
-            return try await operation(registration)
+            var offerE2E = false
+            if !localOnly {
+                let relaySupports = await Self.relaySupportsE2ESMS(relayURL: registration.relayURL)
+                offerE2E = E2EPairingPolicy.offer(localOnly: localOnly, relaySupports: relaySupports,
+                                                  keychainReady: relaySupports && KeychainE2EKeyStore.shared.canStore())
+            }
+            return try await operation(registration, offerE2E)
         }
     }
 

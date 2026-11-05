@@ -85,6 +85,7 @@ APPLE SELF-SIGNING CONTRACT
 - Main app: deployer-owned Bundle ID.
 - Watch app: main Bundle ID + .watchkitapp.
 - Live Activity: main Bundle ID + .liveactivity.
+- Notification Service Extension: main Bundle ID + .notificationservice; shares the keychain group $(AppIdentifierPrefix)airsim.e2e-sms with the main app for end-to-end encrypted cloud SMS (issue #24). Without that group the app never offers a key and cloud SMS stay plaintext.
 - Tests: main Bundle ID + .tests.
 - WKCompanionAppBundleIdentifier equals the main app Bundle ID.
 - Relay ALLOWED_BUNDLE_ID equals the main app Bundle ID.
