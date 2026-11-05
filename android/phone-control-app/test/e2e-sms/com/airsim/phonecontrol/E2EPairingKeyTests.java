@@ -20,7 +20,23 @@ public final class E2EPairingKeyTests {
         keyFollowsRegistration();
         reparingWithoutKeyClears();
         capabilitiesAdvertiseE2E();
+        pendingPairingCannotUploadPlaintext();
         System.out.println("E2E pairing key tests passed: " + cases + " cases");
+    }
+
+    private static void pendingPairingCannotUploadPlaintext() throws Exception {
+        Map<String, String> values = new HashMap<>();
+        SharedPreferences preferences = preferences(values);
+        E2EKeyStore.prepareEncryptedPairing(preferences, "iphone-air", "https://relay.example");
+        try {
+            E2EKeyStore.key(preferences, "iphone-air", "https://relay.example");
+            throw new AssertionError("published encrypted registration without key must block upload");
+        } catch (IllegalStateException expected) {}
+        E2EKeyStore.save(preferences, "iphone-air", "https://relay.example", KEY);
+        E2EKeyStore.prepareEncryptedPairing(preferences, "iphone-air", "https://relay.example");
+        if (!Arrays.equals(KEY, E2EKeyStore.key(preferences, "iphone-air", "https://relay.example")))
+            throw new AssertionError("re-pair preparation must preserve existing key");
+        cases++;
     }
 
     private static void takeRemovesAndReturns() throws Exception {
@@ -73,7 +89,10 @@ public final class E2EPairingKeyTests {
                 new JSONObject(registration.toString()).put("local_mode", true)), "local mode never encrypts");
         equal(null, E2EKeyStore.forRegistration(preferences, null), "no registration");
         values.replaceAll((entry, stored) -> "not+base64");
-        equal(null, E2EKeyStore.forRegistration(preferences, registration), "a corrupt entry is ignored");
+        try {
+            E2EKeyStore.forRegistration(preferences, registration);
+            throw new AssertionError("corrupt key must not downgrade to plaintext");
+        } catch (IllegalStateException expected) {}
         cases++;
     }
 

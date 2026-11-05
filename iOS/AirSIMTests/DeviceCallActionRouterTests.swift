@@ -29,6 +29,10 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertEqual(model.callLifecycleSnapshot.callID, "backend")
         XCTAssertEqual(model.callLifecycleSnapshot.callUUID, uuid)
         XCTAssertEqual(model.callLifecycleSnapshot.generation, 7)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+        XCTAssertNil(model.callConnectedAt, "An answer ACK is not carrier connection evidence")
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "canonical", state: .active,
+            transport: .vowlan, transportEpoch: 1, backendCallID: "backend"))
         XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
         try await model.callKitAnswer(uuid: uuid, origin: .system)
         XCTAssertEqual(service.commands, ["answer:backend"])

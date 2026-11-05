@@ -410,7 +410,12 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ringing,
             transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
         peer.setCallState("incoming")
-        if answered { try await model.callKitAnswer(uuid: pushed.uuid, origin: .system) }
+        if answered {
+            try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+            XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+            _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .active,
+                transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
+        }
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ended,
             transport: .bluetooth, transportEpoch: 5, backendGeneration: 11))
         let before = model.callLifecycleSnapshot
@@ -469,6 +474,10 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
         peer.setCallState("incoming")
         try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+        XCTAssertNil(model.callConnectedAt)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "cold-call", state: .active,
+            transport: .vowlan, transportEpoch: directory.transportEpoch(for: "A"), backendCallID: "cold-call"))
         XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
         XCTAssertTrue(peer.commands.contains { $0.path == "/api/calls/answer" })
         controller.reportCurrentCallEnded(reason: .remoteEnded)
@@ -863,6 +872,23 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(directory.agentIDs, ["A"])
         XCTAssertEqual(directory.routes(for: "A")?.vowlan, fresh)
         XCTAssertNil(directory.metadata(for: "A")?.phoneNumber)
+    }
+
+    func testFailedKeyWriteDoesNotClaimPairingSucceeded() async throws {
+        let id = "e2e-failure-" + UUID().uuidString
+        defer { VoWLANPairingRecordStore.remove(agentID: id) }
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            e2eKeys: MemoryE2EKeyStore(failure: .unavailable))
+        let credential = try VoWLANCredential(secret: aSecret)
+        directory.stagePairing(agentID: id, credential: credential,
+            e2e: .save(.init(key: Data(repeating: 7, count: 32), deviceID: "fixture")))
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 39000, pcmPort: 39001)
+        for _ in 0..<2 {
+            do {
+                try await directory.persistPairing(agentID: id, credential: credential, endpoint: endpoint, deviceName: nil)
+                XCTFail("Failed E2E write must remain pending and surface on retry")
+            } catch { XCTAssertEqual(error as? E2EKeyStoreError, .unavailable) }
+        }
     }
 
     func testStagedKeyChangeCommitsWithCredential() async throws {

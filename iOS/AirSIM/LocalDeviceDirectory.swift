@@ -105,13 +105,13 @@ final class LocalDeviceDirectory: ObservableObject {
     /// it arrived with is proven (route proof or signed health), like the credential itself.
     /// Synchronous on purpose: verifyPairing must not suspend between its token check and the
     /// peer update.
-    private func commitStagedE2E(agentID: String, credential: VoWLANCredential) {
+    private func commitStagedE2E(agentID: String, credential: VoWLANCredential) throws {
         guard let staged = pendingE2E[agentID], staged.credential == credential else { return }
-        pendingE2E.removeValue(forKey: agentID)
         switch staged.change {
-        case .save(let record): try? e2eKeys.save(record, agentID: agentID)
+        case .save(let record): try e2eKeys.save(record, agentID: agentID)
         case .remove: e2eKeys.remove(agentID: agentID)
         }
+        pendingE2E.removeValue(forKey: agentID)
     }
 
     /// Persists a pairing whose encrypted route proof already verified. A
@@ -131,7 +131,7 @@ final class LocalDeviceDirectory: ObservableObject {
         VoWLANPairingRecordStore.remember(
             agentID: agentID, credential: credential, endpoint: endpoint,
             deviceName: deviceName)
-        commitStagedE2E(agentID: agentID, credential: credential)
+        try commitStagedE2E(agentID: agentID, credential: credential)
         pendingCredentials.removeValue(forKey: agentID)
     }
     func verify(agentID: String, endpoint: VoWLANEndpoint) async throws {
@@ -187,7 +187,7 @@ final class LocalDeviceDirectory: ObservableObject {
         VoWLANPairingRecordStore.remember(
             agentID: agentID, credential: credential, endpoint: endpoint,
             deviceName: identity.deviceName)
-        commitStagedE2E(agentID: agentID, credential: credential)
+        try commitStagedE2E(agentID: agentID, credential: credential)
         pendingCredentials.removeValue(forKey: agentID)
         if let old = peers[agentID], old.endpoint == endpoint, old.credential == credential {
             // The address can stay identical across VPN -> Wi-Fi. A successful
@@ -345,6 +345,6 @@ final class LocalDeviceDirectory: ObservableObject {
         default: state = .connecting
         }
         return DeviceCallEvent(agentID: agentID, callID: call.androidID ?? call.id, state: terminal ? .ended : state,
-            transport: .vowlan, transportEpoch: epoch, number: call.number, direction: call.direction, backendCallID: call.id)
+            transport: .vowlan, transportEpoch: epoch, number: call.number, direction: call.direction, backendCallID: call.id, slotIndex: call.slotIndex)
     }
 }

@@ -459,8 +459,68 @@ final class AppModel: ObservableObject {
         return controller
     }()
     var otherDeviceCallReminders: [OtherDeviceCallReminder] { otherCallReminders.reminders }
+    private var pushResolutionJobs: [DeviceCallKey: Task<Void, Never>] = [:]
+    private var pushResolutionAttempts: [DeviceCallKey: UUID] = [:]
+
+    // A cloud UUID and Telecom ID are separate namespaces. Resolve their signed
+    // association before classifying an unowned LAN event as another call.
+    private func resolvePendingPushedCall(_ key: DeviceCallKey, event: DeviceCallEvent) {
+        guard ConnectionModeRuntimePolicy(mode: ConnectionModePreference.selected()).startsVoWLAN,
+              event.state == .ringing, event.transport == .vowlan,
+              let push = pushedCallIdentity ?? callKit.currentIncomingPush,
+              push.agentID == key.agentID, callLifecycleSnapshot.callUUID == push.uuid,
+              callLifecycleSnapshot.state == .ringing,
+              pushResolutionAttempts[key] != push.uuid,
+              let api = localDevices.api(for: key.agentID) else { return }
+        pushResolutionAttempts[key] = push.uuid
+        pushResolutionJobs[key] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.pushResolutionAttempts[key] == push.uuid { self.pushResolutionJobs.removeValue(forKey: key) }
+                self.otherCallReminders.consume([])
+            }
+            do {
+                let status = try await api.resolvePushedCall(push)
+                guard !Task.isCancelled, self.localDevices.api(for: key.agentID)?.route == api.route else { return }
+                _ = self.reconcileResolvedPushedCall(push, status: status, key: key, api: api)
+            } catch {
+                // One bounded resolution per session; a mismatch leaves genuine
+                // call waiting available, without affecting the CallKit answer.
+                self.traceTerminalProcessing("push_identity_unresolved", fields: [
+                    "device_id": key.agentID, "call_id": event.callID,
+                    "call_uuid": push.uuid.uuidString,
+                    "failure_reason": String(describing: type(of: error))])
+            }
+        }
+    }
+
+    @discardableResult
+    func reconcileResolvedPushedCall(_ push: IncomingVoIPCall, status: CallStatus,
+                                    key: DeviceCallKey, api: AirSIMAPI) -> Bool {
+        guard push.agentID == key.agentID, callLifecycleSnapshot.callUUID == push.uuid,
+              callLifecycleSnapshot.callID == push.callID, callLifecycleSnapshot.generation == push.generation,
+              callLifecycleSnapshot.state == .ringing, deviceCalls.active == nil,
+              status.lastPollError.isEmpty, let call = status.active, !call.isTerminal,
+              ["incoming", "waiting"].contains(call.state),
+              let event = deviceCalls.latestEvent(for: key), event.state == .ringing,
+              event.transport == .vowlan,
+              [call.id, call.androidID].compactMap({ $0 }).contains(event.callID),
+              event.backendCallID == nil || event.backendCallID == call.id else { return false }
+        do {
+            let route = try deviceCallRouter.adoptIncoming(event, systemUUID: push.uuid,
+                service: WLANDeviceCallBackend(api: api, epoch: event.transportEpoch, agentID: key.agentID),
+                presentationCallID: push.callID, presentationGeneration: push.generation)
+            presentedDeviceCall = route.key
+            let applied = presentOwnedCall(route.key, state: .ringing)
+            traceTerminalProcessing("push_identity_bound", fields: ["device_id": key.agentID,
+                "call_id": event.callID, "call_uuid": push.uuid.uuidString,
+                "generation": String(push.generation), "status_revision": String(status.revision ?? 0)])
+            return applied
+        } catch { return false }
+    }
+
     private func lookupOtherCall(_ key: DeviceCallKey) -> OtherDeviceCallReminder? {
-        guard key != presentedDeviceCall, key != deviceCalls.active,
+        guard pushResolutionJobs[key] == nil, key != presentedDeviceCall, key != deviceCalls.active,
               let event = deviceCalls.latestEvent(for: key), event.state == .ringing else { return nil }
         // A PushKit presentation may precede directory ownership. Match the
         // authenticated device AND exact canonical/backend ID, never the number.
@@ -574,12 +634,15 @@ final class AppModel: ObservableObject {
         guard let key = deviceCalls.key(agentID: event.agentID, callID: event.callID),
               let latest = deviceCalls.latestEvent(for: key) else { return effects }
         let previousRecord = ownedRecords[key]
+        resolvePendingPushedCall(key, event: latest)
         if effects.contains(.ended(key)) {
             persistOwnedTerminal(key, event: latest, previous: previousRecord)
         } else if !latest.state.isTerminal {
             ownedRecords[key] = CallRecord(id: latest.callID, index: 0, direction: latest.direction,
                 state: latest.state.callRecordState, number: latest.number,
-                startedAt: previousRecord?.startedAt ?? Date(), updatedAt: Date(), endedAt: nil, missed: false)
+                startedAt: previousRecord?.startedAt ?? Date(), updatedAt: Date(), endedAt: nil, missed: false,
+                connectedAt: previousRecord?.connectedAt ?? (latest.state == .active ? Date() : nil),
+                slotIndex: latest.slotIndex ?? previousRecord?.slotIndex, slotID: previousRecord?.slotID)
         }
         if finishPushedCallIfNeeded(event, key: key) { return effects }
         // A rejected/duplicate snapshot is not a new presentation transition.
@@ -773,10 +836,13 @@ final class AppModel: ObservableObject {
               presentedDeviceCall == key else { return false }
         let id = localPresentationID(key)
         let previous = remoteCall
-        let record = CallRecord(id: id, index: 0, direction: event.direction,
+        var record = CallRecord(id: id, index: 0, direction: event.direction,
             state: state.callRecordState, number: event.number,
             startedAt: previous?.id == id ? previous!.startedAt : Date(), updatedAt: Date(),
             endedAt: state.isTerminal ? Date() : nil, missed: false)
+        record.slotIndex = event.slotIndex ?? (previous?.id == id ? previous?.slotIndex : nil)
+        record.sourceAgentID = key.agentID
+        record.connectedAt = ownedRecords[key]?.connectedAt ?? (state == .active ? (callConnectedAt ?? Date()) : nil)
         guard applyCallLifecycle(.init(callID: id, callUUID: route.systemUUID, generation: route.presentationGeneration ?? key.generation,
             state: state, source: source, timestamp: Date(), traceID: nil, failure: nil)) else { return false }
         if state.isTerminal {
@@ -850,8 +916,11 @@ final class AppModel: ObservableObject {
         guard ownedHistoryFinished.insert(key).inserted else { return }
         var record = CallRecord(id: event.backendCallID ?? event.callID, index: 0, direction: event.direction,
             state: "ended", number: event.number, startedAt: previous?.startedAt ?? Date(), updatedAt: Date(),
-            endedAt: Date(), missed: event.direction == "incoming" && previous?.state != "active" && previous?.state != "held",
+            endedAt: Date(), missed: event.direction == "incoming" && previous?.connectedAt == nil && previous?.state != "active" && previous?.state != "held",
             androidID: event.callID)
+        record.connectedAt = previous?.connectedAt
+        record.slotIndex = event.slotIndex ?? previous?.slotIndex
+        record.slotID = previous?.slotID
         record.historyEstimated = true
         _ = persistDeviceHistory([record], agentID: key.agentID)
         ownedRecords.removeValue(forKey: key)
@@ -862,9 +931,15 @@ final class AppModel: ObservableObject {
     private func persistDeviceHistory(_ records: [CallRecord], agentID: String) -> Bool {
         var byID = Dictionary(callHistory.map { ($0.id, $0) }, uniquingKeysWith: { a, b in a.updatedAt > b.updatedAt ? a : b })
         for raw in records {
-            let record = raw.scopedHistory(to: agentID)
+            var record = raw.scopedHistory(to: agentID)
             if let old = byID[record.id] {
-                if old.historyEstimated != true && record.historyEstimated == true { continue }
+                record = record.preservingHistoryEvidence(from: old)
+                if old.historyEstimated != true && record.historyEstimated == true {
+                    var preserved = old.preservingHistoryEvidence(from: record)
+                    preserved.connectedAt = old.connectedAt ?? record.connectedAt
+                    byID[record.id] = preserved
+                    continue
+                }
                 if old.historyEstimated == record.historyEstimated && old.updatedAt > record.updatedAt { continue }
             }
             byID[record.id] = record
@@ -2277,6 +2352,9 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        for job in pushResolutionJobs.values { job.cancel() }
+        pushResolutionJobs.removeAll()
+        pushResolutionAttempts.removeAll()
         earlyMediaTask?.cancel(); earlyMediaTask = nil
         localDirectoryRefresh?.cancel()
         localDevices.stop()
@@ -4118,6 +4196,13 @@ final class AppModel: ObservableObject {
             }
         }
         if event.state == .ending || event.state.isTerminal {
+            // Stop local ringing on the accepted end intent, before any backend
+            // or system callback. PCM ownership/teardown remains unchanged.
+            audio.stopCallTone(deactivateSession: false)
+            incomingNotifier.update(call: nil, callerName: nil, appIsActive: appIsActive)
+            for job in pushResolutionJobs.values { job.cancel() }
+            pushResolutionJobs.removeAll()
+            pushResolutionAttempts.removeAll()
             callPresentationSurface = nil
             pendingOutgoingCall = nil
             if event.state.isTerminal {
@@ -4189,7 +4274,7 @@ final class AppModel: ObservableObject {
             let state = forcedState ?? Self.lifecycleState(for: call.state)
             _ = receiveOwnedCallEvent(.init(agentID: agentID, callID: call.androidID ?? call.id,
                 state: state, transport: .vowlan, transportEpoch: localDevices.transportEpoch(for: agentID),
-                number: call.number, direction: call.direction, backendCallID: call.id))
+                number: call.number, direction: call.direction, backendCallID: call.id, slotIndex: call.slotIndex))
             return presentedDeviceCall?.agentID == agentID && deviceCalls.active == presentedDeviceCall
         }
         let incoming = callKit.currentIncomingPush
@@ -4849,13 +4934,15 @@ extension AppModel: CallKitActionHandling {
                 let route = try deviceCallRouter.adoptIncoming(.init(agentID: agentID,
                     callID: incoming.androidID ?? incoming.id, state: .ringing, transport: .vowlan,
                     transportEpoch: localDevices.transportEpoch(for: agentID),
-                    number: incoming.number, direction: incoming.direction, backendCallID: incoming.id),
+                    number: incoming.number, direction: incoming.direction, backendCallID: incoming.id, slotIndex: incoming.slotIndex),
                     systemUUID: uuid, service: WLANDeviceCallBackend(api: vowlanAPI,
                         epoch: localDevices.transportEpoch(for: agentID), agentID: agentID),
                     presentationCallID: answeringCall.callID, presentationGeneration: answeringCall.generation)
                 lockLocalTransport(.vowlan, api: vowlanAPI, pcmRoute: pcmRoute)
                 try await answerOwnedCall(route.key, source: origin == .system ? "callkit" : "app")
-                presentOwnedCall(route.key, state: .active)
+                if deviceCalls.latestEvent(for: route.key)?.state == .active {
+                    presentOwnedCall(route.key, state: .active)
+                }
                 await startCallAudioIfReady()
                 return
             case .bluetooth:
@@ -5115,6 +5202,7 @@ extension AppModel: CallKitActionHandling {
     }
 
     func callKitCallDidEnd() {
+        audio.stopCallTone(deactivateSession: false)
         // Watch has taken this exact call's PCM, not a different default phone.
         // Keep source ownership for B-call reminders and scoped Watch end actions.
         if WatchCallCoordinator.shared.ownsMedia(callID: callLifecycleSnapshot.callID),

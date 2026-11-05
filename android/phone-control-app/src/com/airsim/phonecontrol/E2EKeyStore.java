@@ -13,6 +13,20 @@ final class E2EKeyStore {
 
     private E2EKeyStore() {}
 
+    // Persist a fail-closed marker before publishing a first encrypted registration.
+    // A background flush must never observe a new registration with no key and send plaintext.
+    static void prepareEncryptedPairing(Context context, String deviceID, String relayURL) {
+        prepareEncryptedPairing(preferences(context), deviceID, relayURL);
+    }
+
+    static void prepareEncryptedPairing(SharedPreferences preferences, String deviceID, String relayURL) {
+        String entry = entry(deviceID, relayURL);
+        if (preferences.getString(entry, null) == null
+                && !preferences.edit().putString(entry, "pending-encrypted-pairing").commit()) {
+            throw new IllegalStateException("E2E pairing marker could not be saved");
+        }
+    }
+
     static void save(Context context, String deviceID, String relayURL, byte[] key) {
         save(preferences(context), deviceID, relayURL, key);
     }
@@ -49,9 +63,10 @@ final class E2EKeyStore {
         if (stored == null) return null;
         try {
             byte[] key = Base64.getUrlDecoder().decode(stored);
-            return key.length == 32 ? key : null;
+            if (key.length != 32) throw new IllegalArgumentException("invalid key length");
+            return key;
         } catch (IllegalArgumentException corrupt) {
-            return null;
+            throw new IllegalStateException("Stored SMS encryption key is invalid; re-pair before uploading", corrupt);
         }
     }
 

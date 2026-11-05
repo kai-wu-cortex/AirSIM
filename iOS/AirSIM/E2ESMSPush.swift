@@ -35,9 +35,11 @@ enum E2ESMSPush {
                 return try store.record(agentID: agentID) == nil ? .plaintext : .unencryptedFromEncryptedAgent
             } catch E2EKeyStoreError.locked {
                 return .locked(encrypted: false)
-            } catch {
-                // No shared keychain group means no key was ever sent for any agent.
+            } catch E2EKeyStoreError.unconfigured {
                 return .plaintext
+            } catch {
+                // A corrupt/unreadable key is not proof that encryption was never enabled.
+                return .undecryptable
             }
         }
         // No key can open these, locked keychain or not.

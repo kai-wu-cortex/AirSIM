@@ -186,12 +186,17 @@ final class E2ESMSTests: XCTestCase {
                                                threadIdentifier: nil))
     }
 
-    func testUnavailableKeychainKeepsPlaintextPath() {
+    func testUnconfiguredKeychainKeepsPlaintextPath() {
         // Builds without the shared group never sent a key, so their plaintext stays as today.
         let outcome = E2ESMSPush.open(E2ESMSFixture.plaintextPush(agentID: "android-A"),
-                                      store: MemoryE2EKeyStore(failure: .unavailable))
+                                      store: MemoryE2EKeyStore(failure: .unconfigured))
         XCTAssertEqual(outcome, .plaintext)
         XCTAssertNil(E2ESMSPush.notification(for: outcome))
+    }
+
+    func testUnreadableKeyDoesNotAcceptPlaintext() {
+        XCTAssertEqual(E2ESMSPush.open(E2ESMSFixture.plaintextPush(agentID: "android-A"),
+            store: MemoryE2EKeyStore(failure: .unavailable)), .undecryptable)
     }
 
     func testPlaintextWithoutAgentOrKeyIsLegacy() {
@@ -224,11 +229,11 @@ final class E2ESMSTests: XCTestCase {
             let store = KeychainE2EKeyStore(accessGroup: group)
             XCTAssertFalse(store.canStore())
             XCTAssertThrowsError(try store.record(agentID: "android-A")) {
-                XCTAssertEqual($0 as? E2EKeyStoreError, .unavailable)
+                XCTAssertEqual($0 as? E2EKeyStoreError, .unconfigured)
             }
             XCTAssertThrowsError(try store.save(E2EKeyRecord(key: Data(0..<32), deviceID: "iphone-air"),
                                                 agentID: "android-A")) {
-                XCTAssertEqual($0 as? E2EKeyStoreError, .unavailable)
+                XCTAssertEqual($0 as? E2EKeyStoreError, .unconfigured)
             }
         }
     }

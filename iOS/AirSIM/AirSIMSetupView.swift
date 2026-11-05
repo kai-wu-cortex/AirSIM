@@ -826,6 +826,9 @@ struct AirSIMSettingsView: View {
             } else { deviceOrderSection }
         case .preferences:
             Section {
+                Picker("主题", selection: $settings.theme) {
+                    ForEach(AppTheme.allCases) { theme in Text(theme.title).tag(theme) }
+                }
                 Picker("外观", selection: $settings.appearance) {
                     ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
                 }

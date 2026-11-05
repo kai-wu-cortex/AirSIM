@@ -18,8 +18,91 @@ final class FixtureToneOutput: CallToneOutput {
 
 @MainActor
 final class OtherDeviceCallReminderTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        // The test host uses the simulator SMS fixture to avoid startup networking.
+        // Let each routing test choose its own mode after that startup completes.
+        var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments.removeValue(forKey: ConnectionModePreference.key)
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+    }
 
-    func testRepeatedPushDoesNotReportOrEndCurrentSystemCall() async throws {
+    func testResolvedPushBindsLANSessionWithoutRemovingRealCallWaiting() throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.cloud)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in ReminderBackend() }, callKitController: controller)
+        controller.setEnabled(false)
+        defer { model.stop() }
+        let push = IncomingVoIPCall(bluetoothCallID: "cloud-independent-id", uuid: UUID(), generation: 41, number: nil, agentID: "A")
+        model.callKitDidReceiveIncoming(push)
+        ConnectionModePreference.set(.vowlan)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-id", state: .ringing,
+            transport: .vowlan, transportEpoch: 1, backendCallID: "lan-id"))
+        let key = try XCTUnwrap(model.deviceCalls.key(agentID: "A", callID: "telecom-id"))
+        XCTAssertEqual(model.otherDeviceCallReminders.map(\.key), [key])
+        let api = AirSIMAPI(route: .vowlan(endpoint: try VoWLANEndpoint(host: "10.0.0.19", controlPort: 7592, pcmPort: 7593), credential: try VoWLANCredential(secret: Data(repeating: 3, count: 32))))
+        let call = CallRecord(id: "lan-id", index: 0, direction: "incoming", state: "incoming", number: nil,
+            startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false, androidID: "telecom-id")
+        let status = CallStatus(active: call, history: [], polling: true, eventDriven: true, pollIntervalSeconds: 2, lastPollError: "", revision: 9)
+        XCTAssertTrue(model.reconcileResolvedPushedCall(push, status: status, key: key, api: api))
+        XCTAssertTrue(model.otherDeviceCallReminders.isEmpty)
+        XCTAssertEqual(model.deviceCallRouter.route(for: key)?.systemUUID, push.uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, push.uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.callID, push.callID)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "real-second-call", state: .ringing, transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(model.otherDeviceCallReminders.count, 1)
+        XCTAssertEqual(model.otherDeviceCallReminders.first?.key.callID, "real-second-call")
+        model.callKitCallDidEnd()
+        XCTAssertFalse(model.reconcileResolvedPushedCall(push, status: status, key: key, api: api), "Late proof cannot revive an ending call")
+    }
+
+    func testCallKitDismissalStopsFallbackRingtoneImmediately() {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let output = FixtureToneOutput()
+        let model = AppModel(audioController: AudioSessionController(toneOutput: output),
+            deviceBackend: { _, _ in ReminderBackend() }, callKitController: controller)
+        controller.setEnabled(false)
+        defer { model.stop() }
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "ring", state: .ringing, transport: .vowlan, transportEpoch: 1))
+        XCTAssertTrue(output.isPlaying)
+        model.callKitCallDidEnd()
+        XCTAssertFalse(output.isPlaying)
+        XCTAssertFalse(model.audio.hasCallTone)
+    }
+
+    func testOwnedConnectedTimeSurvivesEndAndDiskReload() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
+        defer { ConnectionModePreference.set(old) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalHistoryStore(directoryURL: directory)
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in ReminderBackend() }, callKitController: controller, historyStore: store)
+        controller.setEnabled(false)
+        defer { model.stop() }
+        let event = DeviceCallEvent(agentID: "A", callID: "duration", state: .ringing, transport: .vowlan, transportEpoch: 1)
+        _ = model.receiveOwnedCallEvent(event)
+        let key = try XCTUnwrap(model.deviceCalls.key(agentID: "A", callID: "duration"))
+        XCTAssertTrue(model.activateDeviceCall(key))
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "duration", state: .active, transport: .vowlan, transportEpoch: 1))
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "duration", state: .ended, transport: .vowlan, transportEpoch: 1))
+        let saved = try XCTUnwrap(store.loadCallHistory().first)
+        XCTAssertNotNil(saved.connectedAt)
+        XCTAssertNotNil(saved.connectedDuration)
+        XCTAssertFalse(saved.missed)
+    }
+
+    func testDialToneQuickTapHasAudibleMinimumWithoutDelayingLongPressRelease() {
+        XCTAssertEqual(DialToneTiming.releaseDelay(held: 0.02), 0.14, accuracy: 0.001)
+        XCTAssertEqual(DialToneTiming.releaseDelay(held: 1), 0)
+    }
+
+    func testRepeatedPushReportsExistingIdentityWithoutEndingCurrentSystemCall() async throws {
         let controller = CallKitController(observesSystemCallbacks: false)
         controller.setEnabled(true)
         defer { controller.setEnabled(false) }
@@ -28,9 +111,9 @@ final class OtherDeviceCallReminderTests: XCTestCase {
         controller.reportIncomingPush(call, systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
         await fulfillment(of: [reported], timeout: 2)
         var reports = 0, ends = 0
-        controller.reportRequiredVoIPPush(call, systemReport: { _, _, done in reports += 1; done(nil) },
+        controller.reportRequiredVoIPPush(call, systemReport: { uuid, _, done in XCTAssertEqual(uuid, call.uuid); reports += 1; done(nil) },
             systemEnd: { _ in ends += 1 }) { error in XCTAssertNil(error) }
-        XCTAssertEqual(reports, 0)
+        XCTAssertEqual(reports, 1)
         XCTAssertEqual(ends, 0)
         XCTAssertEqual(controller.currentSystemCallUUID, call.uuid)
     }

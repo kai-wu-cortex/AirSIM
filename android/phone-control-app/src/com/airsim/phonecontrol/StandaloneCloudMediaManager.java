@@ -37,6 +37,12 @@ final class StandaloneCloudMediaManager implements Closeable {
     private final ExecutorService sessions = Executors.newCachedThreadPool();
     private final Object lock = new Object();
     private CloudSession active;
+    private final CloudCallRetryPolicy.IncomingIdentities<Descriptor> incomingIdentities =
+            new CloudCallRetryPolicy.IncomingIdentities<>();
+
+    private static String incomingKey(JSONObject registration, String androidID) {
+        return registration.optString("relay_url") + "\n" + registration.optString("device_id") + "\n" + androidID;
+    }
 
     private StandaloneCloudMediaManager(android.content.Context context) {
         this.context = context.getApplicationContext();
@@ -75,13 +81,18 @@ final class StandaloneCloudMediaManager implements Closeable {
     String androidCallIDFor(JSONObject call) {
         if (call == null) return "";
         synchronized (lock) {
-            if (active == null) return "";
-            Descriptor descriptor = active.descriptor;
-            bindOutgoing(descriptor);
-            return new CloudCallTarget(descriptor.callID, descriptor.callUUID,
-                    descriptor.generation, descriptor.androidID).resolve(
-                    call.optString("call_id"), call.optString("call_uuid"),
-                    call.optLong("generation", 1));
+            // Publish identity before waiting for HTTP: APNs can arrive even if its
+            // HTTP acknowledgement is lost, and LAN answer must resolve that UUID.
+            java.util.List<Descriptor> candidates = incomingIdentities.values();
+            if (active != null) candidates.add(active.descriptor);
+            for (Descriptor descriptor : candidates) {
+                bindOutgoing(descriptor);
+                String resolved = new CloudCallTarget(descriptor.callID, descriptor.callUUID,
+                        descriptor.generation, descriptor.androidID).resolve(
+                        call.optString("call_id"), call.optString("call_uuid"), call.optLong("generation", 1));
+                if (!resolved.isEmpty() && CallRepository.state(resolved) >= 0) return resolved;
+            }
+            return "";
         }
     }
 
@@ -98,11 +109,15 @@ final class StandaloneCloudMediaManager implements Closeable {
         if ("incoming".equals(direction) && "incoming".equals(state) && descriptor == null) {
             // A queued ringing event can survive a Relay time-out until after the
             // carrier call has ended. Never wake CallKit with a stale ring.
-            if (CallRepository.state(androidID) < 0 && eventAgeMillis(event) > 3_000) {
+            if (CallRepository.state(androidID) != android.telecom.Call.STATE_RINGING) {
                 BridgeLog.info("standalone_incoming_skipped_ended");
                 return;
             }
-            descriptor = Descriptor.incoming(registration, androidID);
+            String identityKey = incomingKey(registration, androidID);
+            boolean retry = incomingIdentities.get(identityKey) != null;
+            descriptor = incomingIdentities.getOrCreate(identityKey, () -> Descriptor.incoming(registration, androidID));
+            BridgeLog.info("standalone_incoming_identity call_id=" + DebugRedactor.safeIdentifier(androidID)
+                    + " call_uuid=" + DebugRedactor.safeIdentifier(descriptor.callUUID) + " retry=" + retry);
             JSONObject payload = identity(registration).put("event", "incoming_call")
                     .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
                     .put("generation", descriptor.generation).put("call_secret", descriptor.secret)
@@ -113,7 +128,8 @@ final class StandaloneCloudMediaManager implements Closeable {
             // Keep ringing latency bounded; a failed call event stays queued for
             // the priority retry path instead of blocking the agent loop for 15s.
             postRelay(registration, relay, "/v2/events/call", payload, 5_000);
-            start(descriptor, generation);
+            // A call can end while HTTP is outstanding; never start its media afterward.
+            if (CallRepository.state(androidID) == android.telecom.Call.STATE_RINGING) start(descriptor, generation);
         } else if (descriptor != null && descriptor.androidID.isEmpty()) {
             bindOutgoing(descriptor);
             synchronized (lock) {
@@ -128,6 +144,7 @@ final class StandaloneCloudMediaManager implements Closeable {
                 }
             }
         }
+        if (descriptor == null) descriptor = incomingIdentities.get(incomingKey(registration, androidID));
         if (descriptor != null && !CloudCallTarget.owns(descriptor.androidID, androidID)) {
             // Call waiting, or a late event of an earlier call: it must not rewrite or end
             // the lifecycle of the call this session owns.
@@ -564,7 +581,9 @@ final class StandaloneCloudMediaManager implements Closeable {
             new SecureRandom().nextBytes(secret);
             StringBuilder encoded = new StringBuilder(64);
             for (byte value : secret) encoded.append(String.format("%02x", value & 0xff));
-            Descriptor result = new Descriptor("android-" + System.currentTimeMillis(), UUID.randomUUID().toString(), 1,
+            // The authenticated Telecom ID is also the LAN identity. A separate
+            // timestamp ID made the same physical call look like another device.
+            Descriptor result = new Descriptor(androidID, UUID.randomUUID().toString(), 1,
                     encoded.toString(), registration.optString("relay_url"), "incoming", androidID);
             result.validate();
             return result;
@@ -610,6 +629,7 @@ final class StandaloneCloudMediaManager implements Closeable {
         synchronized (lock) {
             if (active != null) active.close();
             active = null;
+            incomingIdentities.clear();
         }
     }
 }

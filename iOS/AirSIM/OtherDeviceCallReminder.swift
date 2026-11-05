@@ -60,6 +60,7 @@ final class OtherDeviceCallReminderController: ObservableObject {
         }
     }
     func consume(_ effects: [DeviceCallEffect]) {
+        let previous = Set(reminders.map(\.key))
         for effect in effects {
             switch effect {
             case let .present(key), let .remind(key), let .update(key): watched.insert(key)
@@ -71,6 +72,14 @@ final class OtherDeviceCallReminderController: ObservableObject {
         }
         reminders = watched.sorted { $0.generation < $1.generation }.compactMap(lookup).filter(\.stillRinging)
         let valid = Set(reminders.map(\.key))
+        for key in previous.symmetricDifference(valid) {
+            let phase = valid.contains(key) ? "reminder_added" : "reminder_removed"
+            Task { @MainActor in
+                await AgentVerboseTraceRecorder.shared.recordEvent(source: "ios", category: "call", phase: phase,
+                    title: "其他设备来电状态", fields: ["device_id": key.agentID,
+                        "call_id": key.callID, "generation": String(key.generation)])
+            }
+        }
         for key in watched where !valid.contains(key) {
             if announced.contains(key) { remove(OtherDeviceCallReminder.notificationID(for: key)) }
         }

@@ -16,8 +16,10 @@ struct E2EKeyRecord: Codable, Equatable, Sendable {
 enum E2EKeyStoreError: Error, Equatable {
     /// The keychain cannot be read until the first unlock after a restart.
     case locked
-    /// No shared group (an unsigned or re-signed build without Keychain Sharing) or another keychain error.
+    /// A corrupt record or another keychain error; never a signal to accept plaintext.
     case unavailable
+    /// This build has no usable shared entitlement and cannot have negotiated a key.
+    case unconfigured
 }
 
 protocol E2EKeyStoring: Sendable {
@@ -83,7 +85,8 @@ struct KeychainE2EKeyStore: E2EKeyStoring {
     }
 
     private func baseQuery(account: String) throws -> [String: Any] {
-        guard let accessGroup, !account.isEmpty else { throw E2EKeyStoreError.unavailable }
+        guard let accessGroup else { throw E2EKeyStoreError.unconfigured }
+        guard !account.isEmpty else { throw E2EKeyStoreError.unavailable }
         return [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
@@ -105,6 +108,7 @@ struct KeychainE2EKeyStore: E2EKeyStoring {
         switch status {
         case errSecSuccess: return
         case errSecInteractionNotAllowed: throw E2EKeyStoreError.locked
+        case errSecMissingEntitlement: throw E2EKeyStoreError.unconfigured
         default: throw E2EKeyStoreError.unavailable
         }
     }

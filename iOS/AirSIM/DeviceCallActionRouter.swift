@@ -316,19 +316,12 @@ final class DeviceCallActionRouter {
         _ = context.registry.apply(.init(agentID: ringing.agentID, callID: ringing.callID,
             state: .connecting, transport: ringing.transport, transportEpoch: ringing.transportEpoch,
             backendGeneration: ringing.backendGeneration, number: ringing.number,
-            direction: ringing.direction, backendCallID: ringing.backendCallID))
+            direction: ringing.direction, backendCallID: ringing.backendCallID, slotIndex: ringing.slotIndex))
         onActivate?(route)
         do {
             try await target.backend.answer(callID: target.identity.backendID, generation: target.identity.generation)
             guard context.registry.active == key else { throw CancellationError() }
-            if let current = context.registry.latestEvent(for: key), current.state == .connecting {
-                var confirmed = current
-                confirmed = DeviceCallEvent(agentID: current.agentID, callID: current.callID, state: .active,
-                    transport: current.transport, transportEpoch: current.transportEpoch,
-                    backendGeneration: current.backendGeneration, number: current.number,
-                    direction: current.direction, backendCallID: current.backendCallID)
-                _ = context.registry.apply(confirmed)
-            }
+
         } catch {
             // An answer failure must not retire the ringing call. Release the
             // optimistic ownership only; a late agent .active (the Android

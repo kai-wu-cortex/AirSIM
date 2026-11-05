@@ -158,6 +158,10 @@ public final class PairingServer implements Closeable {
             // VoWLAN HMAC 密钥只属于 Android 热点网关。Linux Agent 的 Push
             // 注册结构使用严格 JSON 解码，且无须接触该密钥，因此转发前必须移除。
             registration.remove("vowlan_secret");
+            if (e2eKey != null && !registration.optBoolean("local_mode", false)) {
+                StandaloneAgentStore.validateRegistration(registration);
+                E2EKeyStore.prepareEncryptedPairing(context, registration.optString("device_id"), registration.optString("relay_url"));
+            }
             String agentResponse = new AgentClient(context).registerPairing(registration.toString());
             JSONObject response = new JSONObject(agentResponse)
                     .put("agent_id", AndroidAgentIdentity.agentID(context));

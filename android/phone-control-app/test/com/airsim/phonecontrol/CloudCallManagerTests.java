@@ -6,6 +6,7 @@ import java.lang.reflect.*;
 /** Runs the actual manager without starting a socket, dial, or background executor. */
 public final class CloudCallManagerTests {
     public static void main(String[] args) throws Exception {
+        missedCallHistoryKeepsConnectionAndSIMFacts();
         RelayEgressGate.shared.enableAfterRestore();
         localResolveRequiresCompleteIdentityAndCurrentPublishedCall();
         endedBeforeEventDrainStillReleasesOutgoing();
@@ -83,12 +84,14 @@ public final class CloudCallManagerTests {
         var instance = StandaloneCloudMediaManager.class.getDeclaredField("instance");
         instance.setAccessible(true);
         Object previous = instance.get(null);
-        try (var f = new Fixture("telecom-owner")) {
+        var owner = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100");
+        String ownerID = CallRepository.add(owner);
+        try (var f = new Fixture(ownerID)) {
             instance.set(null, f.manager);
             var constructor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
             constructor.setAccessible(true);
             var gateway = constructor.newInstance(new android.content.Context());
-            var published = new JSONObject().put("id", "local-owner").put("android_id", "telecom-owner")
+            var published = new JSONObject().put("id", "local-owner").put("android_id", ownerID)
                     .put("state", "incoming");
             set(gateway, "activeCall", published);
             var identity = new JSONObject().put("call_id", "new-cloud-call")
@@ -117,7 +120,34 @@ public final class CloudCallManagerTests {
             set(gateway, "activeCall", null);
             check(gateway.forward("POST", "/api/calls/resolve", identity.toString()).status() == 409,
                     "ended mapping still resolved");
-        } finally { instance.set(null, previous); }
+        } finally { instance.set(null, previous); CallRepository.remove(owner); }
+    }
+
+    private static void missedCallHistoryKeepsConnectionAndSIMFacts() throws Exception {
+        var ctor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
+        ctor.setAccessible(true);
+        var gateway = ctor.newInstance(new android.content.Context());
+        var apply = StandaloneAgentGateway.class.getDeclaredMethod("applyCallEvent", JSONObject.class);
+        apply.setAccessible(true);
+        var history = StandaloneAgentGateway.class.getDeclaredField("callHistory"); history.setAccessible(true);
+        for (int index = 0; index < 3; index++) {
+            String direction = index == 2 ? "outgoing" : "incoming";
+            var event = new JSONObject().put("call_id", "history-" + index).put("direction", direction)
+                    .put("state", index == 2 ? "dialing" : "incoming").put("slot_index", index % 2);
+            apply.invoke(gateway, event);
+            if (index == 1) apply.invoke(gateway, new JSONObject(event.toString()).put("state", "active"));
+            apply.invoke(gateway, new JSONObject(event.toString()).put("state", "ended"));
+        }
+        var replacement = new JSONObject().put("call_id", "replacement").put("direction", "incoming").put("state", "incoming");
+        apply.invoke(gateway, replacement);
+        apply.invoke(gateway, new JSONObject().put("call_id", "history-0").put("state", "ended"));
+        check(field(gateway, "activeCall") != null, "late terminal cleared replacement call");
+        var records = (org.json.JSONArray) history.get(gateway);
+        check(records.length() == 3, "late terminal wrote false history");
+        check(records.getJSONObject(0).optBoolean("missed"), "unanswered incoming missing from history");
+        check(!records.getJSONObject(1).optBoolean("missed") && records.getJSONObject(1).has("connected_at"), "answered call marked missed");
+        check(!records.getJSONObject(2).optBoolean("missed"), "outgoing call marked missed");
+        check(records.getJSONObject(0).optInt("slot_index", -1) == 0 && records.getJSONObject(1).optInt("slot_index", -1) == 1, "history lost SIM slots");
     }
 
     private static void oldMediaCannotRestartAfterPureLocalExit() throws Exception {

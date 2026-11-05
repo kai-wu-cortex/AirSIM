@@ -84,7 +84,10 @@ struct CallLifecycleStore: Sendable {
         return CallRecord(id: record.id, index: record.index, direction: record.direction,
             state: snapshot.state.callRecordState, number: record.number,
             startedAt: record.startedAt, updatedAt: snapshot.timestamp ?? record.updatedAt,
-            endedAt: nil, missed: record.missed)
+            endedAt: nil, missed: record.missed, connectedAt: record.connectedAt,
+            androidID: record.androidID, sourceAgentID: record.sourceAgentID,
+            sourceCallID: record.sourceCallID, historyEstimated: record.historyEstimated,
+            slotIndex: record.slotIndex, slotID: record.slotID)
     }
 
     /// Restore a snapshot captured before an optimistic local transition when
