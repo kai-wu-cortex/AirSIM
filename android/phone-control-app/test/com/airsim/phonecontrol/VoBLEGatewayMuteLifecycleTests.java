@@ -9,6 +9,10 @@ public final class VoBLEGatewayMuteLifecycleTests {
     public static void main(String[] args) throws Exception {
         failedMediaCannotBeReownedByQueuedCallState();
         handshakeAfterDestroyCannotPublishOwnership();
+        var destroyed = new VoBLEGatewayService();
+        destroyed.onDestroy();
+        destroyed.onDisconnected("retired-peer"); // must not submit work to a terminated executor
+        destroyed.onAdvertisingFailed(-3);
         System.out.println("VoBLEGatewayMuteLifecycleTests passed: failed PCM rebind and post-destroy handshake");
     }
 

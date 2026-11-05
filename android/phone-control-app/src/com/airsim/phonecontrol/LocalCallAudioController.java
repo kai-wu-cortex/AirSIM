@@ -11,8 +11,8 @@ final class LocalCallAudioController {
     }
 
     /**
-     * @param transport current remote audio owner. VoBLE mutes the stream (its uplink is
-     *                  BLE); VoWLAN keeps the vendor minimum-volume workaround.
+     * @param transport current remote audio owner; output/capture volume preference
+     *                  is applied independently by the privileged coordinator.
      */
     synchronized void update(boolean shouldSilence, String transport) {
         String next = PrivilegedBridgeProtocol.TRANSPORT_VOBLE.equals(transport)
@@ -24,11 +24,10 @@ final class LocalCallAudioController {
         if (shouldSilence == silencing && !transportChanged) return;
         silencing = shouldSilence;
         privilegedBridge.setLocalOutputMuted(shouldSilence, next);
-        LocalOutputMuteController.Strategy policy = next.equals(PrivilegedBridgeProtocol.TRANSPORT_VOBLE)
-                ? LocalOutputMuteController.vobleStrategy() : LocalOutputMuteController.vowlanStrategy();
+
         BridgeLog.info("local_call_output_requested target_suppressed=" + shouldSilence
                 + " transport=" + next
-                + " policy=" + LocalOutputMuteController.policyName(policy)
+                + " policy=selected_in_privileged_coordinator"
                 + " backend=privileged");
     }
 

@@ -82,6 +82,8 @@ public final class ShizukuBridgeUserService extends Binder {
                     yield setLocalOutputMuted(target,
                             data.dataAvail() > 0 ? data.readString() : "vowlan");
                 }
+                case PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_POLICY ->
+                        setLocalOutputMuted(data.readInt() != 0, data.readString(), data.readString());
                 case PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE -> ensureDialerRole();
                 case PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT -> audioSnapshot();
                 case PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS ->
@@ -321,63 +323,31 @@ public final class ShizukuBridgeUserService extends Binder {
         return setLocalOutputMuted(muted, "vowlan");
     }
 
-    /**
-     * @param strategy "voble" or "vowlan". Both currently resolve to the vendor's
-     *                 capture-safe policy on capture-coupled HALs (Samsung must never
-     *                 use index 0, which also silences the forwarded VOICE_DOWNLINK).
-     */
-    private String setLocalOutputMuted(boolean muted, String strategy) throws Exception {
+    private String setLocalOutputMuted(boolean muted, String transport) throws Exception {
+        return setLocalOutputMuted(muted, transport, "minimum_nonzero_volume");
+    }
+
+    private String setLocalOutputMuted(boolean muted, String transport, String policy) throws Exception {
         synchronized (audioLock) {
             verifyIdentity();
-            LocalOutputMuteController.Strategy desired = "voble".equals(strategy)
-                    ? LocalOutputMuteController.vobleStrategy()
-                    : LocalOutputMuteController.vowlanStrategy();
-            if (outputMute != null && !outputStrategy.equals(strategy)) {
-                // A different policy now owns the stream. Restoring the old snapshot can
-                // only be trusted when it is still muted; if we are not applying a new
-                // restriction, the old policy's release below is the restore path.
-                if (!muted) {
-                    try { outputMute.setMuted(false); }
-                    catch (Exception ignored) { /* release path below still runs */ }
-                }
-                // Never let a stale minimum-volume snapshot leak into the next policy.
-                outputMute.suspend();
-                if (!muted) {
-                    outputMute = null;
-                    outputStrategy = strategy;
-                    return "local_output_unchanged";
-                }
+            LocalOutputMuteController.Strategy desired = LocalOutputMuteController.wireStrategy(policy);
+            outputStrategy = "voble".equals(transport) ? "voble" : "vowlan";
+            if (!muted) {
+                if (outputMute == null) return "local_output_unchanged";
+                String result = outputMute.setMuted(false);
+                outputMute = null;
+                return result;
             }
-            outputStrategy = strategy;
-            if (outputMute == null && !muted) return "local_output_unchanged";
-            Exception failure = null;
-            if (outputMute == null) {
-                outputMute = new LocalOutputMuteController(audioBackend(), desired);
-            } else if (!muted || outputMute.policyName().equals(LocalOutputMuteController.policyName(desired))) {
-                return outputMute.setMuted(muted);
-            } else {
-                outputMute = new LocalOutputMuteController(audioBackend(), desired);
+            if (outputMute != null && !outputMute.policyName().equals(policy)) {
+                // Restore the previous reduction before preserving user volume.
+                // Keep the old snapshot if restoration fails so cleanup can retry.
+                outputMute.setMuted(false);
+                outputMute = null;
             }
-            try {
-                return outputMute.setMuted(muted);
-            } catch (Exception error) {
-                failure = error;
-            }
-            // A verified mute may be refused (e.g. shell cannot change the mute bit).
-            // Fall back to the vendor's inaudible strategy instead of leaving the
-            // downlink audible; if that also fails the original error is reported.
-            if (desired != LocalOutputMuteController.Strategy.MUTE) throw failure;
-            LocalOutputMuteController fallback = new LocalOutputMuteController(
-                    audioBackend(), LocalOutputMuteController.strategyForManufacturer(
-                    android.os.Build.MANUFACTURER));
-            if (fallback.policyName().equals(LocalOutputMuteController.policyName(desired))) throw failure;
-            outputMute = fallback;
-            try {
-                return fallback.setMuted(muted) + " fallback=verified_mute_refused";
-            } catch (Exception fallbackFailure) {
-                fallbackFailure.addSuppressed(failure);
-                throw fallbackFailure;
-            }
+            if (outputMute == null) outputMute = new LocalOutputMuteController(audioBackend(), desired);
+            // A transport change does not own a new volume snapshot: all modes
+            // obey this separate, user-selected output/capture policy.
+            return outputMute.setMuted(true);
         }
     }
 
@@ -451,8 +421,9 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String outputPolicyDiagnostic() {
         LocalOutputMuteController current = outputMute;
-        if (current != null && current.usesMinimumVolume())
-            return current.policyName() + " minimum_volume=" + current.targetMinimumVolume();
+        if (current != null)
+            return current.policyName() + (current.usesMinimumVolume()
+                    ? " minimum_volume=" + current.targetMinimumVolume() : " independent_output_control=false");
         return callOutputPolicyMute != null && callOutputPolicyMute.applied() ? "zero_readback" : "not_applied";
     }
 
@@ -513,7 +484,7 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String statusLocked() {
         return "uid=" + Process.myUid()
-                + " service_revision=11"
+                + " service_revision=12"
                 + " pcm=" + (bridgeProcess != null && bridgeProcess.isAlive() ? "running" : "stopped")
                 + " local_output=" + (outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
                     : outputMute != null && outputMute.isVerifiedMuted() ? "muted" : "normal")

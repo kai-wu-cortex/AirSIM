@@ -100,6 +100,11 @@ final class VoBLEAudioEngine: ObservableObject {
 
     func stop() {
         let deactivateAppSession = gate.appAudioSessionActive
+        let fields = ["app_owned_session": String(deactivateAppSession),
+                      "callkit_audio_active": String(gate.callKitAudioActive),
+                      "outputs": AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")]
+        Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "voble",
+            phase: "audio_release", title: "VoBLE 释放通话音频", fields: fields) }
         gate = VoBLEAudioStartGate()
         stopEngine()
         if deactivateAppSession {

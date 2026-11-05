@@ -29,10 +29,23 @@ struct VoBLEReconnectBarrier {
 enum VoBLEConnectionTimeoutPolicy {
     static let timeout: TimeInterval = 8
 
+    static func deadline(state: VoBLEConnectionState, isBackground: Bool,
+                         systemReconnecting: Bool, awaitingConfirmation: Bool) -> TimeInterval? {
+        guard !isBackground, !awaitingConfirmation else { return nil }
+        switch state {
+        case .connecting: return systemReconnecting ? 30 : timeout
+        case .connected, .authenticating: return 20
+        default: return nil
+        }
+    }
+
     static func shouldExpire(state: VoBLEConnectionState, enabled: Bool,
                              elapsed: TimeInterval, isBackground: Bool = false,
-                             systemReconnecting: Bool = false) -> Bool {
-        enabled && state == .connecting && !isBackground && !systemReconnecting && elapsed >= timeout
+                             systemReconnecting: Bool = false,
+                             awaitingConfirmation: Bool = false) -> Bool {
+        guard enabled, let deadline = deadline(state: state, isBackground: isBackground,
+            systemReconnecting: systemReconnecting, awaitingConfirmation: awaitingConfirmation) else { return false }
+        return elapsed >= deadline
     }
 }
 
@@ -254,6 +267,8 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     var onReadyToSendAudio: (() -> Void)?
     var onDisconnected: (() -> Void)?
     var onReady: (() -> Void)?
+    /// Synchronous transport lifecycle notification, not a delayed UI-state subscription.
+    var onHandshakeSettled: (() -> Void)?
 
     private struct PairingAttempt {
         let challengeID: String, androidIdentity: String
@@ -353,7 +368,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     func setApplicationIsBackground(_ value: Bool) {
         applicationIsBackground = value
         connectionTimeoutTask?.cancel(); connectionTimeoutTask = nil
-        if !value, !systemReconnecting, state == .connecting, let peripheral {
+        if !value, let peripheral {
             scheduleConnectionTimeout(for: peripheral)
         }
     }
@@ -624,24 +639,30 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
 
     private func scheduleConnectionTimeout(for value: CBPeripheral) {
         connectionTimeoutTask?.cancel()
-        guard !applicationIsBackground, !systemReconnecting else { return }
+        guard let deadline = VoBLEConnectionTimeoutPolicy.deadline(state: state,
+            isBackground: applicationIsBackground, systemReconnecting: systemReconnecting,
+            awaitingConfirmation: pendingSAS != nil) else { return }
+        let revision = connectionRevision
+        let phase = state
         let started = ContinuousClock.now
         connectionTimeoutTask = Task { [weak self, weak value] in
-            do { try await Task.sleep(for: .seconds(VoBLEConnectionTimeoutPolicy.timeout)) }
+            do { try await Task.sleep(for: .seconds(deadline)) }
             catch { return }
-            guard let self, let value, self.peripheral === value else { return }
+            guard !Task.isCancelled, let self, let value, self.peripheral === value,
+                  self.connectionRevision == revision, self.state == phase else { return }
             let duration = started.duration(to: .now).components
             let elapsed = Double(duration.seconds) + Double(duration.attoseconds) / 1e18
             guard VoBLEConnectionTimeoutPolicy.shouldExpire(state: self.state,
                       enabled: self.enabled, elapsed: elapsed,
                       isBackground: self.applicationIsBackground,
-                      systemReconnecting: self.systemReconnecting) else { return }
+                      systemReconnecting: self.systemReconnecting, awaitingConfirmation: self.pendingSAS != nil) else { return }
 #if DEBUG
             print("[AirSIM VoBLE Connection] connect_timeout; falling back to scan")
 #endif
-            // A cached peripheral can remain .connecting indefinitely after
-            // Android re-creates its GATT server. Cancel it before scanning for
-            // fresh advertisements; do not immediately retry the same cache.
+            self.traceConnectionEvent(phase: "handshake_timeout", title: "VoBLE 握手超时，重新发现",
+                fields: ["state": String(describing: phase), "revision": String(revision)], isFailure: true)
+            // Cancel stalled connection/discovery/authentication before scanning.
+            // Never overlap a replacement with the old CoreBluetooth connection.
             self.queuedPeer = nil
             self.cancelCurrentConnection()
             self.failPending(with: VoBLECentralError.disconnected)
@@ -739,6 +760,20 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
         let message: String?
         if case let .failed(value) = state { message = value } else { message = nil }
         if errorMessage != message { errorMessage = message }
+        let restartedPhase: Bool
+        switch event {
+        case .connected, .restored, .servicesInvalidated: restartedPhase = true
+        default: restartedPhase = false
+        }
+        if previous != state || restartedPhase, let peripheral { scheduleConnectionTimeout(for: peripheral) }
+        // Release handshake ownership immediately, before failed -> scanning can
+        // coalesce in a UI subscriber. A normal poweredOn/scan is not a completion.
+        let settled: Bool
+        switch event {
+        case .disconnected, .authenticationFailed, .stopped, .bluetoothUnavailable: settled = true
+        default: settled = state == .ready && previous != .ready
+        }
+        if settled { onHandshakeSettled?() }
         if state == .ready, previous != .ready {
             onReady?()
             deviceInformationRefreshTask?.cancel()
@@ -811,6 +846,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
                     throw VoBLECentralError.authenticationFailed
                 }
                 pendingSAS = remoteSAS
+                connectionTimeoutTask?.cancel(); connectionTimeoutTask = nil
                 return
             }
             guard object["op"] as? String == "begin",
@@ -865,6 +901,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
             else { object["sas"] = attempt.material.sas }
             try enqueueMessage(JSONSerialization.data(withJSONObject: object), type: .pairing, characteristic: pairing)
             pendingSAS = nil
+            if let peripheral { scheduleConnectionTimeout(for: peripheral) }
         } catch { failAuthentication(error.localizedDescription) }
     }
 

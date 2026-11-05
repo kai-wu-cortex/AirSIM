@@ -40,6 +40,21 @@ public final class AppConfig {
 		return AVFNetworkPolicy.installerEndpointForAgent(endpoint(context));
 	}
 
+    public static String callAudioVolumeSelection(Context context) {
+        String value = preferences(context).getString("call_audio_volume", "auto");
+        return "minimum".equals(value) || "preserve".equals(value) ? value : "auto";
+    }
+
+    public static void setCallAudioVolumeSelection(Context context, String value) {
+        String normalized = "minimum".equals(value) || "preserve".equals(value) ? value : "auto";
+        preferences(context).edit().putString("call_audio_volume", normalized).apply();
+    }
+
+    static String callAudioVolumePolicy(Context context) {
+        return LocalOutputMuteController.policyName(LocalOutputMuteController.configuredStrategy(
+                callAudioVolumeSelection(context), android.os.Build.MANUFACTURER, android.os.Build.MODEL));
+    }
+
     public static String mode(Context context) {
         return preferences(context).getString("mode", MODE_REMOTE_SILENT);
     }

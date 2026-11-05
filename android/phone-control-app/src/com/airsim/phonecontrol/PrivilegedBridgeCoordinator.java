@@ -9,6 +9,11 @@ final class PrivilegedBridgeCoordinator {
         default String setLocalOutputMuted(boolean muted, String transport) throws Exception {
             return setLocalOutputMuted(muted);
         }
+        default String setLocalOutputMuted(boolean muted, String transport, String policy) throws Exception {
+            if (!"minimum_nonzero_volume".equals(policy))
+                throw new java.io.IOException("privileged service needs audio policy update");
+            return setLocalOutputMuted(muted, transport);
+        }
         default String audioSnapshot() throws Exception { throw new java.io.IOException("snapshot unsupported"); }
     }
 
@@ -16,6 +21,7 @@ final class PrivilegedBridgeCoordinator {
     private volatile long connectionGeneration;
 
     long connectionGeneration() { return connectionGeneration; }
+    private String outputPolicy = "minimum_nonzero_volume";
     private boolean desiredMuted;
     private boolean hasMuteIntent;
     private String desiredTransport = PrivilegedBridgeProtocol.TRANSPORT_VOWLAN;
@@ -27,7 +33,7 @@ final class PrivilegedBridgeCoordinator {
         transport = value;
         lastBridgeStatus = value.startBridge();
         lastResult = lastBridgeStatus;
-        if (hasMuteIntent) lastResult = value.setLocalOutputMuted(desiredMuted, desiredTransport);
+        if (hasMuteIntent) lastResult = value.setLocalOutputMuted(desiredMuted, desiredTransport, outputPolicy);
     }
 
     synchronized void disconnect() {
@@ -48,8 +54,16 @@ final class PrivilegedBridgeCoordinator {
                 ? PrivilegedBridgeProtocol.TRANSPORT_VOBLE
                 : PrivilegedBridgeProtocol.TRANSPORT_VOWLAN;
         if (transport != null && hasMuteIntent) {
-            lastResult = transport.setLocalOutputMuted(muted, desiredTransport);
+            lastResult = transport.setLocalOutputMuted(muted, desiredTransport, outputPolicy);
         }
+    }
+
+    synchronized void setOutputPolicy(String policy) throws Exception {
+        if (!"preserve_volume".equals(policy) && !"minimum_nonzero_volume".equals(policy))
+            throw new java.io.IOException("unsupported audio volume policy");
+        outputPolicy = policy;
+        if (transport != null && hasMuteIntent)
+            lastResult = transport.setLocalOutputMuted(desiredMuted, desiredTransport, outputPolicy);
     }
 
     synchronized boolean desiredMuted() {
@@ -64,15 +78,10 @@ final class PrivilegedBridgeCoordinator {
         return AudioWatchdogSnapshot.parse(current.audioSnapshot());
     }
 
-    void reassertLocalOutputMuted() throws Exception {
-        Transport current;
-        synchronized (this) {
-            if (!desiredMuted || !hasMuteIntent) throw new java.io.IOException("obsolete mute intent");
-            current = transport;
-        }
-        if (current == null) throw new java.io.IOException("privileged transport disconnected");
-        String result = current.setLocalOutputMuted(true, desiredTransport);
-        synchronized (this) { if (current == transport && desiredMuted) lastResult = result; }
+    synchronized void reassertLocalOutputMuted() throws Exception {
+        if (!desiredMuted || !hasMuteIntent) throw new java.io.IOException("obsolete mute intent");
+        if (transport == null) throw new java.io.IOException("privileged transport disconnected");
+        lastResult = transport.setLocalOutputMuted(true, desiredTransport, outputPolicy);
     }
 
     synchronized String lastResult() {

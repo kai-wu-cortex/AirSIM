@@ -198,6 +198,13 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
         sessions[peripheralID] = value
         value.calls.mediaPermission = { _ in false }
         onSessionCreated?(value)
+        value.central.onHandshakeSettled = { [weak self] in
+            guard let self, self.handshake == peripheralID else { return }
+            self.handshake = nil
+            // Do not start another central reentrantly from a disconnect callback.
+            // The delayed task only drains the queue; it never clears ownership.
+            Task { @MainActor [weak self] in self?.nextHandshake() }
+        }
         var subscriptions = Set<AnyCancellable>()
         value.central.$state.dropFirst().receive(on: DispatchQueue.main).sink { [weak self, weak value] state in
             guard let self, let value, value.central.state == state else { return }
@@ -207,11 +214,6 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
                 self.reconnectTasks.removeValue(forKey: peripheralID)?.cancel()
             }
             if state == .ready, self.selectedPeripheralID == nil { self.selectedPeripheralID = peripheralID }
-            if self.handshake == peripheralID, state == .ready || state == .stopped || {
-                if case .failed = state { return true }; return false
-            }() {
-                self.handshake = nil; self.nextHandshake()
-            }
             if VoBLEAutoReconnectPolicy.shouldReconnect(
                 enabled: self.enabled,
                 known: self.isKnown(peripheralID),

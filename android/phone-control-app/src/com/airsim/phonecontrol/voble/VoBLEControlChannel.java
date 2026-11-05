@@ -12,6 +12,11 @@ public final class VoBLEControlChannel {
 
     private final Map<String, Subscription> subscriptions = new HashMap<>();
     private String authenticatedOwner;
+    private long epoch;
+    public synchronized long epoch() { return epoch; }
+    public synchronized boolean authenticate(String deviceId, long expectedEpoch) {
+        return epoch == expectedEpoch && authenticate(deviceId);
+    }
 
     public synchronized boolean authenticate(String deviceId) {
         if (!canAuthenticate(deviceId)) return false;
@@ -64,6 +69,16 @@ public final class VoBLEControlChannel {
     public synchronized void disconnect(String deviceId) {
         subscriptions.remove(deviceId);
         if (owns(deviceId)) authenticatedOwner = null;
+    }
+
+    /** Retires ephemeral GATT state; persistent pairing keys are owned elsewhere. */
+    public synchronized java.util.Set<String> disconnectAll() {
+        epoch++;
+        var peers = new java.util.HashSet<>(subscriptions.keySet());
+        if (authenticatedOwner != null) peers.add(authenticatedOwner);
+        subscriptions.clear();
+        authenticatedOwner = null;
+        return peers;
     }
 
     /** Revokes the authenticated central without trusting any other connected central. */

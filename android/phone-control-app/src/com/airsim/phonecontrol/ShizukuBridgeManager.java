@@ -110,6 +110,8 @@ final class ShizukuBridgeManager {
 
     private ShizukuBridgeManager(Context context) {
         app = context.getApplicationContext();
+        try { coordinator.setOutputPolicy(AppConfig.callAudioVolumePolicy(app)); }
+        catch (Exception error) { throw new IllegalStateException(error); }
         muteRetrier = new MuteRequestRetrier(new MuteRequestRetrier.Scheduler() {
             @Override public void execute(Runnable task) { worker.execute(task); }
             @Override public void schedule(Runnable task, long delayMillis) {
@@ -572,6 +574,19 @@ final class ShizukuBridgeManager {
             roleRequestInFlight = false;
         }
         if (deliver) mainHandler.post(() -> callback.onResult(success, detail));
+    }
+
+    void refreshCallAudioVolumePolicy() {
+        worker.execute(() -> {
+            try {
+                coordinator.setOutputPolicy(AppConfig.callAudioVolumePolicy(app));
+                status = coordinator.connected() ? "音量策略已应用 · " + coordinator.lastResult() : "音量策略已保存，等待权限服务连接";
+                BridgeLog.info("call_audio_volume_policy=" + AppConfig.callAudioVolumePolicy(app));
+            } catch (Exception error) {
+                status = "音量策略应用失败，请重新启动权限服务";
+                BridgeLog.error("call_audio_volume_policy_failed", error);
+            }
+        });
     }
 
     void setLocalOutputMuted(boolean muted) {

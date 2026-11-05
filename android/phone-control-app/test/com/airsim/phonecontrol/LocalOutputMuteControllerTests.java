@@ -4,6 +4,8 @@ import java.io.IOException;
 
 public final class LocalOutputMuteControllerTests {
     public static void main(String[] args) throws Exception {
+        outputPolicySurvivesReconnectionAndRejectsLegacyPreserve();
+        preserveVolumeAndDeviceSelection();
         captureCoupledDeviceNeverMutesOrUsesZeroVolume();
         captureSafeFailuresRestoreOriginalState();
         allVendorsUseCaptureSafeMinimumVolume();
@@ -64,6 +66,60 @@ public final class LocalOutputMuteControllerTests {
         check(volumeUnmutes.muted && volumeUnmutes.volume == 4,
                 "restoring volume must not cancel a pre-existing mute");
         System.out.println("LocalOutputMuteControllerTests passed");
+    }
+
+    private static void outputPolicySurvivesReconnectionAndRejectsLegacyPreserve() throws Exception {
+        var coordinator = new PrivilegedBridgeCoordinator();
+        var writes = new java.util.ArrayList<String>();
+        PrivilegedBridgeCoordinator.Transport backend = new PrivilegedBridgeCoordinator.Transport() {
+            public String startBridge() { return "started"; }
+            public String status() { return "running"; }
+            public String setLocalOutputMuted(boolean active) { throw new AssertionError("lost policy"); }
+            public String setLocalOutputMuted(boolean active, String transport, String policy) {
+                writes.add(active + ":" + transport + ":" + policy); return policy;
+            }
+        };
+        coordinator.setOutputPolicy("preserve_volume");
+        coordinator.connect(backend);
+        check(writes.isEmpty(), "settings must not change audio outside a remote call");
+        coordinator.setLocalOutputMuted(true, "voble");
+        coordinator.reassertLocalOutputMuted();
+        coordinator.disconnect(); coordinator.connect(backend);
+        check(writes.size() == 3 && writes.stream().allMatch(v -> v.equals("true:voble:preserve_volume")),
+                "intent/watchdog/reconnection must retain selected policy and transport");
+        coordinator.setLocalOutputMuted(false);
+        try { coordinator.reassertLocalOutputMuted(); throw new AssertionError("ended call repaired"); }
+        catch (java.io.IOException expected) { }
+        check(writes.get(3).equals("false:voble:preserve_volume"), "hangup lost policy");
+        var legacy = new PrivilegedBridgeCoordinator.Transport() {
+            public String startBridge() { return "started"; }
+            public String status() { return "running"; }
+            public String setLocalOutputMuted(boolean active) { throw new AssertionError("legacy fallback muted capture"); }
+        };
+        try { legacy.setLocalOutputMuted(true, "voble", "preserve_volume"); throw new AssertionError("unsupported preserve succeeded"); }
+        catch (java.io.IOException expected) { }
+    }
+
+    private static void preserveVolumeAndDeviceSelection() throws Exception {
+        check(LocalOutputMuteController.configuredStrategy("auto", "Google", "Pixel 6")
+                == LocalOutputMuteController.Strategy.PRESERVE_VOLUME, "reported Pixel 6 defaults to preserve");
+        check(LocalOutputMuteController.configuredStrategy("auto", "Google", "Pixel 7")
+                == LocalOutputMuteController.Strategy.MINIMUM_NONZERO_VOLUME, "do not infer untested models");
+        check(LocalOutputMuteController.configuredStrategy("preserve", "other", "any")
+                == LocalOutputMuteController.Strategy.PRESERVE_VOLUME, "manual override works on any device");
+        check(LocalOutputMuteController.configuredStrategy("minimum", "Google", "Pixel 6")
+                == LocalOutputMuteController.Strategy.MINIMUM_NONZERO_VOLUME, "explicit user choice wins");
+        Platform audio = new Platform();
+        var output = new LocalOutputMuteController(audio, LocalOutputMuteController.Strategy.PRESERVE_VOLUME);
+        output.setMuted(true);
+        audio.volume = 7;
+        output.setMuted(true); output.setMuted(false);
+        check(audio.volume == 7 && audio.changes == 0, "watchdog and hangup must preserve manual volume");
+        audio.muted = true;
+        output.setMuted(true); output.setMuted(false);
+        check(audio.muted && audio.changes == 0, "preserve must not own user mute either");
+        try { LocalOutputMuteController.wireStrategy("unknown"); throw new AssertionError("invalid policy accepted"); }
+        catch (java.io.IOException expected) { }
     }
 
     private static void captureSafeFailuresRestoreOriginalState() throws Exception {

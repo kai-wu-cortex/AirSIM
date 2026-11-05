@@ -115,6 +115,11 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
         return request("muted", new JSONObject().put("muted", muted));
     }
 
+    @Override public String setLocalOutputMuted(boolean muted, String transport, String policy) throws Exception {
+        return request("output_policy", new JSONObject().put("muted", muted)
+                .put("transport", transport).put("policy", policy));
+    }
+
     @Override public String audioSnapshot() throws Exception {
         return request("audio_snapshot", new JSONObject());
     }

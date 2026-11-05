@@ -45,6 +45,21 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
         }
     }
 
+    @Override public String setLocalOutputMuted(boolean muted, String transport, String policy) throws RemoteException {
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(PrivilegedBridgeProtocol.DESCRIPTOR);
+            data.writeInt(muted ? 1 : 0);
+            data.writeString(transport);
+            data.writeString(policy);
+            if (!binder.transact(PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_POLICY, data, reply, 0))
+                throw new RemoteException("请重新启动权限服务，以应用通话音量策略");
+            reply.readException();
+            String result = reply.readString();
+            return result == null ? "" : result;
+        } finally { reply.recycle(); data.recycle(); }
+    }
+
     @Override public String audioSnapshot() throws RemoteException {
         return transact(PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT, false, false);
     }

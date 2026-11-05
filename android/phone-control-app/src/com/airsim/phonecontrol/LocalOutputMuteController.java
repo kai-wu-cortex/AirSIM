@@ -4,17 +4,32 @@ import java.io.IOException;
 
 /** One remote-call mute cycle; the backend runs with Shizuku shell/root identity. */
 final class LocalOutputMuteController {
-    enum Strategy { MUTE, MINIMUM_VOLUME, MINIMUM_NONZERO_VOLUME }
+    enum Strategy { MUTE, MINIMUM_VOLUME, MINIMUM_NONZERO_VOLUME, PRESERVE_VOLUME }
+    static Strategy configuredStrategy(String selection, String manufacturer, String model) {
+        if ("preserve".equals(selection)) return Strategy.PRESERVE_VOLUME;
+        if ("minimum".equals(selection)) return Strategy.MINIMUM_NONZERO_VOLUME;
+        // Issue #26 reports Pixel 6 specifically. Do not infer other HALs from
+        // chipset/vendor alone or detect coupling from a moment of silent PCM.
+        if ("google".equalsIgnoreCase(manufacturer) && "pixel 6".equalsIgnoreCase(model))
+            return Strategy.PRESERVE_VOLUME;
+        return strategyForManufacturer(manufacturer);
+    }
+    static Strategy wireStrategy(String policy) throws IOException {
+        if ("preserve_volume".equals(policy)) return Strategy.PRESERVE_VOLUME;
+        if ("minimum_nonzero_volume".equals(policy)) return Strategy.MINIMUM_NONZERO_VOLUME;
+        throw new IOException("unsupported audio volume policy");
+    }
     static Strategy strategyForManufacturer(String manufacturer) {
         // Some vendor HALs expose VOICE_DOWNLINK capture that is coupled to the
         // call stream mute/zero index: setting muted=true or volume=0 produces
         // all-zero downlink, so neither side hears the remote party. Do not use a
-        // real mute on any manufacturer; always use the lowest NONZERO index and
-        // keep the capture stream unmuted.
+        // real mute for the reduction option. Its lowest NONZERO index avoids
+        // zeroed capture on some HALs but may still attenuate capture on others.
+        // configuredStrategy supports keeping the user's volume for those devices.
         return Strategy.MINIMUM_NONZERO_VOLUME;
     }
 
-    /** Every remote-audio path uses the same capture-safe minimum-volume policy. */
+    /** Legacy reduction policy. User/device capture preference is resolved separately. */
     static Strategy vobleStrategy() {
         return strategyForManufacturer(android.os.Build.MANUFACTURER);
     }
@@ -48,12 +63,13 @@ final class LocalOutputMuteController {
     }
     boolean isVerifiedMuted() { return verifiedMuted; }
     boolean isVerifiedMinimum() { return verifiedMinimum; }
-    boolean usesMinimumVolume() { return strategy != Strategy.MUTE; }
+    boolean usesMinimumVolume() { return strategy == Strategy.MINIMUM_VOLUME || strategy == Strategy.MINIMUM_NONZERO_VOLUME; }
     /** Exposes the exact OS boundary this controller owns (tests and diagnostics). */
     Backend backend() { return backend; }
     private boolean requiresUnmutedCapture() { return strategy == Strategy.MINIMUM_NONZERO_VOLUME; }
     static String policyName(Strategy strategy) {
         return switch (strategy) {
+            case PRESERVE_VOLUME -> "preserve_volume";
             case MUTE -> "mute";
             case MINIMUM_VOLUME -> "minimum_volume";
             case MINIMUM_NONZERO_VOLUME -> "minimum_nonzero_volume";
@@ -62,6 +78,12 @@ final class LocalOutputMuteController {
     String policyName() { return policyName(strategy); }
     int targetMinimumVolume() { return targetMinimum; }
     String setMuted(boolean muted) throws Exception {
+        if (strategy == Strategy.PRESERVE_VOLUME) {
+            started = muted;
+            // Neither the initial request, watchdog nor hangup owns the user's
+            // volume/mute in this mode. Manual adjustments must survive all three.
+            return "local_output_preserve_volume local_output_suppressed=false independent_output_control=false";
+        }
         if (!muted) return restore();
         if (!started) {
             // Finish all reads before marking the snapshot usable or changing system audio.

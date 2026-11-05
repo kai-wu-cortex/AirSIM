@@ -5,6 +5,7 @@ import java.util.List;
 
 public final class RemoteAudioWatchdogTests {
     public static void main(String[] args) throws Exception {
+        preserveVolumeNeverTriggersVolumeRepair();
         captureSafeTargetRequiresUnmutedPositiveVolume();
         captureSafeWatchdogRepairsWithoutRemutingCapture();
         minimumVolumeTargetIsNotMistakenForUnmutedDrift();
@@ -66,6 +67,19 @@ public final class RemoteAudioWatchdogTests {
                 && report.contains("budget_exhausted"), "TXT must include evidence and limitations");
         System.out.println("RemoteAudioWatchdogTests passed");
     }
+    private static void preserveVolumeNeverTriggersVolumeRepair() throws Exception {
+        var monitor = new RemoteAudioWatchdog(new RemoteAudioWatchdog.Backend() {
+            int sample;
+            public AudioWatchdogSnapshot probe() throws Exception {
+                return AudioWatchdogSnapshot.parse("muted=" + (++sample % 2 == 0)
+                        + " volume=" + sample % 8 + " mode=2 speaker=false pcm=true output_policy=preserve_volume");
+            }
+            public void repair(int step) { throw new AssertionError("user volume is not drift"); }
+            public void reconnect() { throw new AssertionError("healthy preserved policy cannot reconnect"); }
+        }, value -> {});
+        for (long now = 0; now < 180000; now += 2000) monitor.tick(now, () -> true);
+    }
+
     private static void captureSafeWatchdogRepairsWithoutRemutingCapture() throws Exception {
         int[] volume = {4}, repairs = {0}; boolean[] muted = {false};
         LocalOutputMuteController output = new LocalOutputMuteController(new LocalOutputMuteController.Backend() {

@@ -1499,11 +1499,11 @@ final class CallUpdateWorkSchedulerTests: XCTestCase {
         XCTAssertTrue(AppRefreshPolicy.shouldRunAgentPolling(mode: .cloud))
     }
 
-    func testScreenLockCannotExpirePendingOrSystemBluetoothReconnection() {
+    func testScreenLockPreservesSystemReconnectButForegroundHasDeadline() {
         XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(state: .connecting, enabled: true,
             elapsed: 120, isBackground: true, systemReconnecting: false))
         XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(state: .connecting, enabled: true,
-            elapsed: 120, isBackground: false, systemReconnecting: true))
+            elapsed: 120, isBackground: true, systemReconnecting: true))
         XCTAssertTrue(VoBLEConnectionTimeoutPolicy.shouldExpire(state: .connecting, enabled: true,
             elapsed: 8, isBackground: false, systemReconnecting: false))
     }
@@ -4099,7 +4099,7 @@ final class AirSIMTests: XCTestCase {
             state: .connecting, enabled: true, elapsed: 8))
         XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(
             state: .connecting, enabled: false, elapsed: 20))
-        for state in [VoBLEConnectionState.authenticating, .ready, .stopped] {
+        for state in [VoBLEConnectionState.ready, .stopped] {
             XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(
                 state: state, enabled: true, elapsed: 20))
         }

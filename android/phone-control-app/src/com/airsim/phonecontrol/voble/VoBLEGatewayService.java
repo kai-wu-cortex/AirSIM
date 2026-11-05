@@ -222,6 +222,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     }
 
     @Override public void onAdvertisingFailed(int code) {
+        if (destroyed) return;
         mainHandler.removeCallbacks(advertisingRetry);
         long attempt = advertisingRetries.incrementAndGet();
         if (attempt > 3) {
@@ -237,10 +238,12 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     @Override public IBinder onBind(Intent intent) { return null; }
 
     @Override public void onPairingWrite(String deviceId, byte[] value) {
-        controlQueue.execute(() -> handlePairing(deviceId, value));
+        long epoch = channel.epoch();
+        controlQueue.execute(() -> handlePairing(deviceId, value, epoch));
     }
 
-    private void handlePairing(String deviceId, byte[] value) {
+    private void handlePairing(String deviceId, byte[] value, long epoch) {
+        if (destroyed || epoch != channel.epoch()) return;
         try {
             JSONObject request = new JSONObject(new String(value, StandardCharsets.UTF_8));
             String operation = request.optString("op", "");
@@ -281,7 +284,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                             decode(request.getString("iphone_nonce")),
                             request.getString("sas"), System.currentTimeMillis());
                 }
-                if (!channel.authenticate(deviceId)) throw new SecurityException("another central owns VoBLE");
+                if (!channel.authenticate(deviceId, epoch)) throw new SecurityException("VoBLE connection was retired or owned by another central");
                 peerIdentities.put(deviceId, identity);
                 diagnostics = new VoBLEDiagnostics.Snapshot(
                         RuntimeMode.agentLabel(this), true, false, "G.711-mu/8000/mono",
@@ -416,7 +419,8 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     }
 
     @Override public void onDisconnected(String deviceId) {
-        controlQueue.execute(() -> {
+        if (destroyed) return;
+        try { controlQueue.execute(() -> {
             BridgeLog.info("voble_peer_disconnected");
             peerIdentities.remove(deviceId);
             SessionContext value = session;
@@ -426,7 +430,10 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
             }
             pendingPairingCode = "";
             diagnostics = VoBLEDiagnostics.idle(RuntimeMode.agentLabel(this));
-        });
+        }); } catch (java.util.concurrent.RejectedExecutionException error) {
+            // close() also retires peers during onDestroy, after queues shut down.
+            if (!destroyed) throw error;
+        }
     }
 
     private void publishCallState(String callId, String direction, String state, String number) {

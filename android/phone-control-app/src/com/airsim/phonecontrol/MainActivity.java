@@ -800,6 +800,35 @@ public final class MainActivity extends Activity {
         shizukuCard.addView(rootActions, matchWithTop(10));
         root.addView(shizukuCard, matchWithTop(10));
 
+        root.addView(sectionTitle("远端通话音量与本机声音"), matchWithTop(22));
+        LinearLayout volumeCard = card(SURFACE, 22);
+        volumeCard.setOrientation(LinearLayout.VERTICAL);
+        volumeCard.setPadding(dp(16), dp(16), dp(16), dp(16));
+        volumeCard.addView(description("部分手机的通话音量也会影响转发给 iPhone 的声音。此设置适用于 VoWLAN、VoBLE 和使用此音频桥的云端通话。"));
+        RadioGroup volumeChoices = new RadioGroup(this);
+        String[] volumeKeys = {"auto", "preserve", "minimum"};
+        String[] volumeLabels = {"自动适配", "保留通话音量 · 优先远端声音", "降低本机声音 · 最低非零音量"};
+        java.util.Map<Integer, String> volumeIDs = new java.util.HashMap<>();
+        for (int index = 0; index < volumeKeys.length; index++) {
+            RadioButton option = new RadioButton(this);
+            option.setId(View.generateViewId()); option.setText(volumeLabels[index]);
+            option.setTextColor(TEXT); option.setButtonTintList(ColorStateList.valueOf(PRIMARY));
+            volumeIDs.put(option.getId(), volumeKeys[index]); volumeChoices.addView(option);
+            if (volumeKeys[index].equals(AppConfig.callAudioVolumeSelection(this))) option.setChecked(true);
+        }
+        TextView volumeExplanation = description(callAudioVolumeExplanation());
+        volumeChoices.setOnCheckedChangeListener((group, id) -> {
+            String choice = volumeIDs.get(id);
+            if (choice == null) return;
+            AppConfig.setCallAudioVolumeSelection(this, choice);
+            ShizukuBridgeManager.get(this).refreshCallAudioVolumePolicy();
+            volumeExplanation.setText(callAudioVolumeExplanation());
+            toast("音量偏好已保存，正在应用");
+        });
+        volumeCard.addView(volumeChoices, matchWithTop(8));
+        volumeCard.addView(volumeExplanation, matchWithTop(6));
+        root.addView(volumeCard, matchWithTop(10));
+
         root.addView(sectionTitle("私有网络与端口"), matchWithTop(22));
         LinearLayout networkCard = card(SURFACE, 22);
         networkCard.setOrientation(LinearLayout.VERTICAL);
@@ -2100,6 +2129,15 @@ public final class MainActivity extends Activity {
         if (text.length() > 5 || !text.chars().allMatch(Character::isDigit)) return -1;
         int value = Integer.parseInt(text);
         return NetworkSettings.isUsablePort(value) ? value : -1;
+    }
+
+    private String callAudioVolumeExplanation() {
+        boolean preserve = "preserve_volume".equals(AppConfig.callAudioVolumePolicy(this));
+        String auto = "auto".equals(AppConfig.callAudioVolumeSelection(this))
+                ? "自动适配：目前 Pixel 6 保留音量，其他设备沿用降低本机声音策略。\n" : "";
+        return auto + (preserve
+                ? "当前保留安卓通话音量：通话中可用安卓音量键调到清晰档位，看门狗不会调低，挂断后保留你的调整。若音量已很低，请手动调高。\n此音频桥尚不能独立降低本机输出并保证采集音量，安卓本机可能发声或漏音。"
+                : "当前会将安卓通话音量维持在最低非零档，结束后恢复。若 iPhone 声音过小，选择“保留通话音量”。\n本机低音量不代表绝对静音；无法保证降低本机声音不影响远端采集。");
     }
 
     private void refreshShizukuStatus() {

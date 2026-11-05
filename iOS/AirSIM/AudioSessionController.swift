@@ -228,7 +228,25 @@ final class AudioSessionController: ObservableObject {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] notification in
-            Task { @MainActor [weak self] in self?.handleRouteChange(notification) }
+            // Snapshot at notification delivery, before an async hop or standby
+            // activation changes the shared session again. Port types only: no
+            // headset names, identifiers or audio are collected.
+            let session = AVAudioSession.sharedInstance()
+            let previous = notification.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
+            let fields: [String: String] = [
+                "reason": String((notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0),
+                "previous_outputs": previous?.outputs.map { $0.portType.rawValue }.joined(separator: ",") ?? "none",
+                "outputs": session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","),
+                "inputs": session.currentRoute.inputs.map { $0.portType.rawValue }.joined(separator: ","),
+                "category": session.category.rawValue,
+                "mode": session.mode.rawValue,
+                "category_options": String(session.categoryOptions.rawValue)
+            ]
+            Task { @MainActor [weak self] in
+                self?.handleRouteChange(notification)
+                await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "audio-route",
+                    phase: "route_changed", title: "系统音频路由变化", fields: fields)
+            }
         }
     }
 
