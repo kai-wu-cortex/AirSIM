@@ -188,6 +188,8 @@ public final class MainActivity extends Activity {
         if (Intent.ACTION_DIAL.equals(getIntent().getAction()) && data != null) {
             showPage(Page.CALLS);
             if (number != null) number.setText(data.getSchemeSpecificPart());
+        } else if (getIntent().getBooleanExtra("open_pairing", false)) {
+            openPairingPage();
         }
         refreshStatus();
         refreshAgent();
@@ -989,6 +991,8 @@ public final class MainActivity extends Activity {
         contentHost.removeAllViews();
         contentHost.addView(pairingPage(), new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        ShizukuBridgeManager.get(this).refreshBridgeStatus();
+        if (resumed && pcmStatusPoller != null) pcmStatusPoller.start();
         startPairing();
     }
 
@@ -1994,12 +1998,26 @@ public final class MainActivity extends Activity {
                 && bottomBar.getVisibility() == View.VISIBLE) showPage(Page.STATUS);
     }
 
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent != null && intent.getBooleanExtra("open_pairing", false)) {
+            openPairingPage();
+        }
+    }
+
     private void startPairing() {
         stopPairingServer();
         if (pairingStatus != null) pairingStatus.setText("正在检查局域网并生成临时密钥…");
         pairingServer = new PairingServer(this, new PairingServer.Listener() {
             @Override public void onStarted(String code, String address, long expiresAtMillis) {
                 BridgeLog.info("pairing_started address=" + address + " expires_at=" + expiresAtMillis);
+                try {
+                    java.nio.file.Files.write(new java.io.File(getFilesDir(), "pairing-session.txt").toPath(),
+                            ("code=" + MainScreenPresentation.formatPairingCode(code) + "\naddress="
+                                    + address.replace('\n', ' ') + "\nexpires_at=" + expiresAtMillis + "\n")
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception ignored) {}
                 pairingCode = code;
                 pairingExpiresAt = expiresAtMillis;
                 runOnUiThread(() -> {
@@ -2015,6 +2033,10 @@ public final class MainActivity extends Activity {
 
             @Override public void onSucceeded(String agentResponse) {
                 BridgeLog.info("pairing_completed");
+                try {
+                    java.nio.file.Files.write(new java.io.File(getFilesDir(), "pairing-session.txt").toPath(),
+                            "status=paired\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                } catch (Exception ignored) {}
                 boolean localMode = false;
                 try {
                     localMode = new JSONObject(agentResponse).optBoolean("local_mode", false);
@@ -2243,8 +2265,12 @@ public final class MainActivity extends Activity {
 
     private boolean dialerRoleHeld() {
         RoleManager manager = getSystemService(RoleManager.class);
-        return manager != null && manager.isRoleAvailable(RoleManager.ROLE_DIALER)
-                && manager.isRoleHeld(RoleManager.ROLE_DIALER);
+        if (manager != null && manager.isRoleAvailable(RoleManager.ROLE_DIALER)
+                && manager.isRoleHeld(RoleManager.ROLE_DIALER)) {
+            return true;
+        }
+        TelecomManager telecom = getSystemService(TelecomManager.class);
+        return telecom != null && getPackageName().equals(telecom.getDefaultDialerPackage());
     }
 
     private String vowlanNetworkLine() {

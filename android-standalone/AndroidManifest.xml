@@ -11,6 +11,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
@@ -35,6 +37,7 @@
         android:name="com.airsim.phonecontrol.StandaloneBridgeApplication"
         android:allowBackup="false"
         android:debuggable="true"
+        android:hardwareAccelerated="false"
         android:icon="@mipmap/ic_launcher"
         android:label="AirSIM Standalone"
         android:roundIcon="@mipmap/ic_launcher"
@@ -83,6 +86,12 @@
             <meta-data android:name="android.telecom.IN_CALL_SERVICE_UI" android:value="true" />
             <meta-data android:name="android.telecom.IN_CALL_SERVICE_RINGING" android:value="false" />
             <intent-filter><action android:name="android.telecom.InCallService" /></intent-filter>
+        </service>
+        <service
+            android:name="com.airsim.phonecontrol.AirSIMCallManagerService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter><action android:name="android.telecom.ConnectionService" /></intent-filter>
         </service>
         <service
             android:name="com.airsim.phonecontrol.StandaloneAgentService"

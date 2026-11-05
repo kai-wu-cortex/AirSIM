@@ -462,7 +462,8 @@ final class ShizukuBridgeManager {
 
     StartupSnapshot startupSnapshot() {
         if (rootTransport != null || rootStartInFlight.get()
-                || channel == PrivilegeChannelPreference.Channel.ROOT) {
+                || channel == PrivilegeChannelPreference.Channel.ROOT
+                || new java.io.File("/data/local/tmp/airsim-bridge.token").isFile()) {
             return new StartupSnapshot(true, true, true);
         }
         boolean installed = false;
@@ -705,6 +706,10 @@ final class ShizukuBridgeManager {
     }
 
     void refreshBridgeStatus() {
+        if (!coordinator.connected() && rootTransport == null && privilegedClient == null && !rootStartInFlight.get()
+                && new java.io.File("/data/local/tmp/airsim-bridge.token").isFile()) {
+            startRootChannel();
+        }
         if (!coordinator.connected() || !statusRefreshInFlight.compareAndSet(false, true)) return;
         worker.execute(() -> {
             try {
@@ -731,6 +736,7 @@ final class ShizukuBridgeManager {
                 audioHealthReport.clear();
                 status = (rootTransport != null ? "Root" : "Shizuku") + " PCM 状态检查失败";
                 BridgeLog.error("pcm_status_refresh_failed", error);
+                if (rootTransport != null) restartRootChannel();
             } finally {
                 statusRefreshInFlight.set(false);
             }

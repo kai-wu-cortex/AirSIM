@@ -356,7 +356,9 @@ final class StandaloneAgentGateway {
 
     private AgentCommandDispatcher.Result execute(AgentCommand command) {
         RoleManager roles = context.getSystemService(RoleManager.class);
-        boolean dialer = roles != null && roles.isRoleHeld(RoleManager.ROLE_DIALER);
+        android.telecom.TelecomManager telecom = context.getSystemService(android.telecom.TelecomManager.class);
+        boolean dialer = (roles != null && roles.isRoleHeld(RoleManager.ROLE_DIALER))
+                || (telecom != null && context.getPackageName().equals(telecom.getDefaultDialerPackage()));
         return AgentCommandDispatcher.execute(command, dialer,
                 value -> {
                     CallRepository.ActionResult result = CallRepository.execute(

@@ -40,6 +40,10 @@ final class AppUpdatePresenter {
 
     boolean showStartupNotes(Runnable after) {
         Activity activity = liveOwner();
+        if ("MU3356".equals(android.os.Build.MODEL)) {
+            preferences.edit().putString(NOTES_SEEN, version + "#" + build).apply();
+            return false;
+        }
         if (activity == null || !AppUpdatePolicy.needsNotes(version + "#" + build,
                 preferences.getString(NOTES_SEEN, ""))) return false;
         if (dialog != null) return true;

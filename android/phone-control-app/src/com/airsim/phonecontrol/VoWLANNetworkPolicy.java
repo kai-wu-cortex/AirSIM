@@ -52,7 +52,7 @@ public final class VoWLANNetworkPolicy {
         if (remote instanceof Inet6Address && local instanceof Inet6Address) {
             return remote.isLinkLocalAddress() && local.isLinkLocalAddress() && interfaceName != null
                     && (interfaceName.startsWith("wlan") || interfaceName.startsWith("swlan")
-                        || interfaceName.startsWith("ap"));
+                        || interfaceName.startsWith("ap") || interfaceName.startsWith("br"));
         }
         return remote != null && local != null
                 && permitsPairingPeer(remote.getHostAddress(), local.getHostAddress(), interfaceName);
@@ -86,7 +86,7 @@ public final class VoWLANNetworkPolicy {
     }
 
     public static boolean isHotspotInterface(String name, String host) {
-        if (name == null || host == null || !(name.startsWith("swlan") || name.startsWith("ap"))) return false;
+        if (name == null || host == null || !(name.startsWith("swlan") || name.startsWith("ap") || name.startsWith("br"))) return false;
         if (isCustomPrivate(host)) return true;
         String[] fields = host.split("\\.");
         if (fields.length != 4) return false;

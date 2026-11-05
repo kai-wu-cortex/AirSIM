@@ -42,6 +42,18 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
     }
 
     static RootBridgeTransport start(Context context) throws Exception {
+        File daemonTokenFile = new File("/data/local/tmp/airsim-bridge.token");
+        if (daemonTokenFile.isFile() && daemonTokenFile.canRead()) {
+            try {
+                String daemonToken = new String(java.nio.file.Files.readAllBytes(daemonTokenFile.toPath()), StandardCharsets.UTF_8).trim();
+                if (!daemonToken.isEmpty()) {
+                    RootBridgeTransport daemon = new RootBridgeTransport(null, 27580, daemonToken, daemonTokenFile);
+                    daemon.request("status", new JSONObject());
+                    BridgeLog.info("root_bridge_connected port=27580 mode=daemon");
+                    return daemon;
+                }
+            } catch (Exception ignored) {}
+        }
         int port = 20000 + new SecureRandom().nextInt(30000);
         String token = randomToken();
         int ownerPid = android.os.Process.myPid();
@@ -61,7 +73,8 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
                 + "' /system/bin/app_process /system/bin com.airsim.phonecontrol.RootBridgeMain '"
                 + shellEscape(context.getPackageName()) + "' " + port + " '"
                 + shellEscape(tokenFile.getAbsolutePath()) + "' " + ownerPid + " " + ownerStart;
-        String su = new File("/system/bin/su").canExecute() ? "/system/bin/su" : "su";
+        String su = new File("/system/bin/su").canExecute() ? "/system/bin/su"
+                : (new File("/debug_ramdisk/su").canExecute() ? "/debug_ramdisk/su" : "su");
         Process process;
         try {
             process = new ProcessBuilder(su, "-c", command)
@@ -154,6 +167,10 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
 
     synchronized void close() {
         if (closed) return;
+        if (process == null) {
+            closed = true;
+            return;
+        }
         try {
             // Killing su alone can leave app_process and its PCM supervisor alive.
             // The authenticated shutdown waits for the owned PCM child to stop.

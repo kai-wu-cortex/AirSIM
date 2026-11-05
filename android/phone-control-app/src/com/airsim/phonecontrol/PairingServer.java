@@ -339,7 +339,7 @@ public final class PairingServer implements Closeable {
     }
 
     private static int interfacePriority(String name) {
-        if (name.startsWith("swlan") || name.startsWith("ap")) return 0;
+        if (name.startsWith("swlan") || name.startsWith("ap") || name.startsWith("br")) return 0;
         if (name.startsWith("wlan")) return 1;
         return 2;
     }

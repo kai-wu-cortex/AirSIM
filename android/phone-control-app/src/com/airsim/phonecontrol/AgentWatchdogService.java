@@ -70,8 +70,10 @@ public final class AgentWatchdogService extends Service {
                     BridgeLog.info("command_received action=" + command.action + " command_id="
                             + DebugRedactor.safeIdentifier(command.id));
                     RoleManager roleManager = getSystemService(RoleManager.class);
-                    boolean dialerRoleHeld = roleManager != null
-                            && roleManager.isRoleHeld(RoleManager.ROLE_DIALER);
+                    android.telecom.TelecomManager telecomManager = getSystemService(android.telecom.TelecomManager.class);
+                    boolean dialerRoleHeld = (roleManager != null
+                            && roleManager.isRoleHeld(RoleManager.ROLE_DIALER))
+                            || (telecomManager != null && getPackageName().equals(telecomManager.getDefaultDialerPackage()));
                     AgentCommandDispatcher.Result result = AgentCommandDispatcher.execute(
                             command, dialerRoleHeld,
                             call -> {
