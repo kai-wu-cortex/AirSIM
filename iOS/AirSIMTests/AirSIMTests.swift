@@ -5250,3 +5250,38 @@ private actor OperationQueryTransport: AirSIMHTTPTransport {
         return .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
     }
 }
+
+@MainActor
+final class CallNotificationTruthTests: XCTestCase {
+    private func record(direction: String = "incoming", state: String = "ended", missed: Bool = true,
+                        connected: Bool = false) -> CallRecord {
+        var call = CallRecord(id: "notification-test", index: 0, direction: direction, state: state,
+            number: "10086", startedAt: Date(), updatedAt: Date(),
+            endedAt: state == "ended" ? Date() : nil, missed: missed)
+        if connected { call.connectedAt = Date() }
+        return call
+    }
+    func testOnlyExplicitUnansweredIncomingTerminalIsMissed() {
+        XCTAssertTrue(CallNotificationTruth.isMissed(record()))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(connected: true)))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(missed: false)))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(direction: "outgoing")))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(state: "incoming")))
+    }
+    func testLegacyEndAndAnsweredPushCannotBecomeMissed() {
+        var info: [AnyHashable: Any] = ["event": "call_owner", "phase": "ended", "direction": "incoming"]
+        XCTAssertFalse(CallNotificationTruth.isMissedPush(info))
+        info["missed"] = true; info["notification_status"] = "missed"
+        XCTAssertTrue(CallNotificationTruth.isMissedPush(info))
+        info["phase"] = "active"
+        XCTAssertFalse(CallNotificationTruth.isMissedPush(info))
+        info["phase"] = "ended"; info["missed"] = false
+        XCTAssertFalse(CallNotificationTruth.isMissedPush(info))
+    }
+    func testBodyUsesActualSIMAndUnknownValuesRemainUnknown() {
+        XCTAssertEqual(CallNotificationTruth.body(number: "10086", callerName: "运营商", slotIndex: 1),
+            "运营商 · 10086 · SIM 2")
+        XCTAssertEqual(CallNotificationTruth.body(number: "10086", callerName: "10086", slotIndex: nil), "10086")
+        XCTAssertEqual(CallNotificationTruth.body(number: nil, callerName: nil, slotIndex: -1), "未知号码")
+    }
+}

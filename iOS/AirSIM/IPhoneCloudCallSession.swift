@@ -855,6 +855,7 @@ final class IPhoneCloudCallSession {
     }
 
     func answer(_ incoming: IncomingVoIPCall) async throws {
+        guard !DedicatedCallPolicy.vowlanOnly else { throw IPhoneCloudCallError.mediaUnavailable }
         guard let url = incoming.authenticatedMediaURL else {
             throw IPhoneCloudCallError.mediaUnavailable
         }
@@ -897,6 +898,7 @@ final class IPhoneCloudCallSession {
     }
 
     func reject(_ incoming: IncomingVoIPCall) async throws {
+        guard !DedicatedCallPolicy.vowlanOnly else { throw IPhoneCloudCallError.mediaUnavailable }
         call = incoming
         answered = false
         guard let envelope = media.controlEnvelope(action: "reject", call: incoming),
@@ -1091,10 +1093,12 @@ final class IPhoneCloudCallSession {
     }
 
     func prepareAudioForCallKit() throws {
+        guard !DedicatedCallPolicy.vowlanOnly else { throw IPhoneCloudCallError.mediaUnavailable }
         try media.prepareForCallKit()
     }
 
     func startAudio() throws {
+        guard !DedicatedCallPolicy.vowlanOnly else { throw IPhoneCloudCallError.mediaUnavailable }
         guard isPrepared else { throw IPhoneCloudCallError.connectionClosed }
         Task { await AgentVerboseTraceRecorder.shared.recordAudioStartup(phase: "phone_start") }
         try media.startAudio()
@@ -1105,6 +1109,7 @@ final class IPhoneCloudCallSession {
     }
 
     func startAudioWithRetry() {
+        guard !DedicatedCallPolicy.vowlanOnly else { return }
         guard canAttemptAudio else { return }
         if media.isAudioRunning {
             audioState = .connected

@@ -106,6 +106,16 @@ public final class VoWLANControlGateway implements Closeable {
                 }
                 return;
             }
+            if ("/api/calls/early-media".equals(request.path.split("[?]", 2)[0])) {
+                String call = android.net.Uri.parse(request.path).getQueryParameter("call_id");
+                byte[] secret = matched.secretCopy();
+                try {
+                    var grant = EarlyMediaSessions.grant(context, matched.id(), call == null ? "" : call, nonce, secret);
+                    respond(peer, grant == null ? 410 : 200,
+                        grant == null ? "{\"error\":\"early_media_revoked\"}" : grant.toString());
+                } finally { Arrays.fill(secret, (byte) 0); }
+                return;
+            }
             String identityProof = null;
             byte[] requestSecret = matched.secretCopy();
             try {

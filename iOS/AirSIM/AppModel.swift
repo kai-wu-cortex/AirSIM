@@ -3,6 +3,22 @@ import Foundation
 import UIKit
 import WidgetKit
 
+/// 运营商 early media 是否已可听的纯判定。
+/// 184 只有 VoWLAN 具备接通前 early media：仅 receiveOnly 会话收到首帧下行 PCM
+/// 才算听到，grant 到达或租约本身不算听到。云端与蓝牙在接通后才开始媒体，
+/// 接通前没有运营商语音。开关关闭时三路恒为 false。
+enum CarrierEarlyMediaAudibility {
+    static func isAudible(
+        transport: CallTransport?,
+        receiveOnly: Bool,
+        hasReceivedEarlyMedia: Bool,
+        enabled: Bool
+    ) -> Bool {
+        guard enabled, transport == .vowlan else { return false }
+        return receiveOnly && hasReceivedEarlyMedia
+    }
+}
+
 enum AppForegroundRecoveryPolicy {
     /// Foreground return may restart discovery only while idle. An active call keeps
     /// its locked route; network recovery resumes after the call, never as a handover.
@@ -324,7 +340,10 @@ enum ModuleConnectivityPolicy {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var activeCall: CallRecord?
-    @Published var callHistory: [CallRecord] = [] { didSet { refreshHistoryAttention() } }
+    @Published var callHistory: [CallRecord] = [] { didSet {
+        refreshHistoryAttention()
+        incomingNotifier.reconcileHistory(callHistory, previous: oldValue, callerName: { contacts.displayName(for: $0) })
+    } }
     @Published var messages: [SMSMessage] = [] { didSet { refreshHistoryAttention() } }
     @Published private(set) var unreadMessageIDs: Set<String> = []
     @Published private(set) var unseenMissedCallIDs: Set<String> = []
@@ -370,7 +389,7 @@ final class AppModel: ObservableObject {
     private var localDirectoryRefresh: Task<Void, Never>?
     private var localDirectoryRefreshPending = false
     @Published private(set) var pairedDeviceRecords = PairedAndroidDeviceStore.records()
-    let incomingNotifier = IncomingCallNotifier()
+    let incomingNotifier = IncomingCallNotifier.shared
     let incomingSMSNotifier = IncomingSMSNotifier()
     let liveActivity = LiveActivityController()
     private var liveActivityAgentPage = 0
@@ -904,8 +923,9 @@ final class AppModel: ObservableObject {
 
     private func updateOwnedPrimaryAlerts(_ call: CallRecord?) {
         let suppressed = call?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone
-        incomingNotifier.update(call: suppressed ? nil : call,
-            callerName: call.map { contacts.displayName(for: $0.number) }, appIsActive: appIsActive)
+        incomingNotifier.update(call: call,
+            callerName: call.map { contacts.displayName(for: $0.number) }, appIsActive: appIsActive,
+            presentIncoming: !suppressed)
         if suppressed || WatchCallCoordinator.shared.ownsMedia(callID: call?.id) { audio.stopCallTone() }
         else { audio.updateCallTone(for: call) }
     }
@@ -983,6 +1003,19 @@ final class AppModel: ObservableObject {
     var callAudioIsActive: Bool {
         (audio.active && audio.transportReady && !audio.receiveOnly) || bluetoothPCMConnected
             || cloudCallAudioState.isConnected || VirtualCallTTSController.shared.isPrepared
+    }
+
+    /// 呼出接通前是否已听到运营商传回的原始回铃音。184 只有 VoWLAN 走
+    /// receiveOnly early media 会话；云端与蓝牙接通后才开始媒体，因此它们
+    /// 在接通前恒为 false。开关关闭时恒为 false。
+    @Published private(set) var carrierEarlyMediaNotice: String?
+
+    var carrierEarlyMediaAudible: Bool {
+        CarrierEarlyMediaAudibility.isAudible(
+            transport: currentCallTransport,
+            receiveOnly: audio.receiveOnly,
+            hasReceivedEarlyMedia: audio.hasReceivedEarlyMedia,
+            enabled: CarrierRingbackPreference.isEnabled())
     }
 
     /// The actual BLE PCM path, not just the selected session. The engine and
@@ -1596,8 +1629,12 @@ final class AppModel: ObservableObject {
     }
 
     var callAudioStatusText: String {
+        if callLifecycleSnapshot.state == .connecting, CarrierRingbackPreference.isEnabled() {
+            if carrierEarlyMediaAudible { return "运营商语音 · 尚未接通" }
+            if let carrierEarlyMediaNotice { return carrierEarlyMediaNotice }
+        }
         if callLifecycleSnapshot.state == .connecting, audio.receiveOnly {
-            return audio.hasReceivedEarlyMedia ? "运营商语音 · 尚未接通" : "正在连接运营商语音 · 尚未接通"
+            return carrierEarlyMediaAudible ? "运营商语音 · 尚未接通" : "正在连接运营商语音 · 尚未接通"
         }
         if currentCallTransport == .vowlan,
            !audio.transportReady, let error = audio.errorMessage { return error }
@@ -2495,13 +2532,12 @@ final class AppModel: ObservableObject {
                     callerName: callerName ?? previousCall.map { contacts.displayName(for: $0.number) }
                 )
                 // CallKit 成功后由系统负责锁屏来电界面；仅在 CallKit 不可用或上报失败时发普通通知兜底。
-                if !callKit.suppressesInAppIncomingRingtone {
-                    incomingNotifier.update(
-                        call: lifecycleCall,
-                        callerName: callerName,
-                        appIsActive: appIsActive
-                    )
-                }
+                incomingNotifier.update(
+                    call: lifecycleCall,
+                    callerName: callerName,
+                    appIsActive: appIsActive,
+                    presentIncoming: !callKit.suppressesInAppIncomingRingtone
+                )
                 if lifecycleCall?.direction == "incoming", callKit.suppressesInAppIncomingRingtone {
                     // CallKit 已负责系统铃声，不能再叠加应用内铃声。
                     audio.stopCallTone()
@@ -3732,9 +3768,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Disabling the preference stops only pre-answer receive-only media.
+    /// Established two-way audio and the call itself remain owned by their route.
+    func carrierRingbackPreferenceDidChange(enabled: Bool) {
+        guard !enabled else { return }
+        earlyMediaTask?.cancel()
+        earlyMediaTask = nil
+        guard callLifecycleSnapshot.state == .connecting,
+              currentCallTransport == .vowlan, audio.receiveOnly else { return }
+        audio.deactivate(preservingSharedSession: callKit.managesCurrentCall)
+        audio.updateCallTone(for: remoteCall)
+    }
+
     /// Only a canonical, paired WLAN call can negotiate early media. No relay,
     /// unscoped legacy PCM, URL supplied by the peer, or microphone is used here.
     private func startEarlyMediaIfEligible() {
+        // 开关关闭时不探测运营商 early media，也不消耗本次呼出的唯一尝试机会，
+        // 呼出等待音保持本地合成音；打开开关后下次呼出重新探测。
+        guard CarrierRingbackPreference.isEnabled() else { return }
         guard callLifecycleSnapshot.state == .connecting,
               let key = presentedDeviceCall,
               let route = deviceCallRouter.route(for: key), route.transport == .vowlan,
@@ -3745,10 +3796,12 @@ final class AppModel: ObservableObject {
               !callKit.managesCurrentCall || callKit.audioSessionIsActive,
               earlyMediaAttempted.insert(route.systemUUID).inserted else { return }
         earlyMediaTask?.cancel()
+        carrierEarlyMediaNotice = "正在等待运营商接通前语音"
         let snapshot = callLifecycleSnapshot
         earlyMediaTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let current = { !Task.isCancelled && self.callLifecycleSnapshot.callUUID == snapshot.callUUID
+            let current = { !Task.isCancelled && CarrierRingbackPreference.isEnabled()
+                && self.callLifecycleSnapshot.callUUID == snapshot.callUUID
                 && self.callLifecycleSnapshot.state == .connecting
                 && self.presentedDeviceCall == key && self.deviceCallContext.media.owner == key }
             if current(), !self.audio.active { self.audio.updateCallTone(for: self.remoteCall) }
@@ -3792,6 +3845,13 @@ final class AppModel: ObservableObject {
                     }
                     return true
                 })
+            if current() {
+                switch outcome {
+                case .unsupported: self.carrierEarlyMediaNotice = "安卓未提供接通前音频，正在播放本地等待音"
+                case .unavailable, .timedOut, .revoked: self.carrierEarlyMediaNotice = "运营商语音暂不可用，正在播放本地等待音"
+                case .cancelled: break
+                }
+            }
             await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "early-media",
                 phase: "negotiation_finished", title: "接通前语音协商结束", fields: ["outcome": outcome.rawValue])
         }

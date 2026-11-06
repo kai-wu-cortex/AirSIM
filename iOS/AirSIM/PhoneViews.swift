@@ -979,7 +979,6 @@ struct RecentsView: View {
                                 if call.missed { Text("未接通").font(.caption).foregroundStyle(.red) }
                                 else if let duration = call.connectedDuration { Text("通话时长 \(Int(duration) / 60) 分 \(Int(duration) % 60) 秒").font(.caption).foregroundStyle(.secondary) }
                                 else { Text("通话时长未记录").font(.caption).foregroundStyle(.secondary) }
-                                if let slot = call.slotIndex, slot >= 0 { Text("SIM \(slot + 1)").font(.caption).foregroundStyle(.secondary) }
                             }
                         }.padding(.vertical, 5)
                     }

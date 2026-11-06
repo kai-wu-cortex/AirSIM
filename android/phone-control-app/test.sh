@@ -292,6 +292,10 @@ sh "$ROOT/verify-io-api.sh" "$DIAGNOSTICS_OUT"
   "$ROOT"/src/com/airsim/phonecontrol/SystemCallOutputPolicy.java \
   "$ROOT"/test/com/airsim/phonecontrol/CallOutputPolicyMuteTests.java \
   "$ROOT"/test/com/airsim/phonecontrol/LocalOutputMuteControllerTests.java
+"$JAVAC" --release 17 -cp "$OUT" -d "$OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/LocalMicrophoneMuteController.java \
+  "$ROOT"/test/com/airsim/phonecontrol/LocalMicrophoneMuteControllerTests.java
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.LocalMicrophoneMuteControllerTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.LocalOutputMuteControllerTests
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.CallOutputPolicyMuteTests
 
@@ -341,6 +345,8 @@ mkdir -p "$PCM_OUT"
 "$JAVAC" --release 17 -cp "$OUT:$ANDROID_JAR" -d "$PCM_OUT" \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/VoWLANPairingStore.java \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/RemoteAudioSessionRegistry.java \
+  "$ROOT"/src/com/airsim/phonecontrol/EarlyMediaLeaseRules.java \
+  "$ROOT"/src/com/airsim/phonecontrol/EarlyMediaSessions.java \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANPCMRelay.java \
   "$ROOT"/test/com/airsim/phonecontrol/DirectPCMIntegrationTests.java
 "$JAVA" -cp "$PCM_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.DirectPCMIntegrationTests
@@ -348,3 +354,6 @@ mkdir -p "$PCM_OUT"
 sh "$ROOT/test-audio-policy.sh"
 
 sh "$ROOT/test-privileged-sms.sh"
+
+"$JAVAC" --release 17 -d "$OUT" "$ROOT/src/com/airsim/phonecontrol/EarlyMediaLeaseRules.java" "$ROOT/test/com/airsim/phonecontrol/EarlyMediaLeaseRulesTests.java"
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.EarlyMediaLeaseRulesTests

@@ -4,6 +4,7 @@ import java.io.IOException;
 
 public final class LocalOutputMuteControllerTests {
     public static void main(String[] args) throws Exception {
+        deviceOutputMuteDoesNotSetGlobalStreamMute();
         captureCoupledDeviceNeverMutesOrUsesZeroVolume();
         captureSafeFailuresRestoreOriginalState();
         allVendorsUseCaptureSafeMinimumVolume();
@@ -64,6 +65,24 @@ public final class LocalOutputMuteControllerTests {
         check(volumeUnmutes.muted && volumeUnmutes.volume == 4,
                 "restoring volume must not cancel a pre-existing mute");
         System.out.println("LocalOutputMuteControllerTests passed");
+    }
+
+    private static void deviceOutputMuteDoesNotSetGlobalStreamMute() throws Exception {
+        Platform audio = new Platform();
+        LocalOutputMuteController controller = new LocalOutputMuteController(audio,
+                LocalOutputMuteController.physicalOutputStrategy());
+        controller.setMuted(true);
+        check(audio.deviceMuted && !audio.muted && audio.volume == 4,
+                "device suppression must not write global stream mute or volume");
+        controller.setMuted(true);
+        controller.setMuted(false);
+        check(!audio.deviceMuted && !audio.muted && audio.volume == 4,
+                "release must restore both device policy and original stream state");
+        audio.rejectDevice = true;
+        try { controller.setMuted(true); throw new AssertionError("device API failure must surface"); }
+        catch (IOException expected) { }
+        check(!audio.deviceMuted && !controller.isVerifiedMuted(),
+                "partly applied device mute must be restored on failure");
     }
 
     private static void captureSafeFailuresRestoreOriginalState() throws Exception {
@@ -184,7 +203,7 @@ public final class LocalOutputMuteControllerTests {
     }
 
     private static final class Platform implements LocalOutputMuteController.Backend {
-        boolean muted;
+        boolean muted, deviceMuted, rejectDevice;
         boolean supportsMute = true;
         boolean rejectRestore;
         boolean rejectVolume;
@@ -197,6 +216,11 @@ public final class LocalOutputMuteControllerTests {
         public int volume() { return volume; }
         public int minimumVolume() { return minimum; }
         public void prepareOutputMute(boolean originalMuted) { policyPreparations++; }
+        public void applyOutputOnlyMute() throws IOException {
+            deviceMuted = true;
+            if (rejectDevice) throw new IOException("device write refused");
+        }
+        public void restoreOutputMute() { deviceMuted = false; }
         public void setVolume(int value) throws IOException {
             if (rejectVolume) throw new IOException("volume restore temporarily unavailable");
             if (!ignoreVolume) volume = value;

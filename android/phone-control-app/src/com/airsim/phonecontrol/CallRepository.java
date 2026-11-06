@@ -126,6 +126,14 @@ public final class CallRepository {
         });
     }
 
+    static boolean isOutgoingDialing(String id) {
+        Call call = CALLS.get(id);
+        if (call == null || call.getDetails() == null
+                || call.getDetails().getCallDirection() != Call.Details.DIRECTION_OUTGOING) return false;
+        int state = call.getState();
+        return state == Call.STATE_DIALING || state == Call.STATE_CONNECTING || state == Call.STATE_SELECT_PHONE_ACCOUNT;
+    }
+
     public static int state(String callId) {
         Call call = CALLS.get(callId);
         return call == null ? -1 : call.getState();

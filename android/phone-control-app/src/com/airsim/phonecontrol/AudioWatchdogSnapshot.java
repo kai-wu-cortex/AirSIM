@@ -6,7 +6,8 @@ import java.util.Map;
 
 /** Observed OS flags, never an assertion that a physical speaker is acoustically silent. */
 record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speaker, boolean pcm,
-        String mediaEvidence, boolean minimumVolumePolicy, int minimumVolume, boolean requiresUnmutedCapture) {
+        String mediaEvidence, boolean minimumVolumePolicy, int minimumVolume, boolean requiresUnmutedCapture, boolean deviceOutputRequired, boolean deviceOutputMuted,
+        boolean microphoneRequired, boolean microphoneMuted) {
     static AudioWatchdogSnapshot parse(String value) throws IOException {
         Map<String, String> fields = new HashMap<>();
         for (String item : (value == null ? "" : value).trim().split("\\s+")) {
@@ -27,7 +28,9 @@ record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speake
                 .filter(key -> fields.getOrDefault(key, "").matches("[a-zA-Z0-9_.$]{1,64}"))
                 .map(key -> key + "=" + fields.get(key)).collect(java.util.stream.Collectors.joining(" "));
             return new AudioWatchdogSnapshot(bool(fields, "muted"), volume, mode,
-                    bool(fields, "speaker"), bool(fields, "pcm"), evidence, minimumPolicy, minimum, captureSafe);
+                    bool(fields, "speaker"), bool(fields, "pcm"), evidence, minimumPolicy, minimum, captureSafe,
+                    "true".equals(fields.get("device_output_required")), "true".equals(fields.get("device_output_muted")),
+                    "true".equals(fields.get("microphone_required")), "true".equals(fields.get("microphone_muted")));
         } catch (RuntimeException error) { throw new IOException("invalid audio snapshot", error); }
     }
     private static boolean bool(Map<String, String> fields, String key) {
@@ -37,13 +40,16 @@ record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speake
     }
     String diagnostic() {
         return "muted=" + muted + " volume=" + volume + " mode=" + mode
-                + " speaker=" + speaker + " pcm=" + pcm + " acoustic_check=unavailable " + mediaEvidence
+                + " speaker=" + speaker + " pcm=" + pcm + " device_output_required=" + deviceOutputRequired
+                + " device_output_muted=" + deviceOutputMuted + " microphone_required=" + microphoneRequired
+                + " microphone_muted=" + microphoneMuted + " acoustic_check=unavailable " + mediaEvidence
                 + (minimumVolumePolicy ? " minimum_volume=" + minimumVolume : "");
     }
     boolean targetSatisfied() {
-        return minimumVolumePolicy
+        boolean outputOK = deviceOutputRequired ? deviceOutputMuted : minimumVolumePolicy
                 ? minimumVolume >= (requiresUnmutedCapture ? 1 : 0) && volume == minimumVolume
                     && (!requiresUnmutedCapture || !muted)
                 : muted;
+        return outputOK && (!microphoneRequired || microphoneMuted);
     }
 }

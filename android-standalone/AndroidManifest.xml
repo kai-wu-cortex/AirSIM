@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.airsim.phonecontrol.standalone"
-    android:versionCode="133"
-    android:versionName="0.9.8.21-history">
+    android:versionCode="137"
+    android:versionName="0.9.8.25">
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
     </queries>
@@ -81,7 +81,7 @@
             android:exported="true"
             android:permission="android.permission.BIND_INCALL_SERVICE">
             <meta-data android:name="android.telecom.IN_CALL_SERVICE_UI" android:value="true" />
-            <meta-data android:name="android.telecom.IN_CALL_SERVICE_RINGING" android:value="false" />
+            <meta-data android:name="android.telecom.IN_CALL_SERVICE_RINGING" android:value="true" />
             <intent-filter><action android:name="android.telecom.InCallService" /></intent-filter>
         </service>
         <service

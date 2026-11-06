@@ -1,5 +1,17 @@
 import Foundation
 
+/// This personal build keeps the recovered Codex 184 call implementation and
+/// restricts its public routing entry points to VoWLAN. Relay signaling remains
+/// independent, so PushKit can still wake the existing CallKit answer path.
+enum DedicatedCallPolicy {
+    static var vowlanOnly: Bool {
+        (Bundle.main.object(forInfoDictionaryKey: "AirSIMVoWLANCallsOnly") as? String) == "YES"
+    }
+    static var selectableModes: [AirSIMConnectionMode] {
+        vowlanOnly ? [.vowlan] : AirSIMConnectionMode.allCases
+    }
+}
+
 /// 用户明确选择的连接方式。只有 `automatic` 可以跨传输回退。
 enum AirSIMConnectionMode: String, CaseIterable, Codable, Identifiable, Sendable {
     case vowlan
@@ -49,6 +61,7 @@ enum CloudSignalingPreference {
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
         if defaults.bool(forKey: RelayEgressGate.persistenceKey) { return false }
         if let stored = defaults.object(forKey: key) as? Bool { return stored }
+        if DedicatedCallPolicy.vowlanOnly { return true }
         // Existing automatic/cloud installations already rely on Relay.
         let mode = ConnectionModePreference.selected(defaults: defaults)
         return mode == .automatic || mode == .cloud
@@ -70,6 +83,7 @@ enum ConnectionModePreference {
     }
 
     static func selected(defaults: UserDefaults = .standard) -> AirSIMConnectionMode {
+        if DedicatedCallPolicy.vowlanOnly { return .vowlan }
         if let rawValue = defaults.string(forKey: key),
            let mode = AirSIMConnectionMode(rawValue: rawValue) {
             return mode
@@ -87,6 +101,7 @@ enum ConnectionModePreference {
         _ mode: AirSIMConnectionMode,
         defaults: UserDefaults = .standard
     ) {
+        let mode: AirSIMConnectionMode = DedicatedCallPolicy.vowlanOnly ? .vowlan : mode
         defaults.set(mode.rawValue, forKey: key)
         defaults.set(mode == .vowlan, forKey: LocalModePreference.key)
         defaults.set(
@@ -98,6 +113,7 @@ enum ConnectionModePreference {
 
 enum WidgetConnectionModeCycle {
     static func next(after mode: AirSIMConnectionMode, pureLocal: Bool) -> AirSIMConnectionMode {
+        if DedicatedCallPolicy.vowlanOnly { return .vowlan }
         let modes: [AirSIMConnectionMode] = pureLocal
             ? [.vowlan, .bluetooth, .localDual]
             : [.vowlan, .bluetooth, .localDual, .cloud, .automatic]
@@ -189,6 +205,10 @@ enum PairedAndroidDeviceStore {
 struct ConnectionModeRuntimePolicy: Equatable, Sendable {
     let mode: AirSIMConnectionMode
 
+    init(mode: AirSIMConnectionMode) {
+        self.mode = DedicatedCallPolicy.vowlanOnly ? .vowlan : mode
+    }
+
     var startsVoWLAN: Bool { mode == .vowlan || mode == .automatic || mode == .localDual }
     var startsBluetooth: Bool { mode == .bluetooth || mode == .automatic || mode == .localDual }
     var startsCloud: Bool { mode == .cloud || mode == .automatic }
@@ -209,6 +229,7 @@ enum DialRouteSelector {
         bluetoothReady: Bool,
         cloudReady: Bool
     ) -> CallTransport? {
+        if DedicatedCallPolicy.vowlanOnly { return vowlanReady ? .vowlan : nil }
         switch mode {
         case .vowlan:
             return vowlanReady ? .vowlan : nil

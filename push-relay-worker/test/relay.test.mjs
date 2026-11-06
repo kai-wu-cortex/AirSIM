@@ -1012,7 +1012,8 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   assert.equal(captured[2].options.headers["apns-push-type"], "alert");
   assert.equal(captured[2].options.headers["apns-topic"], "com.example.airsim");
   assert.equal(captured[2].payload.event, "incoming_call_mirror");
-  assert.equal(captured[2].payload.aps.alert.title, "10010");
+  assert.equal(captured[2].payload.aps.alert.title, "AirSIM 来电");
+  assert.match(captured[2].payload.aps.alert.body, /10010/);
   assert.equal(captured[3].options.headers["apns-push-type"], "liveactivity");
   assert.equal(captured[3].options.headers["apns-topic"], "com.example.airsim.push-type.liveactivity");
   assert.equal(captured[3].payload.aps.event, "start");
@@ -1882,4 +1883,45 @@ test("encrypted SMS rejects impossible and noncanonical base64url without consum
       assert.equal(pushes.length, i + 1);
     }
   });
+});
+
+test("call outcome notifications require explicit native missed evidence", async () => {
+  for (const scenario of [
+    { name: "missed", direction: "incoming", missed: true, alert: true },
+    { name: "answered", direction: "incoming", missed: false, alert: false },
+    { name: "outgoing", direction: "outgoing", missed: true, alert: false },
+    { name: "legacy unknown", direction: "incoming", alert: false },
+    { name: "answered before stale missed", direction: "incoming", missed: true, active: true, alert: false },
+  ]) {
+    const env = testEnvironment();
+    await worker.fetch(post("/v1/devices/register", registration), env);
+    const captured = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      captured.push({ options, payload: JSON.parse(options.body) });
+      return new Response("", { status: 200 });
+    };
+    try {
+      const value = { event: "call_owner", device_id: registration.device_id,
+        device_secret: registration.device_secret, call_id: "notification-call",
+        call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9", generation: 1,
+        owner: "android", direction: scenario.direction, number: "10086", slot_index: 1 };
+      if (scenario.active) await worker.fetch(post("/v1/events/call-owner", { ...value, phase: "active" }), env);
+      const event = { ...value, phase: "ended" };
+      if ("missed" in scenario) event.missed = scenario.missed;
+      const response = await worker.fetch(post("/v1/events/call-owner", event), env);
+      assert.equal(response.status, 202, scenario.name);
+      const result = captured.at(-1);
+      assert.equal(result.options.headers["apns-push-type"], scenario.alert ? "alert" : "background", scenario.name);
+      assert.equal(result.payload.missed, scenario.alert, scenario.name);
+      if (scenario.alert) {
+        assert.equal(result.payload.aps.alert.title, "AirSIM 未接来电");
+        assert.match(result.payload.aps.alert.body, /10086.*SIM 2/);
+        assert.equal(result.payload.aps.category, "AIRSIM_MISSED_CALL");
+      } else assert.equal(result.payload.aps.alert, undefined, scenario.name);
+      const count = captured.length;
+      await worker.fetch(post("/v1/events/call-owner", event), env);
+      assert.equal(captured.length, count, "duplicate terminal event must not alert twice");
+    } finally { globalThis.fetch = originalFetch; }
+  }
 });

@@ -122,6 +122,7 @@ final class StandaloneCloudMediaManager implements Closeable {
                     .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
                     .put("generation", descriptor.generation).put("call_secret", descriptor.secret)
                     .put("number", event.optString("number", "")).put("caller_name", "")
+                    .put("slot_index", event.optInt("slot_index", -1))
                     .put("issued_at", Instant.now().toString())
                     .put("expires_at", Instant.now().plusSeconds(90).toString())
                     .put("media_transport", "legacy_pcm");
@@ -164,7 +165,14 @@ final class StandaloneCloudMediaManager implements Closeable {
                     JSONObject owner = identity(registration).put("event", "call_owner")
                             .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
                             .put("generation", descriptor.generation).put("owner", "android")
-                            .put("phase", phase);
+                            .put("phase", phase)
+                            .put("direction", direction)
+                            .put("number", event.optString("number", ""))
+                            .put("slot_index", event.optInt("slot_index", -1))
+                            .put("timestamp", Instant.now().toString());
+                    // Only an explicit native terminal fact can authorize a missed alert.
+                    if ("ended".equals(phase) && event.has("missed"))
+                        owner.put("missed", event.optBoolean("missed", false));
                     // Best effort: an older Relay may not know owner=android yet, and
                     // this notification must never block the authoritative call path.
                     try {

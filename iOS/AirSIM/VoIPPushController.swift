@@ -203,6 +203,7 @@ enum CloudModePreference {
     static let key = "airsim.cloud-audio-relay-enabled"
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if DedicatedCallPolicy.vowlanOnly { return false }
         if defaults.object(forKey: ConnectionModePreference.key) != nil {
             return ConnectionModeRuntimePolicy(
                 mode: ConnectionModePreference.selected(defaults: defaults)
@@ -566,6 +567,7 @@ enum CallTransportPolicy {
         cloudMediaAvailable: Bool,
         cloudMediaEnabled: Bool = true
     ) -> CallTransport? {
+        if DedicatedCallPolicy.vowlanOnly { return vowlanReady ? .vowlan : nil }
         switch mode {
         case .automatic:
             if vowlanReady { return .vowlan }
@@ -1507,6 +1509,7 @@ final class VoIPPushController: NSObject {
         mediaTransport: CloudMediaTransport? = nil,
         timeout: TimeInterval = 6
     ) async throws -> IncomingVoIPCall {
+        guard !DedicatedCallPolicy.vowlanOnly else { throw CloudCommandError.unavailable }
         let commandID = operationID
         guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
@@ -1769,6 +1772,7 @@ final class VoIPPushController: NSObject {
     }
 
     func cloudCallControlCredentials() -> CloudCallControlCredentials? {
+        guard !DedicatedCallPolicy.vowlanOnly else { return nil }
         guard let secret = Self.loadOrCreateDeviceSecret() else { return nil }
         let deviceID = PushDeviceIdentity.deviceID(deviceSecret: secret)
         let relayURL = configuredRelayURL()

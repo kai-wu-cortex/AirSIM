@@ -5,6 +5,7 @@ import java.util.List;
 
 public final class RemoteAudioWatchdogTests {
     public static void main(String[] args) throws Exception {
+        deviceIsolationRequiresDeviceReadbackAndMicrophoneMute();
         captureSafeTargetRequiresUnmutedPositiveVolume();
         captureSafeWatchdogRepairsWithoutRemutingCapture();
         minimumVolumeTargetIsNotMistakenForUnmutedDrift();
@@ -66,6 +67,17 @@ public final class RemoteAudioWatchdogTests {
                 && report.contains("budget_exhausted"), "TXT must include evidence and limitations");
         System.out.println("RemoteAudioWatchdogTests passed");
     }
+    private static void deviceIsolationRequiresDeviceReadbackAndMicrophoneMute() throws Exception {
+        String sample = "muted=false volume=4 mode=2 speaker=false pcm=true output_policy=zero_readback "
+                + "device_output_required=true device_output_muted=true microphone_required=true microphone_muted=true";
+        check(AudioWatchdogSnapshot.parse(sample).targetSatisfied(),
+                "device-only policy does not need a global stream mute when output and mic are verified");
+        check(!AudioWatchdogSnapshot.parse(sample.replace("microphone_muted=true", "microphone_muted=false")).targetSatisfied(),
+                "microphone re-enabled by telephony must trigger repair");
+        check(!AudioWatchdogSnapshot.parse(sample.replace("device_output_muted=true", "device_output_muted=false")).targetSatisfied(),
+                "device output drift must trigger repair even when microphone is muted");
+    }
+
     private static void captureSafeWatchdogRepairsWithoutRemutingCapture() throws Exception {
         int[] volume = {4}, repairs = {0}; boolean[] muted = {false};
         LocalOutputMuteController output = new LocalOutputMuteController(new LocalOutputMuteController.Backend() {

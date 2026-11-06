@@ -20,7 +20,7 @@ struct AirSIMFirstConnectionView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("连接安卓手机")
                         .font(.largeTitle.bold())
-                    Text("AirSIM 可通过 VoWLAN、蓝牙或云端 Relay 独立连接 Android 手机。")
+                    Text(DedicatedCallPolicy.vowlanOnly ? "通话通过 VoWLAN 直连 Android 手机，Relay 仅用于推送通知。" : "AirSIM 可通过 VoWLAN、蓝牙或云端 Relay 独立连接 Android 手机。")
                         .foregroundStyle(.secondary)
                 }
 
@@ -34,8 +34,8 @@ struct AirSIMFirstConnectionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
 
-                Picker("连接模式", selection: $connectionModeRaw) {
-                    ForEach(AirSIMConnectionMode.allCases) { mode in
+                Picker("连接模式", selection: Binding(get: { selectedMode.rawValue }, set: { connectionModeRaw = $0 })) {
+                    ForEach(DedicatedCallPolicy.selectableModes) { mode in
                         Text(mode.title).tag(mode.rawValue)
                     }
                 }
@@ -91,7 +91,7 @@ struct AirSIMFirstConnectionView: View {
     }
 
     private var selectedMode: AirSIMConnectionMode {
-        AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic
+        DedicatedCallPolicy.vowlanOnly ? .vowlan : (AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic)
     }
 }
 
@@ -441,6 +441,25 @@ struct AirSIMSettingsView: View {
         case remark
     }
 
+    private var carrierRingbackSection: some View {
+        Section {
+            Toggle(isOn: $settings.carrierRingbackEnabled) {
+                Text(L10n.t("运营商原始等待音"))
+            }
+            .accessibilityIdentifier("carrierRingback")
+            .onChange(of: settings.carrierRingbackEnabled) { enabled in
+                model.carrierRingbackPreferenceDidChange(enabled: enabled)
+            }
+            Text(L10n.t("呼出接通前优先播放运营商回铃音，设备不支持时用本地等待音"))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text(L10n.t("呼出等待音"))
+        } footer: {
+            Text(L10n.t("仅 VoWLAN 呼出支持接通前运营商语音；关闭后呼出等待音恢复为本地合成音。"))
+        }
+    }
+
     var body: some View {
         SettingsNavigationContainer(isRoot: category == nil) {
             Form {
@@ -503,8 +522,8 @@ struct AirSIMSettingsView: View {
                     .onChange(of: cloudSignalingEnabled) { enabled in
                         model.setCloudSignalingEnabled(enabled)
                     }
-                    Picker("连接模式", selection: $connectionModeRaw) {
-                        ForEach(AirSIMConnectionMode.allCases) { mode in
+                    Picker("连接模式", selection: Binding(get: { selectedMode.rawValue }, set: { connectionModeRaw = $0 })) {
+                        ForEach(DedicatedCallPolicy.selectableModes) { mode in
                             Label(mode.title, systemImage: modeIcon(mode)).tag(mode.rawValue)
                         }
                     }
@@ -539,6 +558,10 @@ struct AirSIMSettingsView: View {
                 } footer: {
                     Text("这是全局开关，关闭后所有后台静音音频保活路径都会停止；不会关闭 VoWLAN、蓝牙或云端 Push 功能。")
                 }
+                }
+
+                if category == "来电与短信" {
+                    carrierRingbackSection
                 }
 
                 if category == "连接与设备" {
@@ -1022,7 +1045,7 @@ struct AirSIMSettingsView: View {
     }
 
     private var selectedMode: AirSIMConnectionMode {
-        AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic
+        DedicatedCallPolicy.vowlanOnly ? .vowlan : (AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic)
     }
 
     private var runtimePolicy: ConnectionModeRuntimePolicy {
