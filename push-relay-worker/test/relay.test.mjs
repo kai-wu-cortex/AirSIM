@@ -991,7 +991,7 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
     assert.equal(call.status, 202);
     const sms = await worker.fetch(post("/v1/events/sms", {
       event: "incoming_sms", device_id: registration.device_id,
-      device_secret: registration.device_secret, delivery_id: "sms-1",
+      device_secret: registration.device_secret, delivery_id: "sms-1", agent_id: "android-test",
       sender: "10010", content: "余额提醒", sim_slot: "SIM 2", timestamp: now.toISOString(),
     }), env);
     assert.equal(sms.status, 202);
@@ -1024,6 +1024,7 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   assert.equal(captured[4].payload.aps.alert.body, "余额提醒");
   assert.equal(captured[4].payload.aps.alert.subtitle, "接收于 SIM 2");
   assert.equal(captured[4].payload.sim_slot, "SIM 2");
+  assert.equal(captured[4].payload.agent_id, "android-test");
 
   const storedCall = JSON.parse(await env.DEVICES.get("call:d9b59660-05bb-4ea8-9aeb-4505b35c93f9"));
   assert.equal(storedCall.device_id, registration.device_id);
