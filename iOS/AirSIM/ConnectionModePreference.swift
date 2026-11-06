@@ -146,6 +146,11 @@ enum PairedAndroidDeviceStore {
               let values = try? JSONDecoder().decode([PairedAndroidDeviceRecord].self, from: data) else { return [] }
         return values.filter { permits($0.id, defaults: defaults) }
     }
+    static func uniqueKnownAgentID(localAgentIDs: [String] = [], defaults: UserDefaults = .standard) -> String? {
+        guard !hasForgottenDevices(defaults: defaults) else { return nil }
+        let ids = Set(records(defaults: defaults).map(\.id) + localAgentIDs)
+        return ids.count == 1 ? ids.first : nil
+    }
     static func remember(_ record: PairedAndroidDeviceRecord, defaults: UserDefaults = .standard) {
         guard !record.id.isEmpty, permits(record.id, defaults: defaults) else { return }
         var values = records(defaults: defaults).filter { $0.id != record.id }

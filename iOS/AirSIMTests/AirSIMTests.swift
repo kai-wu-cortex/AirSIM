@@ -3295,14 +3295,21 @@ final class AirSIMTests: XCTestCase {
         let pushed = SMSMessage(
             sender: "10086", content: "短信正文", code: nil,
             timestamp: Date(timeIntervalSince1970: 1_791_448_212),
-            deliveryID: "sms-stable-1", direction: .incoming
+            deliveryID: "sms-stable-1", direction: .incoming,
+            sourceAgentID: "android-A"
         )
         let synchronized = SMSMessage(
             sender: "10086", content: "短信正文", code: nil,
             timestamp: Date(timeIntervalSince1970: 1_791_448_212.123456789),
-            deliveryID: "sms-stable-1", direction: .incoming
+            deliveryID: "sms-stable-1", direction: .incoming,
+            sourceAgentID: "android-A", simSlot: "中国联通 — Club"
         )
         XCTAssertEqual(pushed.id, synchronized.id)
+        for records in [[pushed, synchronized], [synchronized, pushed]] {
+            let deduplicated = SMSHistoryPolicy.deduplicated(records)
+            XCTAssertEqual(deduplicated.count, 1)
+            XCTAssertEqual(deduplicated.first?.simSlot, "中国联通 — Club")
+        }
     }
 
     func testCloudUplinkNeverBurstsAfterBlockedSend() {
@@ -3451,6 +3458,33 @@ final class AirSIMTests: XCTestCase {
         PairedAndroidDeviceStore.allowPairing("samsung", defaults: reopened)
         PairedAndroidDeviceStore.remember(samsung, defaults: reopened)
         XCTAssertEqual(Set(PairedAndroidDeviceStore.records(defaults: reopened).map(\.id)), ["vivo", "samsung"])
+    }
+
+    func testLegacySMSIdentityAliasRequiresSingleKnownProducer() {
+        let suite = "AirSIMTests.sms-producer-policy.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let legacy = SMSMessage(sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "shared-delivery", direction: .incoming)
+        let a = SMSMessage(sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "shared-delivery", direction: .incoming, sourceAgentID: "A")
+        let b = SMSMessage(sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "shared-delivery", direction: .incoming, sourceAgentID: "B")
+        XCTAssertTrue(SMSHistoryPolicy.sharesDeliveryIdentity(legacy, a, uniqueAgentID: "A"))
+        XCTAssertTrue(SMSHistoryPolicy.sharesDeliveryIdentity(a, legacy, uniqueAgentID: "A"))
+        XCTAssertFalse(SMSHistoryPolicy.sharesDeliveryIdentity(legacy, a, uniqueAgentID: nil))
+        XCTAssertFalse(SMSHistoryPolicy.sharesDeliveryIdentity(legacy, a, uniqueAgentID: "B"))
+        XCTAssertFalse(SMSHistoryPolicy.sharesDeliveryIdentity(a, b, uniqueAgentID: "A"))
+
+        XCTAssertNil(PairedAndroidDeviceStore.uniqueKnownAgentID(defaults: defaults))
+        PairedAndroidDeviceStore.remember(.init(id: "A", deviceName: "A", agentKind: "avf"), defaults: defaults)
+        XCTAssertEqual(PairedAndroidDeviceStore.uniqueKnownAgentID(defaults: defaults), "A")
+        XCTAssertEqual(PairedAndroidDeviceStore.uniqueKnownAgentID(localAgentIDs: ["A"], defaults: defaults), "A")
+        PairedAndroidDeviceStore.remember(.init(id: "B", deviceName: "B", agentKind: "standalone"), defaults: defaults)
+        XCTAssertNil(PairedAndroidDeviceStore.uniqueKnownAgentID(defaults: defaults))
+        PairedAndroidDeviceStore.forget("B", defaults: defaults)
+        XCTAssertNil(PairedAndroidDeviceStore.uniqueKnownAgentID(defaults: defaults),
+            "a forgotten device can still have a valid remote pairing and must not be guessed away")
     }
 
     func testFreshVoWLANIdentityClearsOldNumberWhenNewSIMDoesNotReportNumber() throws {

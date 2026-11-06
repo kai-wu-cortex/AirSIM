@@ -418,12 +418,12 @@ func TestPushManagerSendsActivityStateWithOriginalCallUUID(t *testing.T) {
 }
 
 func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
-	var received []incomingSMSPushEvent
+	var received []map[string]any
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/events/sms" {
 			t.Fatalf("请求路径=%q", request.URL.Path)
 		}
-		var value incomingSMSPushEvent
+		var value map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
 			t.Fatal(err)
 		}
@@ -437,6 +437,12 @@ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
 	if err := manager.store(testPushRegistration(server.URL)); err != nil {
 		t.Fatal(err)
 	}
+	// iOS automatic re-registration does not repeat Android's pairing identity.
+	automatic := testPushRegistration(server.URL)
+	automatic.AndroidAgentID = ""
+	if err := manager.store(automatic); err != nil {
+		t.Fatal(err)
+	}
 	message := smsMessage{
 		Sender: "10010", Content: "余额提醒", Timestamp: time.Now(), DeliveryID: "SM-7-test",
 	}
@@ -446,8 +452,11 @@ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
 	if sent, err := manager.sendSMS(message); err != nil || sent {
 		t.Fatalf("重复短信不应再次发送: sent=%v err=%v", sent, err)
 	}
-	if len(received) != 1 || received[0].DeliveryID != message.DeliveryID || received[0].Content != message.Content {
+	if len(received) != 1 || received[0]["delivery_id"] != message.DeliveryID || received[0]["content"] != message.Content {
 		t.Fatalf("短信中继载荷错误: %#v", received)
+	}
+	if received[0]["agent_id"] != "android-test" {
+		t.Fatalf("短信中继缺少 Android Agent 身份: %#v", received)
 	}
 }
 

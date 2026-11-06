@@ -364,7 +364,10 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         guard !pushed.contentTruncated else { return false }
         guard !historyStore.visibleMessages([pushed.message]).isEmpty else { return false }
         var messages = historyStore.loadMessages()
-        guard !messages.contains(where: { $0.id == pushed.message.id }) else { return false }
+        let uniqueAgentID = PairedAndroidDeviceStore.uniqueKnownAgentID()
+        guard !messages.contains(where: {
+            SMSHistoryPolicy.sharesDeliveryIdentity($0, pushed.message, uniqueAgentID: uniqueAgentID)
+        }) else { return false }
         messages.append(pushed.message)
         messages.sort { $0.timestamp > $1.timestamp }
         if messages.count > 2_000 {
