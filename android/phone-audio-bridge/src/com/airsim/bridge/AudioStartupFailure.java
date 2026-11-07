@@ -1,6 +1,7 @@
 package com.airsim.bridge;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /** Stable, non-private error evidence across the privileged-process boundary. */
@@ -40,8 +41,28 @@ final class AudioStartupFailure extends IOException {
 
     Map<String, Object> diagnosticFields() {
         // Never export an OEM exception's arbitrary message, addresses, or call data.
-        return Map.of("error_phase", phase, "error_code", code,
-                "error_class", origin(getCause()).getClass().getSimpleName(), "result", "error");
+        // Frame names and line numbers are platform/own-code evidence, so they travel
+        // across the privileged boundary while the message does not.
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("error_phase", phase);
+        fields.put("error_code", code);
+        fields.put("error_class", origin(getCause()).getClass().getSimpleName());
+        fields.put("error_stack", stack(origin(getCause())));
+        fields.put("result", "error");
+        return fields;
+    }
+
+    private static String stack(Throwable error) {
+        StackTraceElement[] frames = error.getStackTrace();
+        StringBuilder text = new StringBuilder();
+        int limit = Math.min(frames.length, 8);
+        for (int index = 0; index < limit; index++) {
+            if (index > 0) text.append(" <- ");
+            text.append(frames[index].getClassName()).append('.')
+                .append(frames[index].getMethodName()).append(':')
+                .append(frames[index].getLineNumber());
+        }
+        return text.toString();
     }
 
     private static Throwable origin(Throwable error) {
