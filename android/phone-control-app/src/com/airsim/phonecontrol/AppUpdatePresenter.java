@@ -50,11 +50,11 @@ final class AppUpdatePresenter {
     void showNotes(Runnable after) {
         Activity activity = liveOwner();
         if (activity == null || dialog != null) return;
-        String notes = "• 修复 Android 10 的 SIM 订阅监听兼容性，避免启动 Service 时调用高版本接口崩溃。\n\n"
-                + "• 上报设备电量，供兼容的 iPhone 小组件显示；无有效采样时不会伪造电量。\n\n"
-                + "• 配套 iPhone build 162 新增小组件、未读短信／未接来电标记与试验性 TLS 公网配对教程。\n\n"
-                + "• 改善 Shizuku 短信收件箱兼容性；首次追平只补转近 15 分钟短信，旧短信仅推进游标。\n\n"
-                + "• U30Air 客户端与通话收尾改进需要兼容设备端；本 APK 不安装或更新 U30Air 固件。\n\n"
+        String notes = "• 云端音频支持自动、稳定优先与手动缓冲，兼容 iPhone 可选 720 ms；更大缓冲也会增加通话延迟。\n\n"
+                + "• 兼容两端协商后支持云端短信端到端加密，SIM 信息随密文保护；已有配对请检查加密状态。\n\n"
+                + "• 改进 SIM 与未接通知、过期提醒清理，避免重复提醒或跨设备误清理。\n\n"
+                + "• 配套 iPhone 175 支持运营商接通前语音开关；Android 保留采集音量，并改善挂断阶段的本机漏音控制。\n\n"
+                + "• 本 APK 不更新 U30Air 固件或独立 AVF Linux Agent；旧 Agent 可能仅在 iPhone 接收侧应用缓冲。\n\n"
                 + "• 反馈仍由用户手动上传；配对和已有数据保留。";
         AlertDialog next = new AlertDialog.Builder(activity).setTitle("当前版本更新内容 · " + version + "（" + build + "）")
                 .setMessage(notes).setPositiveButton("知道了", (ignored, which) -> {

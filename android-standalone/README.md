@@ -1,6 +1,6 @@
 # AirSIM Android Standalone
 
-2026-11-05：[Apps v0.9.8.23](../docs/releases/0.9.8.23.md)，Android Standalone `0.9.8.23（128）`。包含兼容设备的跨模式早期媒体和 iPhone 云端扬声器恢复；AVF Linux Agent 未更新，不能仅通过更新 Bridge 获得新媒体能力。发布及实机验证范围见说明；以下旧版本记录保留追溯。
+2026-11-08：[Apps v0.9.8.24](../docs/releases/0.9.8.24.md)，Android Standalone `0.9.8.24（135）`。包含云端音频缓冲、兼容端短信加密、SIM 与未接通知和运营商语音开关；AVF Linux Agent 未更新，不能仅通过更新 Bridge 获得新媒体能力。发布及实机验证范围见说明；以下旧版本记录保留追溯。
 
 ## 通用安卓应用与机型适配
 
