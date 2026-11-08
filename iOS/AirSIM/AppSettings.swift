@@ -67,6 +67,18 @@ enum AppTheme: String, CaseIterable, Identifiable {
     var accent: Color { self == .forest ? Color(red: 0.12, green: 0.47, blue: 0.38) : Color(red: 0.12, green: 0.56, blue: 0.88) }
 }
 
+/// Snapshot this preference when a call begins; never reconfigure live audio
+/// because a settings view or another scene changes defaults mid-call.
+enum CarrierRingbackPreference {
+    static let key = "airsim.carrier-ringback-enabled"
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: key) as? Bool ?? true
+    }
+    static func allowsReceiveOnly(enabled: Bool, outgoing: Bool, state: CallLifecycleState) -> Bool {
+        enabled && outgoing && state == .connecting
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     @Published var theme: AppTheme {

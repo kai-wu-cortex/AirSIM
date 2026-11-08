@@ -582,6 +582,7 @@ struct AirSIMSettingsView: View {
     @State private var updateViewVisible = false
     @AppStorage(ConnectionModePreference.key) private var connectionModeRaw = ConnectionModePreference.selected().rawValue
     @AppStorage(CloudSignalingPreference.key) private var cloudSignalingEnabled = CloudSignalingPreference.isEnabled()
+    @AppStorage(CarrierRingbackPreference.key) private var carrierRingbackEnabled = true
     @AppStorage(BackgroundStandbyPreference.key) private var backgroundStandbyEnabled = false
     @AppStorage(LiveActivityVisibilityPreference.key) private var liveActivityEnabled = true
     @AppStorage(SMSVerificationCodeClipboard.enabledKey) private var autoCopySMSCode = true
@@ -805,6 +806,13 @@ struct AirSIMSettingsView: View {
                     .accessibilityIdentifier("cloudSignaling")
             } footer: {
                 Text(pureLocalEnabled ? "纯本地模式已阻止云端通知，关闭后恢复原偏好。" : "用于后台来电通知，不改变通话的音频连接方式。")
+            }
+            Section {
+                Toggle("运营商接通前语音", isOn: $carrierRingbackEnabled)
+                    .disabled(model.callLifecycleSnapshot.state != .idle && !model.callLifecycleSnapshot.state.isTerminal)
+                    .accessibilityIdentifier("carrierRingback")
+            } footer: {
+                Text("适用于 VoWLAN、蓝牙与云端。设备提供音频时播放，尚未接通不计时；关闭后使用本地等待音。通话期间不可更改。")
             }
             smsSection
             Section {

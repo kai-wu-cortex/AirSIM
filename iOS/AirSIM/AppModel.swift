@@ -358,6 +358,8 @@ final class AppModel: ObservableObject {
     private var localEndUUID: UUID?
     private var endFeedback = OutgoingEndFeedbackPolicy()
     private var callEndFeedbackRevision: UInt64 = 0
+    private var carrierEarlyMediaEnabled = CarrierRingbackPreference.isEnabled()
+    @Published private(set) var carrierEarlyMediaNotice: String?
     private var earlyMediaTask: Task<Void, Never>?
     private var earlyMediaAttempted = Set<UUID>()
 
@@ -989,7 +991,8 @@ final class AppModel: ObservableObject {
     }
 
     private var carrierEarlyMediaAudible: Bool {
-        (currentCallTransport == .bluetooth && vobleCalls.earlyMediaAudible)
+        (currentCallTransport == .vowlan && audio.receiveOnly && audio.hasReceivedEarlyMedia)
+            || (currentCallTransport == .bluetooth && vobleCalls.earlyMediaAudible)
             || (currentCallTransport == .cloud && IPhoneCloudCallSession.shared.earlyMediaAudible)
     }
 
@@ -1611,6 +1614,11 @@ final class AppModel: ObservableObject {
     }
 
     var callAudioStatusText: String {
+        if callLifecycleSnapshot.state == .connecting, !carrierEarlyMediaEnabled {
+            return "等待接通 · 本地等待音"
+        }
+        if callLifecycleSnapshot.state == .connecting, !carrierEarlyMediaAudible,
+           let carrierEarlyMediaNotice { return carrierEarlyMediaNotice }
         if callLifecycleSnapshot.state == .connecting,
            (currentCallTransport == .bluetooth && vobleCalls.earlyMediaUnavailable)
             || (currentCallTransport == .cloud && IPhoneCloudCallSession.shared.earlyMediaUnavailable) {
@@ -3761,6 +3769,7 @@ final class AppModel: ObservableObject {
     /// Only a canonical, paired WLAN call can negotiate early media. No relay,
     /// unscoped legacy PCM, URL supplied by the peer, or microphone is used here.
     private func startEarlyMediaIfEligible() {
+        guard carrierEarlyMediaEnabled else { return }
         guard callLifecycleSnapshot.state == .connecting,
               let key = presentedDeviceCall,
               let route = deviceCallRouter.route(for: key), route.transport == .vowlan,
@@ -3771,6 +3780,7 @@ final class AppModel: ObservableObject {
               !callKit.managesCurrentCall || callKit.audioSessionIsActive,
               earlyMediaAttempted.insert(route.systemUUID).inserted else { return }
         earlyMediaTask?.cancel()
+        carrierEarlyMediaNotice = "正在等待运营商语音 · 尚未接通"
         let snapshot = callLifecycleSnapshot
         earlyMediaTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -3818,6 +3828,13 @@ final class AppModel: ObservableObject {
                     }
                     return true
                 })
+            if current() {
+                switch outcome {
+                case .unsupported: self.carrierEarlyMediaNotice = "设备未提供接通前音频 · 使用本地等待音"
+                case .unavailable, .timedOut, .revoked: self.carrierEarlyMediaNotice = "运营商语音暂不可用 · 使用本地等待音"
+                case .cancelled: break
+                }
+            }
             await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "early-media",
                 phase: "negotiation_finished", title: "接通前语音协商结束", fields: ["outcome": outcome.rawValue])
         }
@@ -4125,6 +4142,11 @@ final class AppModel: ObservableObject {
         }
         guard accepted else { return false }
         callLifecycleSnapshot = callLifecycleStore.snapshot
+        if previous.callUUID != event.callUUID || previous.generation != event.generation {
+            carrierEarlyMediaEnabled = CarrierRingbackPreference.isEnabled()
+            carrierEarlyMediaNotice = nil
+        }
+        if event.state == .active || event.state.isTerminal { carrierEarlyMediaNotice = nil }
         if previous.callUUID != event.callUUID || event.state.isTerminal { callConnectedAt = nil }
         if event.state == .active, callConnectedAt == nil { callConnectedAt = Date() }
         if let call = pushedCallIdentity,
