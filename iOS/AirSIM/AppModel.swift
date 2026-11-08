@@ -1614,7 +1614,8 @@ final class AppModel: ObservableObject {
     }
 
     var callAudioStatusText: String {
-        if callLifecycleSnapshot.state == .connecting, !carrierEarlyMediaEnabled {
+        if callLifecycleSnapshot.state == .connecting, !carrierEarlyMediaEnabled,
+           (remoteCall ?? activeCall ?? pendingOutgoingCall)?.direction == "outgoing" {
             return "等待接通 · 本地等待音"
         }
         if callLifecycleSnapshot.state == .connecting, !carrierEarlyMediaAudible,

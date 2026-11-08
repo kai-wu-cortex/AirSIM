@@ -24,6 +24,21 @@ public final class AirSIMInCallService extends InCallService {
     private final CallEventDeduplicator deduplicator = new CallEventDeduplicator();
 	private LocalCallAudioController localAudio;
 
+    private final RemoteOutputTail outputTail = new RemoteOutputTail();
+    private long scheduledTailDeadline;
+    private int lastAudioRoute = -1;
+
+    @Override public void onCallAudioStateChanged(android.telecom.CallAudioState state) {
+        super.onCallAudioStateChanged(state);
+        if (instance != this || localAudio == null) return;
+        if (state != null && state.getRoute() == lastAudioRoute) return;
+        if (state != null) lastAudioRoute = state.getRoute();
+        updateLocalAudioPolicy();
+        // Reassert only the selected capture-safe policy, through the same
+        // Root/Shizuku coordinator. This never adds a global microphone mute.
+        localAudio.reassertIfSilencing();
+    }
+
     @Override
     public void onCallAdded(Call call) {
         super.onCallAdded(call);
@@ -112,16 +127,31 @@ public final class AirSIMInCallService extends InCallService {
         boolean ownsRemoteCall = RemoteAudioSessionRegistry.ownsCall(liveCalls);
         // Notification presentation mode never proves remote audio ownership. Only
         // the unique, authenticated call with a ready PCM owner may silence output.
-        // This also restores local audio immediately on media loss, even if Telecom
-        // has not removed the carrier call yet. Microphone and PCM gain are untouched.
+        // Media loss while the carrier call is active restores local audio. A
+        // confirmed teardown may retain the existing policy for at most two seconds.
+        // Microphone and PCM gain remain untouched.
         // Audio ownership is independent of the presentation mode: when the
         // authenticated iPhone owns the media, Android must mute its local output
         // in both remote_silent and local_and_push. The mode controls presentation
         // and is persisted/forwarded separately.
         boolean shouldSilence = relayingAudio && ownsRemoteCall;
+        String policyTransport = RemoteAudioSessionRegistry.streamPolicy();
+        Call sole = callStates.size() == 1 ? callStates.keySet().iterator().next() : null;
+        boolean terminal = sole != null && (sole.getState() == Call.STATE_DISCONNECTING
+                || sole.getState() == Call.STATE_DISCONNECTED);
+        boolean retaining = outputTail.update(sole == null ? "" : CallRepository.id(sole),
+                terminal, shouldSilence, policyTransport, System.nanoTime() / 1_000_000L);
+        if (retaining) {
+            shouldSilence = true;
+            policyTransport = outputTail.transport();
+            if (scheduledTailDeadline != outputTail.deadline()) {
+                scheduledTailDeadline = outputTail.deadline();
+                MAIN.postDelayed(this::updateLocalAudioPolicy, RemoteOutputTail.MAX_MILLIS);
+            }
+        } else if (!terminal) { scheduledTailDeadline = 0; }
         BridgeLog.info("local_audio_policy mode=" + AppConfig.mode(this)
                 + " silence=" + shouldSilence);
-        localAudio.update(shouldSilence, RemoteAudioSessionRegistry.streamPolicy());
+        localAudio.update(shouldSilence, policyTransport);
         // Multiple native calls cannot safely share a global mute-repair decision.
         localAudio.updateWatchdog(shouldSilence,
                 liveCalls.toString() + transports, transports);
@@ -185,6 +215,7 @@ public final class AirSIMInCallService extends InCallService {
     }
 
     @Override public void onDestroy() {
+        outputTail.clear();
 		BridgeLog.info("incall_service_destroyed");
 		if (localAudio != null) {
             localAudio.updateWatchdog(false, "", "");

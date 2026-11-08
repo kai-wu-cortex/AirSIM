@@ -847,7 +847,11 @@ final class IncomingCallNotifier {
                 do {
                     try await UNUserNotificationCenter.current().add(UNNotificationRequest(
                         identifier: self.localMissedID(key), content: content, trigger: nil))
-                    self.remember(key)
+                    // APNs or corrected history may arrive while add() yields.
+                    if Task.isCancelled || self.missedIDs.contains(key) {
+                        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [self.localMissedID(key)])
+                        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [self.localMissedID(key)])
+                    } else { self.remember(key) }
                 } catch { /* A later history update may retry. */ }
             }
         }
