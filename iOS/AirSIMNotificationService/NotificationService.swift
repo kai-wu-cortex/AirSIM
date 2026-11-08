@@ -2,8 +2,8 @@ import UserNotifications
 
 /// Replaces the Relay's placeholder ("AirSIM／新短信") for end-to-end encrypted SMS (issue #24) with
 /// the decrypted sender and text, using the key the app keeps in the shared keychain group. Other
-/// pushes pass through unchanged. The work is synchronous, so the content is always delivered
-/// before the extension's time limit.
+/// pushes pass through unchanged, except scoped missed-call alerts which replace
+/// stale ringing/local notifications. Decryption remains synchronous.
 final class NotificationService: UNNotificationServiceExtension {
     override func didReceive(_ request: UNNotificationRequest,
                              withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void) {

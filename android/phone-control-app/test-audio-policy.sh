@@ -17,8 +17,12 @@ mkdir -p "$OUT"
   "$ROOT"/src/com/airsim/phonecontrol/TelecomStateMapper.java \
   "$ROOT"/src/com/airsim/phonecontrol/LocalOutputMuteController.java \
   "$ROOT"/src/com/airsim/phonecontrol/LocalCallAudioController.java \
+  "$ROOT"/src/com/airsim/phonecontrol/RemoteOutputTail.java \
   "$ROOT"/src/com/airsim/phonecontrol/RemoteAudioSessionRegistry.java \
   "$ROOT"/src/com/airsim/phonecontrol/voble/VoBLEMediaSession.java \
   "$ROOT"/src/com/airsim/phonecontrol/AirSIMInCallService.java \
   "$ROOT"/test/com/airsim/phonecontrol/RemoteCallMuteLifecycleTests.java
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$BASE:$ANDROID_JAR" com.airsim.phonecontrol.RemoteCallMuteLifecycleTests
+
+"$TASK_JAVA_HOME/bin/javac" --release 17 -cp "$OUT" -d "$OUT" "$ROOT"/test/com/airsim/phonecontrol/RemoteOutputTailTests.java
+"$TASK_JAVA_HOME/bin/java" -cp "$OUT" com.airsim.phonecontrol.RemoteOutputTailTests

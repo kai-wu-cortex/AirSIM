@@ -35,6 +35,10 @@ final class LocalCallAudioController {
         update(shouldSilence, transport);
     }
 
+    synchronized void reassertIfSilencing() {
+        if (silencing) privilegedBridge.setLocalOutputMuted(true, transport);
+    }
+
     void updateWatchdog(boolean active, String key, String transports) {
         privilegedBridge.updateAudioWatchdog(active, key, transports);
     }
