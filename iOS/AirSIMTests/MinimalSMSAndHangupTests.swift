@@ -215,3 +215,33 @@ final class PresentationSIM184Tests: XCTestCase {
         }
     }
 }
+
+final class PR33NotificationTests: XCTestCase {
+    func testNotificationIdentityDoesNotCrossDevicesOrGenerations() {
+        let base: [AnyHashable: Any] = ["agent_id": "a", "call_id": "call", "generation": 1, "call_uuid": "u"]
+        XCTAssertTrue(CallNotificationTruth.matches(base, base))
+        for (key, value) in [("agent_id", "b"), ("call_id", "other"), ("call_uuid", "v")] {
+            var other = base; other[key] = value
+            XCTAssertFalse(CallNotificationTruth.matches(base, other))
+        }
+        var next = base; next["generation"] = 2
+        XCTAssertFalse(CallNotificationTruth.matches(base, next))
+        XCTAssertFalse(CallNotificationTruth.matches(["call_id": "call"], base))
+        XCTAssertTrue(CallNotificationTruth.matches(["agent_id": "a", "call_id": "call"], base))
+    }
+    func testOnlyExplicitUnansweredIncomingTerminalIsMissed() {
+        let now = Date()
+        var call = CallRecord(id: "c", index: 0, direction: "incoming", state: "ended", number: "10086",
+            startedAt: now, updatedAt: now, endedAt: now, missed: true)
+        XCTAssertTrue(CallNotificationTruth.isMissed(call))
+        call.connectedAt = now
+        XCTAssertFalse(CallNotificationTruth.isMissed(call))
+        XCTAssertFalse(CallNotificationTruth.isMissedPush(["event": "call_owner", "phase": "ended"]))
+        XCTAssertTrue(CallNotificationTruth.isMissedPush(["event": "call_owner", "phase": "ended",
+            "direction": "incoming", "missed": true, "notification_status": "missed"]))
+    }
+    func testNoticeIncludesNumberAndSIMWithoutDuplicateName() {
+        XCTAssertEqual(CallNotificationTruth.body(number: "10086", callerName: "运营商", slotIndex: 1), "运营商 · 10086 · SIM 2")
+        XCTAssertEqual(CallNotificationTruth.body(number: "10086", callerName: "10086", slotIndex: -1), "10086")
+    }
+}

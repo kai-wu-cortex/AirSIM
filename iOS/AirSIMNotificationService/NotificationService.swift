@@ -11,6 +11,28 @@ final class NotificationService: UNNotificationServiceExtension {
             contentHandler(request.content)
             return
         }
+        if content.userInfo["event"] as? String == "call_owner",
+           content.userInfo["notification_status"] as? String == "missed",
+           let agent = content.userInfo["agent_id"] as? String, !agent.isEmpty,
+           let call = content.userInfo["call_id"] as? String, !call.isEmpty {
+            // Also reconcile when the host is suspended: a late APNs alert
+            // replaces the local fallback and the ringing mirror, never SMS.
+            let info = content.userInfo
+            UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+                let stale = delivered.filter {
+                    let old = $0.request.content.userInfo
+                    guard ["AIRSIM_INCOMING_CALL", "AIRSIM_INCOMING_CALL_MIRROR", "AIRSIM_MISSED_CALL"]
+                        .contains($0.request.content.categoryIdentifier),
+                        old["agent_id"] as? String == agent, old["call_id"] as? String == call else { return false }
+                    if let a = info["generation"] as? NSNumber, let b = old["generation"] as? NSNumber, a != b { return false }
+                    if let a = info["call_uuid"] as? String, let b = old["call_uuid"] as? String, a != b { return false }
+                    return true
+                }.map { $0.request.identifier }
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: stale)
+                contentHandler(content)
+            }
+            return
+        }
         let outcome = E2ESMSPush.open(request.content.userInfo, store: KeychainE2EKeyStore.shared)
         if let notification = E2ESMSPush.notification(for: outcome) {
             content.title = notification.title
