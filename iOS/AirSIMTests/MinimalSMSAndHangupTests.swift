@@ -245,3 +245,24 @@ final class PR33NotificationTests: XCTestCase {
         XCTAssertEqual(CallNotificationTruth.body(number: "10086", callerName: "10086", slotIndex: -1), "10086")
     }
 }
+
+final class PR33CarrierPreferenceTests: XCTestCase {
+    func testDefaultUpgradeAndExplicitOptOut() {
+        let name = "pr33.preferences." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        XCTAssertTrue(CarrierRingbackPreference.isEnabled(defaults: defaults))
+        defaults.set(false, forKey: CarrierRingbackPreference.key)
+        XCTAssertFalse(CarrierRingbackPreference.isEnabled(defaults: defaults))
+    }
+    func testReceiveOnlyNeverAuthorizesAnsweredIncomingOrEndedAudio() {
+        for enabled in [false, true] {
+            for outgoing in [false, true] {
+                for state: CallLifecycleState in [.idle, .ringing, .connecting, .active, .ended, .failed] {
+                    XCTAssertEqual(CarrierRingbackPreference.allowsReceiveOnly(enabled: enabled, outgoing: outgoing, state: state),
+                        enabled && outgoing && state == .connecting)
+                }
+            }
+        }
+    }
+}

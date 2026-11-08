@@ -131,6 +131,7 @@ final class VoBLECallCoordinator {
     var onEarlyPlayback: (() -> Void)?
     private(set) var earlyMediaAudible = false
     private(set) var earlyMediaUnavailable = false
+    private var carrierEarlyMediaEnabled = true
     private var earlyAttempt: VoBLECallIdentity?
     private var earlyDeadlineTask: Task<Void, Never>?
     private var mediaRequestVersion = 0
@@ -189,6 +190,7 @@ final class VoBLECallCoordinator {
     func startOutgoing(number: String, operationID: String? = nil, systemUUID: UUID? = nil,
                        simAccount: String? = nil) async throws -> VoBLECallIdentity {
         guard pendingOutgoing == nil, reducer.current == nil else { throw VoBLECentralError.bluetooth("call_in_progress") }
+        carrierEarlyMediaEnabled = CarrierRingbackPreference.isEnabled()
         let provisionalID = operationID ?? UUID().uuidString.lowercased()
         let token = UUID()
         pendingOutgoing = (provisionalID, token)
@@ -337,7 +339,9 @@ final class VoBLECallCoordinator {
             onState?(identity, .ringing)
         case let .connecting(identity):
             onState?(identity, .connecting)
-            if event.state == "dialing", identity.direction == "outgoing", earlyAttempt != identity {
+            if CarrierRingbackPreference.allowsReceiveOnly(enabled: carrierEarlyMediaEnabled,
+                outgoing: identity.direction == "outgoing", state: .connecting),
+               event.state == "dialing", earlyAttempt != identity {
                 earlyMediaUnavailable = false
                 earlyAttempt = identity
                 Task { await startMedia(for: identity, receiveOnly: true) }
@@ -374,6 +378,7 @@ final class VoBLECallCoordinator {
     }
 
     private func startMedia(for identity: VoBLECallIdentity, receiveOnly: Bool = false) async {
+        guard !receiveOnly || carrierEarlyMediaEnabled else { return }
         guard endingIdentity != identity, reducer.current == identity, reducer.mediaRequested != receiveOnly,
               !receiveOnly || (identity.direction == "outgoing" && !identity.isProvisional) else { return }
         mediaRequestVersion += 1

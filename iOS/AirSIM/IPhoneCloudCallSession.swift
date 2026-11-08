@@ -767,6 +767,7 @@ final class IPhoneCloudCallSession {
     private var answerRetryGeneration = 0
     private var answerAcknowledged = false
     private var earlyAnswerEnvelope: CloudCallControlEnvelope?
+    private var carrierEarlyMediaEnabled = true
     private var earlyMediaReady = false
     private var earlyPlaybackNotified = false
     private(set) var earlyMediaUnavailable = false
@@ -814,7 +815,8 @@ final class IPhoneCloudCallSession {
                 case "early_media", "early_media_ready_v1":
                     // New capability requires all identity fields (legacy controls
                     // without them cannot authorize pre-connect media).
-                    guard control.authorizesEarlyMedia(callID: call.callID, uuid: call.uuid,
+                    guard CarrierRingbackPreference.allowsReceiveOnly(enabled: session.carrierEarlyMediaEnabled,
+                        outgoing: call.isOutgoing, state: session.lifecycleState), control.authorizesEarlyMedia(callID: call.callID, uuid: call.uuid,
                         generation: call.generation, outgoing: call.isOutgoing, state: session.lifecycleState) else { return }
                     session.earlyMediaReady = true
                     session.earlyMediaUnavailable = false
@@ -912,7 +914,7 @@ final class IPhoneCloudCallSession {
         answered = true
         lifecycleState = .connecting
         answerAcknowledged = false
-        if callChanged { earlyMediaReady = false; earlyPlaybackNotified = false; earlyMediaUnavailable = false }
+        if callChanged { carrierEarlyMediaEnabled = CarrierRingbackPreference.isEnabled(); earlyMediaReady = false; earlyPlaybackNotified = false; earlyMediaUnavailable = false }
         if callChanged || mediaHealthTracker == nil {
             mediaHealthTracker = CloudMediaHealthTracker(startedAt: Date(), maximumRebuilds: 3)
             mediaHealthTracker?.recordRoute(media.audioRouteDescription)
@@ -1142,7 +1144,7 @@ final class IPhoneCloudCallSession {
         guard isPrepared else { throw IPhoneCloudCallError.connectionClosed }
         Task { await AgentVerboseTraceRecorder.shared.recordAudioStartup(phase: "phone_start") }
         let receiveOnly = call?.isOutgoing == true && lifecycleState == .connecting
-        guard !receiveOnly || earlyMediaReady else { return }
+        guard !receiveOnly || (carrierEarlyMediaEnabled && earlyMediaReady) else { return }
         try media.startAudio(receiveOnly: receiveOnly)
         onAudioEngineStarted?()
         Task { await AgentVerboseTraceRecorder.shared.recordAudioStartup(phase: "engine_ready") }
@@ -1153,7 +1155,7 @@ final class IPhoneCloudCallSession {
 
     func startAudioWithRetry() {
         guard canAttemptAudio else { return }
-        if call?.isOutgoing == true && lifecycleState == .connecting && !earlyMediaReady { return }
+        if call?.isOutgoing == true && lifecycleState == .connecting && (!carrierEarlyMediaEnabled || !earlyMediaReady) { return }
         if media.isAudioRunning {
             audioState = .connected
             traceAudio(phase: "already_running", title: "iPhone 云端音频已在运行")

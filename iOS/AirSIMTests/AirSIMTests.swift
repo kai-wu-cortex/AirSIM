@@ -5742,6 +5742,38 @@ final class AllTransportEarlyMediaTests: XCTestCase {
         audio.stopCallTone(deactivateSession: false)
     }
 
+    func testBLEPreferenceDisablesEarlyRequestAndIsFrozenForCurrentCall() async throws {
+        let saved = UserDefaults.standard.object(forKey: CarrierRingbackPreference.key)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: CarrierRingbackPreference.key) }
+            else { UserDefaults.standard.removeObject(forKey: CarrierRingbackPreference.key) }
+        }
+        UserDefaults.standard.set(false, forKey: CarrierRingbackPreference.key)
+        let central = VoBLECallControlProbe()
+        let media = VoBLEGATTMediaTransport(writer: VoBLEWriterProbe(canSend: true, maximumLength: 247))
+        let audio = VoBLEAudioEngine(transport: media)
+        let suite = "EarlyOptOut.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let calls = VoBLECallCoordinator(central: central, media: media, audio: audio, defaults: defaults)
+        var commands: [String] = []
+        central.sendOperation = { command, _, generation in
+            commands.append(command)
+            return .init(requestID: command, generation: generation, success: true, code: "ok", detail: "accepted")
+        }
+        let outgoing = try await calls.startOutgoing(number: "fixture")
+        UserDefaults.standard.set(true, forKey: CarrierRingbackPreference.key)
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "dialing", number: "fixture"))
+        for _ in 0..<30 { await Task.yield() }
+        XCTAssertEqual(commands.filter { $0 == "dial" }.count, 1)
+        XCTAssertFalse(commands.contains("start_early_media"))
+        XCTAssertFalse(media.isRunning)
+        XCTAssertFalse(audio.running)
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "ended", number: "fixture"))
+    }
+
     func testLateBLEEarlyAckAfterEndedCannotRestartMediaOrDialAgain() async throws {
         let central = VoBLECallControlProbe()
         let writer = VoBLEWriterProbe(canSend: true, maximumLength: 247)
