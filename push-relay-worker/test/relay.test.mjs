@@ -1012,7 +1012,8 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   assert.equal(captured[2].options.headers["apns-push-type"], "alert");
   assert.equal(captured[2].options.headers["apns-topic"], "com.example.airsim");
   assert.equal(captured[2].payload.event, "incoming_call_mirror");
-  assert.equal(captured[2].payload.aps.alert.title, "10010");
+  assert.equal(captured[2].payload.aps.alert.title, "AirSIM 来电");
+  assert.equal(captured[2].payload.aps.alert.body, "10010");
   assert.equal(captured[3].options.headers["apns-push-type"], "liveactivity");
   assert.equal(captured[3].options.headers["apns-topic"], "com.example.airsim.push-type.liveactivity");
   assert.equal(captured[3].payload.aps.event, "start");
@@ -1917,4 +1918,39 @@ test("relay preserves optional early media negotiation and scoped status without
   session.webSocketMessage(agent, ready);
   assert.equal(iphone.sent.at(-1), ready);
   assert.equal(iphone.sent.some(message => typeof message === "string" && JSON.parse(message).status === "active"), false);
+});
+
+test("PR33 missed notifications require explicit facts and isolate agent/generation", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const captured = [], originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    captured.push({ options, payload: JSON.parse(options.body) });
+    return new Response("", { status: 200 });
+  };
+  const base = {event:"call_owner", device_id:registration.device_id, device_secret:registration.device_secret,
+    call_id:"native-call", call_uuid:"d9b59660-05bb-4ea8-9aeb-4505b35c93f9", agent_id:"phone-a",
+    generation:1, owner:"android", direction:"incoming", phase:"ended", number:"10086", slot_index:1};
+  try {
+    const send = async event => {
+      const response = await worker.fetch(post("/v1/events/call-owner", event), env);
+      assert.equal(response.status, 202);
+    };
+    await send(base);
+    assert.equal(captured.at(-1).options.headers["apns-push-type"], "background");
+    await send({...base, generation:2, missed:true});
+    assert.equal(captured.at(-1).options.headers["apns-push-type"], "alert");
+    assert.equal(captured.at(-1).payload.agent_id, "phone-a");
+    assert.match(captured.at(-1).payload.aps.alert.body, /10086.*SIM 2/);
+    assert.equal(captured.at(-1).payload.aps.sound, undefined);
+    const count = captured.length;
+    await send({...base, generation:2, missed:true});
+    await send({...base, generation:2, phase:"active"});
+    assert.equal(captured.length, count);
+    await send({...base, generation:2, agent_id:"phone-b", phase:"active"});
+    await send({...base, generation:2, agent_id:"phone-b", missed:true});
+    assert.equal(captured.at(-1).payload.missed, false);
+    await send({...base, generation:3, direction:"outgoing", missed:true});
+    assert.equal(captured.at(-1).options.headers["apns-push-type"], "background");
+  } finally { globalThis.fetch = originalFetch; }
 });

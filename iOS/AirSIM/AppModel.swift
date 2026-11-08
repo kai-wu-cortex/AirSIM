@@ -324,7 +324,11 @@ enum ModuleConnectivityPolicy {
 @MainActor
 final class AppModel: ObservableObject {
     @Published var activeCall: CallRecord?
-    @Published var callHistory: [CallRecord] = [] { didSet { refreshHistoryAttention() } }
+    @Published var callHistory: [CallRecord] = [] { didSet {
+        refreshHistoryAttention()
+        incomingNotifier.reconcileHistory(callHistory, previous: oldValue,
+            callerName: { contacts.displayName(for: $0) })
+    } }
     @Published var messages: [SMSMessage] = [] { didSet { refreshHistoryAttention() } }
     @Published private(set) var unreadMessageIDs: Set<String> = []
     @Published private(set) var unseenMissedCallIDs: Set<String> = []
@@ -370,7 +374,7 @@ final class AppModel: ObservableObject {
     private var localDirectoryRefresh: Task<Void, Never>?
     private var localDirectoryRefreshPending = false
     @Published private(set) var pairedDeviceRecords = PairedAndroidDeviceStore.records()
-    let incomingNotifier = IncomingCallNotifier()
+    let incomingNotifier = IncomingCallNotifier.shared
     let incomingSMSNotifier = IncomingSMSNotifier()
     let liveActivity = LiveActivityController()
     private var liveActivityAgentPage = 0
@@ -906,8 +910,8 @@ final class AppModel: ObservableObject {
     private func updateOwnedPrimaryAlerts(_ call: CallRecord?) {
         let suppressed = (call?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone)
             || carrierEarlyMediaAudible
-        incomingNotifier.update(call: suppressed ? nil : call,
-            callerName: call.map { contacts.displayName(for: $0.number) }, appIsActive: appIsActive)
+        incomingNotifier.update(call: call,
+            callerName: call.map { contacts.displayName(for: $0.number) }, appIsActive: appIsActive, presentIncoming: !suppressed)
         if suppressed || WatchCallCoordinator.shared.ownsMedia(callID: call?.id) { audio.stopCallTone() }
         else { audio.updateCallTone(for: call) }
     }
@@ -2522,13 +2526,8 @@ final class AppModel: ObservableObject {
                     callerName: callerName ?? previousCall.map { contacts.displayName(for: $0.number) }
                 )
                 // CallKit 成功后由系统负责锁屏来电界面；仅在 CallKit 不可用或上报失败时发普通通知兜底。
-                if !callKit.suppressesInAppIncomingRingtone {
-                    incomingNotifier.update(
-                        call: lifecycleCall,
-                        callerName: callerName,
-                        appIsActive: appIsActive
-                    )
-                }
+                incomingNotifier.update(call: lifecycleCall, callerName: callerName,
+                    appIsActive: appIsActive, presentIncoming: !callKit.suppressesInAppIncomingRingtone)
                 if carrierEarlyMediaAudible || (lifecycleCall?.direction == "incoming" && callKit.suppressesInAppIncomingRingtone) {
                     // CallKit 已负责系统铃声，不能再叠加应用内铃声。
                     audio.stopCallTone()
