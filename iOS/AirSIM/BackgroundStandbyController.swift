@@ -821,7 +821,7 @@ final class IncomingCallNotifier {
             }
             // Never replay imported history on launch. An old Agent's explicit
             // missed fact remains eligible even when cloud signaling is enabled.
-            guard (call.endedAt ?? call.updatedAt) >= launchedAt,
+            guard (call.endedAt ?? call.updatedAt).timeIntervalSinceReferenceDate >= launchedAt.timeIntervalSinceReferenceDate,
                   CallNotificationTruth.isMissed(call), let key = CallNotificationTruth.key(info),
                   !missedIDs.contains(key), missedTasks[key] == nil else { continue }
             let body = CallNotificationTruth.body(number: call.number, callerName: callerName(call.number),

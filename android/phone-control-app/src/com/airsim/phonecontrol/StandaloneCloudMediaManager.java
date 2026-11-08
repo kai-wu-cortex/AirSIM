@@ -286,6 +286,8 @@ final class StandaloneCloudMediaManager implements Closeable {
         volatile String mediaProtocol = "";
         volatile boolean mediaStarted;
         volatile boolean earlyMediaAccepted;
+        private volatile CloudPCMAudioQueue.Policy audioBufferPolicy = CloudPCMAudioQueue.Policy.automatic();
+        private boolean audioBufferPolicyReceived;
         final long earlyMediaDeadline = System.nanoTime() + 120_000_000_000L;
         int sequence;
 
@@ -381,6 +383,17 @@ final class StandaloneCloudMediaManager implements Closeable {
                         || descriptor.generation != control.optLong("generation", -1)) continue;
                 mediaProtocol = control.optString("media_protocol", "");
                 earlyMediaAccepted = control.optInt("early_media_version", 0) == 1;
+                // Only accept preferences after the authenticated socket + exact
+                // call identity checks above. Replays cannot retune a live call.
+                if ("answer".equals(action) && !audioBufferPolicyReceived) {
+                    audioBufferPolicy = CloudPCMAudioQueue.Policy.fromWire(
+                            control.optInt("audio_buffer_version", 0),
+                            control.optString("audio_buffer_mode", "automatic"),
+                            control.optInt("audio_buffer_ms", 0));
+                    audioBufferPolicyReceived = true;
+                    BridgeLog.info("cloud_audio_buffer target_ms=" + audioBufferPolicy.minimum * 20
+                            + " max_ms=" + audioBufferPolicy.maximum * 20);
+                }
                 JSONObject command = new JSONObject().put("command_id",
                                 control.optString("command_id", UUID.randomUUID().toString()))
                         .put("type", "call_control").put("action", action)
@@ -477,7 +490,7 @@ final class StandaloneCloudMediaManager implements Closeable {
                                         // Keep signaling alive even when optional early media fails.
                                         closeSocket(next);
                                     }
-                                }, sessions, rxOnly);
+                                }, sessions, rxOnly, audioBufferPolicy);
                                 mediaPump.start();
                                 RemoteAudioSessionRegistry.setCloud(next, true, descriptor.androidID);
                             }

@@ -4,7 +4,22 @@ import java.util.ArrayDeque;
 
 /** Cloud-only 8 kHz mono PCM reserve. Clock is monotonic, never wall-clock time. */
 final class CloudPCMAudioQueue {
-    private static final int MAX_FRAMES = 12; // 240 ms, not a second of stale speech.
+    static final class Policy {
+        final int minimum, maximum, capacity;
+        final boolean adaptive;
+        private Policy(int minimum, int maximum, int capacity, boolean adaptive) {
+            this.minimum = minimum; this.maximum = maximum; this.capacity = capacity; this.adaptive = adaptive;
+        }
+        static Policy automatic() { return new Policy(4, 10, 12, true); }
+        static Policy fromWire(int version, String mode, int millis) {
+            if (version != 1) return automatic();
+            if ("stable".equals(mode)) return new Policy(12, 36, 38, true);
+            if ("manual".equals(mode) && (millis == 240 || millis == 480 || millis == 720 || millis == 960))
+                return new Policy(millis / 20, millis / 20, millis / 20 + 2, false);
+            return automatic();
+        }
+    }
+    private final Policy policy;
     private final boolean playout;
     private final ArrayDeque<Frame> frames = new ArrayDeque<>();
     private int target = 4;
@@ -21,23 +36,28 @@ final class CloudPCMAudioQueue {
         Frame(byte[] pcm, long now) { this.pcm = pcm.clone(); capturedAt = now; }
     }
 
-    CloudPCMAudioQueue(boolean playout) { this.playout = playout; }
+    CloudPCMAudioQueue(boolean playout) { this(playout, Policy.automatic()); }
+    CloudPCMAudioQueue(boolean playout, Policy policy) {
+        this.playout = playout;
+        this.policy = playout ? policy : Policy.automatic();
+        target = this.policy.minimum;
+    }
     synchronized void offer(byte[] pcm, long nowMillis) {
         if (pcm.length != 320) return;
         if (playout && lastArrival >= 0 && nowMillis >= lastArrival) {
             long delta = nowMillis - lastArrival;
             jitter += (Math.abs(delta - 20) - jitter) / 16;
-            target = Math.max(target, Math.min(10, 4 + (int) (jitter / 20)));
+            if (policy.adaptive) target = Math.max(target, Math.min(policy.maximum, policy.minimum + (int) (jitter / 20)));
             stableFrames = delta >= 15 && delta <= 25 ? stableFrames + 1 : 0;
-            if (stableFrames >= 100) {
-                target = Math.max(4, target - 1);
+            if (policy.adaptive && stableFrames >= 100) {
+                target = Math.max(policy.minimum, target - 1);
                 stableFrames = 0;
                 trim(target + 2);
             }
         }
         lastArrival = nowMillis;
         frames.addLast(new Frame(pcm, nowMillis));
-        trim(MAX_FRAMES);
+        trim(policy.capacity);
         if (playout && !primed && frames.size() >= target) primed = true;
     }
     synchronized byte[] poll(long nowMillis) {
@@ -66,7 +86,7 @@ final class CloudPCMAudioQueue {
             concealed++;
             return pcm;
         }
-        target = Math.min(10, target + 1);
+        if (policy.adaptive) target = Math.min(policy.maximum, target + 1);
         primed = false;
         return null;
     }

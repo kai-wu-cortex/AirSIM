@@ -64,3 +64,32 @@
 4. Root/Shizuku、保留采集音量/最低非零音量分别检查，尤其 Pixel 6 和采集受音量影响的设备。未验证的独立物理输出/全局麦克风静音不开放。
 
 模拟器/JVM/构建通过不等于上述实机验收已完成。没有发起真实电话、短信或录音。
+
+## 2026-11-08 iPhone 本地安装
+
+- 用户决定保留最低 iOS 16.3，要求先安装真机测试。以 develop `10cdd49` 为基线构建本地开发签名 0.9.8（173），版本号仅由仓库外 xcconfig 覆盖。
+- 安装前二进制检查发现新增未接提醒的 Date `>=` 比较再次引入 162 崩溃涉及的运行时符号；已改为等价的时间戳比较，保留相等边界。最终构建、深度签名、12 个 Mach-O 的 Date 导入检查通过。
+- iPhone Air 保留数据覆盖安装成功，设备查询确认为 `com.eric3u.airsim / 0.9.8 / 173`，启动命令成功。APNs 为开发环境 sandbox。
+- 本次未更新 Android、U30Air 或生产 Worker，未发布 Release/TestFlight。完整通知协同及 Android 输出尾段仍需相应端更新后联测；真实电话由用户手动验收。
+
+## 2026-11-08 联测部署进展
+
+- 用户随后授权更新 Android Standalone 和 Worker，安卓目标为红米无线调试。
+- Worker 80 项测试、dry-run、所需 Secret 名称检查通过，部署前版本 `b7820f4f-831b-411c-b433-f2c6a5c19270`。
+- `airsim-push.remotepilot.site` 已部署 develop `10cdd49` 的 Worker，版本 `02b98446-59ff-4d25-ba3d-b24a732116b4`，部署列表确认 100% 流量，公网 `/healthz` 返回 `ok:true`。现有 KV/DO 绑定和 Secrets 保留。
+- 最新源码重新构建 Standalone Debug 成功，包名 `com.airsim.phonecontrol.standalone`；沿用 0.9.8.23（128）版本字段，因此不能仅凭版本号与之前产物区分。APK SHA-256：`94e958ccd61e6cf27843f716a798ae7b2a760a3bf3fb16fc28b027e8940f1687`。
+- 红米无线调试连接恢复后，确认旧 Debug 包构建号 132、证书与本机 Debug 密钥一致。为避免降级，使用仓库外 Manifest 构建 0.9.8.23（133）；包 SHA-256：`ad2f2b831b9ea3f2c8e04cfc8d6c6daeb5c68287f34b4251a505a5c932655356`。
+- 已通过 `adb install -r` 在 Redmi 9（M2004J19C）保留数据覆盖安装成功，包版本查询确认为 133，MainActivity 启动成功、应用进程存在。未卸载或清除配对数据，真实双向通话及通知仍由用户联测。
+- 未更新 U30Air、独立 AVF Agent 或阿里云 Relay；未发起真实通话、短信或录音，未发布 Release/TestFlight。
+
+## 2026-11-08 阿里云 Relay 同步
+
+用户随后授权阿里云同步更新。实例 `i-bp1gixcvkyfkg57m95w1`（杭州）的 AirSIM Relay 已更新为相同 develop `10cdd49` 业务源码，公网地址仍为 `https://118.178.109.247`。
+
+- 新运行目录：`/opt/airsim-relay/releases/20261108-pr33-10cdd49`；`current` 已切换。保留旧目录 `20261103-2` 可回退。
+- 原生 workerd、Node、自托管运行适配器、配置、数据目录及 DO namespace 保持原有版本/路径。同步全部 7 个业务模块并逐一校验 SHA-256，另更新 smoke 脚本；源码传输包 SHA-256：`8603cec0a1d9a40c64ef393c07f715e41a6e7a935353b3b90f1d1f422c1e8525`。
+- 仅停止/启动 `airsim-relay.service`。旧进程退出触发既有 15 秒 TimeoutStopSec 后被 systemd 终止，备份在进程完全停止后执行，包含完整 SQLite/WAL 目录和配置，权限 0600：`/opt/airsim-relay/backups/20261108-pr33/state-and-config.tar.gz`。切换期间公网短暂返回 502，随后恢复。
+- 配置文件 SHA 校验不变；AirSIM APNs、HTTPS 与 AirSIM Cloud Relay/APNs/HTTPS/TURN 的 PID 均未改变，最终状态均 active。
+- 自托管 5 项测试通过；服务器内及 Mac 公网 HTTPS/WSS 合成测试均通过：健康、Dashboard 未授权拒绝、注册、心跳、设备鉴权、拨号命令去重、双向二进制 PCM。两轮合成注册均已清理，未向真实设备拨号或推送。
+- Apple production/sandbox TLS 验证及 HTTP/2 协商通过（无认证请求返回预期 405）；这不代表真实 APNs 投递已验收。公网 IP 证书正常有效，到期时间 2026-11-14 23:18:49（北京时间）。
+- 既有 Notion 凭据仍缺失，手动反馈上传仍受此限制；未打印或改动秘密。真实通话、锁屏推送、SIM 通知与音频质量待用户测试，两端需使用同一个 Relay。

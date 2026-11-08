@@ -19,7 +19,7 @@ final class CloudPCMMediaPump implements Closeable {
     private final Executor executor;
     private final boolean receiveOnly;
     private final CloudPCMAudioQueue outgoing = new CloudPCMAudioQueue(false);
-    private final CloudPCMAudioQueue incoming = new CloudPCMAudioQueue(true);
+    private final CloudPCMAudioQueue incoming;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean started = new AtomicBoolean();
     private volatile long sendingSince, playingSince;
@@ -30,6 +30,11 @@ final class CloudPCMMediaPump implements Closeable {
     }
     CloudPCMMediaPump(InputStream capture, OutputStream playback, Sender sender,
                       Failure failure, Executor executor, boolean receiveOnly) {
+        this(capture, playback, sender, failure, executor, receiveOnly, CloudPCMAudioQueue.Policy.automatic());
+    }
+    CloudPCMMediaPump(InputStream capture, OutputStream playback, Sender sender,
+                      Failure failure, Executor executor, boolean receiveOnly, CloudPCMAudioQueue.Policy policy) {
+        this.incoming = new CloudPCMAudioQueue(true, policy);
         this.receiveOnly = receiveOnly;
         this.capture = capture; this.playback = playback; this.sender = sender;
         this.failure = failure; this.executor = executor;

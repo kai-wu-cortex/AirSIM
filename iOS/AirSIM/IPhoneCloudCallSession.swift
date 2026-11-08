@@ -239,9 +239,41 @@ struct CloudPCMBufferedFrame {
     let pcm: Data
 }
 
+enum CloudAudioBufferMode: String, CaseIterable {
+    case automatic, stable, manual
+    var title: String {
+        switch self { case .automatic: return "自动（默认）"; case .stable: return "稳定优先"; case .manual: return "手动" }
+    }
+}
+
+struct CloudAudioBufferPolicy: Equatable {
+    static let modeKey = "airsim.cloud-audio-buffer-mode"
+    static let millisecondsKey = "airsim.cloud-audio-buffer-ms"
+    static let manualChoices = [240, 480, 720, 960]
+    let mode: CloudAudioBufferMode
+    let milliseconds: Int
+    init(mode: CloudAudioBufferMode = .automatic, milliseconds: Int = 720) {
+        self.mode = mode
+        self.milliseconds = Self.manualChoices.contains(milliseconds) ? milliseconds : 720
+    }
+    static func current(defaults: UserDefaults = .standard) -> Self {
+        Self(mode: CloudAudioBufferMode(rawValue: defaults.string(forKey: modeKey) ?? "") ?? .automatic,
+             milliseconds: defaults.integer(forKey: millisecondsKey))
+    }
+    var minimumFrames: Int { mode == .manual ? milliseconds / 20 : mode == .stable ? 12 : 4 }
+    var maximumTargetFrames: Int { mode == .manual ? minimumFrames : mode == .stable ? 36 : 12 }
+    var capacity: Int { mode == .automatic ? 12 : maximumTargetFrames + 2 }
+    var adaptive: Bool { mode != .manual }
+}
+
 /// Raw AirSIM PCM has no wire sequence, so callers assign monotonic arrival
 /// numbers. The reserve absorbs relay bursts without ever growing unbounded.
 struct CloudPCMAdaptiveJitterBuffer {
+    let policy: CloudAudioBufferPolicy
+    init(policy: CloudAudioBufferPolicy = .init()) {
+        self.policy = policy
+        targetFrameCount = policy.minimumFrames
+    }
     private var frames: [UInt32: CloudPCMBufferedFrame] = [:]
     private var expectedSequence: UInt32?
     private var lastArrivalAt: Date?
@@ -267,10 +299,12 @@ struct CloudPCMAdaptiveJitterBuffer {
             let delta = arrivedAt.timeIntervalSince(previous)
             if delta >= 0 {
                 estimatedJitter += (abs(delta - 0.02) - estimatedJitter) / 16
-                targetFrameCount = max(targetFrameCount, min(12, 4 + Int(estimatedJitter / 0.02)))
+                if policy.adaptive {
+                    targetFrameCount = max(targetFrameCount, min(policy.maximumTargetFrames, policy.minimumFrames + Int(estimatedJitter / 0.02)))
+                }
                 stableFrames = (0.015...0.025).contains(delta) ? stableFrames + 1 : 0
-                if stableFrames >= 100 {
-                    targetFrameCount = max(4, targetFrameCount - 1)
+                if policy.adaptive, stableFrames >= 100 {
+                    targetFrameCount = max(policy.minimumFrames, targetFrameCount - 1)
                     stableFrames = 0
                     trim(to: targetFrameCount + 2)
                 }
@@ -278,7 +312,7 @@ struct CloudPCMAdaptiveJitterBuffer {
         }
         lastArrivalAt = arrivedAt
         frames[sequence] = CloudPCMBufferedFrame(sequence: sequence, pcm: pcm)
-        trim(to: 12)
+        trim(to: policy.capacity)
         if !isPrimed, frames.count >= targetFrameCount { isPrimed = true }
     }
 
@@ -362,7 +396,7 @@ struct CloudPCMAdaptiveJitterBuffer {
     }
 
     mutating func notePlaybackUnderrun() {
-        targetFrameCount = min(12, targetFrameCount + 1)
+        if policy.adaptive { targetFrameCount = min(policy.maximumTargetFrames, targetFrameCount + 1) }
         stableFrames = 0
         isPrimed = false
     }
@@ -376,7 +410,7 @@ struct CloudPCMAdaptiveJitterBuffer {
         pcm[index * 2 + 1] = UInt8(truncatingIfNeeded: bits >> 8)
     }
 
-    mutating func reset() { self = CloudPCMAdaptiveJitterBuffer() }
+    mutating func reset() { self = CloudPCMAdaptiveJitterBuffer(policy: policy) }
 }
 
 enum CloudCallRetryPolicy {
@@ -536,9 +570,15 @@ struct CloudCallControlEnvelope: Codable, Equatable, Sendable {
     let commandID: String
     let traceID: String
     var earlyMediaVersion: Int? = 1
+    var audioBufferVersion: Int? = nil
+    var audioBufferMode: String? = nil
+    var audioBufferMilliseconds: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case earlyMediaVersion = "early_media_version"
+        case audioBufferVersion = "audio_buffer_version"
+        case audioBufferMode = "audio_buffer_mode"
+        case audioBufferMilliseconds = "audio_buffer_ms"
         case action, generation
         case callID = "call_id"
         case callUUID = "call_uuid"
@@ -910,6 +950,7 @@ final class IPhoneCloudCallSession {
             try media.prepareForCallKit()
         }
         let callChanged = call?.uuid != incoming.uuid
+        if callChanged { media.configureAudioBuffer(CloudAudioBufferPolicy.current()) }
         call = incoming
         answered = true
         lifecycleState = .connecting
@@ -1549,6 +1590,10 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
     private var playbackTimer: DispatchSourceTimer?
     private var uplinkGeneration = UUID()
     private var jitterBuffer = CloudPCMAdaptiveJitterBuffer()
+    // Per-call snapshot survives socket/audio-route rebuilds; never delays capture.
+    func configureAudioBuffer(_ policy: CloudAudioBufferPolicy) {
+        queue.sync { jitterBuffer = CloudPCMAdaptiveJitterBuffer(policy: policy) }
+    }
     private var playbackWindow = CloudPCMPlaybackWindow()
     private var playbackGeneration = UUID()
     private var downlinkSequence: UInt32 = 0
@@ -1741,7 +1786,7 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
             )
             controlOperations[operationKey] = identity
         }
-        let envelope = CloudCallControlEnvelope(
+        var envelope = CloudCallControlEnvelope(
             action: action,
             callID: call.callID,
             callUUID: call.uuid.uuidString.lowercased(),
@@ -1749,6 +1794,11 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
             commandID: identity.commandID,
             traceID: identity.traceID
         )
+        if action == "answer" {
+            envelope.audioBufferVersion = 1
+            envelope.audioBufferMode = jitterBuffer.policy.mode.rawValue
+            envelope.audioBufferMilliseconds = jitterBuffer.policy.milliseconds
+        }
         return envelope
     }
 

@@ -1912,8 +1912,14 @@ test("relay preserves optional early media negotiation and scoped status without
   const state = new MemoryMediaState([agent, iphone]);
   const session = new CallMediaSession(state, {});
   const identity = { call_id: "carrier", call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9", generation: 8 };
-  session.webSocketMessage(iphone, JSON.stringify({ action: "answer", ...identity, early_media_version: 1 }));
+  session.webSocketMessage(iphone, JSON.stringify({ action: "answer", ...identity, early_media_version: 1, audio_buffer_version: 1, audio_buffer_mode: "manual", audio_buffer_ms: 720 }));
   assert.equal(JSON.parse(agent.sent.at(-1)).early_media_version, 1);
+  const forwarded = JSON.parse(agent.sent.at(-1));
+  assert.equal(forwarded.audio_buffer_version, 1);
+  assert.equal(forwarded.audio_buffer_mode, "manual");
+  assert.equal(forwarded.audio_buffer_ms, 720);
+  assert.equal(forwarded.call_uuid, identity.call_uuid);
+  assert.equal(forwarded.generation, identity.generation);
   const ready = JSON.stringify({ status: "early_media_ready_v1", ...identity });
   session.webSocketMessage(agent, ready);
   assert.equal(iphone.sent.at(-1), ready);

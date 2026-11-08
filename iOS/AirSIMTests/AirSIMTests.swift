@@ -5900,3 +5900,76 @@ final class AllTransportEarlyMediaTests: XCTestCase {
         XCTAssertEqual(old.callID, "c")
     }
 }
+
+
+final class CloudAudioBufferPreferenceTests: XCTestCase {
+    private let frame = Data(repeating: 1, count: 320)
+    private let epoch = Date(timeIntervalSince1970: 100)
+
+    func testDefaultsAndInvalidSavedValuesRemainBounded() {
+        let name = "buffer-tests-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        XCTAssertEqual(CloudAudioBufferPolicy.current(defaults: defaults).mode, .automatic)
+        defaults.set("manual", forKey: CloudAudioBufferPolicy.modeKey)
+        defaults.set(Int.max, forKey: CloudAudioBufferPolicy.millisecondsKey)
+        XCTAssertEqual(CloudAudioBufferPolicy.current(defaults: defaults).milliseconds, 720)
+        defaults.set("unknown", forKey: CloudAudioBufferPolicy.modeKey)
+        XCTAssertEqual(CloudAudioBufferPolicy.current(defaults: defaults).minimumFrames, 4)
+    }
+
+    func testManual720Primes36FramesAndAbsorbs400msGap() {
+        var buffer = CloudPCMAdaptiveJitterBuffer(policy: .init(mode: .manual, milliseconds: 720))
+        for i in 0..<35 {
+            buffer.enqueue(sequence: UInt32(i), pcm: frame, arrivedAt: epoch.addingTimeInterval(Double(i) * 0.02))
+            XCTAssertTrue(buffer.dequeue(maxFrames: 1).isEmpty)
+        }
+        buffer.enqueue(sequence: 35, pcm: frame, arrivedAt: epoch.addingTimeInterval(0.7))
+        for _ in 0..<20 { XCTAssertEqual(buffer.dequeue(maxFrames: 1).count, 1) }
+        XCTAssertEqual(buffer.underrunCount, 0)
+        XCTAssertEqual(buffer.bufferedFrameCount, 16)
+        XCTAssertEqual(buffer.targetFrameCount, 36)
+    }
+
+    func testManualBufferIsBoundedAndResetKeepsPolicyWithoutOldAudio() {
+        var buffer = CloudPCMAdaptiveJitterBuffer(policy: .init(mode: .manual, milliseconds: 720))
+        for i in 0..<100 { buffer.enqueue(sequence: UInt32(i), pcm: frame, arrivedAt: epoch) }
+        XCTAssertEqual(buffer.bufferedFrameCount, 38)
+        XCTAssertEqual(buffer.droppedFrameCount, 62)
+        for _ in 0..<45 { _ = buffer.dequeue(maxFrames: 1) }
+        XCTAssertFalse(buffer.isPrimed)
+        XCTAssertEqual(buffer.targetFrameCount, 36)
+        buffer.reset()
+        XCTAssertEqual(buffer.bufferedFrameCount, 0)
+        XCTAssertEqual(buffer.targetFrameCount, 36)
+        XCTAssertTrue(buffer.dequeue(maxFrames: 1).isEmpty)
+        XCTAssertEqual(CloudPCMAdaptiveJitterBuffer().targetFrameCount, 4, "next automatic call starts fresh")
+    }
+
+    func testStableModeAdaptsAndRecoversWithinBounds() {
+        var buffer = CloudPCMAdaptiveJitterBuffer(policy: .init(mode: .stable))
+        for _ in 0..<100 { buffer.notePlaybackUnderrun() }
+        XCTAssertEqual(buffer.targetFrameCount, 36)
+        for i in 0..<3000 {
+            buffer.enqueue(sequence: UInt32(i), pcm: frame, arrivedAt: epoch.addingTimeInterval(Double(i) * 0.02))
+            _ = buffer.dequeue(maxFrames: 1)
+        }
+        XCTAssertEqual(buffer.targetFrameCount, 12)
+        XCTAssertLessThanOrEqual(buffer.bufferedFrameCount, 14)
+    }
+
+    func testBufferMetadataRemainsOptionalAndPreservesCallIdentity() throws {
+        var envelope = CloudCallControlEnvelope(action: "answer", callID: "native", callUUID: "uuid",
+            generation: 5, commandID: "operation", traceID: "trace")
+        envelope.audioBufferVersion = 1
+        envelope.audioBufferMode = "manual"
+        envelope.audioBufferMilliseconds = 720
+        var wire = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(envelope)) as? [String: Any])
+        XCTAssertEqual(wire["audio_buffer_ms"] as? Int, 720)
+        XCTAssertEqual(wire["call_id"] as? String, "native")
+        for key in ["audio_buffer_version", "audio_buffer_mode", "audio_buffer_ms"] { wire.removeValue(forKey: key) }
+        let legacy = try JSONDecoder().decode(CloudCallControlEnvelope.self, from: JSONSerialization.data(withJSONObject: wire))
+        XCTAssertNil(legacy.audioBufferVersion)
+        XCTAssertEqual(legacy.commandID, "operation")
+    }
+}
