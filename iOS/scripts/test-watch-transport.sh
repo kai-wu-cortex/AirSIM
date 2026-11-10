@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 root, out = map(Path, sys.argv[1:])
 source = (root/'AirSIMWatchApp/WatchCallSession.swift').read_text()
-transport = source.split('private final class WatchLocalPCMTransport:', 1)[1].split('// MARK: Watch-only reliability policies', 1)[0]
+transport = source.split('private final class WatchLocalPCMTransport:', 1)[1].split('private struct WatchDirectCallRoute', 1)[0]
 transport = 'private final class WatchLocalPCMTransport:' + transport
 # The transport implementation is unmodified; only the endpoint fixture is loopback-only.
 harness = (root/'WatchTransportSmoke/main.swift').read_text()

@@ -41,6 +41,15 @@ for localOnly in [false, true] {
 for phase in [WatchCallPhase.idle, .incoming, .connecting, .active, .ended] {
     check(WatchReliabilityPolicy.phaseAfterMediaReady(phase) == phase, "Transport cannot change Android call phase")
 }
+for state in ["active", "held"] {
+    check(WatchReliabilityPolicy.ringingResolution(state) == .answeredElsewhere, "An already connected call dismisses Watch ringing as answered elsewhere")
+}
+for state in ["ended", "failed", "disconnected"] {
+    check(WatchReliabilityPolicy.ringingResolution(state) == .ended, "A confirmed terminal call dismisses Watch ringing")
+}
+for state in [nil, "", "incoming", "waiting", "connecting"] {
+    check(WatchReliabilityPolicy.ringingResolution(state) == nil, "Missing, ringing, or transitional status keeps Watch available for answer")
+}
 let first = UUID(), second = UUID()
 check(!WatchReliabilityPolicy.acceptsMediaCallback(currentUUID: second, callbackUUID: first), "Old media callback cannot affect new call")
 check(!WatchReliabilityPolicy.acceptsMediaCallback(currentUUID: nil, callbackUUID: first), "Retired callback ignored")
