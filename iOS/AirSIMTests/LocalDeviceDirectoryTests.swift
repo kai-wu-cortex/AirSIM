@@ -530,6 +530,87 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(boundary.acks, [["same-wire-id"]])
     }
 
+    func testLegacyUnscopedPushDoesNotSplitWhenOnlyProducerIsKnown() async throws {
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(nil)
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let boundary = SMSProducerBoundary()
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 8575, pcmPort: 39001)
+        let api = AirSIMAPI(
+            route: .vowlan(endpoint: endpoint, credential: try VoWLANCredential(secret: aSecret)),
+            transport: boundary
+        )
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { _ in api })
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let suite = "AirSIMTests.single-sms-producer.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        PairedAndroidDeviceStore.remember(.init(id: "A", deviceName: "A", agentKind: "avf"), defaults: defaults)
+        let store = LocalHistoryStore(directoryURL: path)
+        let pushed = SMSMessage(
+            sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "same-wire-id", direction: .incoming
+        )
+        XCTAssertTrue(store.saveMessages([pushed]))
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, historyStore: store, pairedDeviceDefaults: defaults)
+        defer { model.stop() }
+        model.reloadMessagesFromLocalStore()
+
+        await model.synchronizeSMS(from: smsPollResult(api, agentID: "A"))
+
+        XCTAssertEqual(model.messages.count, 1)
+        XCTAssertEqual(model.messages.first?.sourceAgentID, "A")
+        // Review regression: the authenticated pull must remain usable by the
+        // current develop Watch device-scoped conversation feature.
+        XCTAssertTrue(WatchSMSPolicy.permits(sourceAgentID: model.messages.first?.sourceAgentID,
+            selectedAgentID: "A", pairedIDs: ["A"]), "authenticated delivery disappears from Watch")
+        XCTAssertEqual(model.messages.first?.simSlot, "中国联通 — Club")
+        XCTAssertEqual(boundary.acks, [["same-wire-id"]])
+    }
+
+    func testPR32PairingChangesDuringInboxFetchMustNotAliasAnotherProducer() async throws {
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(nil)
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let boundary = SMSProducerBoundary()
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 8575, pcmPort: 39001)
+        let api = AirSIMAPI(
+            route: .vowlan(endpoint: endpoint, credential: try VoWLANCredential(secret: aSecret)),
+            transport: boundary
+        )
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { _ in api })
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let suite = "AirSIMTests.single-sms-producer.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        PairedAndroidDeviceStore.remember(.init(id: "A", deviceName: "A", agentKind: "avf"), defaults: defaults)
+        let store = LocalHistoryStore(directoryURL: path)
+        let pushed = SMSMessage(
+            sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "same-wire-id", direction: .incoming
+        )
+        XCTAssertTrue(store.saveMessages([]))
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, historyStore: store, pairedDeviceDefaults: defaults)
+        defer { model.stop() }
+        model.reloadMessagesFromLocalStore()
+
+        boundary.beforeInbox = { @MainActor in
+            PairedAndroidDeviceStore.remember(.init(id: "B", deviceName: "B", agentKind: "avf"), defaults: defaults)
+            // Legacy APNs from newly added B arrives while A's inbox is in flight.
+            XCTAssertTrue(store.saveMessages([pushed]))
+            model.reloadMessagesFromLocalStore()
+        }
+        await model.synchronizeSMS(from: smsPollResult(api, agentID: "A"))
+
+        XCTAssertEqual(model.messages.count, 2, "pairing changed: A and unknown/B must remain distinct")
+        XCTAssertEqual(Set(model.messages.map(\.sourceAgentID)), [nil, "A"])
+        XCTAssertEqual(boundary.acks, [["same-wire-id"]])
+    }
+
     func testSMSIngestionPrefersFullRouteWhenEndpointIsReused() async throws {
         let aID = "A-route-\(UUID().uuidString)", bID = "B-route-\(UUID().uuidString)"
         let a = try AuthenticatedHealthPeer(agentID: aID, secret: aSecret)
@@ -1164,11 +1245,13 @@ private struct HistoryAckGateTransport: AirSIMHTTPTransport {
 }
 
 private final class SMSProducerBoundary: AirSIMHTTPTransport, @unchecked Sendable {
+    var beforeInbox: (@Sendable () async -> Void)?
     private let lock = NSLock()
     private var captured: [[String]] = []
     var acks: [[String]] { lock.withLock { captured } }
     func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
         if request.url?.path == "/api/sms" {
+            await beforeInbox?()
             return .init(statusCode: 200, body: Data(
                 #"[{"sender":"fixture","content":"same","timestamp":"2026-10-18T00:00:00Z","delivery_id":"same-wire-id","source_agent_id":"untrusted","sim_slot":"中国联通 — Club"}]"#.utf8))
         }

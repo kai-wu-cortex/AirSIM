@@ -141,18 +141,41 @@ enum PairedAndroidDeviceStore {
     private static let forgottenKey = "airsim.forgotten-android-devices.v1"
     private static let peripheralsKey = "airsim.android-device-peripherals.v1"
 
+    private static let identityLock = NSRecursiveLock()
+    private static let identityRevisionKey = "airsim.sms-pairing-revision.v1"
+    static func withSMSIdentitySnapshot<T>(localAgentIDs: [String] = [], defaults: UserDefaults = .standard,
+                                          _ body: (SMSIdentitySnapshot) -> T) -> T {
+        identityLock.lock(); defer { identityLock.unlock() }
+        let data = defaults.data(forKey: recordsKey)
+        let recordsValid = data.map { (try? JSONDecoder().decode([PairedAndroidDeviceRecord].self, from: $0)) != nil } ?? (defaults.object(forKey: recordsKey) == nil)
+        let forgottenValid = defaults.object(forKey: forgottenKey) == nil || defaults.stringArray(forKey: forgottenKey) != nil
+        let valid = recordsValid && forgottenValid
+        return body(SMSIdentitySnapshot(knownAgentIDs: Set(records(defaults: defaults).map(\.id) + localAgentIDs),
+            hasForgottenDevices: hasForgottenDevices(defaults: defaults),
+            revision: defaults.string(forKey: identityRevisionKey) ?? "", valid: valid))
+    }
+    static func smsIdentitySnapshot(localAgentIDs: [String] = [], defaults: UserDefaults = .standard) -> SMSIdentitySnapshot {
+        withSMSIdentitySnapshot(localAgentIDs: localAgentIDs, defaults: defaults) { $0 }
+    }
+
     static func records(defaults: UserDefaults = .standard) -> [PairedAndroidDeviceRecord] {
         guard let data = defaults.data(forKey: recordsKey),
               let values = try? JSONDecoder().decode([PairedAndroidDeviceRecord].self, from: data) else { return [] }
         return values.filter { permits($0.id, defaults: defaults) }
     }
     static func remember(_ record: PairedAndroidDeviceRecord, defaults: UserDefaults = .standard) {
+        identityLock.lock(); defer { identityLock.unlock() }
         guard !record.id.isEmpty, permits(record.id, defaults: defaults) else { return }
+        if !records(defaults: defaults).contains(where: { $0.id == record.id }) {
+            defaults.set(UUID().uuidString, forKey: identityRevisionKey)
+        }
         var values = records(defaults: defaults).filter { $0.id != record.id }
         values.append(record)
         defaults.set(try? JSONEncoder().encode(values), forKey: recordsKey)
     }
     static func forget(_ id: String, defaults: UserDefaults = .standard) {
+        identityLock.lock(); defer { identityLock.unlock() }
+        defaults.set(UUID().uuidString, forKey: identityRevisionKey)
         var forgotten = Set(defaults.stringArray(forKey: forgottenKey) ?? [])
         forgotten.insert(id)
         defaults.set(Array(forgotten), forKey: forgottenKey)
@@ -168,6 +191,8 @@ enum PairedAndroidDeviceStore {
         !(defaults.stringArray(forKey: forgottenKey) ?? []).isEmpty
     }
     static func allowPairing(_ id: String, defaults: UserDefaults = .standard) {
+        identityLock.lock(); defer { identityLock.unlock() }
+        defaults.set(UUID().uuidString, forKey: identityRevisionKey)
         defaults.set((defaults.stringArray(forKey: forgottenKey) ?? []).filter { $0 != id }, forKey: forgottenKey)
     }
     static func rememberPeripheral(_ peripheralID: String, for id: String, defaults: UserDefaults = .standard) {

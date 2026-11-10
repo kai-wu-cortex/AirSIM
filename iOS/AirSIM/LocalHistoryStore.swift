@@ -23,6 +23,14 @@ final class LocalHistoryStore {
         var deletedKeys: Set<String>
         // Genuine no-ID deletions also suppress the same old SMS after an Agent adds delivery IDs.
         var legacyDeletedKeys: Set<String>? = nil
+        // Migrated read state commits atomically with scoped records and tombstones.
+        var migratedReadKeys: Set<String>? = nil
+        // Hash of legacy delivery ID -> proven owner. Used only while the
+        // current directory still confirms that unique producer.
+        var legacyAliasOwners: [String: String]? = nil
+        // Deliveries received without a unique producer remain ambiguous even
+        // if the user later removes/re-pairs devices and the directory shrinks.
+        var ambiguousLegacyKeys: Set<String>? = nil
     }
     private let fileManager: FileManager
     private let directoryURL: URL
@@ -62,9 +70,12 @@ final class LocalHistoryStore {
         load(CallRecord.self, from: callHistoryURL) ?? []
     }
 
-    func loadMessages() -> [SMSMessage] {
+    func loadMessages() -> [SMSMessage] { messageSnapshot() ?? [] }
+
+    /// nil denotes unreadable storage; an empty array is a valid empty inbox.
+    func messageSnapshot() -> [SMSMessage]? {
         Self.messageLock.lock(); defer { Self.messageLock.unlock() }
-        return readMessageState()?.messages ?? []
+        return readMessageState()?.messages
     }
 
     @discardableResult
@@ -74,18 +85,80 @@ final class LocalHistoryStore {
         return save(records, to: callHistoryURL)
     }
 
-    @discardableResult
-    func saveMessages(_ records: [SMSMessage]) -> Bool {
-        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
-        _ = readAttentionState()
-        guard var state = readMessageState() else { return false }
-        // A background push can arrive after another store instance captured its input array.
-        // Merge under the lock; deletion is explicit and never inferred from missing records.
-        let merged = SMSHistoryPolicy.deduplicated(state.messages + records)
-        state.messages = Array(merged.filter { Self.isVisible($0, in: state) }
-            .sorted { $0.timestamp > $1.timestamp }.prefix(2_000))
-        return writeMessageState(state)
+    struct SMSIngestion {
+        let messages: [SMSMessage]
+        let newMessages: [SMSMessage]
+        let acceptedMessageIDs: Set<String>
+        let changed: Bool
     }
+
+    /// The caller holds a current pairing snapshot across this synchronous transaction.
+    /// Unknown records gain a scope only beside a matching authenticated delivery.
+    func ingestMessages(_ records: [SMSMessage], legacySourceAgentID: String? = nil,
+                        recordAmbiguity: Bool = true) -> SMSIngestion? {
+        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        let attention = readAttentionState()
+        guard var state = readMessageState() else { return nil }
+        let before = state.messages
+        let combined = state.messages + records
+        if recordAmbiguity && legacySourceAgentID == nil {
+            for message in records where message.sourceAgentID?.isEmpty != false && message.deliveryID?.isEmpty == false {
+                state.ambiguousLegacyKeys = (state.ambiguousLegacyKeys ?? []).union(Self.visibilityKeys(message))
+            }
+        }
+        var scopedDeliveries = Set<String>()
+        if let source = legacySourceAgentID, !source.isEmpty, attention != nil,
+           !combined.contains(where: { $0.sourceAgentID?.isEmpty == false && $0.sourceAgentID != source }) {
+            for message in combined where !message.isOutgoing {
+                guard let id = message.deliveryID, !id.isEmpty else { continue }
+                var legacy = message; legacy.sourceAgentID = nil
+                let key = Self.visibilityKeys(legacy).first!
+                guard !(state.ambiguousLegacyKeys ?? []).contains(key) else { continue }
+                let previousOwner = state.legacyAliasOwners?[key]
+                guard previousOwner == nil || previousOwner == source else { continue }
+                if message.sourceAgentID == source || previousOwner == source {
+                    scopedDeliveries.insert(id)
+                    var aliases = state.legacyAliasOwners ?? [:]
+                    aliases[key] = source
+                    state.legacyAliasOwners = aliases
+                }
+            }
+        }
+        func canonical(_ message: SMSMessage) -> SMSMessage {
+            var copy = message
+            if !copy.isOutgoing, copy.sourceAgentID?.isEmpty != false,
+               let id = copy.deliveryID, scopedDeliveries.contains(id) { copy.sourceAgentID = legacySourceAgentID }
+            return copy
+        }
+        // Include deleted/read legacy records even when their bodies are no longer stored.
+        // Only the exact stable delivery key is transferred, never a content fingerprint.
+        for message in combined where message.sourceAgentID == legacySourceAgentID && !message.isOutgoing {
+            guard let id = message.deliveryID, scopedDeliveries.contains(id) else { continue }
+            var legacy = message; legacy.sourceAgentID = nil
+            if !Self.visibilityKeys(legacy).isDisjoint(with: state.deletedKeys) {
+                state.deletedKeys.formUnion(Self.visibilityKeys(message))
+            }
+            if let attention, !Self.visibilityKeys(legacy).isDisjoint(with: attention.readMessages) {
+                state.migratedReadKeys = (state.migratedReadKeys ?? []).union(Self.visibilityKeys(message))
+            }
+        }
+        let oldIDs = Set(state.messages.map { canonical($0).id })
+        let normalized = records.map(canonical)
+        state.messages = Array(SMSHistoryPolicy.deduplicated(combined.map(canonical))
+            .filter { Self.isVisible($0, in: state) }.sorted { $0.timestamp > $1.timestamp }.prefix(2_000))
+        let retained = Set(state.messages.map(\.id))
+        let accepted = Set(zip(records, normalized).compactMap { original, mapped in
+            retained.contains(mapped.id) || !Self.isVisible(mapped, in: state) ? original.id : nil
+        })
+        guard writeMessageState(state) else { return nil }
+        let delivered = Set(normalized.map(\.id))
+        return SMSIngestion(messages: state.messages,
+            newMessages: state.messages.filter { delivered.contains($0.id) && !oldIDs.contains($0.id) },
+            acceptedMessageIDs: accepted, changed: before != state.messages)
+    }
+
+    @discardableResult
+    func saveMessages(_ records: [SMSMessage]) -> Bool { ingestMessages(records, recordAmbiguity: false) != nil }
 
     func visibleMessages(_ records: [SMSMessage]) -> [SMSMessage] {
         Self.messageLock.lock(); defer { Self.messageLock.unlock() }
@@ -97,15 +170,29 @@ final class LocalHistoryStore {
     func deleteMessages(ids: Set<String>, from records: [SMSMessage]) -> Bool {
         Self.messageLock.lock(); defer { Self.messageLock.unlock() }
         guard var state = readMessageState() else { return false }
-        for message in records + state.messages where ids.contains(message.id) {
+        let requested = (records + state.messages).filter { ids.contains($0.id) }
+        for message in requested + Self.migratedActionTargets(requested, in: state) {
             state.deletedKeys.formUnion(Self.deletionKeys(message))
             if message.deliveryID?.isEmpty != false {
                 state.legacyDeletedKeys = (state.legacyDeletedKeys ?? []).union(Self.deletionKeys(message))
             }
         }
-        state.messages = SMSHistoryPolicy.deduplicated(state.messages + records).filter { Self.isVisible($0, in: state) }
+        state.messages = state.messages.filter { Self.isVisible($0, in: state) }
             .sorted { $0.timestamp > $1.timestamp }
         return writeMessageState(state)
+    }
+
+    /// A UI action may have captured the legacy row before a background migration.
+    /// Do not alias a legacy row that is still present: it may be another producer.
+    private static func migratedActionTargets(_ records: [SMSMessage], in state: MessageState) -> [SMSMessage] {
+        records.compactMap { message in
+            guard message.sourceAgentID?.isEmpty != false, message.deliveryID?.isEmpty == false,
+                  !state.messages.contains(where: { $0.id == message.id }),
+                  let key = visibilityKeys(message).first, !(state.ambiguousLegacyKeys ?? []).contains(key),
+                  let source = state.legacyAliasOwners?[key] else { return nil }
+            var scoped = message; scoped.sourceAgentID = source
+            return state.messages.first { $0.id == scoped.id }
+        }
     }
 
     private static func deletionKeys(_ message: SMSMessage) -> Set<String> {
@@ -145,8 +232,9 @@ final class LocalHistoryStore {
     func unreadMessageIDs(in records: [SMSMessage]) -> Set<String> {
         Self.messageLock.lock(); defer { Self.messageLock.unlock() }
         guard let state = readAttentionState() else { return [] }
+        let readKeys = state.readMessages.union(readMessageState()?.migratedReadKeys ?? [])
         return Set(SMSHistoryPolicy.deduplicated(records).filter {
-            !$0.isOutgoing && Self.visibilityKeys($0).isDisjoint(with: state.readMessages)
+            !$0.isOutgoing && Self.visibilityKeys($0).isDisjoint(with: readKeys)
                 && Self.deletionKeys($0).isDisjoint(with: state.legacyReadMessages)
         }.map(\.id))
     }
@@ -165,6 +253,7 @@ final class LocalHistoryStore {
         Self.messageLock.lock(); defer { Self.messageLock.unlock() }
         guard var state = readAttentionState() else { return false }
         state.read(records)
+        if let messages = readMessageState() { state.read(Self.migratedActionTargets(records, in: messages)) }
         return writeAttentionState(state)
     }
 

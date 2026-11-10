@@ -10,6 +10,8 @@ root, out = map(Path, sys.argv[1:])
 source = (root/'AirSIM/APIModels.swift').read_text()
 models = source[source.index('struct CallRecord:'):source.index('struct CallStatus:')]
 models += source[source.index('enum SMSDirection:'):source.index('struct SMSStatus:')]
+prefs = (root/'AirSIM/ConnectionModePreference.swift').read_text()
+models += prefs[prefs.index('enum AndroidAgentBindingPreference'):prefs.index('struct ConnectionModeRuntimePolicy')]
 (out/'Models.swift').write_text('import Foundation\nimport CryptoKit\n' + models)
 PY
 xcrun swiftc "$OUT/Models.swift" "$ROOT/AirSIM/LocalHistoryStore.swift" "$ROOT/Shared/WatchCallPayload.swift" "$ROOT/SMSIdentitySmoke/main.swift" -o "$OUT/checks"

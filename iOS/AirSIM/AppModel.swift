@@ -382,6 +382,7 @@ final class AppModel: ObservableObject {
     private var liveActivityAgentPage = 0
 
     private let historyStore: LocalHistoryStore
+    private let pairedDeviceDefaults: UserDefaults
     private lazy var vobleMode = VoBLEModeController(bluetooth: vobleHub)
     private var ownedBLESession: VoBLEDeviceSession {
         if let agent = deviceCalls.active?.agentID ?? presentedDeviceCall?.agentID,
@@ -1663,6 +1664,7 @@ final class AppModel: ObservableObject {
          bluetoothHub: VoBLEDeviceHub? = nil,
          callKitController: CallKitController? = nil,
          historyStore: LocalHistoryStore? = nil,
+         pairedDeviceDefaults: UserDefaults = .standard,
          cloudStatusFetcher: @escaping @MainActor () async throws -> CloudAgentStatus = {
              try await VoIPPushController.shared.fetchCloudAgentStatus()
          },
@@ -1676,6 +1678,7 @@ final class AppModel: ObservableObject {
         self.cloudStatusNow = cloudStatusNow
         self.audio = audioController ?? AudioSessionController()
         self.historyStore = historyStore ?? LocalHistoryStore()
+        self.pairedDeviceDefaults = pairedDeviceDefaults
         self.callKit = callKitController ?? .shared
         (UIApplication.shared.delegate as? AirSIMNotificationDelegate)?
             .releaseColdLaunchHandler()
@@ -3534,12 +3537,12 @@ final class AppModel: ObservableObject {
             simSlot: sms.simSlot.isEmpty ? nil : sms.simSlot
         )
         if let agentID, !agentID.isEmpty { message.sourceAgentID = agentID }
-        guard !messages.contains(where: { $0.id == message.id }) else { return }
-        var updated = messages
-        updated.append(message)
-        updated = normalizedMessages(historyStore.visibleMessages(updated))
-        messages = updated
-        _ = historyStore.saveMessages(updated)
+        let saved = PairedAndroidDeviceStore.withSMSIdentitySnapshot(
+            localAgentIDs: localDevices.agentIDs, defaults: pairedDeviceDefaults
+        ) { current in historyStore.ingestMessages([message], legacySourceAgentID: current.uniqueAgentID) }
+        guard let saved else { return }
+        messages = normalizedMessages(saved.messages)
+        guard !saved.newMessages.isEmpty else { return }
         SMSVerificationCodeClipboard.handle([message])
         incomingSMSNotifier.notify(
             message: message,
@@ -3582,6 +3585,8 @@ final class AppModel: ObservableObject {
             // Snapshot a verified producer before suspension; never trust an
             // inbox-supplied device label or the selection after the await.
             let producerID = agentID ?? resolvedSourceAgentID(for: producer)
+            let identitySnapshot = PairedAndroidDeviceStore.smsIdentitySnapshot(
+                localAgentIDs: localDevices.agentIDs, defaults: pairedDeviceDefaults)
             let fetched = try await AgentSMSInboxFetch.fetch(
                 reportingAgent: reportingAgent, discoveredAgent: currentAgent
             )
@@ -3590,13 +3595,20 @@ final class AppModel: ObservableObject {
                 message.sourceAgentID = producerID
                 return message
             }
-            let existingIDs = Set(messages.map(\.id))
-            let newlyReceived = remoteMessages
-                .filter { !existingIDs.contains($0.id) }
-                .sorted { $0.timestamp < $1.timestamp }
+            let saved = PairedAndroidDeviceStore.withSMSIdentitySnapshot(
+                localAgentIDs: localDevices.agentIDs, defaults: pairedDeviceDefaults
+            ) { current in
+                historyStore.ingestMessages(remoteMessages, legacySourceAgentID: identitySnapshot.legacySource(comparedTo: current))
+            }
+            guard let saved else { throw CocoaError(.fileWriteUnknown) }
+            messages = normalizedMessages(saved.messages)
+            let newlyReceived = saved.newMessages.sorted { $0.timestamp < $1.timestamp }
             SMSVerificationCodeClipboard.handle(newlyReceived)
-            let mergedMessages = await mergeMessages(remoteMessages, acknowledgingOn: fetched.agent)
-            if messages != mergedMessages { messages = mergedMessages }
+            // ACK the original wire delivery, only after durable save/tombstone migration.
+            let acknowledged = remoteMessages.filter { saved.acceptedMessageIDs.contains($0.id) }.compactMap(\.deliveryID)
+            if !acknowledged.isEmpty { try? await fetched.agent.acknowledgeMessages(ids: acknowledged) }
+            // Another ingress or deletion may occur during ACK; disk remains authoritative.
+            if let latest = historyStore.messageSnapshot() { messages = normalizedMessages(latest) }
             if notifyIfBackground {
                 for message in historyStore.visibleMessages(newlyReceived).suffix(3) {
                     incomingSMSNotifier.notify(
@@ -3656,12 +3668,10 @@ final class AppModel: ObservableObject {
             callHistory = normalizedCallHistory(Array(callsByID.values))
         }
 
-        let storedMessages = historyStore.loadMessages()
-        if !storedMessages.isEmpty {
-            var messagesByID: [String: SMSMessage] = [:]
-            for message in messages { messagesByID[message.id] = message }
-            for message in storedMessages { messagesByID[message.id] = message }
-            messages = normalizedMessages(historyStore.visibleMessages(Array(messagesByID.values)))
+        if let storedMessages = historyStore.messageSnapshot() {
+            // Store transactions already union deliveries. Re-unioning stale UI
+            // snapshots here would resurrect the unscoped side of a migration.
+            messages = normalizedMessages(storedMessages)
         }
     }
 
@@ -3694,47 +3704,20 @@ final class AppModel: ObservableObject {
         return merged
     }
 
-    private func mergeMessages(
-        _ remote: [SMSMessage], acknowledgingOn source: AirSIMAPI
-    ) async -> [SMSMessage] {
-        var byID: [String: SMSMessage] = [:]
-        for message in messages { byID[message.id] = message }
-        for var message in remote {
-            // 旧版模块没有 delivery_id 时保留手机已有标识，避免新旧版本来回覆盖。
-            if message.deliveryID == nil { message.deliveryID = byID[message.id]?.deliveryID }
-            byID[message.id] = message
-        }
-        let merged = normalizedMessages(historyStore.visibleMessages(Array(byID.values)))
-        if !remote.isEmpty, historyStore.saveMessages(merged) {
-            // A durably deleted delivery is also consumed; do not keep redelivering it.
-            let visibleRemoteIDs = Set(historyStore.visibleMessages(remote).map(\.id))
-            let persistedIDs = Set(historyStore.loadMessages().map(\.id)).union(remote.map(\.id).filter {
-                !visibleRemoteIDs.contains($0)
-            })
-            let acknowledgedIDs = remote
-                .filter { persistedIDs.contains($0.id) }
-                .compactMap(\.deliveryID)
-            try? await source.acknowledgeMessages(ids: acknowledgedIDs)
-        }
-        // A deletion can happen while the delivery acknowledgement is suspended.
-        return normalizedMessages(historyStore.visibleMessages(merged + historyStore.loadMessages()))
-    }
-
     /// 模块不会在收件箱接口回传已发送短信，因此发送成功后立即写入手机本地历史。
     private func saveSentMessage(recipient: String, content: String, agentID: String?, simSlot: String?) {
         let updatedMessages = SMSHistoryPolicy.appendingSentMessage(
             recipient: recipient,
             content: content,
             at: .now,
-            to: messages,
+            to: [],
             limit: maxMessageCount,
             sourceAgentID: agentID,
             simSlot: simSlot
         )
-        messages = updatedMessages
         if !historyStore.saveMessages(updatedMessages) {
             errorMessage = "短信已发送，但保存到本机失败，请稍后刷新确认"
-        }
+        } else if let latest = historyStore.messageSnapshot() { messages = normalizedMessages(latest) }
     }
 
     private func normalizedCallHistory(_ records: [CallRecord]) -> [CallRecord] {

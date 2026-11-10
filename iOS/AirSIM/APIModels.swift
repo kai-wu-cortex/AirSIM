@@ -440,6 +440,21 @@ enum SMSHistoryPolicy {
     }
 }
 
+/// A stable directory observation, independent of the selected device.
+struct SMSIdentitySnapshot: Equatable {
+    let knownAgentIDs: Set<String>
+    let hasForgottenDevices: Bool
+    let revision: String
+    let valid: Bool
+    var uniqueAgentID: String? {
+        guard valid, !hasForgottenDevices, knownAgentIDs.count == 1 else { return nil }
+        return knownAgentIDs.first
+    }
+    func legacySource(comparedTo current: Self) -> String? {
+        self == current ? current.uniqueAgentID : nil
+    }
+}
+
 struct SMSStatus: Codable, Sendable {
     let autoCleanupME: Bool
     let count: Int?

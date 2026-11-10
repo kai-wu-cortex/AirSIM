@@ -373,15 +373,10 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
     private func persistRemoteSMS(_ pushed: IncomingRemoteSMS) -> Bool {
         // 超长内容在 APNs payload 中只带预览，等待下次与 Agent 同步完整正文，避免本地出现两条。
         guard !pushed.contentTruncated else { return false }
-        guard !historyStore.visibleMessages([pushed.message]).isEmpty else { return false }
-        var messages = historyStore.loadMessages()
-        guard !messages.contains(where: { $0.id == pushed.message.id }) else { return false }
-        messages.append(pushed.message)
-        messages.sort { $0.timestamp > $1.timestamp }
-        if messages.count > 2_000 {
-            messages = Array(messages.prefix(2_000))
+        let saved = PairedAndroidDeviceStore.withSMSIdentitySnapshot { current in
+            historyStore.ingestMessages([pushed.message], legacySourceAgentID: current.uniqueAgentID)
         }
-        guard historyStore.saveMessages(messages) else { return false }
+        guard let saved, saved.changed else { return false }
         // A background notification need not create a SwiftUI scene/AppModel.
         // Refresh counts from durable state without starting any connection.
         let store = AirSIMWidgetStore()
