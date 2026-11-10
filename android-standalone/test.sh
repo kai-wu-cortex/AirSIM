@@ -23,6 +23,10 @@ assert_contains "$ROOT/../android/phone-control-app/src/com/airsim/phonecontrol/
   'standalone DTMF must preserve the explicitly requested published call identity'
 
 S="$ROOT/../android/phone-control-app/src/com/airsim/phonecontrol/StandaloneAgentService.java"
+assert_contains "$S" 'if (instance != null && instance.running) return;' \
+  'agent service start must be idempotent while the service is already running'
+assert_contains "$S" 'if (startRequested) return;' \
+  'agent service start must collapse concurrent start requests'
 assert_contains "$S" 'registrationRecovery.takeResync(' \
   'registration sync must honour relay 401 recovery'
 assert_contains "$S" 'relay.postJSON(registration, "/v1/devices/register", payload, 15_000);' \
@@ -86,11 +90,18 @@ assert_contains "$M" 'if (descriptor != null && !CloudCallTarget.owns(descriptor
 assert_contains "$M" 'try { event = new JSONObject(encoded); } catch (Exception ignored) { return; }' \
   'an unparsable dropped event must not escape the event worker'
 
+W="$ROOT/../android/phone-control-app/src/com/airsim/phonecontrol/VoWLANGatewayService.java"
+assert_contains "$W" 'if (instance != null && instance.running) return;' \
+  'VoWLAN service start must be idempotent while the service is already running'
+B="$ROOT/../android/phone-control-app/src/com/airsim/phonecontrol/voble/VoBLEGatewayService.java"
+assert_contains "$B" 'if (instance != null && !instance.destroyed) return;' \
+  'VoBLE service start must be idempotent while the service is already running'
+
 assert_contains "$MANIFEST" 'package="com.airsim.phonecontrol.standalone"' \
   'standalone package id is missing'
-assert_contains "$MANIFEST" 'android:versionCode="128"' \
+assert_contains "$MANIFEST" 'android:versionCode="136"' \
   'standalone version code does not match the current candidate build'
-assert_contains "$MANIFEST" 'android:versionName="0.9.8.23"' \
+assert_contains "$MANIFEST" 'android:versionName="0.9.8.25"' \
   'standalone version name does not match the current Android candidate'
 assert_contains "$MANIFEST" 'com.airsim.phonecontrol.STANDALONE_AGENT' \
   'standalone runtime flag is missing'
