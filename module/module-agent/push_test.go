@@ -418,12 +418,12 @@ func TestPushManagerSendsActivityStateWithOriginalCallUUID(t *testing.T) {
 }
 
 func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
-	var received []incomingSMSPushEvent
+	var received []map[string]any
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/events/sms" {
 			t.Fatalf("请求路径=%q", request.URL.Path)
 		}
-		var value incomingSMSPushEvent
+		var value map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&value); err != nil {
 			t.Fatal(err)
 		}
@@ -437,6 +437,12 @@ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
 	if err := manager.store(testPushRegistration(server.URL)); err != nil {
 		t.Fatal(err)
 	}
+	// iOS automatic re-registration does not repeat Android's pairing identity.
+	automatic := testPushRegistration(server.URL)
+	automatic.AndroidAgentID = ""
+	if err := manager.store(automatic); err != nil {
+		t.Fatal(err)
+	}
 	message := smsMessage{
 		Sender: "10010", Content: "余额提醒", Timestamp: time.Now(), DeliveryID: "SM-7-test",
 	}
@@ -446,8 +452,11 @@ func TestIncomingSMSUsesAlertEndpointAndDeduplicates(t *testing.T) {
 	if sent, err := manager.sendSMS(message); err != nil || sent {
 		t.Fatalf("重复短信不应再次发送: sent=%v err=%v", sent, err)
 	}
-	if len(received) != 1 || received[0].DeliveryID != message.DeliveryID || received[0].Content != message.Content {
+	if len(received) != 1 || received[0]["delivery_id"] != message.DeliveryID || received[0]["content"] != message.Content {
 		t.Fatalf("短信中继载荷错误: %#v", received)
+	}
+	if received[0]["agent_id"] != "android-test" {
+		t.Fatalf("短信中继缺少 Android Agent 身份: %#v", received)
 	}
 }
 
@@ -580,5 +589,45 @@ func TestNonRingingCallsNeverProduceVoIPPush(t *testing.T) {
 		if sent, err := manager.sendIncoming(call, time.Now()); err != nil || sent {
 			t.Fatalf("非振铃呼入不应发送 VoIP Push: call=%#v sent=%v err=%v", call, sent, err)
 		}
+	}
+}
+
+func TestSMSAgentIdentitySurvivesReregistrationAndRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "push.json")
+	manager := newPushManager(path)
+	registration := testPushRegistration("https://push.example.com")
+	if err := manager.store(registration); err != nil {
+		t.Fatal(err)
+	}
+	registration.AndroidAgentID = ""
+	if err := manager.store(registration); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{path, path + ".last-good"} {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved pushRegistration
+		if err := json.Unmarshal(data, &saved); err != nil {
+			t.Fatal(err)
+		}
+		if saved.AndroidAgentID != "android-test" {
+			t.Fatalf("identity lost in %s", name)
+		}
+	}
+	if err := os.WriteFile(path, []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recovered := newPushManager(path)
+	if recovered.config.AndroidAgentID != "android-test" {
+		t.Fatal("backup lost identity")
+	}
+	registration.AndroidAgentID = "explicit-new-agent"
+	if err := recovered.store(registration); err != nil {
+		t.Fatal(err)
+	}
+	if newPushManager(path).config.AndroidAgentID != "explicit-new-agent" {
+		t.Fatal("explicit replacement was ignored")
 	}
 }

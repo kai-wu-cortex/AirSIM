@@ -3295,14 +3295,21 @@ final class AirSIMTests: XCTestCase {
         let pushed = SMSMessage(
             sender: "10086", content: "短信正文", code: nil,
             timestamp: Date(timeIntervalSince1970: 1_791_448_212),
-            deliveryID: "sms-stable-1", direction: .incoming
+            deliveryID: "sms-stable-1", direction: .incoming,
+            sourceAgentID: "android-A"
         )
         let synchronized = SMSMessage(
             sender: "10086", content: "短信正文", code: nil,
             timestamp: Date(timeIntervalSince1970: 1_791_448_212.123456789),
-            deliveryID: "sms-stable-1", direction: .incoming
+            deliveryID: "sms-stable-1", direction: .incoming,
+            sourceAgentID: "android-A", simSlot: "中国联通 — Club"
         )
         XCTAssertEqual(pushed.id, synchronized.id)
+        for records in [[pushed, synchronized], [synchronized, pushed]] {
+            let deduplicated = SMSHistoryPolicy.deduplicated(records)
+            XCTAssertEqual(deduplicated.count, 1)
+            XCTAssertEqual(deduplicated.first?.simSlot, "中国联通 — Club")
+        }
     }
 
     func testCloudUplinkNeverBurstsAfterBlockedSend() {

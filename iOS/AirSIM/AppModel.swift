@@ -2444,7 +2444,7 @@ final class AppModel: ObservableObject {
                 isOnline = true; isReconnecting = false; consecutivePollFailures = 0
                 lastSuccessfulLocalAPI = result.api
                 if result.smsChanged {
-                    await loadMessagesFromAgent(silently: true, notifyIfBackground: true, reportingAgent: result.api)
+                    await synchronizeSMS(from: result)
                 }
                 if AppRefreshPolicy.shouldRefreshSupplementalState(appIsActive: appIsActive) {
                     scheduleModuleMetadataRefresh(generation: generation, api: result.api)
@@ -2619,9 +2619,7 @@ final class AppModel: ObservableObject {
                 audio.updateModuleDiagnostics(audioConfig)
             }
             if result.smsChanged {
-                await loadMessagesFromAgent(
-                    silently: true, notifyIfBackground: true, reportingAgent: result.api
-                )
+                await synchronizeSMS(from: result)
             }
         } catch {
             guard !Task.isCancelled, !(error is CancellationError),
@@ -2744,11 +2742,26 @@ final class AppModel: ObservableObject {
 
     }
 
-    private struct AgentPollResult {
+    struct AgentPollResult {
         let call: CallStatus
         let smsChanged: Bool
         let api: AirSIMAPI
         let agentID: String?
+    }
+
+    func synchronizeSMS(from result: AgentPollResult) async {
+        await loadMessagesFromAgent(
+            silently: true, notifyIfBackground: true,
+            agentID: result.agentID, reportingAgent: result.api
+        )
+    }
+
+    private func resolvedSourceAgentID(for api: AirSIMAPI) -> String? {
+        if let ownedSource = deviceCallRouter.ownedAgentID(for: api) { return ownedSource }
+        guard case let .vowlan(endpoint, _) = api.route else { return nil }
+        return localDevices.agentIDs.first { localDevices.api(for: $0)?.route == api.route }
+            ?? localDevices.agentIDs.first { localDevices.routes(for: $0)?.vowlan == endpoint }
+            ?? vowlan.discoveredAgents.first { $0.endpoint == endpoint }?.id
     }
 
     private func nextAgentEvent() async throws -> AgentPollResult {
@@ -2767,13 +2780,7 @@ final class AppModel: ObservableObject {
             lockedLocal: currentLocalAPI,
             transport: currentCallTransport
         )
-        let sourceAgentID: String?
-        if let ownedSource = deviceCallRouter.ownedAgentID(for: pollingAPI) {
-            sourceAgentID = ownedSource
-        } else if case let .vowlan(endpoint, _) = pollingAPI.route {
-            sourceAgentID = localDevices.agentIDs.first { localDevices.routes(for: $0)?.vowlan == endpoint }
-                ?? vowlan.discoveredAgents.first { $0.endpoint == endpoint }?.id
-        } else { sourceAgentID = nil }
+        let sourceAgentID = resolvedSourceAgentID(for: pollingAPI)
         if eventStreamSupported != false {
             do {
                 let event = try await pollingAPI.waitForAgentEvent(
@@ -3564,6 +3571,7 @@ final class AppModel: ObservableObject {
     func loadMessagesFromAgent(
         silently: Bool = false,
         notifyIfBackground: Bool = false,
+        agentID: String? = nil,
         reportingAgent: AirSIMAPI? = nil
     ) async {
         do {
@@ -3573,7 +3581,7 @@ final class AppModel: ObservableObject {
             let producer = reportingAgent ?? currentAgent
             // Snapshot a verified producer before suspension; never trust an
             // inbox-supplied device label or the selection after the await.
-            let producerID = localDevices.agentIDs.first { localDevices.api(for: $0)?.route == producer.route }
+            let producerID = agentID ?? resolvedSourceAgentID(for: producer)
             let fetched = try await AgentSMSInboxFetch.fetch(
                 reportingAgent: reportingAgent, discoveredAgent: currentAgent
             )

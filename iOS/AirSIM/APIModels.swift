@@ -390,6 +390,17 @@ enum SMSHistoryPolicy {
         func legacyKey(_ message: SMSMessage) -> String {
             message.scopedIdentity("\(message.sender)\u{0}\(Int64(message.timestamp.timeIntervalSince1970.rounded(.down)))\u{0}\(message.content)\u{0}\(message.direction?.rawValue ?? "incoming")")
         }
+        func preservingSIMLine(_ incoming: SMSMessage, _ existing: SMSMessage?) -> SMSMessage {
+            var merged = incoming
+            let incomingLine = incoming.simSlot?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if incomingLine?.isEmpty != false,
+               let existingLine = existing?.simSlot?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !existingLine.isEmpty {
+                // APNs may omit a unique line label; do not erase the Agent copy's label.
+                merged.simSlot = existingLine
+            }
+            return merged
+        }
         let authoritativeLegacyKeys = Set(records.filter { $0.deliveryID?.isEmpty == false }.map(legacyKey))
         var byID: [String: SMSMessage] = [:]
         for message in records {
@@ -398,7 +409,7 @@ enum SMSHistoryPolicy {
                 if authoritativeLegacyKeys.contains(legacy) { continue }
                 byID["legacy:" + legacy] = message
             } else {
-                byID[message.id] = message
+                byID[message.id] = preservingSIMLine(message, byID[message.id])
             }
         }
         return Array(byID.values)
