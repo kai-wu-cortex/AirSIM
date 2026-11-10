@@ -91,72 +91,80 @@ public final class PhoneAudioBridge {
             && now - firstPlaybackAt >= ROUTE_VERIFY_TIMEOUT_MS;
     }
 
-    // Some OEM ROMs (HONOR/HiSilicon among them) inject a privacy audit at the top of
-    // AudioRecord.startRecording(): it reads ActivityThread.currentApplication(), runs
-    // Objects.requireNonNull on the result, then calls HiLog.authPrintf("AudioRecord.startRecording", ...).
-    // A privileged app_process helper has no ActivityThread, so currentApplication() is
-    // always null and every capture source except CAMCORDER(5) throws NullPointerException
-    // from inside the platform method before mState is ever checked.
-    //
-    // The recorder itself must still be built for the real source (VOICE_DOWNLINK=3)
-    // because the native side is configured for the call downlink. Only the Java field
-    // the audit reads is swapped for the duration of startRecording() and restored in
-    // finally, so routing, getAudioSource() and post-start diagnostics are unaffected.
+    // Narrow workaround for the reported HONOR Android 16 framework audit NPE.
+    // Always try the ordinary API first. Do not change native capture construction.
     private static final int AUDIT_BYPASS_SOURCE_ID = 5;
     private static volatile Field recordSourceField;
     private static volatile boolean recordSourceFieldResolved;
-    private static volatile boolean auditBypassReported;
+    private static final java.util.concurrent.atomic.AtomicBoolean auditBypassReported =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     private static Field resolveRecordSourceField() {
         if (recordSourceFieldResolved) return recordSourceField;
         synchronized (PhoneAudioBridge.class) {
             if (!recordSourceFieldResolved) {
-                Field field = null;
                 try {
-                    field = AudioRecord.class.getDeclaredField("mRecordSource");
+                    Field field = AudioRecord.class.getDeclaredField("mRecordSource");
                     field.setAccessible(true);
-                } catch (Throwable ignored) {
-                    // Undeclared/renamed field: stay honest and start the plain way.
-                    field = null;
+                    recordSourceField = field;
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                    recordSourceField = null;
                 }
-                recordSourceField = field;
                 recordSourceFieldResolved = true;
             }
         }
         return recordSourceField;
     }
 
-    /** Starts capture while dodging OEM startRecording() audits that expect an ActivityThread. */
+    static boolean matchesCaptureAuditFailure(NullPointerException error) {
+        if (!"HONOR".equalsIgnoreCase(Build.MANUFACTURER) || Build.VERSION.SDK_INT != 36) return false;
+        StackTraceElement[] frames = error.getStackTrace();
+        // requireNonNull must throw directly into AudioRecord.startRecording.
+        return frames.length >= 2
+                && frames[0].getClassName().equals("java.util.Objects")
+                && frames[0].getMethodName().equals("requireNonNull")
+                && frames[1].getClassName().equals("android.media.AudioRecord")
+                && frames[1].getMethodName().equals("startRecording");
+    }
+
     static void startRecordingCompat(AudioRecord recorder, long started) {
+        NullPointerException originalFailure;
+        try {
+            recorder.startRecording();
+            return;
+        } catch (NullPointerException error) {
+            if (!matchesCaptureAuditFailure(error)
+                    || recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) throw error;
+            originalFailure = error;
+        }
         Field field = resolveRecordSourceField();
-        if (field == null) {
-            recorder.startRecording();
-            return;
-        }
-        Object original;
+        if (field == null) throw originalFailure;
+        int original;
         try {
-            original = field.get(recorder);
-        } catch (Throwable ignored) {
-            recorder.startRecording();
-            return;
+            original = field.getInt(recorder);
+            field.setInt(recorder, AUDIT_BYPASS_SOURCE_ID);
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            originalFailure.addSuppressed(error);
+            throw originalFailure;
         }
-        try {
-            field.set(recorder, AUDIT_BYPASS_SOURCE_ID);
-        } catch (Throwable ignored) {
-            recorder.startRecording();
-            return;
-        }
+        Throwable startupFailure = null;
         try {
             recorder.startRecording();
+        } catch (RuntimeException | Error error) {
+            startupFailure = error;
+            throw error;
         } finally {
             try {
-                field.set(recorder, original);
-            } catch (Throwable ignored) {
-                // Capture is already running; a stale audit field only garbles logs.
+                field.setInt(recorder, original);
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                // Never report READY with a mutated source. The caller's endpoint lease
+                // stops/releases capture on failure, preserving the initial exception.
+                if (startupFailure != null) startupFailure.addSuppressed(error);
+                else throw new IllegalStateException("capture source restore failed", error);
             }
         }
-        if (!auditBypassReported) {
-            auditBypassReported = true;
+        if (recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING
+                && auditBypassReported.compareAndSet(false, true)) {
             Map<String, Object> fields = new LinkedHashMap<>();
             fields.put("builder", Build.MANUFACTURER + "/" + Build.DEVICE);
             fields.put("capture_source_id", original);
