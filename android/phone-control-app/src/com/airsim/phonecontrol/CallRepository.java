@@ -207,6 +207,18 @@ public final class CallRepository {
         });
     }
 
+    /** A Watch may claim only a still-ringing exact native instance, not take over an active call. */
+    static ActionResult answerForWatch(String callID) {
+        Call expected = CALLS.get(callID);
+        if (expected == null) return ActionResult.failure("stale watch call");
+        String error = TelecomInvocation.run(task -> new Handler(Looper.getMainLooper()).post(task), () -> {
+            if (CALLS.get(callID) != expected || expected.getState() != Call.STATE_RINGING)
+                throw new IllegalStateException("call answered elsewhere");
+            expected.answer(VideoProfile.STATE_AUDIO_ONLY);
+        }, 2_000L);
+        return error.isEmpty() ? ActionResult.success() : ActionResult.failure(error);
+    }
+
     public static ActionResult execute(Context context, AgentCommand command) {
         if (!command.isSupported()) return ActionResult.failure("unsupported action");
         if ("dial".equals(command.action)) {

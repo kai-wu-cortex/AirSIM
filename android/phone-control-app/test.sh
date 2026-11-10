@@ -357,11 +357,15 @@ mkdir -p "$PCM_OUT"
   "$ROOT"/test/pcm/com/airsim/phonecontrol/VoWLANPairingStore.java \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/RemoteAudioSessionRegistry.java \
   "$ROOT"/src/com/airsim/phonecontrol/AndroidEarlyMedia.java \
+  "$ROOT"/src/com/airsim/phonecontrol/WatchMediaGrant.java \
+  "$ROOT"/src/com/airsim/phonecontrol/WatchMediaSessions.java \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANPCMRelay.java \
+  "$ROOT"/test/com/airsim/phonecontrol/WatchMediaRelayIntegrationTests.java \
   "$ROOT"/test/com/airsim/phonecontrol/DirectPCMIntegrationTests.java \
   "$ROOT"/test/com/airsim/phonecontrol/EarlyMediaRelayIntegrationTests.java
 "$JAVA" -cp "$PCM_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.DirectPCMIntegrationTests
 "$JAVA" -cp "$PCM_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.EarlyMediaRelayIntegrationTests
+"$JAVA" -cp "$PCM_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.WatchMediaRelayIntegrationTests
 
 sh "$ROOT/test-audio-policy.sh"
 

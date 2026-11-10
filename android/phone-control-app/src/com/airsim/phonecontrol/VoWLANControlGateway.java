@@ -62,6 +62,11 @@ public final class VoWLANControlGateway implements Closeable {
             }
             Request request = readRequest(peer.getInputStream());
             pathForLog[0] = request.path;
+            if (request.path.startsWith("/api/watch/")) {
+                WatchDirectGateway.Reply reply = WatchDirectGateway.handle(context, request.method, request.path, request.headers, request.body);
+                respond(peer, reply.status(), reply.body());
+                return;
+            }
             if (!VoWLANControlPolicy.allowed(request.method, request.path)) {
                 respond(peer, 404, "{\"error\":\"not_found\"}");
                 return;
@@ -139,6 +144,7 @@ public final class VoWLANControlGateway implements Closeable {
                         .put("agent_id", AndroidAgentIdentity.agentID(context))
                         .put("identity_proof", identityProof)
                         .put("canonical_call_ids", canonicalCallIDsSupported())
+                        .put("watch_direct_version", RuntimeMode.isStandalone(context) ? 2 : 0)
                         .put("agent_kind", RuntimeMode.isStandalone(context) ? "standalone" : "avf")
                         .put("device_name", AndroidAgentIdentity.deviceName())
                         .put("manufacturer", android.os.Build.MANUFACTURER)
