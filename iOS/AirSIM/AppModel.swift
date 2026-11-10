@@ -746,9 +746,26 @@ final class AppModel: ObservableObject {
     func ownedWatchTarget(uuid: UUID, agentID: String?, presentationID: String? = nil)
         -> (route: LockedDeviceCallRoute, api: AirSIMAPI, backendID: String)? {
         guard let target = deviceCallRouter.wlanTarget(for: uuid, agentID: agentID),
-              presentationID == nil || presentationID == localPresentationID(target.route.key) else { return nil }
+              presentationID == nil || presentationID == localPresentationID(target.route.key)
+                || presentationID == target.backendID
+                || presentationID == deviceCalls.latestEvent(for: target.route.key)?.callID else { return nil }
         return target
     }
+    func matchesOwnedCallReference(uuid: UUID, presentationID: String) -> Bool {
+        guard let route = deviceCallRouter.retainedRoute(for: uuid) else { return false }
+        return presentationID == localPresentationID(route.key)
+            || deviceCalls.latestEvent(for: route.key)?.callID == presentationID
+    }
+    func watchCanonicalCallID(uuid: UUID, agentID: String?) -> String? {
+        guard let route = deviceCallRouter.retainedRoute(for: uuid), route.key.agentID == agentID else { return nil }
+        return deviceCalls.latestEvent(for: route.key)?.callID
+    }
+
+    func resumeAfterWatchHandoffFailure(uuid: UUID) async {
+        guard callLifecycleSnapshot.callUUID == uuid else { return }
+        await startCallAudioIfReady()
+    }
+
     static func pcmRouteForWatch(_ route: LocalAgentRoute) -> PCMRoute { pcmRoute(for: route) }
     func ownedCallUUID(for presentationID: String?) -> UUID? {
         guard let key = presentedDeviceCall, presentationID == localPresentationID(key) else { return nil }
@@ -3470,6 +3487,25 @@ final class AppModel: ObservableObject {
             }
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    func sendWatchSMSReply(recipient: String, body: String, agentID: String, slotID: String) async -> WatchSMSReplyOutcome {
+        guard !callLifecycleSnapshot.state.representsCall else { return .failed("通话结束后再发送短信") }
+        guard PairedAndroidDeviceStore.records().contains(where: { $0.id == agentID }),
+              let api = localDevices.api(for: agentID) else { return .failed("该安卓设备未通过 VoWLAN 连接") }
+        guard let slot = localDevices.metadata(for: agentID)?.simSlots?.first(where: { $0.id == slotID }) else {
+            return .failed("发送卡已变化，请重新选择")
+        }
+        do {
+            let result = try await api.sendSMS(to: recipient, message: body, simAccount: slot.id)
+            guard result.sent else { return .failed("安卓报告短信未发送") }
+            let label = slot.slotIndex.map { "SIM \($0 + 1)" } ?? slot.label
+            saveSentMessage(recipient: recipient, content: body, agentID: agentID, simSlot: label)
+            return .sent
+        } catch {
+            // The write may have reached Android before transport failed.
+            return .uncertain
         }
     }
 

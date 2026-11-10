@@ -281,6 +281,7 @@ final class DeviceCallActionRouter {
     }
     func route(for key: DeviceCallKey) -> LockedDeviceCallRoute? { routes[key] }
     func contains(uuid: UUID) -> Bool { routes.values.contains { $0.systemUUID == uuid } }
+    func retainedRoute(for uuid: UUID) -> LockedDeviceCallRoute? { routes.values.first { $0.systemUUID == uuid } }
     func renewIdlePresentation(for key: DeviceCallKey) throws {
         guard context.registry.active == nil, context.registry.latestEvent(for: key)?.state == .ringing,
               let route = routes[key] else { throw DeviceCallRoutingError.stale }

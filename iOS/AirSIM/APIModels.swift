@@ -1441,3 +1441,15 @@ struct RecentCallGroup: Identifiable {
             }) }.sorted { $0.latest.startedAt == $1.latest.startedAt ? $0.id < $1.id : $0.latest.startedAt > $1.latest.startedAt }
     }
 }
+
+/// A command ACK or a different active call does not prove this call has ended.
+enum CallEndEvidence {
+    static func confirms(_ status: CallStatus, id: String) -> Bool {
+        guard !id.isEmpty else { return false }
+        func matches(_ call: CallRecord) -> Bool {
+            [call.id, call.androidID, call.sourceCallID].compactMap { $0 }.contains(id)
+        }
+        if let active = status.active, matches(active) { return active.isTerminal }
+        return (status.history ?? []).contains { matches($0) && $0.isTerminal }
+    }
+}

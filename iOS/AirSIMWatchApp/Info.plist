@@ -22,6 +22,11 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>用于在 Apple Watch 上接听 AirSIM 网络语音来电。</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于 Apple Watch 连接已配对的 VoWLAN 语音网关，实现手表麦克风与扬声器通话。</string>
 	<key>UIBackgroundModes</key>

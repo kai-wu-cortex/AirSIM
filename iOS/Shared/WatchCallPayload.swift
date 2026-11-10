@@ -158,6 +158,8 @@ struct WatchLocalPCMEndpoint: Equatable, Sendable {
     let port: UInt16
     let secret: Data
     let usesTLS: Bool
+    let watchGrant: String?
+    let clockOffset: Double
 
     init?(dictionary: [String: Any]) {
         guard let host = dictionary["pcm_host"] as? String,
@@ -173,8 +175,11 @@ struct WatchLocalPCMEndpoint: Equatable, Sendable {
             let octets = parts.compactMap { UInt8($0) }
             guard rawPort >= 1024, octets.count == 4, parts.count == 4,
                   parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }),
+                  zip(parts, octets).allSatisfy({ String($0.0) == String($0.1) }),
                   octets[0] == 10 || (octets[0] == 172 && (16...31).contains(octets[1]))
-                    || (octets[0] == 192 && octets[1] == 168) else { return nil }
+                    || (octets[0] == 192 && octets[1] == 168)
+                    || (octets[0] == 169 && octets[1] == 254)
+                    || (octets[0] == 100 && (64...127).contains(octets[1])) else { return nil }
         }
         let base64 = encoded.replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
@@ -184,6 +189,9 @@ struct WatchLocalPCMEndpoint: Equatable, Sendable {
         port = UInt16(rawPort)
         self.secret = secret
         self.usesTLS = usesTLS
+        watchGrant = dictionary["watch_grant"] as? String
+        let offset = dictionary["clock_offset"] as? Double ?? 0
+        clockOffset = offset.isFinite && abs(offset) < 86_400 ? offset : 0
     }
 }
 
@@ -360,5 +368,188 @@ struct WatchIncomingNotificationPlan: Equatable, Sendable {
         identifier = "airsim.watch.incoming.\(payload.callID)"
         title = "AirSIM 来电"
         body = parts.isEmpty ? "模块收到来电" : parts.joined(separator: " · ")
+    }
+}
+
+// Watch SMS uses the paired companion channel, never forwards SMS encryption keys.
+struct WatchSMSDevice: Codable, Equatable, Identifiable {
+    let id: String
+    let name: String
+}
+struct WatchSMSRow: Codable, Equatable, Identifiable {
+    let id: String
+    let agentID: String
+    let sender: String
+    let preview: String
+    let timestamp: Date
+    let sim: String?
+    let outgoing: Bool
+    let unread: Bool
+}
+struct WatchSMSPage: Codable, Equatable {
+    let devices: [WatchSMSDevice]
+    let selectedAgentID: String?
+    var rows: [WatchSMSRow]
+    let total: Int
+    let generatedAt: Date
+}
+struct WatchSMSDetail: Codable, Equatable {
+    let row: WatchSMSRow
+    let body: String
+    let truncated: Bool
+}
+enum WatchSMSPolicy {
+    static let payloadBudget = 28_000
+    static func selected(requested: String?, current: String?, paired: [String]) -> String? {
+        if let requested { return paired.contains(requested) ? requested : nil }
+        if let current, paired.contains(current) { return current }
+        return paired.count == 1 ? paired.first : nil
+    }
+    static func permits(sourceAgentID: String?, selectedAgentID: String?, pairedIDs: [String]) -> Bool {
+        guard let sourceAgentID, let selectedAgentID else { return false }
+        return sourceAgentID == selectedAgentID && pairedIDs.contains(sourceAgentID)
+    }
+    static func prefix(_ text: String, utf8Limit: Int) -> String {
+        guard utf8Limit > 0 else { return "" }
+        var count = 0
+        return String(text.prefix { character in
+            let bytes = String(character).utf8.count
+            guard count + bytes <= utf8Limit else { return false }
+            count += bytes
+            return true
+        })
+    }
+    static func boundedDetail(row: WatchSMSRow, body: String) throws -> WatchSMSDetail {
+        var limit = 20_000
+        while true {
+            let text = prefix(body, utf8Limit: limit)
+            let detail = WatchSMSDetail(row: row, body: text, truncated: text != body)
+            if try JSONEncoder().encode(detail).count <= payloadBudget { return detail }
+            guard limit > 0 else { throw NSError(domain: "WatchSMSPayload", code: 1) }
+            limit /= 2
+        }
+    }
+    static func matches(_ row: WatchSMSRow, agentID: String, id: String) -> Bool {
+        row.agentID == agentID && row.id == id
+    }
+}
+
+/// DTMF is a scoped command to the connected Android call, never microphone audio.
+enum WatchDTMFPolicy {
+    static func validDigit(_ digit: String) -> Bool {
+        digit.utf8.count == 1 && "0123456789*#".contains(digit)
+    }
+    static func canSend(phase: String?, backendID: String?, expectedID: String) -> Bool {
+        phase == "active" && backendID == expectedID && !expectedID.isEmpty
+    }
+}
+
+extension WatchCallMirrorPolicy {
+    /// An active iPhone-owned call may already be tombstoned against late
+    /// incoming pushes; its matching terminal mirror must still clear display.
+    static func acceptsTerminalForDisplay(_ incoming: WatchCallPayload, current: WatchCallPayload) -> Bool {
+        incoming.phase == .ended && incoming.matches(callID: current.callID, callUUID: current.callUUID)
+    }
+}
+
+struct WatchSMSConversation: Identifiable, Equatable {
+    let id: String
+    let agentID: String
+    let peer: String
+    let rows: [WatchSMSRow]
+    var latest: WatchSMSRow { rows[rows.count - 1] }
+    var unreadCount: Int { rows.filter { !$0.outgoing && $0.unread }.count }
+}
+
+enum WatchSMSConversationPolicy {
+    static func peer(_ sender: String) -> String {
+        let raw = sender.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "" }
+        let allowed = CharacterSet(charactersIn: "+0123456789 ()-.\t")
+        guard raw.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return "text:" + raw }
+        var digits = raw.filter { $0.isASCII && $0.isNumber }
+        guard !digits.isEmpty else { return "text:" + raw }
+        let international = raw.hasPrefix("+") || digits.hasPrefix("00")
+        if digits.hasPrefix("00") { digits = String(digits.dropFirst(2)) }
+        if international {
+            if digits.hasPrefix("86"), digits.count > 2 { return "number:" + digits.dropFirst(2) }
+            return "international:" + digits
+        }
+        if digits.count == 13, digits.hasPrefix("861") { digits = String(digits.dropFirst(2)) }
+        return "number:" + digits
+    }
+    static func groups(_ rows: [WatchSMSRow]) -> [WatchSMSConversation] {
+        let grouped = Dictionary(grouping: rows) { row in
+            let value = peer(row.sender)
+            return Data(row.agentID.utf8).base64EncodedString() + "." + Data((value.isEmpty ? "unknown:" + row.id : value).utf8).base64EncodedString()
+        }
+        return grouped.map { id, values in
+            let sorted = values.sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id : $0.timestamp < $1.timestamp }
+            return WatchSMSConversation(id: id, agentID: sorted[0].agentID, peer: peer(sorted[0].sender), rows: sorted)
+        }.sorted { $0.latest.timestamp == $1.latest.timestamp ? $0.id < $1.id : $0.latest.timestamp > $1.latest.timestamp }
+    }
+}
+
+
+struct WatchSMSReplyOptions: Codable {
+    struct Slot: Codable, Identifiable {
+        let id: String
+        let label: String
+        let carrier: String?
+    }
+    let recipient: String
+    let slots: [Slot]
+    let selectedID: String?
+}
+
+enum WatchSMSReplyOutcome {
+    case sent
+    case failed(String)
+    case uncertain
+}
+
+extension WatchSMSConversationPolicy {
+    static func replyNumber(_ sender: String) -> String? {
+        let raw = sender.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowed = CharacterSet(charactersIn: "+0123456789 ()-.\t")
+        guard raw.unicodeScalars.allSatisfy(allowed.contains),
+              !raw.dropFirst().contains("+") else { return nil }
+        let digits = raw.filter { $0.isASCII && $0.isNumber }
+        guard (1...30).contains(digits.count) else { return nil }
+        return raw.hasPrefix("+") ? "+" + digits : digits
+    }
+}
+
+/// Validate the server-signed grant before deriving a per-call media key.
+enum WatchMediaGrantPolicy {
+    static func decode(_ value: String) -> Data? {
+        guard value.utf8.count <= 4096 else { return nil }
+        let raw = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        return Data(base64Encoded: raw + String(repeating: "=", count: (4 - raw.count % 4) % 4))
+    }
+    static func valid(_ encoded: String, call: WatchVoIPCall, now: TimeInterval) -> Bool {
+        guard !call.isOutgoing, let data = decode(encoded),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              value["agent_id"] as? String == call.agentID,
+              value["call_id"] as? String == call.callID,
+              value["call_uuid"] as? String == call.uuid.uuidString.lowercased(),
+              (value["generation"] as? NSNumber)?.uint64Value == call.generation,
+              let expiry = value["expires_at"] as? Double, expiry > now, expiry <= now + 65,
+              let until = value["session_until"] as? Double, until > expiry, until <= now + 14_405,
+              let owner = value["owner"] as? String, owner.count == 64, owner.allSatisfy({ $0.isHexDigit }),
+              let instance = value["instance"] as? String, !instance.isEmpty,
+              let session = value["session"] as? String, UUID(uuidString: session) != nil else { return false }
+        return true
+    }
+}
+
+/// Dispatch IDs survive a lost acknowledgement; new explicit sends use new IDs.
+enum WatchSMSDispatchPolicy {
+    static func reserve(_ id: String, now: TimeInterval, ledger: inout [String: Double]) -> Bool {
+        guard UUID(uuidString: id) != nil else { return false }
+        ledger = ledger.filter { now - $0.value < 86_400 }
+        guard ledger[id] == nil, ledger.count < 256 else { return false }
+        ledger[id] = now
+        return true
     }
 }
