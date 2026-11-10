@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.airsim.phonecontrol.standalone"
-    android:versionCode="135"
-    android:versionName="0.9.8.24">
+    android:versionCode="136"
+    android:versionName="0.9.8.25">
     <queries>
         <package android:name="moe.shizuku.privileged.api" />
     </queries>

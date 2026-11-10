@@ -47,6 +47,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class VoBLEGatewayService extends Service implements VoBLEGattServer.Listener {
     private static final String CHANNEL_ID = "airsim_voble";
     private static final int NOTIFICATION_ID = 4108;
+    private static final Object START_LOCK = new Object();
+    private static boolean startRequested;
     private static volatile VoBLEGatewayService instance;
     private static volatile VoBLEDiagnostics.Snapshot diagnostics =
             VoBLEDiagnostics.idle("Android");
@@ -128,14 +130,20 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
 
     public static void start(Context context) {
         if (!hasPermissions(context)) return;
-        Intent intent = new Intent(context, VoBLEGatewayService.class);
-        try {
-            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
-            else context.startService(intent);
-        } catch (IllegalStateException | SecurityException restricted) {
-            // Application/boot may run in the background. Retry when the Activity resumes;
-            // do not let an expected platform restriction kill the app or clear pairing.
-            BridgeLog.error("voble_service_start_deferred", restricted);
+        synchronized (START_LOCK) {
+            if (instance != null && !instance.destroyed) return;
+            if (startRequested) return;
+            startRequested = true;
+            Intent intent = new Intent(context, VoBLEGatewayService.class);
+            try {
+                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
+                else context.startService(intent);
+            } catch (IllegalStateException | SecurityException restricted) {
+                startRequested = false;
+                // Application/boot may run in the background. Retry when the Activity resumes;
+                // do not let an expected platform restriction kill the app or clear pairing.
+                BridgeLog.error("voble_service_start_deferred", restricted);
+            }
         }
     }
 
@@ -169,6 +177,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     @Override public void onCreate() {
         super.onCreate();
         instance = this;
+        synchronized (START_LOCK) { startRequested = false; }
         createNotificationChannel();
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
@@ -753,7 +762,10 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
             destroyed = true;
             stopMedia("", 0);
         }
-        if (instance == this) instance = null;
+        synchronized (START_LOCK) {
+            if (instance == this) instance = null;
+            startRequested = false;
+        }
         pendingPairingCode = "";
         diagnostics = VoBLEDiagnostics.idle(RuntimeMode.agentLabel(this));
         mainHandler.removeCallbacks(advertisingRetry);
