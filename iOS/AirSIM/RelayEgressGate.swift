@@ -55,7 +55,11 @@ final class RelayEgressGate: @unchecked Sendable {
         operations[id] = { operation.cancel() }
         lock.unlock()
         defer { finish(id) }
-        let result = try await operation.value
+        let result = try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await operation.value
+        } onCancel: { operation.cancel() }
+        try Task.checkCancellation()
         guard isCurrent(admittedEpoch) else { throw RelayEgressError.stale }
         return result
     }
@@ -97,6 +101,19 @@ final class RelayEgressGate: @unchecked Sendable {
             || (pieces[0] == 172 && (16...31).contains(pieces[1]))
             || (pieces[0] == 100 && (64...127).contains(pieces[1]))
             || (pieces[0] == 169 && pieces[1] == 254)
+    }
+
+    /// Reuses connections only. Every diagnostic still fetches an uncached response.
+    static func makeDiagnosticSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 6
+        configuration.timeoutIntervalForResource = 8
+        configuration.waitsForConnectivity = false
+        return URLSession(configuration: configuration, delegate: NoRedirectDelegate.shared, delegateQueue: nil)
     }
 
     private static func defaultTransport(_ request: URLRequest) async throws -> (Data, URLResponse) {

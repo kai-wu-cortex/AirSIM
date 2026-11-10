@@ -481,6 +481,16 @@ public final class CoreTests {
 		assertTrue(!VoWLANAuth.verify(vowlanSecret,
 				"xyJYZyGVDVSARzo3dd9vM_luQBhKeneDd6vk2VWmIkE",
 				vowlanCanonical, 1789090000L, 1789090040L));
+        byte[] watchKey = VoWLANAuth.watchCallKey(vowlanSecret);
+        assertTrue(!java.util.Arrays.equals(watchKey, vowlanSecret));
+        assertTrue(!VoWLANAuth.sign(watchKey, vowlanCanonical).equals(VoWLANAuth.sign(vowlanSecret, vowlanCanonical)));
+        assertTrue(VoWLANControlPolicy.watchAllowed("GET", "/api/calls/status?call_id=one", "one"));
+        assertTrue(VoWLANControlPolicy.watchAllowed("POST", "/api/calls/answer", "one"));
+        assertTrue(VoWLANControlPolicy.watchAllowed("POST", "/api/calls/hangup", "one"));
+        assertTrue(!VoWLANControlPolicy.watchAllowed("POST", "/api/calls/answer", ""));
+        assertTrue(!VoWLANControlPolicy.watchAllowed("POST", "/api/calls/dial", "one"));
+        assertTrue(!VoWLANControlPolicy.watchAllowed("POST", "/api/sms/send", "one"));
+        assertTrue(!VoWLANControlPolicy.watchAllowed("GET", "/api/calls/status", "one"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/api/health"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/v1/health"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/api/calls/status"));

@@ -56,7 +56,20 @@ final class StandaloneAgentGateway {
         return new JSONObject().put("ok", true).put("configured", store.configured())
                 .put("runtime_profile", "android-standalone").put("pending_commands", 0)
                 .put("last_seen", store.lastSeen() == 0 ? "" : Instant.ofEpochMilli(store.lastSeen()).toString())
-                .put("transport", "in_process").toString();
+                .put("transport", "in_process").put("readiness", readiness()).toString();
+    }
+
+    private JSONObject readiness() throws Exception {
+        RoleManager roles = context.getSystemService(RoleManager.class);
+        boolean dialer = roles != null && roles.isRoleAvailable(RoleManager.ROLE_DIALER) && roles.isRoleHeld(RoleManager.ROLE_DIALER);
+        ShizukuBridgeManager bridge = ShizukuBridgeManager.get(context);
+        return new JSONObject().put("default_dialer", dialer)
+                .put("phone_permission", context.checkSelfPermission(android.Manifest.permission.CALL_PHONE) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                .put("state_permission", context.checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                .put("permission_channel", bridge.status().contains("已连接"))
+                .put("bridge_process", bridge.bridgeRunning())
+                .put("paired", VoWLANPairingStore.configured(context))
+                .put("uptime_seconds", android.os.SystemClock.elapsedRealtime() / 1000.0);
     }
 
     String pushStatus() throws Exception { return store.pushStatus().toString(); }
@@ -364,7 +377,7 @@ final class StandaloneAgentGateway {
         synchronized (callsLock) {
             String state = event.optString("state", "");
             if ("ended".equals(state)) {
-                if (activeCall != null) {
+                if (activeCall != null && event.optString("call_id").equals(activeCall.optString("android_id"))) {
                     activeCall.put("missed", "incoming".equals(activeCall.optString("direction"))
                                     && !activeCall.has("connected_at"))
                             .put("state", "ended").put("ended_at", Instant.now().toString())

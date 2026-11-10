@@ -293,7 +293,13 @@ final class CallKitController: NSObject {
             // This real call is already reported. Reporting and then ending the
             // duplicate UUID would otherwise end the active CallKit surface.
             PushDiagnostics.record("PushKit 复用已有通话会话", fields: ["call_uuid": currentUUID!.uuidString])
-            completion(nil)
+            let report: RequiredSystemReporter = systemReport ?? { [provider] uuid, update, done in
+                provider.reportNewIncomingCall(with: uuid, update: update, completion: done)
+            }
+            // Fulfil the mandatory PushKit report using the existing system identity.
+            // Never send an end for that identity, even if CallKit accepts the report.
+            report(currentUUID!, update(number: call.number, callerName: call.callerName,
+                                        genericHandle: call.isVirtual), completion)
             return
         }
         let localOwnerBusy = model?.ownsLocalCallPresentation == true

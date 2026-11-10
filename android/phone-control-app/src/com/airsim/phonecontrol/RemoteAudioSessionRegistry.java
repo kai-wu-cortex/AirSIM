@@ -4,6 +4,7 @@ package com.airsim.phonecontrol;
 public final class RemoteAudioSessionRegistry {
     private static boolean vowlan;
     private static boolean voble;
+    private static RemoteCallAudioScope early = new RemoteCallAudioScope();
     private static final java.util.Set<Object> cloud = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     private RemoteAudioSessionRegistry() {}
@@ -63,7 +64,20 @@ public final class RemoteAudioSessionRegistry {
         return RemoteCallAudioScope.SHARED.ownsCall(callID);
     }
 
-    static synchronized boolean ownsCall(java.util.List<String> calls) { return active() && RemoteCallAudioScope.SHARED.owns(calls); }
+    /** Early media is receive-only; releasing it must never trigger owner-lost hangup. */
+    public static synchronized void setEarlyMedia(Object owner, String callID, boolean ready) {
+        if (ready) early.bind(owner, callID);
+        else early.release(owner);
+        AirSIMInCallService.refreshAudioPolicy();
+    }
 
-    static synchronized void resetForTests() { vowlan = false; voble = false; cloud.clear(); }
+    static synchronized boolean ownsCall(java.util.List<String> calls) {
+        return (active() && RemoteCallAudioScope.SHARED.owns(calls)) || early.owns(calls);
+    }
+    static synchronized boolean ownsVoWLANCall(java.util.List<String> calls) {
+        return (vowlan && RemoteCallAudioScope.SHARED.owns(calls)) || early.owns(calls);
+    }
+    static synchronized boolean ownsEarlyCall(String callID) { return early.ownsCall(callID); }
+
+    static synchronized void resetForTests() { vowlan = false; voble = false; cloud.clear(); early = new RemoteCallAudioScope(); }
 }

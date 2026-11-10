@@ -47,9 +47,11 @@ protocol DeviceCallBackend: AnyObject {
     func answer(callID: String, generation: UInt64?) async throws
     func end(callID: String, generation: UInt64?, reject: Bool) async throws
     func dtmf(_ digits: String, callID: String, generation: UInt64?) async throws
+    func confirmsEnded(callID: String) async throws -> Bool
 }
 
 extension DeviceCallBackend {
+    func confirmsEnded(callID: String) async throws -> Bool { false }
     func dial(number: String, operationID: String, systemUUID: UUID,
               simAccount: String?) async throws -> DeviceBackendCall {
         try await dial(number: number, operationID: operationID, systemUUID: systemUUID)
@@ -85,6 +87,7 @@ final class DeviceCallActionRouter {
     var hasPendingTermination: Bool { !pendingTerminations.isEmpty }
     var systemUUID: () -> UUID = { UUID() }
     var onActivate: ((LockedDeviceCallRoute) -> Void)?
+    var onTerminationFeedback: ((DeviceCallKey, String) -> Void)?
     var onFinish: ((DeviceCallKey, Bool) -> Void)?
     var onAnswerFailed: ((DeviceCallKey) -> Void)?
     var onTerminationSettled: (() -> Void)?
@@ -281,6 +284,7 @@ final class DeviceCallActionRouter {
     }
     func route(for key: DeviceCallKey) -> LockedDeviceCallRoute? { routes[key] }
     func contains(uuid: UUID) -> Bool { routes.values.contains { $0.systemUUID == uuid } }
+    func retainedRoute(for uuid: UUID) -> LockedDeviceCallRoute? { routes.values.first { $0.systemUUID == uuid } }
     func renewIdlePresentation(for key: DeviceCallKey) throws {
         guard context.registry.active == nil, context.registry.latestEvent(for: key)?.state == .ringing,
               let route = routes[key] else { throw DeviceCallRoutingError.stale }
@@ -316,19 +320,12 @@ final class DeviceCallActionRouter {
         _ = context.registry.apply(.init(agentID: ringing.agentID, callID: ringing.callID,
             state: .connecting, transport: ringing.transport, transportEpoch: ringing.transportEpoch,
             backendGeneration: ringing.backendGeneration, number: ringing.number,
-            direction: ringing.direction, backendCallID: ringing.backendCallID))
+            direction: ringing.direction, backendCallID: ringing.backendCallID, slotIndex: ringing.slotIndex))
         onActivate?(route)
         do {
             try await target.backend.answer(callID: target.identity.backendID, generation: target.identity.generation)
             guard context.registry.active == key else { throw CancellationError() }
-            if let current = context.registry.latestEvent(for: key), current.state == .connecting {
-                var confirmed = current
-                confirmed = DeviceCallEvent(agentID: current.agentID, callID: current.callID, state: .active,
-                    transport: current.transport, transportEpoch: current.transportEpoch,
-                    backendGeneration: current.backendGeneration, number: current.number,
-                    direction: current.direction, backendCallID: current.backendCallID)
-                _ = context.registry.apply(confirmed)
-            }
+
         } catch {
             // An answer failure must not retire the ringing call. Release the
             // optimistic ownership only; a late agent .active (the Android
@@ -343,9 +340,28 @@ final class DeviceCallActionRouter {
             throw error
         }
     }
+    /// A resumed phone can observe transport loss before the Watch's end message.
+    /// Ask the captured backend for this exact call before treating it as a live failure.
+    func resolveWLANLoss(_ key: DeviceCallKey, stillLost: () -> Bool, onWillEnd: () -> Void = {}) async -> Bool {
+        guard let target = targets[key], context.registry.active == key,
+              context.registry.latestEvent(for: key)?.state.isTerminal == false else { return false }
+        let ended = (try? await target.backend.confirmsEnded(callID: target.identity.callID)) == true
+        guard !Task.isCancelled, stillLost(), context.registry.active == key,
+              context.registry.latestEvent(for: key)?.state.isTerminal == false else { return false }
+        if ended {
+            finished(key, authoritative: true)
+            return false
+        }
+        onWillEnd()
+        try? await end(key, rejectIfRinging: false, source: "wlan_loss")
+        // end retires this call synchronously; never attach its alert to a newer call.
+        return context.registry.active == nil
+    }
+
     func end(_ key: DeviceCallKey, rejectIfRinging: Bool, source: String = "app") async throws {
         traceAction(key, source: source, next: .ended)
         guard let target = targets[key], context.registry.latestEvent(for: key)?.state.isTerminal == false else { return }
+        onTerminationFeedback?(key, "正在确认安卓挂断结果")
         pendingTerminations.insert(key)
         defer {
             pendingTerminations.remove(key)
@@ -354,7 +370,14 @@ final class DeviceCallActionRouter {
         // Retire presentation before I/O. A delayed active event cannot revive it.
         // The control lane must survive this tombstone until the captured end finishes.
         finished(key)
+        do {
         try await target.backend.end(callID: target.identity.backendID, generation: target.identity.generation, reject: rejectIfRinging)
+            let confirmed = (try? await target.backend.confirmsEnded(callID: target.identity.callID)) == true
+            onTerminationFeedback?(key, confirmed ? "安卓已确认通话结束" : "iPhone 已结束；安卓挂断尚未确认，请查看安卓")
+        } catch {
+            onTerminationFeedback?(key, "iPhone 已结束；未能确认安卓挂断，请查看安卓")
+            throw error
+        }
     }
     func sendDTMF(_ digits: String, for key: DeviceCallKey) async throws {
         guard context.registry.active == key, context.media.owner == key,
@@ -409,6 +432,9 @@ final class WLANDeviceCallBackend: DeviceCallBackend {
               simAccount: String?) async throws -> DeviceBackendCall {
         try? await api.warmAudioHost()
         return try await api.dialOwnedCall(number: number, operationID: operationID, simAccount: simAccount, expectedAgentID: agentID)
+    }
+    func confirmsEnded(callID: String) async throws -> Bool {
+        CallEndEvidence.confirms(try await api.callStatus(), id: callID)
     }
     func answer(callID: String, generation: UInt64?) async throws {
         try? await api.warmAudioHost()

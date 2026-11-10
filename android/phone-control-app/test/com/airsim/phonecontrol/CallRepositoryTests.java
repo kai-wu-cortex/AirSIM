@@ -4,6 +4,7 @@ import android.telecom.Call;
 
 public final class CallRepositoryTests {
     public static void main(String[] args) {
+        endedCallCannotKeepGatewayOwnedOrCloseReplacement();
         watchdogRequiresPCMAndConfirmedControlIdentity();
         oldHangupCompletionCannotCloseReplacementLease();
         newDialOwnershipIgnoresIncomingAndDifferentOutgoingCalls();
@@ -14,6 +15,31 @@ public final class CallRepositoryTests {
         cloudCallEventsDriveOnlyTheirOwnCall();
         localRejectUsesPublishedCallIdentity();
         System.out.println("call repository tests passed");
+    }
+
+    private static void endedCallCannotKeepGatewayOwnedOrCloseReplacement() {
+        String host = "127.0.0.44";
+        Call oldCall = new Call(Call.STATE_ACTIVE), nextCall = new Call(Call.STATE_ACTIVE);
+        String oldID = CallRepository.add(oldCall), nextID = CallRepository.add(nextCall);
+        DirectCallOwnership.Lease first = DirectCallOwnership.begin(host);
+        try {
+            DirectCallOwnership.record(host, oldID, first);
+            if (!DirectCallOwnership.ownsLiveCall(host)) throw new AssertionError("live owner missing");
+            oldCall.setStateForTest(Call.STATE_DISCONNECTED);
+            if (DirectCallOwnership.ownsLiveCall(host)) throw new AssertionError("terminal call retained ownership");
+            DirectCallOwnership.callEnded(oldID);
+            DirectCallOwnership.Lease next = DirectCallOwnership.begin(host);
+            DirectCallOwnership.record(host, nextID, next);
+            DirectCallOwnership.callEnded(oldID);
+            DirectCallOwnership.end(first, true);
+            if (!DirectCallOwnership.ownsLiveCall(host) || nextCall.getState() != Call.STATE_ACTIVE)
+                throw new AssertionError("late terminal touched replacement");
+            CallRepository.remove(nextCall);
+            if (DirectCallOwnership.ownsLiveCall(host)) throw new AssertionError("removed call retained ownership");
+        } finally {
+            DirectCallOwnership.end(DirectCallOwnership.capture(host), false);
+            CallRepository.remove(oldCall); CallRepository.remove(nextCall);
+        }
     }
 
     private static void watchdogRequiresPCMAndConfirmedControlIdentity() {

@@ -6,6 +6,7 @@ import android.telecom.Call;
 public final class RemoteCallMuteLifecycleTests {
     private static int passed;
     public static void main(String[] args) throws Exception {
+        earlyMediaScopesAndHandoff();
         dialingWaitsForAnswerBeforeReducingSamsungOutput();
         ordinaryCallsStayAudible();
         for (String mode : new String[]{"remote_silent", "local_and_push"}) {
@@ -27,6 +28,40 @@ public final class RemoteCallMuteLifecycleTests {
         vobleKeepsDownlinkCaptureAlive();
         transportSwitchRestoresPreviousPolicySnapshot();
         System.out.println("RemoteCallMuteLifecycleTests passed: " + passed + " scenarios");
+    }
+
+    private static void earlyMediaScopesAndHandoff() {
+        try (Fixture f = new Fixture(Call.STATE_DIALING)) {
+            Object early = new Object(), other = new Object(), duplex = new Object();
+            int lost = RemoteCallHangupGuard.lostCalls;
+            RemoteAudioSessionRegistry.setEarlyMedia(early, f.id + "-wrong", true);
+            check(!f.audio.muted, "unrelated early media cannot silence this call");
+            RemoteAudioSessionRegistry.setEarlyMedia(early, f.id, false);
+            RemoteAudioSessionRegistry.setEarlyMedia(early, new String(f.id), true);
+            check(f.audio.muted, "authenticated dialing capture can suppress local colored ringback");
+            RemoteAudioSessionRegistry.setEarlyMedia(other, f.id, false);
+            check(f.audio.muted, "stale owner release cannot restore another owner's output");
+            RemoteAudioSessionRegistry.setEarlyMedia(early, f.id, false);
+            check(f.audio.muted && f.call.getState() == Call.STATE_DIALING,
+                    "early media loss must retain isolation while this carrier call still exists");
+            check(RemoteCallHangupGuard.lostCalls == lost, "early loss must not arm duplex hangup guard");
+            RemoteAudioSessionRegistry.setEarlyMedia(early, f.id, true);
+            f.call.setStateForTest(Call.STATE_ACTIVE);
+            RemoteAudioSessionRegistry.setVoWLAN(true);
+            RemoteAudioSessionRegistry.ownCall(duplex, f.id);
+            RemoteAudioSessionRegistry.setEarlyMedia(early, f.id, false);
+            check(f.audio.muted, "early cleanup must preserve an answered duplex owner's policy");
+            RemoteAudioSessionRegistry.setVoWLAN(false);
+            RemoteAudioSessionRegistry.releaseCall(duplex);
+            check(f.audio.muted, "duplex media release must not expose the still-active carrier");
+            f.call.setStateForTest(Call.STATE_DISCONNECTING);
+            check(f.audio.muted, "disconnecting must retain the exact call's isolation");
+            f.call.setStateForTest(Call.STATE_DISCONNECTED);
+            check(f.audio.muted, "disconnected callback must not restore before native call removal");
+            f.removeNative();
+            check(!f.audio.muted && f.audio.volume == 6, "native removal restores initial volume");
+        }
+        passed++;
     }
 
     /**
@@ -228,10 +263,21 @@ public final class RemoteCallMuteLifecycleTests {
                 DirectCallOwnership.end(lease, false);
                 RemoteAudioSessionRegistry.setVoWLAN(false);
             }
-            check(!f.audio.muted && f.audio.volume == 6,
-                    transport + " media loss must restore the original output while the carrier call is still active");
-            check(!ShizukuBridgeManager.INSTANCE.watchdog, "media loss must stop repair");
-            check(f.call.getState() == Call.STATE_ACTIVE, "audio policy must not hang up the carrier call");
+            if ("vowlan".equals(transport)) {
+                check(f.audio.muted && ShizukuBridgeManager.INSTANCE.watchdog,
+                        "VoWLAN teardown retains local isolation until native carrier removal");
+                f.call.setStateForTest(Call.STATE_DISCONNECTING);
+                check(f.audio.muted, "VoWLAN disconnecting cannot expose carrier audio");
+                f.call.setStateForTest(Call.STATE_DISCONNECTED);
+                check(f.audio.muted, "VoWLAN disconnected still waits for native removal");
+                f.removeNative();
+                check(!f.audio.muted && f.audio.volume == 6, "native removal restores original output");
+            } else {
+                check(!f.audio.muted && f.audio.volume == 6,
+                        transport + " media loss restores original output");
+                check(!ShizukuBridgeManager.INSTANCE.watchdog, "non-VoWLAN media loss stops repair");
+                check(f.call.getState() == Call.STATE_ACTIVE, "restoration must not hang up the carrier");
+            }
         } finally { AppConfig.audioMode = "remote_silent"; }
         passed++;
     }
@@ -359,7 +405,7 @@ public final class RemoteCallMuteLifecycleTests {
         final ShizukuBridgeManager.Platform audio = ShizukuBridgeManager.INSTANCE.platform;
         final Call call;
         final String id;
-        boolean destroyed;
+        boolean destroyed, removed;
         Fixture(int state) {
             RemoteAudioSessionRegistry.resetForTests();
             audio.muted = false; audio.volume = 6;
@@ -368,11 +414,12 @@ public final class RemoteCallMuteLifecycleTests {
             id = CallRepository.id(call);
         }
         public void close() {
-            if (!destroyed) service.onCallRemoved(call);
-            else CallRepository.remove(call);
+            if (!destroyed && !removed) removeNative();
+            else if (destroyed) CallRepository.remove(call);
             if (!destroyed) destroy();
             RemoteAudioSessionRegistry.resetForTests();
         }
+        void removeNative() { service.onCallRemoved(call); removed = true; }
         void destroy() { service.onDestroy(); destroyed = true; }
     }
     /** The fixture dispatches mute requests on a real worker thread. */

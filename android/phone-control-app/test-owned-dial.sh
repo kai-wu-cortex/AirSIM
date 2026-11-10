@@ -14,6 +14,7 @@ if [ ! -f "$JSON_JAR" ]; then
 fi
 test "$(shasum -a 256 "$JSON_JAR" | awk '{print $1}')" = 3cf6cd6892e32e2b4c1c39e0f52f5248a2f5b37646fdfbb79a66b46b618414ed
 "$TASK_JAVA_HOME/bin/javac" --release 17 -cp "$JSON_JAR:$BUILT:$BASE:$ANDROID_JAR" -d "$OUT" \
+  "$ROOT"/test/android/net/Uri.java \
   "$ROOT"/test/owned-dial/com/airsim/phonecontrol/*.java \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/VoWLANPairingStore.java \
   "$ROOT"/test/gateway-lifecycle/com/airsim/phonecontrol/RuntimeMode.java \

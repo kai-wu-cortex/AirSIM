@@ -60,5 +60,10 @@ final class CallOutputPolicyMute {
         if (failure != null) throw failure; // retain snapshot for restoration retry
         previous = null;
     }
+    boolean verifyApplied() throws Exception {
+        if (!applied) return false;
+        for (int device : DEVICES) if (api.index(device) != 0) return false;
+        return true;
+    }
     boolean applied() { return applied; }
 }

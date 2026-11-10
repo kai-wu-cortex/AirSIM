@@ -42,6 +42,7 @@ final class LocalDeviceDirectory: ObservableObject {
     private let legacyBinding: () -> String?
     private let bluetoothReady: (String) -> Bool
     private let apiFactory: @Sendable (LocalAgentRoute) -> AirSIMAPI
+    private let e2eKeys: any E2EKeyStoring
     private final class Peer {
         let endpoint: VoWLANEndpoint
         let api: AirSIMAPI
@@ -61,6 +62,8 @@ final class LocalDeviceDirectory: ObservableObject {
     private var peers: [String: Peer] = [:]
     private var verification: [String: UUID] = [:]
     private var pendingCredentials: [String: VoWLANCredential] = [:]
+    /// The E2E SMS key change of a claim, committed with the credential it arrived with.
+    private var pendingE2E: [String: (credential: VoWLANCredential, change: E2EPairingKeyChange)] = [:]
     private var epoch: UInt64 = 0
     private var enabled = false
     private var forgotten = Set<String>()
@@ -71,12 +74,14 @@ final class LocalDeviceDirectory: ObservableObject {
          legacyBinding: @escaping () -> String? = { AndroidAgentBindingPreference.selected() },
          bluetoothReady: @escaping (String) -> Bool = { _ in false },
          apiFactory: @escaping @Sendable (LocalAgentRoute) -> AirSIMAPI = { AirSIMAPI(route: $0) },
+         e2eKeys: any E2EKeyStoring = KeychainE2EKeyStore.shared,
          healthTransport: @escaping HealthTransport = { request in
              try await WiredHTTPTransport().send(request)
          }) {
         self.credentials = credentials; self.legacyBinding = legacyBinding
         self.bluetoothReady = bluetoothReady; self.healthTransport = healthTransport
         self.apiFactory = apiFactory
+        self.e2eKeys = e2eKeys
     }
     var agentIDs: [String] { Array(peers.keys).sorted() }
     func lastObservation(for agentID: String) -> Date? { peers[agentID]?.lastObservation }
@@ -90,9 +95,25 @@ final class LocalDeviceDirectory: ObservableObject {
             bluetoothReady: bluetooth)
     }
     func api(for agentID: String) -> AirSIMAPI? { peers[agentID]?.verified == true ? peers[agentID]?.api : nil }
-    func stagePairing(agentID: String, credential: VoWLANCredential) {
+    func hasPendingPairing(agentID: String) -> Bool { pendingCredentials[agentID] != nil || pendingE2E[agentID] != nil }
+
+    func stagePairing(agentID: String, credential: VoWLANCredential, e2e: E2EPairingKeyChange? = nil) {
         forgotten.remove(agentID)
         pendingCredentials[agentID] = credential
+        pendingE2E[agentID] = e2e.map { (credential, $0) }
+    }
+
+    /// The claim reply is not authenticated, so its E2E SMS key change waits until the credential
+    /// it arrived with is proven (route proof or signed health), like the credential itself.
+    /// Synchronous on purpose: verifyPairing must not suspend between its token check and the
+    /// peer update.
+    private func commitStagedE2E(agentID: String, credential: VoWLANCredential) throws {
+        guard let staged = pendingE2E[agentID], staged.credential == credential else { return }
+        switch staged.change {
+        case .save(let record): try e2eKeys.save(record, agentID: agentID)
+        case .remove: e2eKeys.remove(agentID: agentID)
+        }
+        pendingE2E.removeValue(forKey: agentID)
     }
 
     /// Persists a pairing whose encrypted route proof already verified. A
@@ -112,6 +133,7 @@ final class LocalDeviceDirectory: ObservableObject {
         VoWLANPairingRecordStore.remember(
             agentID: agentID, credential: credential, endpoint: endpoint,
             deviceName: deviceName)
+        try commitStagedE2E(agentID: agentID, credential: credential)
         pendingCredentials.removeValue(forKey: agentID)
     }
     func verify(agentID: String, endpoint: VoWLANEndpoint) async throws {
@@ -139,7 +161,8 @@ final class LocalDeviceDirectory: ObservableObject {
     func verifyCandidates(_ candidates: [VoWLANDiscoveredAgent]) async {
         await withTaskGroup(of: Void.self) { group in
             for candidate in candidates where PairedAndroidDeviceStore.permits(candidate.id) {
-                if routes(for: candidate.id)?.vowlan == candidate.endpoint { continue }
+                if routes(for: candidate.id)?.vowlan == candidate.endpoint,
+                   !hasPendingPairing(agentID: candidate.id) { continue }
                 group.addTask { [self] in
                     guard !Task.isCancelled else { return }
                     try? await verify(agentID: candidate.id, endpoint: candidate.endpoint)
@@ -167,6 +190,7 @@ final class LocalDeviceDirectory: ObservableObject {
         VoWLANPairingRecordStore.remember(
             agentID: agentID, credential: credential, endpoint: endpoint,
             deviceName: identity.deviceName)
+        try commitStagedE2E(agentID: agentID, credential: credential)
         pendingCredentials.removeValue(forKey: agentID)
         if let old = peers[agentID], old.endpoint == endpoint, old.credential == credential {
             // The address can stay identical across VPN -> Wi-Fi. A successful
@@ -200,8 +224,10 @@ final class LocalDeviceDirectory: ObservableObject {
         verification[agentID] = UUID()
         peers.removeValue(forKey: agentID)?.poll?.cancel()
         pendingCredentials.removeValue(forKey: agentID)
+        pendingE2E.removeValue(forKey: agentID)
         let store = credentials
         await Task.detached { store.remove(agentID: agentID) }.value
+        e2eKeys.remove(agentID: agentID)
         objectWillChange.send()
     }
     func start() {

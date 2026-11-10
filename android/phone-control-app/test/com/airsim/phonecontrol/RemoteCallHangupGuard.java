@@ -4,5 +4,6 @@ package com.airsim.phonecontrol;
 final class RemoteCallHangupGuard {
     private RemoteCallHangupGuard() {}
     static void ownerBound(String callID) {}
-    static void ownerLost(String callID) {}
+    static int lostCalls;
+    static void ownerLost(String callID) { lostCalls++; }
 }

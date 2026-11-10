@@ -11,6 +11,12 @@ final class SMSDeliveryIdentity {
         return sentAt > 0 ? sentAt : receivedAt;
     }
 
+    /** Keyed once the cloud registration has an E2E key, so the Relay cannot test guesses against the id. */
+    static String id(byte[] e2eKey, String sender, String body, long timestamp) throws Exception {
+        return e2eKey == null ? id(sender, body, timestamp)
+                : E2ESMSCrypto.keys(e2eKey).deliveryID(sender, body, timestamp);
+    }
+
     static String id(String sender, String body, long timestamp) throws Exception {
         String source = (sender == null ? "" : sender) + "\0" + timestamp + "\0"
                 + (body == null ? "" : body);

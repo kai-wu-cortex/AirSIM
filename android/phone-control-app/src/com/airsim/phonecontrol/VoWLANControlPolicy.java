@@ -5,7 +5,7 @@ import java.util.Set;
 public final class VoWLANControlPolicy {
     private static final Set<String> GET_ROUTES = Set.of(
             "/v1/health", "/api/health", "/api/status", "/api/debug", "/api/events",
-            "/api/calls/status", "/api/calls/events", "/api/calls/audio/host/config",
+            "/api/calls/early-media", "/api/calls/status", "/api/calls/events", "/api/calls/audio/host/config",
             "/api/push/status", "/api/sms", "/api/sms/status", "/api/feedback", "/api/local-mode");
     private static final Set<String> POST_ROUTES = Set.of(
             "/api/calls/resolve", "/api/calls/dial", "/api/calls/answer", "/api/calls/reject",
@@ -22,6 +22,12 @@ public final class VoWLANControlPolicy {
         if ("GET".equalsIgnoreCase(method)) return GET_ROUTES.contains(path);
         if ("POST".equalsIgnoreCase(method)) return POST_ROUTES.contains(path);
         return false;
+    }
+
+    static boolean watchAllowed(String method, String path, String callID) {
+        if (callID == null || callID.isBlank() || callID.length() > 128) return false;
+        if ("GET".equals(method)) return path.startsWith("/api/calls/status?call_id=");
+        return "POST".equals(method) && ("/api/calls/answer".equals(path) || "/api/calls/hangup".equals(path));
     }
 
     static boolean ownsCallAfterResponse(String path, int status, boolean currentlyOwnsCall) {

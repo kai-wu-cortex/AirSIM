@@ -11,6 +11,7 @@ final class VoWLANNetworkRecoveryGate {
         stableAt = now + 1_000;
         pending = true;
     }
+    synchronized boolean isSettling(long now) { return !closed && pending && now < stableAt; }
     synchronized boolean consume(long now) {
         if (closed || !pending || now < stableAt) return false;
         pending = false;

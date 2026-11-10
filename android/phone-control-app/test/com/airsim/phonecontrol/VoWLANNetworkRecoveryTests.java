@@ -4,6 +4,7 @@ public final class VoWLANNetworkRecoveryTests {
     public static void main(String[] args) {
         VoWLANNetworkRecoveryGate gate = new VoWLANNetworkRecoveryGate();
         gate.observe("network-1:wlan0:192.168.1.2", 0);
+        check(gate.isSettling(0) && !gate.isSettling(1000), "idle topology waits only until stable deadline");
         check(!gate.consume(0), "wait for route/address settling");
         check(gate.nextDelay(0, 5000) == 1000, "pending network must be revisited without waiting full polling delay");
         check(gate.consume(1000), "first Wi-Fi network requires publication");
@@ -16,6 +17,7 @@ public final class VoWLANNetworkRecoveryTests {
         gate.observe("network-3:wlan0:192.168.1.2", 8000);
         gate.close();
         gate.observe("late-callback", 9000);
+        check(!gate.isSettling(9000), "closed gate cannot delay service shutdown");
         check(!gate.consume(10000), "late callback cannot revive a destroyed service");
 
         VoWLANAdvertisementEpoch advertisement = new VoWLANAdvertisementEpoch();

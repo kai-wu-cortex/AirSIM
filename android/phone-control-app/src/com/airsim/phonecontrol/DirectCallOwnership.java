@@ -35,6 +35,24 @@ public final class DirectCallOwnership {
         }
         if (abandoned) CallRepository.disconnect(callID);
     }
+    /** Terminal events retire only their exact call, never a replacement lease. */
+    public static void callEnded(String callID) {
+        if (callID == null || callID.isEmpty()) return;
+        java.util.List<Lease> ended;
+        synchronized (DirectCallOwnership.class) {
+            ended = new java.util.ArrayList<>();
+            for (Lease lease : sessions.values()) {
+                if (callID.equals(lease.callID)) ended.add(lease);
+            }
+        }
+        for (Lease lease : ended) end(lease, false);
+    }
+    public static synchronized boolean ownsLiveCall(String host) {
+        Lease lease = sessions.get(host);
+        if (lease == null || lease.closed || lease.callID.isEmpty()) return false;
+        int state = CallRepository.state(lease.callID);
+        return state >= 0 && state != android.telecom.Call.STATE_DISCONNECTED;
+    }
     public static void disconnectHost(String host) { end(existing(host), true); }
     public static synchronized void pcmReady(Lease lease) {
         if (lease == null || lease.closed || sessions.get(lease.host) != lease) return;

@@ -77,6 +77,14 @@ public final class OwnedDialGatewayTests {
             String canonical = "AIRSIM-DIAL1\ndelayed-publication\noperation-A\n" + created[0] + "\nbackend-" + created[0];
             check(VoWLANAuth.sign(new byte[32], canonical).equals(receipt.optString("operation_proof")), "receipt signature must bind exact operation and identities");
             check(dials[0] == 1, "waiting for publication must never redial");
+            check(gateway.ownsCall(), "authenticated live dial must retain gateway ownership");
+            call.setStateForTest(android.telecom.Call.STATE_DISCONNECTED);
+            check(!gateway.ownsCall(), "remote hangup must clear ownership without a local hangup request");
+            var unrelated = new android.telecom.Call(android.telecom.Call.STATE_ACTIVE);
+            CallRepository.add(unrelated);
+            try { check(!gateway.ownsCall(), "an unrelated active call cannot revive the old owner"); }
+            finally { CallRepository.remove(unrelated); }
+
         } finally {
             DirectCallOwnership.end(DirectCallOwnership.capture("127.0.0.1"), false);
             CallRepository.remove(call);

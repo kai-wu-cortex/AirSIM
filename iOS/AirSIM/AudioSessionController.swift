@@ -171,6 +171,10 @@ enum SpeakerRoutePolicy {
 /// 管理 iPhone/iPad 内置麦克风、扬声器与 VoWLAN 网络 PCM 之间的双向通话音频。
 @MainActor
 final class AudioSessionController: ObservableObject {
+    @Published private(set) var audioHealthText = "当前没有通话音频会话"
+    @Published private(set) var audioHealthWarning: String?
+    private var lastDownlinkUptime: TimeInterval?
+    private var audioHealthTask: Task<Void, Never>?
     @Published private(set) var active = false
     @Published private(set) var routeDescription = ""
     @Published private(set) var transportReady = false
@@ -191,6 +195,8 @@ final class AudioSessionController: ObservableObject {
     private var transport: NetworkPCMTransport?
     private var encoder: VoicePCMEncoder?
     private let toneOutput: any CallToneOutput
+    private let overrideSpeakerRoute: (Bool) throws -> Void
+    private let makeEngine: () -> AVAudioEngine
     private var currentCallTone: CallTone?
     private var endedToneTask: Task<Void, Never>?
     var hasCallTone: Bool { currentCallTone != nil }
@@ -199,6 +205,9 @@ final class AudioSessionController: ObservableObject {
     private var speakerRouteRetryTask: Task<Void, Never>?
     private var sessionActivationManagedByCallKit = false
     private var routeChangeObserver: NSObjectProtocol?
+    private var engineConfigurationObserver: NSObjectProtocol?
+    private var earlyPlaybackRecoveryTask: Task<Void, Never>?
+    private var playbackGeneration: UInt64 = 0
     private var playbackQueue = PlaybackQueueTracker(maximumFrames: 4_000)
     private var startupUptime: TimeInterval = 0
     private var recordedFirstDownlink = false
@@ -210,8 +219,14 @@ final class AudioSessionController: ObservableObject {
         ) }
     }
 
-    init(toneOutput: (any CallToneOutput)? = nil) {
+    init(toneOutput: (any CallToneOutput)? = nil,
+         makeEngine: @escaping () -> AVAudioEngine = { AVAudioEngine() },
+         overrideSpeakerRoute: @escaping (Bool) throws -> Void = {
+             try AVAudioSession.sharedInstance().overrideOutputAudioPort($0 ? .speaker : .none)
+         }) {
         self.toneOutput = toneOutput ?? SystemCallToneOutput()
+        self.overrideSpeakerRoute = overrideSpeakerRoute
+        self.makeEngine = makeEngine
         // CallKit、蓝牙或系统控制中心都可能改变输出路由，按钮状态必须跟随真实会话。
         routeChangeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification,
@@ -225,6 +240,9 @@ final class AudioSessionController: ObservableObject {
     deinit {
         if let routeChangeObserver {
             NotificationCenter.default.removeObserver(routeChangeObserver)
+        }
+        if let engineConfigurationObserver {
+            NotificationCenter.default.removeObserver(engineConfigurationObserver)
         }
     }
 
@@ -257,6 +275,8 @@ final class AudioSessionController: ObservableObject {
     ) async -> Bool {
         guard !Task.isCancelled, isCurrent() else { return false }
         guard !active else { return true }
+        lastDownlinkUptime = nil
+        audioHealthText = "正在建立音频连接"; audioHealthWarning = nil
         startupUptime = ProcessInfo.processInfo.systemUptime
         recordedFirstDownlink = false
         hasReceivedEarlyMedia = false
@@ -278,18 +298,22 @@ final class AudioSessionController: ObservableObject {
             let session = AVAudioSession.sharedInstance()
             sessionActivationManagedByCallKit = sessionAlreadyActive
             if receiveOnly {
-                if !sessionAlreadyActive { try session.setCategory(.playback, mode: .default) }
+                // Playback-only sessions cannot route to the built-in receiver.
+                // Keep capture disabled below, but allow both call outputs.
+                if !sessionAlreadyActive {
+                    try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+                }
             } else { try configureCallAudioSession() }
             if !sessionAlreadyActive {
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             }
             // 每次通话默认使用听筒；仅在用户主动开启扬声器后覆盖输出路由。
-            if !receiveOnly || sessionAlreadyActive {
-                try session.overrideOutputAudioPort(requestedSpeakerOverride ? .speaker : .none)
-            }
+            // Route changes can be rejected while CallKit activates audio.
+            // A pending output preference must never abort carrier playback.
+            try? overrideSpeakerRoute(requestedSpeakerOverride)
             refreshRouteDescription()
 
-            let engine = AVAudioEngine()
+            let engine = makeEngine()
             let player = AVAudioPlayerNode()
             let encoder = VoicePCMEncoder()
             // 用户可能在权限弹窗或音频启动期间切换静音，新编码器必须继承期望状态。
@@ -370,13 +394,24 @@ final class AudioSessionController: ObservableObject {
             self.transport = transport
             playbackQueue.reset()
             active = true
+            if receiveOnly {
+                engineConfigurationObserver = NotificationCenter.default.addObserver(
+                    forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+                ) { [weak self, weak engine] _ in
+                    Task { @MainActor [weak self, weak engine] in
+                        guard let self, let engine, self.engine === engine,
+                              self.sessionOwner == owner else { return }
+                        self.recoverEarlyPlaybackIfNeeded()
+                    }
+                }
+            }
             transportReady = false
             routeDescription = route.isOverlayHost ? "正在连接 VPN 直连语音…"
                 : (route.requiresWiFi ? "正在连接 VoWLAN 语音…" : "正在连接模块网络语音…")
             diagnosticDescription = "\(DeviceContext.displayName) PCM 尚未握手"
             moduleDiagnosticDescription = ""
             errorMessage = nil
-            if !receiveOnly { retryRequestedSpeakerRoute() }
+            retryRequestedSpeakerRoute()
             transport.start()
             return true
         } catch {
@@ -510,9 +545,7 @@ final class AudioSessionController: ObservableObject {
                 if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
                 guard !Task.isCancelled, requestedSpeakerOverride == requested else { return }
                 do {
-                    try AVAudioSession.sharedInstance().overrideOutputAudioPort(
-                        requested ? .speaker : .none
-                    )
+                    try overrideSpeakerRoute(requested)
                     // API 返回只表示系统接受了请求；currentRoute 的切换是异步的。
                     // 等待一个很短的确认窗口，再以真实输出端口决定按钮高亮。
                     try? await Task.sleep(for: .seconds(SpeakerRoutePolicy.routeVerificationDelay))
@@ -555,6 +588,16 @@ final class AudioSessionController: ObservableObject {
     }
 
     func deactivate(preservingSharedSession: Bool = false) {
+        audioHealthTask?.cancel(); audioHealthTask = nil
+        lastDownlinkUptime = nil; audioHealthWarning = nil
+        audioHealthText = "当前没有通话音频会话"
+        earlyPlaybackRecoveryTask?.cancel()
+        earlyPlaybackRecoveryTask = nil
+        if let engineConfigurationObserver {
+            NotificationCenter.default.removeObserver(engineConfigurationObserver)
+            self.engineConfigurationObserver = nil
+        }
+        playbackGeneration &+= 1
         if active { recordStartup("stopped") }
         sessionOwner = nil
         let callKitManagedSession = sessionActivationManagedByCallKit
@@ -606,9 +649,18 @@ final class AudioSessionController: ObservableObject {
         stopCallTone()
 
         do {
+            let routesLikeCall = tone == .outgoingWaiting
+            if routesLikeCall, !sessionActivationManagedByCallKit {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+                try session.setActive(true)
+                // Play the waiting tone even if the route is not ready yet.
+                try? overrideSpeakerRoute(requestedSpeakerOverride)
+            }
             try toneOutput.play(SynthesizedCallTone.wavData(for: tone), looping: looping, volume: tone.volume,
-                                configureSession: !sessionActivationManagedByCallKit)
+                                configureSession: !sessionActivationManagedByCallKit && !routesLikeCall)
             currentCallTone = tone
+            if routesLikeCall { retryRequestedSpeakerRoute() }
         } catch {
             toneOutput.stop(deactivateSession: !sessionActivationManagedByCallKit)
             currentCallTone = nil
@@ -628,9 +680,46 @@ final class AudioSessionController: ObservableObject {
         try session.setPreferredIOBufferDuration(0.02)
     }
 
+    private func startAudioHealthMonitor() {
+        audioHealthTask?.cancel()
+        let owner = sessionOwner
+        let started = ProcessInfo.processInfo.systemUptime
+        audioHealthTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, self.active, self.sessionOwner == owner else { return }
+                let now = ProcessInfo.processInfo.systemUptime
+                let gap = now - (self.lastDownlinkUptime ?? started)
+                if gap >= 6 {
+                    self.audioHealthText = self.lastDownlinkUptime == nil ? "音频已连接，但尚未收到下行数据" : "下行音频数据已中断超过 6 秒"
+                    self.audioHealthWarning = self.audioHealthText
+                } else if self.lastDownlinkUptime != nil {
+                    if self.engine?.isRunning == true && self.player?.isPlaying == true {
+                        self.audioHealthText = "正在接收音频数据，播放引擎运行中"; self.audioHealthWarning = nil
+                    } else {
+                        self.audioHealthText = "收到音频数据，但本机播放引擎未运行"; self.audioHealthWarning = self.audioHealthText
+                    }
+                } else { self.audioHealthText = "音频已连接，等待下行数据" }
+            }
+        }
+    }
+    func recoverLocalPlayback() {
+        guard active, let engine, let player else { return }
+        do {
+            if !engine.isRunning { try engine.start() }
+            if !player.isPlaying { player.play() }
+            audioHealthText = "已恢复本机播放引擎，等待音频数据"
+            audioHealthWarning = nil
+        } catch {
+            audioHealthWarning = "本机播放恢复失败：\(error.localizedDescription)"
+            audioHealthText = audioHealthWarning ?? "恢复失败"
+        }
+    }
+
     private func handleTransportEvent(_ event: NetworkPCMTransport.Event) {
         switch event {
         case .connected:
+            startAudioHealthMonitor()
             recordStartup("pcm_ready")
             transportReady = true
             diagnosticDescription = "\(DeviceContext.displayName) PCM 已握手，等待语音数据"
@@ -700,6 +789,9 @@ final class AudioSessionController: ObservableObject {
     }
 
     private func schedulePlayback(_ pcm: Data) {
+        if !pcm.isEmpty { lastDownlinkUptime = ProcessInfo.processInfo.systemUptime }
+        recoverEarlyPlaybackIfNeeded()
+        if receiveOnly, engine?.isRunning == false { return }
         guard active, let player, !pcm.isEmpty else { return }
         let frames = pcm.count / MemoryLayout<Int16>.size
         guard frames > 0, playbackQueue.reserve(frames: frames) else { return }
@@ -735,13 +827,58 @@ final class AudioSessionController: ObservableObject {
                 output[frame] = Float(Int16(bitPattern: bits)) / 32_768
             }
         }
+        let generation = playbackGeneration
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) {
             [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.playbackQueue.complete(frames: frames)
+                guard let self, self.playbackGeneration == generation else { return }
+                self.playbackQueue.complete(frames: frames)
             }
         }
         if !player.isPlaying { player.play() }
+    }
+
+    /// Hardware route changes stop a receive-only engine without closing PCM.
+    /// Reconnect to the new output format while keeping its call-bound transport.
+    private func recoverEarlyPlaybackIfNeeded() {
+        guard active, receiveOnly, let owner = sessionOwner, let engine, let player,
+              !engine.isRunning, earlyPlaybackRecoveryTask == nil else { return }
+        earlyPlaybackRecoveryTask = Task { @MainActor [weak self, weak engine, weak player] in
+            guard let self, let engine, let player else { return }
+            defer {
+                if self.sessionOwner == owner { self.earlyPlaybackRecoveryTask = nil }
+            }
+            for delay in [0.0, 0.1, 0.3, 0.8] {
+                if delay > 0 {
+                    do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                }
+                guard !Task.isCancelled, self.active, self.receiveOnly,
+                      self.sessionOwner == owner, self.engine === engine else { return }
+                do {
+                    player.stop()
+                    engine.stop()
+                    self.playbackGeneration &+= 1
+                    self.playbackQueue.reset()
+                    engine.disconnectNodeOutput(player)
+                    engine.disconnectNodeOutput(engine.mainMixerNode)
+                    guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                        sampleRate: 8_000, channels: 1, interleaved: false) else {
+                        throw VoiceAudioError.invalidPlaybackFormat
+                    }
+                    try CallAudioGraph.connectPlayback(player, engine: engine, format: format)
+                    engine.prepare()
+                    try engine.start()
+                    player.play()
+                    self.recordStartup("early_playback_route_recovered")
+                    self.refreshRouteDescription()
+                    return
+                } catch {
+                    if delay == 0.8 {
+                        self.errorMessage = "接通前音频输出恢复失败：\(error.localizedDescription)"
+                    }
+                }
+            }
+        }
     }
 }
 

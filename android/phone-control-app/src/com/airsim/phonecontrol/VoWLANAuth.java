@@ -30,6 +30,10 @@ public final class VoWLANAuth {
         }
     }
 
+    static byte[] watchCallKey(byte[] secret) {
+        return Base64.getUrlDecoder().decode(sign(secret, "AirSIM/watch-call-only/v1"));
+    }
+
     public static boolean verify(
             byte[] secret, String suppliedSignature, String canonical,
             long timestamp, long now) {

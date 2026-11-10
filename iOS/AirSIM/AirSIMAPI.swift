@@ -105,6 +105,7 @@ struct AirSIMAPI: Sendable {
 
     // MARK: 通话与短信
 
+    func androidReadiness() async throws -> AndroidReadinessResponse { try await get("api/status") }
     func health() async throws -> AgentHealth { try await get("api/health") }
     func resolvePushedCall(_ call: IncomingVoIPCall) async throws -> CallStatus {
         do { return try await postDecoded("api/calls/resolve", ["call_id": call.callID,

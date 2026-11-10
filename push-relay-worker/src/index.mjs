@@ -259,6 +259,7 @@ async function enqueueDeviceCommand(request, env) {
     expires_at: new Date(Date.now() + (value.type === "send_sms" ? 5 : 2) * 60_000).toISOString(),
     number: normalizePhoneNumber(value.number),
     ...(value.type === "send_sms" ? { message: value.message.trim() } : {}),
+    ...(value.type === "send_sms" && value.sim_account ? { sim_account: value.sim_account } : {}),
     ...(dtmfCall ? {call:dtmfCall,owner:"iphone"} : {}),
   };
   let call = null;
@@ -484,6 +485,10 @@ function validateDeviceCommand(value) {
   if (value.type === "send_sms") {
     if (typeof value.message !== "string" || !value.message.trim() ||
         [...value.message].length > 2_000) return "invalid SMS content";
+    if (value.sim_account !== undefined &&
+        (typeof value.sim_account !== "string" ||
+         new TextEncoder().encode(value.sim_account).length > 512 ||
+         /[\u0000-\u001f\u007f]/.test(value.sim_account))) return "invalid SIM account";
   }
   return "";
 }
@@ -1331,18 +1336,22 @@ async function receiveCall(request, env) {
   try {
     if (!alertDuplicate) {
       const displayName = stringValue(call.caller_name) || stringValue(call.number) || "未知号码";
-      const alertBody = stringValue(call.caller_name) && stringValue(call.number)
-        ? stringValue(call.number)
-        : "AirSIM 语音来电";
+      const alertBody = [stringValue(call.caller_name) && stringValue(call.number) && displayName !== stringValue(call.number)
+        ? `${displayName} · ${stringValue(call.number)}` : displayName,
+        Number.isInteger(call.slot_index) && call.slot_index >= 0 ? `SIM ${call.slot_index + 1}` : ""
+      ].filter(Boolean).join(" · ");
       const alertPayload = {
         aps: {
-          alert: { title: displayName, body: alertBody },
+          alert: { title: "AirSIM 来电", body: alertBody },
           sound: "default",
           category: "AIRSIM_INCOMING_CALL_MIRROR",
           "thread-id": `airsim-call-${call.call_uuid}`,
           "interruption-level": "time-sensitive",
         },
         event: "incoming_call_mirror",
+        generation: call.generation || 1,
+        agent_id: agentID,
+        slot_index: Number.isInteger(call.slot_index) ? call.slot_index : -1,
         call_id: call.call_id,
         call_uuid: call.call_uuid,
         number: stringValue(call.number),
@@ -1450,6 +1459,8 @@ async function receiveSMS(request, env) {
     return jsonResponse(400, { error: "invalid incoming SMS" });
   }
   const sender = nonEmpty(message.sender) ? message.sender.trim() : "未知号码";
+  const simSlot = /^SIM [1-9][0-9]?$/.test(stringValue(message.sim_slot).trim())
+    ? stringValue(message.sim_slot).trim() : "";
   // Android's carrier timestamp can be old when the inbox provider restores a message,
   // or when an offline Agent flushes its durable queue after a long Relay outage.
   // Preserve the delivery ID for deduplication, but show the arrival time on iPhone.
@@ -1476,7 +1487,7 @@ async function receiveSMS(request, env) {
 
   const payload = encryptedPayload || fittedSMSPayload(message.content, (content, truncated) => ({
     aps: {
-      alert: { title: sender, body: content },
+      alert: { title: sender, subtitle: simSlot ? `接收于 ${simSlot}` : "SIM 未知", body: content },
       sound: "default",
       "thread-id": `airsim-sms-${sender}`.slice(0, 64),
       "content-available": 1,
@@ -1485,6 +1496,7 @@ async function receiveSMS(request, env) {
     delivery_id: message.delivery_id,
     agent_id: stringValue(message.agent_id),
     sender,
+    sim_slot: simSlot,
     content,
     content_truncated: truncated,
     code: stringValue(message.code),
@@ -1628,26 +1640,56 @@ async function receiveCallOwner(request, env) {
       (event.phase !== "active" && event.phase !== "ended")) {
     return jsonResponse(400, { error: "invalid call ownership event" });
   }
-  const dedupeKey = `dedupe:owner:${authenticated.device.device_id}:${event.call_uuid}:${event.phase}`;
+  const generation = Number.isInteger(event.generation) && event.generation > 0 ? event.generation : 1;
+  const agentID = stringValue(event.agent_id);
+  const scope = JSON.stringify([authenticated.device.device_id, agentID, event.call_uuid, generation]);
+  const dedupeKey = `dedupe:owner:${scope}:${event.phase}`;
   if (await readRelayState(env, dedupeKey)) return jsonResponse(202, { duplicate: true });
 
+  const notificationKey = `call-notification:${scope}`;
+  const observed = await bestEffortReadRelayRecord(env, notificationKey);
+  // Terminal is monotonic for this agent/UUID/generation. A delayed active
+  // event must not resurrect the UI after the authoritative terminal event.
+  if (event.phase === "active" && observed?.ended) return jsonResponse(202, { stale: true });
+  const missed = event.owner === "android" && event.phase === "ended"
+    && event.direction === "incoming" && event.missed === true && observed?.answered !== true;
+  await bestEffortWriteRelayState(env, notificationKey, JSON.stringify({
+    answered: observed?.answered === true || event.phase === "active",
+    ended: event.phase === "ended",
+  }), 5 * 60 * 60);
   const payload = {
     aps: { "content-available": 1 },
     event: "call_owner",
+    agent_id: agentID,
     call_id: event.call_id,
     call_uuid: event.call_uuid,
     owner: event.owner,
     phase: event.phase,
+    direction: event.direction === "incoming" ? "incoming" : event.direction === "outgoing" ? "outgoing" : "",
+    number: stringValue(event.number),
+    slot_index: Number.isInteger(event.slot_index) ? event.slot_index : -1,
+    timestamp: stringValue(event.timestamp),
+    notification_status: missed ? "missed" : event.phase === "active" ? "answered" : "ended",
+    missed,
     generation: Number.isInteger(event.generation) && event.generation > 0
       ? event.generation : 1,
   };
+  if (missed) {
+    payload.aps.alert = { title: "AirSIM 未接来电", body: [stringValue(event.number) || "未知号码",
+      Number.isInteger(event.slot_index) && event.slot_index >= 0 ? `SIM ${event.slot_index + 1}` : ""
+    ].filter(Boolean).join(" · ") };
+    payload.aps["mutable-content"] = 1;
+    // The call already rang. A missed-call record must not ring a second time.
+    payload.aps.category = "AIRSIM_MISSED_CALL";
+    payload.aps["thread-id"] = `airsim-call-${event.call_uuid}`;
+  }
   try {
     await sendAPNs(env, authenticated.device, authenticated.device.alert_token, {
       topic: authenticated.device.bundle_id,
-      pushType: "background",
-      priority: "5",
+      pushType: missed ? "alert" : "background",
+      priority: missed ? "10" : "5",
       expiration: Math.floor(Date.now() / 1000) + 120,
-      collapseID: `${event.call_uuid}-${event.phase}`,
+      collapseID: missed ? event.call_uuid : `${event.call_uuid}-${event.phase}`,
       payload,
     });
     await writeRelayState(env, dedupeKey, "1", 180);

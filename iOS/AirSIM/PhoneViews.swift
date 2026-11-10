@@ -3,6 +3,7 @@ import AVFoundation
 import UIKit
 import LinkPresentation
 import UniformTypeIdentifiers
+import UserNotifications
 
 enum DialPadPasteSanitizer {
     static func sanitize(_ value: String) -> String {
@@ -442,6 +443,8 @@ struct DialPadView: View {
     }
 
     private func dialActions(metrics: DialPadLayoutMetrics) -> some View {
+        VStack(spacing: 6) {
+        if let result = model.remoteEndFeedback { Text(result).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
         HStack(spacing: metrics.keySpacing) {
             Button(action: clearNumber) {
                 Text(L10n.t("清空"))
@@ -456,7 +459,9 @@ struct DialPadView: View {
             .accessibilityLabel(L10n.t("清空号码"))
             .accessibilityIdentifier("dialpad.clear")
             Button {
-                Task { await model.dial() }
+                if model.numberInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    model.recallLastOutgoingNumber()
+                } else { Task { await model.dial() } }
             } label: {
                 Circle()
                     .fill(.green)
@@ -469,11 +474,10 @@ struct DialPadView: View {
             }
             .buttonStyle(.plain)
             .disabled(
-                model.numberInput.isEmpty
-                    || model.isBusy
-                    || !model.canStartOutgoingCommand
+                model.isBusy || (model.numberInput.isEmpty ? model.mostRecentOutgoingNumber == nil : !model.canStartOutgoingCommand)
             )
-            .opacity(model.numberInput.isEmpty || !model.canStartOutgoingCommand ? 0.4 : 1)
+            .opacity((model.numberInput.isEmpty ? model.mostRecentOutgoingNumber == nil : !model.canStartOutgoingCommand) ? 0.4 : 1)
+            .accessibilityLabel(model.numberInput.isEmpty ? "填入最近一次呼出号码" : "呼出")
 
             Image(systemName: "delete.left")
                 .font(.system(size: metrics.deleteIconSize))
@@ -490,6 +494,7 @@ struct DialPadView: View {
                 .accessibilityAction(named: Text(L10n.t("清空号码"))) { clearNumber() }
         }
         .frame(width: metrics.keypadWidth)
+        }
     }
 
     private func clearNumber() {
@@ -624,8 +629,12 @@ private struct DialPadCurrentAgentCard: View {
 
             HStack(spacing: 8) {
                 AgentTransportPill(title: "VoWLAN", online: agent.vowlanOnline, enabled: true)
-                AgentTransportPill(title: "VoBLE", online: agent.bluetoothOnline, enabled: true)
-                AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled, lastConfirmed: true)
+                if DedicatedCallPolicy.vowlanOnly {
+                    AgentPushSMSPills(agentID: agent.id).id(agent.id)
+                } else {
+                    AgentTransportPill(title: "VoBLE", online: agent.bluetoothOnline, enabled: true)
+                    AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled, lastConfirmed: true)
+                }
                 Spacer(minLength: 0)
                 Text(agent.agentKindTitle)
                     .font(.caption2)
@@ -726,8 +735,12 @@ private struct PairedAndroidAgentsView: View {
                     }
                     HStack(spacing: 8) {
                         AgentTransportPill(title: "VoWLAN", online: agent.vowlanOnline, enabled: true)
-                        AgentTransportPill(title: "VoBLE", online: agent.bluetoothOnline, enabled: true)
-                        AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled, lastConfirmed: true)
+                        if DedicatedCallPolicy.vowlanOnly {
+                            AgentPushSMSPills(agentID: agent.id).id(agent.id)
+                        } else {
+                            AgentTransportPill(title: "VoBLE", online: agent.bluetoothOnline, enabled: true)
+                            AgentTransportPill(title: "云端", online: agent.cloudOnline, enabled: cloudModeEnabled, lastConfirmed: true)
+                        }
                         Spacer()
                         Text(agent.agentKindTitle)
                             .font(.caption)
@@ -780,23 +793,19 @@ enum DialToneTiming {
     static func releaseDelay(held: TimeInterval) -> TimeInterval { max(0, minimumDuration - max(0, held)) }
 }
 
-@MainActor private final class LocalDialTone {
-    static let shared = LocalDialTone()
-    private var player: AVAudioPlayer?
-    private var startedAt: TimeInterval = 0
-    private var releaseTask: Task<Void, Never>?
-    func start(_ digit: String) {
-        stop()
+enum LocalDialToneWaveform {
+    static func wavData(for digit: String) -> Data? {
+        guard digit.count == 1 else { return nil }
         let rows = ["123", "456", "789", "*0#"]
         guard let row = rows.firstIndex(where: { $0.contains(digit) }),
-              let column = rows[row].firstIndex(of: Character(digit)) else { return }
+              let column = rows[row].firstIndex(of: Character(digit)) else { return nil }
         let low = [697.0,770,852,941][row], high = [1209.0,1336,1477][rows[row].distance(from: rows[row].startIndex, to: column)]
-        let rate = 44100, count = 8820
+        // Whole-second integer-frequency cycles join without periodic fades.
+        let rate = 44100, count = 44100
         var pcm = Data()
         for n in 0..<count {
             let t = Double(n) / Double(rate)
-            let envelope = min(1, min(Double(n)/160, Double(count-1-n)/160))
-            var sample = Int16((sin(2 * .pi * low * t) + sin(2 * .pi * high * t)) * 4500 * envelope).littleEndian
+            var sample = Int16((sin(2 * .pi * low * t) + sin(2 * .pi * high * t)) * 4500).littleEndian
             withUnsafeBytes(of: &sample) { pcm.append(contentsOf: $0) }
         }
         var wav = Data()
@@ -804,9 +813,24 @@ enum DialToneTiming {
         wav.append(Data("RIFF".utf8)); word(UInt32(36 + pcm.count)); wav.append(Data("WAVEfmt ".utf8))
         word(UInt32(16)); word(UInt16(1)); word(UInt16(1)); word(UInt32(rate)); word(UInt32(rate*2)); word(UInt16(2)); word(UInt16(16))
         wav.append(Data("data".utf8)); word(UInt32(pcm.count)); wav.append(pcm)
+        return wav
+    }
+}
+
+@MainActor private final class LocalDialTone {
+    static let shared = LocalDialTone()
+    private var player: AVAudioPlayer?
+    private var cachedTones: [String: Data] = [:]
+    private var startedAt: TimeInterval = 0
+    private var releaseTask: Task<Void, Never>?
+    func start(_ digit: String) {
+        stop()
+        guard let wav = cachedTones[digit] ?? LocalDialToneWaveform.wavData(for: digit) else { return }
+        cachedTones[digit] = wav
         // Never change AVAudioSession category/activation or PCM routing.
         startedAt = ProcessInfo.processInfo.systemUptime
-        player = try? AVAudioPlayer(data: wav); player?.numberOfLoops = -1; player?.volume = 0.55; player?.play()
+        player = try? AVAudioPlayer(data: wav); player?.numberOfLoops = -1; player?.volume = 0; player?.play()
+        player?.setVolume(0.55, fadeDuration: 0.005)
     }
     func stop(respectingMinimum: Bool = false) {
         releaseTask?.cancel(); releaseTask = nil
@@ -818,13 +842,22 @@ enum DialToneTiming {
             }
             return
         }
-        player?.stop(); player = nil
+        guard let endingPlayer = player else { return }
+        player = nil
+        // Stopping at an arbitrary phase produces a broadband click. Fade
+        // this captured player only; a later key owns a different instance.
+        endingPlayer.setVolume(0, fadeDuration: 0.02)
+        Task { @MainActor in
+            defer { endingPlayer.stop() }
+            do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
+        }
     }
 }
 
 // MARK: - 最近通话
 
 struct RecentsView: View {
+    @Environment(\.scenePhase) private var recentsScenePhase
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var contacts: ContactStore
     let onCall: (String) -> Void
@@ -904,6 +937,16 @@ struct RecentsView: View {
                     .listRowInsets(.init(top: 0, leading: PhoneListMetrics.horizontalInset,
                                          bottom: 0, trailing: PhoneListMetrics.horizontalInset))
                     .alignmentGuide(.listRowSeparatorLeading) { _ in PhoneListMetrics.separatorLeading }
+                    .onAppear {
+                        if recentsScenePhase == .active, model.inAppPresentedCall == nil {
+                            model.markMissedCallsSeen(group.records)
+                        }
+                    }
+                    .onChange(of: group.records) { records in
+                        if recentsScenePhase == .active, model.inAppPresentedCall == nil {
+                            model.markMissedCallsSeen(records)
+                        }
+                    }
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
                         if group.records.contains(where: { model.unseenMissedCallIDs.contains($0.id) }) {
                             Button { model.markMissedCallsSeen(group.records) } label: { Label("标为已读", systemImage: "checkmark") }
@@ -979,7 +1022,6 @@ struct RecentsView: View {
                                 if call.missed { Text("未接通").font(.caption).foregroundStyle(.red) }
                                 else if let duration = call.connectedDuration { Text("通话时长 \(Int(duration) / 60) 分 \(Int(duration) % 60) 秒").font(.caption).foregroundStyle(.secondary) }
                                 else { Text("通话时长未记录").font(.caption).foregroundStyle(.secondary) }
-                                if let slot = call.slotIndex, slot >= 0 { Text("SIM \(slot + 1)").font(.caption).foregroundStyle(.secondary) }
                             }
                         }.padding(.vertical, 5)
                     }
@@ -1080,6 +1122,7 @@ private struct SMSCompactActionsMenu: UIViewRepresentable {
 }
 
 struct MessagesView: View {
+    @State private var decryptFailures = AirSIMHealthStore.load().failures.filter { !$0.resolved }
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var contacts: ContactStore
     @Binding var pendingRecipient: String?
@@ -1100,6 +1143,14 @@ struct MessagesView: View {
         Group {
             // Outside explicit deletion mode, row taps belong to navigation, not selection.
             List(selection: state.editMode.isEditing ? $state.selectedConversations : nil) {
+                if !decryptFailures.isEmpty {
+                    NavigationLink {
+                        AirSIMPushHealthView().environmentObject(model)
+                    } label: {
+                        Label("有 \(decryptFailures.count) 条短信解密异常，查看设备与恢复步骤", systemImage: "exclamationmark.lock")
+                            .font(.subheadline).foregroundStyle(.orange)
+                    }
+                }
                 if conversations.isEmpty {
                     EmptyStateView(title: state.searchText.isEmpty ? L10n.t("暂无短信") : "未找到匹配短信", systemImage: state.searchText.isEmpty ? "message" : "magnifyingglass")
                         .listRowBackground(Color.clear)
@@ -1142,6 +1193,10 @@ struct MessagesView: View {
                     }
                 }
             }
+            .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+                decryptFailures = AirSIMHealthStore.load().failures.filter { !$0.resolved }
+            }
+            .onAppear { decryptFailures = AirSIMHealthStore.load().failures.filter { !$0.resolved } }
             .listStyle(.plain)
             .environment(\.editMode, $state.editMode)
             .scrollContentBackground(.hidden)
@@ -2390,6 +2445,9 @@ struct ActiveCallView: View {
             Text(model.callAudioStatusText)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.88))
+            if model.audio.audioHealthWarning != nil {
+                Button("恢复播放") { model.audio.recoverLocalPlayback() }.font(.caption)
+            }
             if model.audio.active, !model.audio.routeDescription.isEmpty {
                 Text("· \(model.audio.routeDescription)")
                     .font(.caption)
@@ -2821,6 +2879,94 @@ enum PhoneRegionLookup {
         let region = serviceDescription(for: number) ?? region(for: number)
         let slot = slotIndex.flatMap { $0 >= 0 ? "SIM \($0 + 1)" : nil }
         if let region { return [slot, region].compactMap { $0 }.joined(separator: " · ") }
-        return fallbackSIM ?? slot
+        return slot ?? fallbackSIM
+    }
+}
+
+/// Push checks describe prerequisites, never claim an APNs delivery was proven.
+private struct AgentPushSMSPills: View {
+    let agentID: String
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var pushText = "推送未检查"
+    @State private var pushColor: Color = .secondary
+    @State private var encryptionText = "短信未检查"
+    @State private var encryptionColor: Color = .secondary
+    @State private var checking = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            pill(pushText, color: pushColor)
+            pill(encryptionText, color: encryptionColor)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("推送检查仅验证权限、Relay 与此设备心跳，不保证通知已送达；加密状态表示本机已保存协商密钥。详情见连接与推送诊断。")
+        .task(id: agentID) { await refresh() }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { Task { await refresh() } }
+        }
+    }
+
+    private func pill(_ text: String, color: Color) -> some View {
+        Text(text).font(.caption2.weight(.medium))
+            .lineLimit(1).minimumScaleFactor(0.8)
+            .foregroundStyle(color)
+            .padding(.horizontal, 7).padding(.vertical, 5)
+            .background(color.opacity(0.12), in: Capsule())
+    }
+
+    @MainActor private func refresh() async {
+        guard !checking else { return }
+        checking = true
+        defer { checking = false }
+        do {
+            if let record = try KeychainE2EKeyStore.shared.record(agentID: agentID) {
+                let valid = record.key.count == 32 && !record.deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                encryptionText = valid ? "短信已加密" : "短信密钥异常"
+                encryptionColor = valid ? .green : .orange
+            } else {
+                encryptionText = "短信未协商"; encryptionColor = .secondary
+            }
+        } catch E2EKeyStoreError.locked {
+            encryptionText = "加密待解锁"; encryptionColor = .secondary
+        } catch {
+            encryptionText = "短信密钥不可用"; encryptionColor = .orange
+        }
+        guard CloudSignalingPreference.isEnabled(), !RelayEgressGate.shared.isBlocked else {
+            pushText = "推送已关闭"; pushColor = .secondary; return
+        }
+        pushText = "推送检查中"; pushColor = .secondary
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        guard !Task.isCancelled else { pushText = "推送未检查"; return }
+        guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional || settings.authorizationStatus == .ephemeral else {
+            pushText = "推送未授权"; pushColor = .orange; return
+        }
+        do {
+            async let health = VoIPPushController.shared.checkRelayForDiagnostics()
+            async let heartbeat = VoIPPushController.shared.fetchCloudAgentStatusForDiagnostics(allowLocalMode: true)
+            let (_, status) = try await (health, heartbeat)
+            guard !Task.isCancelled else { pushText = "推送未检查"; return }
+            guard let device = status.agents.first(where: { $0.agentID == agentID }) else {
+                pushText = "推送未注册"; pushColor = .orange; return
+            }
+            pushText = device.cloudOnline ? "推送检查通过" : "推送心跳过期"
+            pushColor = device.cloudOnline ? .green : .orange
+        } catch {
+            if Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                pushText = "推送未检查"; pushColor = .secondary
+            } else {
+                if let statusError = error as? CloudAgentStatusError {
+                    switch statusError {
+                    case .requestLimitExceeded: pushText = "推送额度已用尽"
+                    case .relayHTTP(401), .relayHTTP(403): pushText = "推送认证失败"
+                    case .unavailable: pushText = "推送未配置"
+                    default: pushText = "推送响应异常"
+                    }
+                } else if let network = error as? URLError {
+                    pushText = network.code == .timedOut ? "推送检查超时" : "推送网络异常"
+                } else { pushText = "推送检查失败" }
+                pushColor = .orange
+                PushDiagnostics.record("拨号页推送检查失败", error: error)
+            }
+        }
     }
 }

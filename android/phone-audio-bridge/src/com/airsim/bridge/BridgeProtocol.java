@@ -45,6 +45,17 @@ final class BridgeProtocol {
         }
     }
 
+    static boolean readReceiveOnlyHello(InputStream input) throws IOException {
+        byte[] hello = new byte[CLIENT_HELLO.length];
+        int first = input.read();
+        if (first < 0) throw new ProbeClosed();
+        hello[0] = (byte) first;
+        new java.io.DataInputStream(input).readFully(hello, 1, hello.length - 1);
+        if (Arrays.equals(hello, CLIENT_HELLO)) return false;
+        if (Arrays.equals(hello, "AIRSIMEM01\n".getBytes(StandardCharsets.US_ASCII))) return true;
+        throw new IllegalArgumentException("invalid PCM handshake");
+    }
+
     static void writeReady(OutputStream output) throws IOException {
         output.write(SERVER_READY);
         output.flush();

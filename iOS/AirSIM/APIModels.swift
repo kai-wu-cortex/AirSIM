@@ -22,7 +22,7 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     var slotIndex: Int? = nil
     var slotID: Int? = nil
     var connectedDuration: TimeInterval? {
-        guard !missed, let connectedAt, let endedAt, endedAt >= connectedAt else { return nil }
+        guard !missed, let connectedAt, let endedAt, endedAt.timeIntervalSinceReferenceDate >= connectedAt.timeIntervalSinceReferenceDate else { return nil }
         return endedAt.timeIntervalSince(connectedAt)
     }
     var isTerminal: Bool { endedAt != nil || state == "ended" || state == "failed" }
@@ -1439,5 +1439,33 @@ struct RecentCallGroup: Identifiable {
             .map { key, calls in Self(id: key, records: calls.sorted {
                 $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt > $1.startedAt
             }) }.sorted { $0.latest.startedAt == $1.latest.startedAt ? $0.id < $1.id : $0.latest.startedAt > $1.latest.startedAt }
+    }
+}
+
+/// A command ACK or a different active call does not prove this call has ended.
+enum CallEndEvidence {
+    static func confirms(_ status: CallStatus, id: String) -> Bool {
+        guard !id.isEmpty else { return false }
+        func matches(_ call: CallRecord) -> Bool {
+            [call.id, call.androidID, call.sourceCallID].compactMap { $0 }.contains(id)
+        }
+        if let active = status.active, matches(active) { return active.isTerminal }
+        return (status.history ?? []).contains { matches($0) && $0.isTerminal }
+    }
+}
+struct AndroidReadinessResponse: Decodable {
+    let readiness: AndroidReadiness?
+}
+struct AndroidReadiness: Decodable {
+    let defaultDialer: Bool
+    let phonePermission: Bool
+    let statePermission: Bool
+    let permissionChannel: Bool
+    let bridgeProcess: Bool
+    let paired: Bool
+    let uptimeSeconds: Double
+    enum CodingKeys: String, CodingKey {
+        case defaultDialer = "default_dialer", phonePermission = "phone_permission", statePermission = "state_permission"
+        case permissionChannel = "permission_channel", bridgeProcess = "bridge_process", paired, uptimeSeconds = "uptime_seconds"
     }
 }

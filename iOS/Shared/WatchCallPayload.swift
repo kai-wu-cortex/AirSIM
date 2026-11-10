@@ -362,3 +362,152 @@ struct WatchIncomingNotificationPlan: Equatable, Sendable {
         body = parts.isEmpty ? "模块收到来电" : parts.joined(separator: " · ")
     }
 }
+
+// Watch SMS uses the paired companion channel, never forwards SMS encryption keys.
+struct WatchSMSDevice: Codable, Equatable, Identifiable {
+    let id: String
+    let name: String
+}
+struct WatchSMSRow: Codable, Equatable, Identifiable {
+    let id: String
+    let agentID: String
+    let sender: String
+    let preview: String
+    let timestamp: Date
+    let sim: String?
+    let outgoing: Bool
+    let unread: Bool
+}
+struct WatchSMSPage: Codable, Equatable {
+    let devices: [WatchSMSDevice]
+    let selectedAgentID: String?
+    var rows: [WatchSMSRow]
+    let total: Int
+    let generatedAt: Date
+}
+struct WatchSMSDetail: Codable, Equatable {
+    let row: WatchSMSRow
+    let body: String
+    let truncated: Bool
+}
+enum WatchSMSPolicy {
+    static let payloadBudget = 28_000
+    static func selected(requested: String?, current: String?, paired: [String]) -> String? {
+        if let requested { return paired.contains(requested) ? requested : nil }
+        if let current, paired.contains(current) { return current }
+        return paired.count == 1 ? paired.first : nil
+    }
+    static func permits(sourceAgentID: String?, selectedAgentID: String?, pairedIDs: [String]) -> Bool {
+        guard let sourceAgentID, let selectedAgentID else { return false }
+        return sourceAgentID == selectedAgentID && pairedIDs.contains(sourceAgentID)
+    }
+    static func prefix(_ text: String, utf8Limit: Int) -> String {
+        guard utf8Limit > 0 else { return "" }
+        var count = 0
+        return String(text.prefix { character in
+            let bytes = String(character).utf8.count
+            guard count + bytes <= utf8Limit else { return false }
+            count += bytes
+            return true
+        })
+    }
+    static func boundedDetail(row: WatchSMSRow, body: String) throws -> WatchSMSDetail {
+        var limit = 20_000
+        while true {
+            let text = prefix(body, utf8Limit: limit)
+            let detail = WatchSMSDetail(row: row, body: text, truncated: text != body)
+            if try JSONEncoder().encode(detail).count <= payloadBudget { return detail }
+            guard limit > 0 else { throw NSError(domain: "WatchSMSPayload", code: 1) }
+            limit /= 2
+        }
+    }
+    static func matches(_ row: WatchSMSRow, agentID: String, id: String) -> Bool {
+        row.agentID == agentID && row.id == id
+    }
+}
+
+/// DTMF is a scoped command to the connected Android call, never microphone audio.
+enum WatchDTMFPolicy {
+    static func validDigit(_ digit: String) -> Bool {
+        digit.utf8.count == 1 && "0123456789*#".contains(digit)
+    }
+    static func canSend(phase: String?, backendID: String?, expectedID: String) -> Bool {
+        phase == "active" && backendID == expectedID && !expectedID.isEmpty
+    }
+}
+
+extension WatchCallMirrorPolicy {
+    /// An active iPhone-owned call may already be tombstoned against late
+    /// incoming pushes; its matching terminal mirror must still clear display.
+    static func acceptsTerminalForDisplay(_ incoming: WatchCallPayload, current: WatchCallPayload) -> Bool {
+        incoming.phase == .ended && incoming.matches(callID: current.callID, callUUID: current.callUUID)
+    }
+}
+
+struct WatchSMSConversation: Identifiable, Equatable {
+    let id: String
+    let agentID: String
+    let peer: String
+    let rows: [WatchSMSRow]
+    var latest: WatchSMSRow { rows[rows.count - 1] }
+    var unreadCount: Int { rows.filter { !$0.outgoing && $0.unread }.count }
+}
+
+enum WatchSMSConversationPolicy {
+    static func peer(_ sender: String) -> String {
+        let raw = sender.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "" }
+        let allowed = CharacterSet(charactersIn: "+0123456789 ()-.\t")
+        guard raw.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return "text:" + raw }
+        var digits = raw.filter { $0.isASCII && $0.isNumber }
+        guard !digits.isEmpty else { return "text:" + raw }
+        let international = raw.hasPrefix("+") || digits.hasPrefix("00")
+        if digits.hasPrefix("00") { digits = String(digits.dropFirst(2)) }
+        if international {
+            if digits.hasPrefix("86"), digits.count > 2 { return "number:" + digits.dropFirst(2) }
+            return "international:" + digits
+        }
+        if digits.count == 13, digits.hasPrefix("861") { digits = String(digits.dropFirst(2)) }
+        return "number:" + digits
+    }
+    static func groups(_ rows: [WatchSMSRow]) -> [WatchSMSConversation] {
+        let grouped = Dictionary(grouping: rows) { row in
+            let value = peer(row.sender)
+            return Data(row.agentID.utf8).base64EncodedString() + "." + Data((value.isEmpty ? "unknown:" + row.id : value).utf8).base64EncodedString()
+        }
+        return grouped.map { id, values in
+            let sorted = values.sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id : $0.timestamp < $1.timestamp }
+            return WatchSMSConversation(id: id, agentID: sorted[0].agentID, peer: peer(sorted[0].sender), rows: sorted)
+        }.sorted { $0.latest.timestamp == $1.latest.timestamp ? $0.id < $1.id : $0.latest.timestamp > $1.latest.timestamp }
+    }
+}
+
+
+struct WatchSMSReplyOptions: Codable {
+    struct Slot: Codable, Identifiable {
+        let id: String
+        let label: String
+        let carrier: String?
+    }
+    let recipient: String
+    let slots: [Slot]
+    let selectedID: String?
+}
+
+enum WatchSMSReplyOutcome {
+    case sent
+    case failed(String)
+    case uncertain
+}
+
+extension WatchSMSConversationPolicy {
+    static func replyNumber(_ sender: String) -> String? {
+        let raw = sender.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowed = CharacterSet(charactersIn: "+0123456789 ()-.\t")
+        guard raw.unicodeScalars.allSatisfy(allowed.contains),
+              !raw.dropFirst().contains("+") else { return nil }
+        let digits = raw.filter { $0.isASCII && $0.isNumber }
+        guard (1...30).contains(digits.count) else { return nil }
+        return raw.hasPrefix("+") ? "+" + digits : digits
+    }
+}

@@ -203,6 +203,7 @@ enum CloudModePreference {
     static let key = "airsim.cloud-audio-relay-enabled"
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if DedicatedCallPolicy.vowlanOnly { return false }
         if defaults.object(forKey: ConnectionModePreference.key) != nil {
             return ConnectionModeRuntimePolicy(
                 mode: ConnectionModePreference.selected(defaults: defaults)
@@ -268,10 +269,18 @@ enum RelayHealthValidation {
         let ok: Bool
         let service: String
         let version: String
+        let capabilities: CapabilityFlags?
     }
 
     static func accepts(statusCode: Int, data: Data) -> Bool {
         version(statusCode: statusCode, data: data) != nil
+    }
+
+    /// The Relay forwards end-to-end encrypted SMS (`capabilities.e2e_sms: 1`, issue #24).
+    static func supportsE2ESMS(statusCode: Int, data: Data) -> Bool {
+        guard version(statusCode: statusCode, data: data) != nil,
+              let payload = try? JSONDecoder().decode(Payload.self, from: data) else { return false }
+        return payload.capabilities?.e2eSMS == true
     }
 
     static func version(statusCode: Int, data: Data) -> String? {
@@ -534,6 +543,8 @@ enum PushDiagnostics {
             safe["error_domain"] = ns.domain
             safe["error_code"] = String(ns.code)
             if case let APIError.http(status, _) = error { safe["http_status"] = String(status) }
+            if case let CloudAgentStatusError.relayHTTP(status) = error { safe["http_status"] = String(status) }
+            if case CloudAgentStatusError.requestLimitExceeded = error { safe["failure_kind"] = "relay_quota" }
         }
         let details = safe
         Task {
@@ -566,6 +577,7 @@ enum CallTransportPolicy {
         cloudMediaAvailable: Bool,
         cloudMediaEnabled: Bool = true
     ) -> CallTransport? {
+        if DedicatedCallPolicy.vowlanOnly { return vowlanReady ? .vowlan : nil }
         switch mode {
         case .automatic:
             if vowlanReady { return .vowlan }
@@ -844,12 +856,19 @@ enum RemoteSMSPushError: LocalizedError {
     case unsupportedEvent
     case incomplete
     case invalidTimestamp
+    case undecryptable
+    case locked
+    /// A plaintext push naming an agent whose SMS arrive encrypted (issue #24).
+    case unencryptedFromEncryptedAgent
 
     var errorDescription: String? {
         switch self {
         case .unsupportedEvent: return "不是有效的新短信推送"
         case .incomplete: return "短信推送缺少必要字段"
         case .invalidTimestamp: return "短信推送时间无效"
+        case .undecryptable: return "加密短信无法解密"
+        case .locked: return "解锁前无法读取短信密钥"
+        case .unencryptedFromEncryptedAgent: return "已忽略未加密的短信推送"
         }
     }
 }
@@ -864,13 +883,22 @@ struct IncomingRemoteSMS: Equatable, Sendable {
     let contentTruncated: Bool
     let simSlot: String?
 
-    init(userInfo: [AnyHashable: Any]) throws {
-        guard userInfo["event"] as? String == "incoming_sms" else {
-            throw RemoteSMSPushError.unsupportedEvent
+    /// End-to-end encrypted pushes (issue #24) are opened with the agent's stored key; a plaintext
+    /// push from an agent that has a key is refused, since only a forger sends one.
+    init(userInfo: [AnyHashable: Any], keyStore: any E2EKeyStoring = KeychainE2EKeyStore.shared) throws {
+        let decrypted: E2ESMS.Plaintext?
+        switch E2ESMSPush.open(userInfo, store: keyStore) {
+        case .notSMS: throw RemoteSMSPushError.unsupportedEvent
+        case .plaintext: decrypted = nil
+        case .decrypted(let sms): decrypted = sms
+        case .locked: throw RemoteSMSPushError.locked
+        case .undecryptable: throw RemoteSMSPushError.undecryptable
+        case .unencryptedFromEncryptedAgent: throw RemoteSMSPushError.unencryptedFromEncryptedAgent
         }
         guard let deliveryID = Self.nonEmpty(userInfo["delivery_id"] as? String),
-              let sender = Self.nonEmpty(userInfo["sender"] as? String),
-              let content = Self.nonEmpty(userInfo["content"] as? String) else {
+              let sender = decrypted.map({ E2ESMSPush.displaySender($0.sender) })
+                ?? Self.nonEmpty(userInfo["sender"] as? String),
+              let content = Self.nonEmpty(decrypted?.content ?? (userInfo["content"] as? String)) else {
             throw RemoteSMSPushError.incomplete
         }
         guard let rawTimestamp = userInfo["timestamp"] as? String,
@@ -881,10 +909,16 @@ struct IncomingRemoteSMS: Equatable, Sendable {
         agentID = Self.nonEmpty(userInfo["agent_id"] as? String)
         self.sender = sender
         self.content = content
-        code = Self.nonEmpty(userInfo["code"] as? String)
+        // Only plaintext pushes carry an extracted code.
+        code = decrypted == nil ? Self.nonEmpty(userInfo["code"] as? String) : nil
         self.timestamp = timestamp
-        contentTruncated = userInfo["content_truncated"] as? Bool ?? false
-        simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
+        contentTruncated = decrypted?.truncated ?? (userInfo["content_truncated"] as? Bool ?? false)
+        // A decrypted SMS takes its SIM slot only from the sealed text: the Relay could add a clear one.
+        if let decrypted {
+            simSlot = E2ESMSPush.simSlot(decrypted.simSlot)
+        } else {
+            simSlot = Self.nonEmpty(userInfo["sim_slot"] as? String)
+        }
     }
 
     private static func parseTimestamp(_ value: String) -> Date? {
@@ -1131,6 +1165,7 @@ final class VoIPPushController: NSObject {
     }
 
     func updateRelayURL(_ value: String) {
+        let previous = configuredRelayURL()
         let normalized = RelayConfiguration.effectiveURL(
             stored: value,
             buildSetting: nil,
@@ -1141,6 +1176,8 @@ final class VoIPPushController: NSObject {
         } else {
             UserDefaults.standard.set(normalized, forKey: Keys.relayURL)
         }
+        // E2E SMS keys belong to the Relay they were negotiated through (issue #24).
+        E2EPairingPolicy.relayChanged(from: previous, to: configuredRelayURL(), store: KeychainE2EKeyStore.shared)
         resetRegistrationBackoff()
         Task { await syncRegistration() }
     }
@@ -1349,40 +1386,21 @@ final class VoIPPushController: NSObject {
             return report
         }
 
-        report.update(.deviceRegistration, state: .running, detail: "验证设备密钥与注册接口")
-        onUpdate(report)
-        do {
-            // Self-test must also repair reachable paired gateways after an APNs
-            // environment change; never enable a local-only pairing implicitly.
-            await syncRegistration()
-            try await registerDirectlyWithRelay(registration)
-            report.update(.deviceRegistration, state: .passed,
-                detail: "Relay 已接受设备注册；已尝试同步可达网关。网关失败请查看 Verbose 的推送注册日志；此项不代表来电已送达。")
-            onUpdate(report)
-        } catch {
-            report.fail(.deviceRegistration, detail: "注册被拒绝：\(error.localizedDescription)")
-            onUpdate(report)
-            return report
-        }
-
-        report.update(.agentDirectory, state: .running, detail: "查询 Relay 已登记的 Android Agent")
+        report.update(.deviceRegistration, state: .running, detail: "读取并核验 Relay 已登记的设备凭据，不重复写入注册")
         onUpdate(report)
         let status: CloudAgentStatus
         do {
-            do {
-                status = try await fetchCloudAgentStatusForDiagnostics(allowLocalMode: true)
-            } catch {
-                // One cold status-registry timeout must not turn this into a
-                // permanent cloud-offline verdict. Retry once before reporting.
-                try await Task.sleep(for: .milliseconds(500))
-                status = try await fetchCloudAgentStatusForDiagnostics(allowLocalMode: true)
-            }
+            status = try await fetchCloudAgentStatusForDiagnostics(allowLocalMode: true, attempts: 2)
+            report.update(.deviceRegistration, state: .passed,
+                detail: "Relay 已通过现有设备凭据鉴权；正常注册同步独立运行，此项不代表推送已送达。")
+            onUpdate(report)
         } catch {
-            report.fail(.agentDirectory,
-                detail: "Relay 状态查询超时：\(error.localizedDescription)\n云端拨号仍会按绑定/缓存的 Agent 尝试，以 enqueue 结果为准。")
+            report.fail(.deviceRegistration, detail: "注册状态未能核实：\(error.localizedDescription)；网络超时不等于设备未注册。")
             onUpdate(report)
             return report
         }
+        report.update(.agentDirectory, state: .running, detail: "分析本次实时返回的安卓记录")
+        onUpdate(report)
         guard !status.agents.isEmpty else {
             report.fail(.agentDirectory,
                 detail: "Relay 没有 Android Agent 记录：Android 未完成云端注册或从未发送心跳")
@@ -1460,7 +1478,7 @@ final class VoIPPushController: NSObject {
     }
 
     /// 检查单即使在公网 PCM 关闭时也需要读取心跳，避免用户无法判断开启条件。
-    func fetchCloudAgentStatusForDiagnostics(allowLocalMode: Bool = false) async throws -> CloudAgentStatus {
+    func fetchCloudAgentStatusForDiagnostics(allowLocalMode: Bool = false, attempts: Int = 3) async throws -> CloudAgentStatus {
         guard !RelayEgressGate.shared.isBlocked,
               !UserDefaults.standard.bool(forKey: RelayEgressGate.persistenceKey) else {
             throw RelayEgressError.disabled
@@ -1493,9 +1511,10 @@ final class VoIPPushController: NSObject {
             deviceSecret: registration.deviceSecret
         ))
 
-        let (data, response) = try await RelayEgressGate.shared.send(request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw CloudAgentStatusError.invalidResponse
+        let (data, response) = try await Self.sendDiagnosticRequest(request, attempts: attempts)
+        guard let http = response as? HTTPURLResponse else { throw CloudAgentStatusError.invalidResponse }
+        guard http.statusCode == 200 else {
+            throw CloudAgentStatusError.relayFailure(statusCode: http.statusCode, data: data)
         }
         return try JSONDecoder().decode(CloudAgentStatus.self, from: data)
     }
@@ -1507,6 +1526,7 @@ final class VoIPPushController: NSObject {
         mediaTransport: CloudMediaTransport? = nil,
         timeout: TimeInterval = 6
     ) async throws -> IncomingVoIPCall {
+        guard !DedicatedCallPolicy.vowlanOnly else { throw CloudCommandError.unavailable }
         let commandID = operationID
         guard let registration = currentRegistration() else { throw CloudCommandError.unavailable }
         let enqueue = try await enqueueCloudCommand(
@@ -1669,6 +1689,11 @@ final class VoIPPushController: NSObject {
     }
 
     /// 验证当前 iPhone 到 Relay 的 HTTPS 控制面，不携带设备密钥。
+    func checkRelayForDiagnostics() async throws -> String {
+        guard !RelayEgressGate.shared.isBlocked, CloudSignalingPreference.isEnabled(),
+              let registration = currentRegistration(allowLocalMode: true) else { throw CloudAgentStatusError.unavailable }
+        return try await fetchRelayHealthVersion(registration: registration)
+    }
     func relayHealthReachable() async -> Bool {
         guard let registration = currentRegistration(),
               (try? await fetchRelayHealthVersion(registration: registration)) != nil else { return false }
@@ -1679,35 +1704,76 @@ final class VoIPPushController: NSObject {
         guard let url = RelayEndpoint.url(base: registration.relayURL, path: "healthz") else {
             throw CloudAgentStatusError.invalidRelayURL
         }
-        // A single cold DNS/TLS handshake to Cloudflare is not a reliable
-        // identity verdict. Retry the read-only health probe a few times so a
-        // transient first-packet loss does not fail the whole self-test.
-        var lastError: Error?
-        for attempt in 1...3 {
-            do {
-                return try await fetchRelayHealthVersionOnce(url: url)
-            } catch {
-                lastError = error
-                if attempt < 3 { try? await Task.sleep(for: .milliseconds(300 * attempt)) }
-            }
-        }
-        throw lastError ?? CloudAgentStatusError.invalidResponse
+        return try await fetchRelayHealthVersionOnce(url: url)
     }
 
-    private static let selfTestSession: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 8
-        configuration.timeoutIntervalForResource = 12
-        configuration.waitsForConnectivity = false
-        return URLSession(configuration: configuration)
-    }()
+    /// Whether the Relay that a pairing registers with forwards encrypted SMS. `/healthz` needs no
+    /// registration, so this works before the first cloud pairing. A "no" makes Android drop an
+    /// existing key, so dropped connections and 5xx are retried like the self-test's health probe;
+    /// any other answer is final.
+    nonisolated static func relaySupportsE2ESMS(
+        relayURL: String,
+        send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
+            try await RelayEgressGate.shared.send($0)
+        }
+    ) async -> Bool {
+        guard let url = RelayEndpoint.url(base: relayURL, path: "healthz") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 6
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        for attempt in 1...3 {
+            if attempt > 1 { try? await Task.sleep(for: .milliseconds(300 * (attempt - 1))) }
+            guard let (data, response) = try? await send(request),
+                  let http = response as? HTTPURLResponse, http.statusCode < 500 else { continue }
+            return RelayHealthValidation.supportsE2ESMS(statusCode: http.statusCode, data: data)
+        }
+        return false
+    }
+
+    nonisolated private static let selfTestSessions = RelayDiagnosticSessionPool()
+
+    nonisolated static func sendDiagnosticRequest(
+        _ request: URLRequest,
+        attempts: Int = 3,
+        send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = {
+            try await RelayEgressGate.shared.send($0, using: selfTestSessions.current)
+        }
+    ) async throws -> (Data, URLResponse) {
+        let limit = max(1, min(3, attempts))
+        for attempt in 0..<limit {
+            try Task.checkCancellation()
+            do {
+                let result = try await send(request)
+                try Task.checkCancellation()
+                if let http = result.1 as? HTTPURLResponse,
+                   [502, 503, 504].contains(http.statusCode), attempt < limit - 1 {
+                    try await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
+                    continue
+                }
+                return result
+            } catch {
+                try Task.checkCancellation()
+                let transient = (error as? URLError).map {
+                    [.timedOut, .networkConnectionLost, .cannotConnectToHost, .dnsLookupFailed,
+                     .cannotFindHost, .notConnectedToInternet].contains($0.code)
+                } ?? false
+                PushDiagnostics.record("推送实时检查请求失败", error: error,
+                    fields: ["endpoint": request.url?.lastPathComponent ?? "unknown", "attempt": String(attempt + 1)])
+                guard transient, attempt < limit - 1 else { throw error }
+                Self.selfTestSessions.rotate()
+                try await Task.sleep(for: .milliseconds(200 * (attempt + 1)))
+            }
+        }
+        throw CloudAgentStatusError.invalidResponse
+    }
 
     private func fetchRelayHealthVersionOnce(url: URL) async throws -> String {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 6
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        let (data, response) = try await RelayEgressGate.shared.send(request)
+        let (data, response) = try await Self.sendDiagnosticRequest(request)
         guard let http = response as? HTTPURLResponse else {
             throw CloudAgentStatusError.invalidResponse
         }
@@ -1720,14 +1786,14 @@ final class VoIPPushController: NSObject {
         return version
     }
 
-    private func registerDirectlyWithRelay(_ registration: AgentPushRegistration) async throws {
+    private func registerDirectlyWithRelay(_ registration: AgentPushRegistration, diagnostics: Bool = false) async throws {
         guard let url = RelayEndpoint.url(
             base: registration.relayURL,
             path: "v1/devices/register"
         ) else { throw CloudAgentStatusError.invalidRelayURL }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 8
+        request.timeoutInterval = diagnostics ? 6 : 8
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         // Webhook URLs/tokens are local pairing material. Relay only needs push
@@ -1735,7 +1801,10 @@ final class VoIPPushController: NSObject {
         var relayRegistration = registration
         relayRegistration.notificationForwarding = nil
         request.httpBody = try JSONEncoder().encode(relayRegistration)
-        let (data, response) = try await RelayEgressGate.shared.send(request)
+        let (data, response): (Data, URLResponse)
+        if diagnostics {
+            (data, response) = try await RelayEgressGate.shared.send(request, using: Self.selfTestSessions.current)
+        } else { (data, response) = try await RelayEgressGate.shared.send(request) }
 #if DEBUG
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             let detail = String(data: data.prefix(1_024), encoding: .utf8) ?? "<非文本响应>"
@@ -1769,6 +1838,7 @@ final class VoIPPushController: NSObject {
     }
 
     func cloudCallControlCredentials() -> CloudCallControlCredentials? {
+        guard !DedicatedCallPolicy.vowlanOnly else { return nil }
         guard let secret = Self.loadOrCreateDeviceSecret() else { return nil }
         let deviceID = PushDeviceIdentity.deviceID(deviceSecret: secret)
         let relayURL = configuredRelayURL()
@@ -1780,15 +1850,22 @@ final class VoIPPushController: NSObject {
         )
     }
 
+    /// `offerE2E` tells the pairing client it may put an E2E SMS key into the claim (issue #24).
     func performAndroidPairing<T>(
         localOnly: Bool,
-        operation: (AgentPushRegistration) async throws -> T
+        operation: (AgentPushRegistration, _ offerE2E: Bool) async throws -> T
     ) async throws -> T {
         try await pairingGate.withPairing {
             guard let registration = self.pairingRegistration(localOnly: localOnly) else {
                 throw SamsungPairingClientError.registrationUnavailable
             }
-            return try await operation(registration)
+            var offerE2E = false
+            if !localOnly {
+                let relaySupports = await Self.relaySupportsE2ESMS(relayURL: registration.relayURL)
+                offerE2E = E2EPairingPolicy.offer(localOnly: localOnly, relaySupports: relaySupports,
+                                                  keychainReady: relaySupports && KeychainE2EKeyStore.shared.canStore())
+            }
+            return try await operation(registration, offerE2E)
         }
     }
 
@@ -1919,6 +1996,7 @@ extension VoIPPushController: PKPushRegistryDelegate {
             completion()
             return
         }
+        AirSIMHealthStore.received(voip: true)
         let userInfo = payload.dictionaryPayload
         Task { @MainActor in
             PushDiagnostics.record("收到 PushKit 来电", fields: [
@@ -1949,5 +2027,16 @@ extension VoIPPushController: PKPushRegistryDelegate {
                 completion()
             }
         }
+    }
+}
+
+/// Rebuild a stale HTTPS connection after transport failure, never cache results.
+private final class RelayDiagnosticSessionPool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var session = RelayEgressGate.makeDiagnosticSession()
+    var current: URLSession { lock.lock(); defer { lock.unlock() }; return session }
+    func rotate() {
+        lock.lock(); let old = session; session = RelayEgressGate.makeDiagnosticSession(); lock.unlock()
+        old.finishTasksAndInvalidate()
     }
 }

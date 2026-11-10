@@ -43,6 +43,7 @@ public final class ShizukuBridgeUserService extends Binder {
     private boolean bridgeDesired;
     private Context serviceContext;
     private volatile LocalOutputMuteController outputMute;
+    private LocalMicrophoneMuteController microphoneMute;
     private volatile String outputStrategy = "vowlan";
     private volatile CallOutputPolicyMute callOutputPolicyMute;
     private final PCMHealthEvidence pcmEvidence = new PCMHealthEvidence();
@@ -314,16 +315,45 @@ public final class ShizukuBridgeUserService extends Binder {
     }
 
     /**
-     * @param strategy "voble" or "vowlan". Both currently resolve to the vendor's
-     *                 capture-safe policy on capture-coupled HALs (Samsung must never
-     *                 use index 0, which also silences the forwarded VOICE_DOWNLINK).
+     * VoWLAN uses built-in device output suppression without setting the global
+     * call-stream mute flag. Capture survival still requires a real-device test.
      */
     private String setLocalOutputMuted(boolean muted, String strategy) throws Exception {
         synchronized (audioLock) {
             verifyIdentity();
+            String result;
+            try { result = setLocalOutputPolicyMuted(muted, strategy); }
+            catch (Exception error) {
+                // A failed output restore must not prevent restoring the microphone.
+                if (!muted && microphoneMute != null) {
+                    try { microphoneMute.setMuted(false); }
+                    catch (Exception micFailure) { error.addSuppressed(micFailure); }
+                }
+                throw error;
+            }
+            if (microphoneMute == null && muted && !"voble".equals(strategy)) {
+                AudioManager audio = shellAudioManager();
+                microphoneMute = new LocalMicrophoneMuteController(new LocalMicrophoneMuteController.Backend() {
+                    public boolean muted() throws Exception {
+                        return audioOperations.run(audio::isMicrophoneMute);
+                    }
+                    public void setMuted(boolean value) throws Exception {
+                        audioOperations.run(() -> { audio.setMicrophoneMute(value); return null; });
+                    }
+                });
+            }
+            if (microphoneMute != null)
+                result += " " + microphoneMute.setMuted(muted && !"voble".equals(strategy));
+            return result;
+        }
+    }
+
+    private String setLocalOutputPolicyMuted(boolean muted, String strategy) throws Exception {
+        synchronized (audioLock) {
+            verifyIdentity();
             LocalOutputMuteController.Strategy desired = "voble".equals(strategy)
                     ? LocalOutputMuteController.vobleStrategy()
-                    : LocalOutputMuteController.vowlanStrategy();
+                    : LocalOutputMuteController.physicalOutputStrategy();
             if (outputMute != null && !outputStrategy.equals(strategy)) {
                 // A different policy now owns the stream. Restoring the old snapshot can
                 // only be trusted when it is still muted; if we are not applying a new
@@ -396,7 +426,6 @@ public final class ShizukuBridgeUserService extends Binder {
                 });
             }
             public void prepareOutputMute(boolean originalMuted) throws Exception {
-                if (!"samsung".equalsIgnoreCase(android.os.Build.MANUFACTURER)) return;
                 callOutputPolicyMute = CallOutputPolicyMute.prepareWithin(
                         audioOperations, new SystemCallOutputPolicy(), originalMuted);
             }
@@ -408,6 +437,11 @@ public final class ShizukuBridgeUserService extends Binder {
                     callOutputPolicyMute.apply();
                     return null;
                 });
+            }
+            public void applyOutputOnlyMute() throws Exception {
+                if (callOutputPolicyMute == null) throw new IOException("device output snapshot missing");
+                applyOutputMute();
+                if (!callOutputPolicyMute.applied()) throw new IOException("device output mute not verified");
             }
             public void restoreOutputMute() throws Exception {
                 if (callOutputPolicyMute == null) return;
@@ -435,6 +469,10 @@ public final class ShizukuBridgeUserService extends Binder {
         return audioOperations.run(() -> "muted=" + audio.isStreamMute(AudioManager.STREAM_VOICE_CALL)
                 + " volume=" + (outputMute != null && outputMute.usesMinimumVolume()
                     ? audibleCallVolume(audio) : audio.getStreamVolume(AudioManager.STREAM_VOICE_CALL))
+                + " device_output_required=" + (outputMute != null && outputMute.policyName().equals("device_output_only"))
+                + " device_output_muted=" + (callOutputPolicyMute != null && callOutputPolicyMute.verifyApplied())
+                + " microphone_required=" + (outputMute != null && outputMute.policyName().equals("device_output_only"))
+                + " microphone_muted=" + audio.isMicrophoneMute()
                 + " mode=" + audio.getMode() + " speaker=" + audio.isSpeakerphoneOn()
                 + " pcm=" + pcmRunning + " output_transport=" + outputStrategy + " output_policy="
                 + outputPolicyDiagnostic()
@@ -505,7 +543,7 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String statusLocked() {
         return "uid=" + Process.myUid()
-                + " service_revision=11"
+                + " service_revision=13"
                 + " pcm=" + (bridgeProcess != null && bridgeProcess.isAlive() ? "running" : "stopped")
                 + " local_output=" + (outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
                     : outputMute != null && outputMute.isVerifiedMuted() ? "muted" : "normal")

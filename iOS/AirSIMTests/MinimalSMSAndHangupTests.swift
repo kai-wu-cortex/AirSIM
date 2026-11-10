@@ -1,9 +1,93 @@
 import Foundation
 import XCTest
 import UIKit
+import AVFoundation
 @testable import AirSIM
 
 final class MinimalSMSAndHangupTests: XCTestCase {
+    @MainActor
+    func testEarlyMediaEngineRestartsAfterOutputChangeAndStaysStoppedAfterHangup() async throws {
+        let engine = AVAudioEngine()
+        let audio = AudioSessionController(toneOutput: FixtureToneOutput(), makeEngine: { engine })
+        defer { audio.deactivate() }
+        let owner = UUID()
+        let credential = try VoWLANCredential(secret: Data(repeating: 7, count: 32))
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.7", controlPort: 17592, pcmPort: 17593)
+        let grant = EarlyMediaGrant(version: 1, agentID: "fixture", callID: "call",
+            sessionID: "session", expiresAt: Int64(Date().timeIntervalSince1970) + 25,
+            state: "early_media", direction: "recvonly", format: "s16le-8000-mono", proof: "fixture")
+        let started = await audio.activateForCall(route: .vowlan(endpoint: endpoint, credential: credential),
+            owner: owner, earlyMedia: grant)
+        XCTAssertTrue(started, audio.errorMessage ?? "Early playback did not start")
+        for _ in 0..<2 {
+            engine.stop()
+            NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+            for _ in 0..<40 {
+                if engine.isRunning { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertTrue(engine.isRunning, "Speaker and receiver transitions must restart playback")
+            XCTAssertEqual(audio.sessionOwner, owner)
+            XCTAssertTrue(audio.receiveOnly)
+        }
+        audio.deactivate()
+        NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(engine.isRunning)
+        XCTAssertNil(audio.sessionOwner)
+    }
+
+    @MainActor
+    func testRejectedOutputRouteDoesNotSilenceOutgoingWaitingTone() throws {
+        let tone = FixtureToneOutput()
+        let audio = AudioSessionController(toneOutput: tone, overrideSpeakerRoute: { _ in
+            throw NSError(domain: NSOSStatusErrorDomain, code: -50)
+        })
+        defer { audio.deactivate() }
+        audio.updateCallTone(for: CallRecord(id: "route-not-ready", index: 0, direction: "outgoing",
+            state: "dialing", number: nil, startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false))
+        XCTAssertTrue(tone.isPlaying, "A transient route failure must not stop waiting audio")
+        XCTAssertTrue(audio.hasCallTone)
+        XCTAssertNil(audio.errorMessage)
+    }
+
+    @MainActor
+    func testOutgoingWaitingAudioSupportsReceiverRoutingBeforeConnection() throws {
+        let tone = FixtureToneOutput()
+        let audio = AudioSessionController(toneOutput: tone)
+        defer { audio.deactivate() }
+        audio.updateCallTone(for: CallRecord(id: "outgoing", index: 0, direction: "outgoing",
+            state: "dialing", number: nil, startedAt: Date(), updatedAt: Date(), endedAt: nil, missed: false))
+        XCTAssertTrue(tone.isPlaying)
+        XCTAssertEqual(AVAudioSession.sharedInstance().category, .playAndRecord,
+            "Playback-only audio cannot switch back to the built-in receiver")
+        XCTAssertFalse(audio.active, "Waiting audio must not open a two-way PCM session")
+    }
+
+    @MainActor
+    func testUnreachablePhoneDoesNotKeepLocalCallPresentedAfterHangup() async throws {
+        let controller = CallKitController()
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+                             callKitController: controller)
+        defer { model.stop() }
+        let uuid = UUID()
+        model.callKitDidReceiveIncoming(.init(bluetoothCallID: "offline-call", uuid: uuid,
+            generation: 1, number: nil, agentID: "offline-phone"))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ringing)
+        do {
+            try await model.callKitEnd()
+            XCTFail("No backend exists to confirm the remote hangup")
+        } catch CallKitBridgeError.noReachableTransport { }
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+        XCTAssertNil(model.activeCall)
+        XCTAssertNil(model.remoteCall)
+        XCTAssertFalse(model.callAudioIsActive)
+        // A delayed snapshot for this call must not revive its presentation.
+        model.callKitDidReceiveIncoming(.init(bluetoothCallID: "offline-call", uuid: uuid,
+            generation: 1, number: nil, agentID: "offline-phone"))
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
+    }
+
     func testMissingOptionalAPIsAreNotRetriedOnEveryPoll() async throws {
         let transport = MissingOptionalAPIBoundary()
         let api = AirSIMAPI(route: .vowlan(endpoint: try VoWLANEndpoint(host: "10.0.0.19", controlPort: 15992, pcmPort: 15993),
@@ -244,6 +328,12 @@ final class PhoneContentSearchTests: XCTestCase {
 
 
 final class PhoneRegionLookupTests: XCTestCase {
+    func testKnownSIMIsNeverReplacedByUnknownFallback() {
+        XCTAssertEqual(PhoneRegionLookup.infoLine(number: nil, slotIndex: 1, fallbackSIM: "SIM 未记录"), "SIM 2")
+        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "1234", slotIndex: 0, fallbackSIM: "SIM 未记录"), "SIM 1")
+        XCTAssertEqual(PhoneRegionLookup.infoLine(number: nil, slotIndex: nil, fallbackSIM: "SIM 未记录"), "SIM 未记录")
+    }
+
     func testBundledOfflineDataAndFormatting() {
         XCTAssertNotNil(PhoneRegionLookup.table, "Offline data must be shipped in the app")
         for number in ["13800138000", "+86 138-0013-8000", "008613800138000", "8613800138000"] {
@@ -269,8 +359,8 @@ final class PhoneRegionLookupTests: XCTestCase {
 
 final class PhoneRegion178RegressionTests: XCTestCase {
     func testMissingMobilePrefixAndServiceCategories() {
-        XCTAssertEqual(PhoneRegionLookup.region(for: "17800159951"), "北京市")
-        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "17800159951", slotIndex: nil), "北京市")
+        XCTAssertEqual(PhoneRegionLookup.region(for: "17800150000"), "北京市")
+        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "17800150000", slotIndex: nil), "北京市")
         XCTAssertEqual(PhoneRegionLookup.infoLine(number: "+86 95588", slotIndex: 0), "SIM 1 · 国内 95 服务号码")
         XCTAssertEqual(PhoneRegionLookup.serviceDescription(for: "008696110"), "国内 96 服务号码")
         for value in ["911", "999", "912345", "+9595588", "009695588", "955881234567", "95abc"] {
@@ -330,5 +420,156 @@ final class PresentationSIM184Tests: XCTestCase {
             XCTAssertEqual(rendered.slotID, slot)
             XCTAssertEqual(rendered.sourceAgentID, "actual-device")
         }
+    }
+}
+
+/// 运营商原始等待音（方案 A，184 底子）单测。
+/// 只覆盖纯逻辑：开关默认值/显式值、VoWLAN 可听判定。
+/// 184 只有 VoWLAN 具备接通前 early media；云端与蓝牙接通后才开始媒体，
+/// 接通前恒不可听，各自接通后的音频判定不受本开关影响。
+final class CarrierRingbackPreferenceTests: XCTestCase {
+    private let suiteName = "com.example.airsim.tests.carrier-ringback"
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        defaults = UserDefaults(suiteName: suiteName)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        super.tearDown()
+    }
+
+    func testDefaultIsEnabledWhenKeyAbsent() {
+        XCTAssertNil(defaults.object(forKey: CarrierRingbackPreference.key))
+        XCTAssertTrue(CarrierRingbackPreference.isEnabled(defaults: defaults))
+    }
+
+    func testExplicitValuesAreRespected() {
+        CarrierRingbackPreference.setEnabled(false, defaults: defaults)
+        XCTAssertFalse(CarrierRingbackPreference.isEnabled(defaults: defaults))
+        CarrierRingbackPreference.setEnabled(true, defaults: defaults)
+        XCTAssertTrue(CarrierRingbackPreference.isEnabled(defaults: defaults))
+    }
+
+    func testVoWLANAudibleOnlyAfterFirstPCMFrame() {
+        // grant 到达、会话已是 receiveOnly，但首帧 PCM 未到：不算听到。
+        XCTAssertFalse(CarrierEarlyMediaAudibility.isAudible(
+            transport: .vowlan, receiveOnly: true, hasReceivedEarlyMedia: false, enabled: true))
+        // 首帧 PCM 到达：算听到。
+        XCTAssertTrue(CarrierEarlyMediaAudibility.isAudible(
+            transport: .vowlan, receiveOnly: true, hasReceivedEarlyMedia: true, enabled: true))
+        // 非 receiveOnly 会话（接通后双向音频）不算接通前运营商语音。
+        XCTAssertFalse(CarrierEarlyMediaAudibility.isAudible(
+            transport: .vowlan, receiveOnly: false, hasReceivedEarlyMedia: true, enabled: true))
+    }
+
+    func testDisabledSwitchMakesAllTransportsInaudible() {
+        for transport: CallTransport in [.vowlan, .bluetooth, .cloud] {
+            XCTAssertFalse(CarrierEarlyMediaAudibility.isAudible(
+                transport: transport, receiveOnly: true, hasReceivedEarlyMedia: true, enabled: false))
+        }
+        XCTAssertFalse(CarrierEarlyMediaAudibility.isAudible(
+            transport: nil, receiveOnly: true, hasReceivedEarlyMedia: true, enabled: false))
+    }
+
+    func testBluetoothAndCloudHaveNoPreAnswerCarrierAudio() {
+        // 184 的蓝牙与云端在接通后才开始媒体，接通前没有运营商语音；
+        // 各自接通后的音频判定（bluetoothPCMConnected / cloudCallAudioState）
+        // 不受本开关影响，这里只断言接通前可听恒为 false。
+        for transport: CallTransport in [.bluetooth, .cloud] {
+            XCTAssertFalse(CarrierEarlyMediaAudibility.isAudible(
+                transport: transport, receiveOnly: true, hasReceivedEarlyMedia: true, enabled: true))
+            XCTAssertFalse(CarrierEarlyMediaAudibility.isAudible(
+                transport: transport, receiveOnly: false, hasReceivedEarlyMedia: false, enabled: true))
+        }
+    }
+}
+
+final class VoWLANOnly184ContractTests: XCTestCase {
+    func testPersonalBuildPinsLegacyModesWithoutDisablingPush() {
+        XCTAssertTrue(DedicatedCallPolicy.vowlanOnly, "Run with AIRSIM_VOWLAN_CALLS_ONLY=YES")
+        let name = "airsim.tests.vowlan-only." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        for mode in AirSIMConnectionMode.allCases {
+            defaults.set(mode.rawValue, forKey: ConnectionModePreference.key)
+            defaults.set(true, forKey: CloudModePreference.key)
+            XCTAssertEqual(ConnectionModePreference.selected(defaults: defaults), .vowlan)
+            XCTAssertFalse(CloudModePreference.isEnabled(defaults: defaults))
+            XCTAssertTrue(CloudSignalingPreference.isEnabled(defaults: defaults))
+            let policy = ConnectionModeRuntimePolicy(mode: mode)
+            XCTAssertTrue(policy.startsVoWLAN)
+            XCTAssertFalse(policy.startsCloud)
+            XCTAssertFalse(policy.startsBluetooth)
+            XCTAssertTrue(policy.usesCallKit)
+            XCTAssertFalse(policy.allowsCrossModeFallback)
+            XCTAssertEqual(DialRouteSelector.preferred(mode: mode, vowlanReady: true,
+                bluetoothReady: true, cloudReady: true), .vowlan)
+            XCTAssertNil(DialRouteSelector.preferred(mode: mode, vowlanReady: false,
+                bluetoothReady: true, cloudReady: true))
+            XCTAssertNil(CallTransportPolicy.preferred(mode: mode, vowlanReady: false,
+                cloudMediaAvailable: true, cloudMediaEnabled: true))
+            XCTAssertEqual(WidgetConnectionModeCycle.next(after: mode, pureLocal: false), .vowlan)
+        }
+        XCTAssertEqual(DedicatedCallPolicy.selectableModes, [.vowlan])
+        CloudSignalingPreference.set(false, defaults: defaults)
+        XCTAssertFalse(CloudSignalingPreference.isEnabled(defaults: defaults))
+    }
+
+    @MainActor func testCloudAudioEntryPointsRejectBeforeMediaStarts() async {
+        let session = IPhoneCloudCallSession.shared
+        XCTAssertThrowsError(try session.prepareAudioForCallKit())
+        XCTAssertThrowsError(try session.startAudio())
+        let call = IncomingVoIPCall(bluetoothCallID: "fixture", uuid: UUID(), generation: 1, number: nil)
+        do {
+            try await session.answer(call)
+            XCTFail("Cloud answer must be refused before preparing audio or sending commands")
+        } catch { XCTAssertTrue(error is IPhoneCloudCallError) }
+        do {
+            try await session.reject(call)
+            XCTFail("Relay cannot send call rejection commands in the push-only build")
+        } catch { XCTAssertTrue(error is IPhoneCloudCallError) }
+        XCTAssertNil(VoIPPushController.shared.cloudCallControlCredentials())
+        XCTAssertFalse(session.isPrepared)
+    }
+
+    func testBothSIMsDurationRegionAndMissedReadStateSurvivePersistence() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalHistoryStore(directoryURL: directory)
+        let start = Date(timeIntervalSince1970: 100)
+        var records: [CallRecord] = []
+        for slot in [0, 1] {
+            var answered = CallRecord(id: "answered-\(slot)", index: 0, direction: "incoming",
+                state: "ended", number: "13800138000", startedAt: start,
+                updatedAt: start.addingTimeInterval(80), endedAt: start.addingTimeInterval(80),
+                missed: false, connectedAt: start.addingTimeInterval(20))
+            answered.slotIndex = slot
+            records.append(answered.scopedHistory(to: "fixture-device"))
+            var missed = CallRecord(id: "missed-\(slot)", index: 0, direction: "incoming",
+                state: "ended", number: answered.number, startedAt: start,
+                updatedAt: start.addingTimeInterval(80), endedAt: start.addingTimeInterval(80),
+                missed: true)
+            missed.slotIndex = slot
+            records.append(missed.scopedHistory(to: "fixture-device"))
+        }
+        XCTAssertTrue(store.saveCallHistory(records))
+        let loaded = store.loadCallHistory()
+        XCTAssertEqual(loaded.count, 4)
+        for call in loaded {
+            XCTAssertNotNil(call.slotIndex)
+            XCTAssertTrue(PhoneRegionLookup.infoLine(number: call.number, slotIndex: call.slotIndex)!
+                .contains("SIM \(call.slotIndex! + 1)"))
+            if call.missed { XCTAssertNil(call.connectedDuration) }
+            else { XCTAssertEqual(call.connectedDuration, 60) }
+        }
+        XCTAssertEqual(loaded.filter(\.missed).count, 2)
+        XCTAssertTrue(store.markMissedCallsSeen(loaded))
+        XCTAssertTrue(store.unseenMissedCallIDs(in: loaded).isEmpty)
+        XCTAssertEqual(store.loadCallHistory().filter(\.missed).count, 2)
     }
 }

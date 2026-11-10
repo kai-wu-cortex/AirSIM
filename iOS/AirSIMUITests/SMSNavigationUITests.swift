@@ -58,7 +58,7 @@ final class SMSNavigationUITests: XCTestCase {
         app.buttons["复制验证码"].firstMatch.tap()
         app.terminate()
         app.launchEnvironment["AIRSIM_UI_CALL"] = "incoming"
-        app.launchEnvironment["AIRSIM_UI_REGION_NUMBER"] = "17800159951"
+        app.launchEnvironment["AIRSIM_UI_REGION_NUMBER"] = "17800150000"
         app.launch()
         XCTAssertTrue(app.staticTexts["北京市"].waitForExistence(timeout: 10))
         app.terminate()

@@ -108,6 +108,20 @@ public final class VoWLANPairingStore {
         return null;
     }
 
+    static Record matchWatch(Context context, String signature, String canonical, long timestamp, long now) {
+        for (Record record : records(context)) {
+            byte[] root = record.secretCopy();
+            byte[] watch = VoWLANAuth.watchCallKey(root);
+            try {
+                if (VoWLANAuth.verify(watch, signature, canonical, timestamp, now)) return record;
+            } finally {
+                Arrays.fill(root, (byte) 0);
+                Arrays.fill(watch, (byte) 0);
+            }
+        }
+        return null;
+    }
+
     public static boolean configured(Context context) {
         return !records(context).isEmpty();
     }

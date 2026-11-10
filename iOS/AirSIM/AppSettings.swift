@@ -67,10 +67,29 @@ enum AppTheme: String, CaseIterable, Identifiable {
     var accent: Color { self == .forest ? Color(red: 0.12, green: 0.47, blue: 0.38) : Color(red: 0.12, green: 0.56, blue: 0.88) }
 }
 
+/// 运营商原始等待音开关：默认开启。未写入 UserDefaults 时视为开启，
+/// 老用户升级后直接走运营商 early media；关闭则回到本地等待音。
+/// 只控制 iOS 本地是否探测 early media，不发给 Android，不改线协议。
+enum CarrierRingbackPreference {
+    static let key = "airsim.carrier-ringback-enabled"
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard let stored = defaults.object(forKey: key) as? Bool else { return true }
+        return stored
+    }
+
+    static func setEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: key)
+    }
+}
+
 @MainActor
 final class AppSettings: ObservableObject {
     @Published var theme: AppTheme {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: "airsim.ui-theme") }
+    }
+    @Published var carrierRingbackEnabled: Bool {
+        didSet { CarrierRingbackPreference.setEnabled(carrierRingbackEnabled) }
     }
     @Published var appearance: AppAppearance {
         didSet { UserDefaults.standard.set(appearance.rawValue, forKey: L10n.appearanceKey) }
@@ -82,6 +101,7 @@ final class AppSettings: ObservableObject {
     init() {
         let defaults = UserDefaults.standard
         theme = AppTheme(rawValue: defaults.string(forKey: "airsim.ui-theme") ?? "sky") ?? .sky
+        carrierRingbackEnabled = CarrierRingbackPreference.isEnabled(defaults: defaults)
         appearance = AppAppearance(rawValue: defaults.string(forKey: L10n.appearanceKey) ?? "") ?? .system
         language = AppLanguage(rawValue: defaults.string(forKey: L10n.languageKey) ?? "") ?? .system
     }
@@ -134,6 +154,10 @@ enum L10n {
         "短信操作": "Message Actions", "选择会话": "Select Conversations",
         "完成选择": "Done", "删除所选会话": "Delete Selected Conversations",
         "1 条短信": "1 Message", "%d 条短信": "%d Messages",
-        "仅删除此 iPhone 上 AirSIM 内的记录，不删除安卓系统短信。": "Only deletes records in AirSIM on this iPhone, not SMS on Android."
+        "仅删除此 iPhone 上 AirSIM 内的记录，不删除安卓系统短信。": "Only deletes records in AirSIM on this iPhone, not SMS on Android.",
+        "运营商原始等待音": "Carrier ringback tone",
+        "呼出等待音": "Outgoing waiting tone",
+        "仅 VoWLAN 呼出支持接通前运营商语音；关闭后呼出等待音恢复为本地合成音。": "Pre-answer carrier audio is available for VoWLAN calls only. Turn this off to use the local waiting tone.",
+        "呼出接通前优先播放运营商回铃音，设备不支持时用本地等待音": "Play the carrier ringback tone before the call is answered; fall back to the local waiting tone when unsupported."
     ]
 }

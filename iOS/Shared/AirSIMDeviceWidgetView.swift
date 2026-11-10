@@ -14,6 +14,9 @@ struct AirSIMDeviceWidgetView: View {
     private var accent: Color { colorScheme == .dark ? Color(red: 0.42, green: 0.70, blue: 1) : Color(red: 0, green: 0.32, blue: 0.78) }
     private var secondaryText: Color { colorScheme == .dark ? Color(red: 0.67, green: 0.71, blue: 0.78) : Color(red: 0.35, green: 0.40, blue: 0.47) }
     private var primaryText: Color { colorScheme == .dark ? Color(red: 0.95, green: 0.96, blue: 0.98) : Color(red: 0.06, green: 0.11, blue: 0.20) }
+    private var hasSwitchControls: Bool {
+        snapshot.controls.map { $0.nextAgentID != nil || $0.mode != $0.nextMode } ?? false
+    }
     private var accessory: Bool { [.accessoryInline, .accessoryCircular, .accessoryRectangular].contains(family) }
 
     var body: some View {
@@ -57,10 +60,9 @@ struct AirSIMDeviceWidgetView: View {
     @ViewBuilder private func accessible(_ d: AirSIMWidgetSnapshot.Device) -> some View {
         if family == .systemSmall {
             VStack(alignment: .leading, spacing: 2) {
-                if snapshot.controls != nil { switchControls(vertical: true, compact: true) }
-                else { Text(d.name).font(.caption2.bold()).lineLimit(1) }
+                Text(d.name).font(.caption2.bold()).lineLimit(1)
                 Text(d.status(at: date)).font(.caption2).lineLimit(1).minimumScaleFactor(0.6)
-                if snapshot.controls == nil, let observed = d.observedAt {
+                if let observed = d.observedAt {
                     Text(observed, style: .time).font(.caption2).foregroundStyle(secondaryText)
                         .accessibilityLabel("最近更新时间 \(observed.formatted(date: .abbreviated, time: .shortened))")
                 }
@@ -68,7 +70,7 @@ struct AirSIMDeviceWidgetView: View {
         } else if family == .systemMedium {
             HStack(spacing: 12) {
                 accessibleIdentity(d).frame(maxWidth: .infinity, alignment: .leading)
-                if snapshot.controls != nil { switchControls(vertical: true, compact: true).frame(maxWidth: .infinity) }
+                if hasSwitchControls { switchControls(vertical: true, compact: true).frame(maxWidth: .infinity) }
                 else { VStack(spacing: 8) {
                     action("通话", symbol: nil, to: .recents, agent: d.id)
                     action("短信", symbol: nil, to: .messages, agent: d.id)
@@ -93,7 +95,7 @@ struct AirSIMDeviceWidgetView: View {
     }
     private func accessibleDetails(_ d: AirSIMWidgetSnapshot.Device) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            accessibleIdentity(d, showTimestamp: snapshot.controls == nil)
+            accessibleIdentity(d, showTimestamp: true)
             if let controls = snapshot.controls,
                family != .systemExtraLarge || d.id == controls.currentAgentID {
                 switchControls(vertical: false, compact: true)
@@ -105,63 +107,75 @@ struct AirSIMDeviceWidgetView: View {
     }
 
     private func small(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if snapshot.controls != nil {
-                switchControls(vertical: true)
-                Text(d.status(at: date)).font(.caption).lineLimit(1)
-                updated(d).font(.caption2)
-            } else {
-            HStack { brand(size: 34); Spacer(); statusDot(d) }
-            Spacer(minLength: 2)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack { brand(size: 24); Spacer(); battery(d).font(.caption2) }
             Text(d.name).font(.headline).lineLimit(1)
-            Label(d.transport.isEmpty ? "连接待确认" : d.transport, systemImage: transportSymbol(d))
-                .font(.caption).foregroundStyle(secondaryText).lineLimit(1)
-            Text(d.status(at: date)).font(.caption).lineLimit(1)
-            if !textSize.isAccessibilitySize { Divider() }
-            updated(d).font(.caption2)
+            status(d)
+            Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                action("拨号", symbol: "phone.fill", to: .dial, agent: d.id, primary: true)
+                action("短信", symbol: "message.fill", to: .messages, agent: d.id)
             }
+            updated(d).font(.system(size: 9))
         }
     }
 
     private func medium(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 7) {
-                if snapshot.controls != nil {
-                    switchControls(vertical: true)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                brand(size: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(d.name).font(.subheadline.weight(.semibold)).lineLimit(1)
                     Text(d.status(at: date)).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
-                } else {
-                HStack(spacing: 9) {
-                    if !textSize.isAccessibilitySize { brand(size: 38) }
-                    Text(d.name).font(.headline).lineLimit(1)
                 }
-                status(d)
-                updated(d).font(.caption2)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                let call = snapshot.latestCall(for: d.id)
-                recentSummary("最近通话", symbol: "phone.fill", text: call?.maskedNumber,
-                              timestamp: call?.date, to: .recents, agent: d.id, count: d.unseenMissedCalls ?? 0)
+                Spacer(minLength: 0)
+                statusDot(d)
+                battery(d)
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack { Text("最近通话").font(.caption2); Spacer(minLength: 0); attentionBadge(d.unseenMissedCalls ?? 0, missed: true) }
+                    if let call = snapshot.latestCall(for: d.id) {
+                        Link(destination: AirSIMWidgetDestination.recents.url(agentID: d.id)) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(call.displayNumber).font(.caption.weight(.medium)).lineLimit(1)
+                                    .foregroundStyle(call.missed ? Color.red : primaryText)
+                                Text(call.missed ? "\(call.detailText) · 未接" : call.detailText)
+                                    .font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
+                            }
+                        }
+                    } else { Text("暂无记录").font(.caption2).foregroundStyle(secondaryText) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
                 Divider()
-                let message = snapshot.latestMessage(for: d.id)
-                recentSummary("最近短信", symbol: "message.fill", text: message?.displayText,
-                              timestamp: message?.date, to: .messages, agent: d.id, count: d.unreadMessages ?? 0)
-            }.frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack { Text("最近短信").font(.caption2); Spacer(minLength: 0); attentionBadge(d.unreadMessages ?? 0, missed: false) }
+                    if let message = snapshot.latestMessage(for: d.id) {
+                        Link(destination: AirSIMWidgetDestination.messages.url(agentID: d.id)) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(message.sender ?? "短信") · \(message.simSlot ?? "SIM 未记录")")
+                                    .font(.caption).foregroundStyle(primaryText).lineLimit(1)
+                                Text(message.displayText).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
+                            }
+                        }
+                    } else { Text("暂无记录").font(.caption2).foregroundStyle(secondaryText) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: .infinity)
+            widgetFooter(d)
         }
     }
 
     private func recentSummary(_ title: String, symbol: String, text: String?, timestamp: Date?,
-                               to destination: AirSIMWidgetDestination, agent: String, count: Int = 0) -> some View {
+                               to destination: AirSIMWidgetDestination, agent: String, count: Int = 0, detail: String? = nil) -> some View {
         Link(destination: destination.url(agentID: agent)) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {
                     Label(title, systemImage: symbol).font(.caption.weight(.semibold))
-                        .foregroundStyle(accent).lineLimit(1)
+                        .foregroundStyle(title == "未接来电" ? Color.red : accent).lineLimit(1)
                     Spacer(minLength: 0)
                     attentionBadge(count, missed: destination == .recents)
                 }
                 Text(text ?? "暂无记录").font(.caption2).foregroundStyle(primaryText).lineLimit(1)
+                if let detail { Text(detail).font(.system(size: 9)).foregroundStyle(secondaryText).lineLimit(1) }
             }
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .contentShape(Rectangle())
@@ -170,21 +184,108 @@ struct AirSIMDeviceWidgetView: View {
     }
 
     private func large(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                if !textSize.isAccessibilitySize { brand(size: 48) }
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("设备状态").font(.title3.bold())
-                    Text(d.name).font(.headline).lineLimit(1)
-                    status(d)
-                }
-            }
+        VStack(alignment: .leading, spacing: 9) {
+            widgetHeader(d)
             Divider()
-            if snapshot.controls != nil { switchControls(vertical: false) }
-            HStack { battery(d); Spacer(); updated(d).font(.caption2) }
+            callSection(d, limit: 2)
             Divider()
-            recentDetails(d)
+            messageSection(d)
             Spacer(minLength: 0)
+            widgetFooter(d)
+        }
+    }
+    private func widgetHeader(_ d: AirSIMWidgetSnapshot.Device) -> some View {
+        HStack(spacing: 10) {
+            brand(size: 32)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(d.name).font(.headline).lineLimit(1)
+                status(d)
+            }
+            Spacer(minLength: 0)
+            VStack(alignment: .trailing, spacing: 3) {
+                battery(d)
+                Text(callStateText(d)).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
+            }
+        }
+    }
+    private func callStateText(_ d: AirSIMWidgetSnapshot.Device) -> String {
+        guard d.isFresh(at: date), d.refreshFailed != true else { return "通话状态待同步" }
+        switch d.activeState {
+        case "active": return "正在通话"
+        case "dialing", "alerting", "connecting": return "正在呼叫"
+        case "incoming", "waiting": return "有来电"
+        case "idle", "ended", "failed": return "当前无通话"
+        default: return "VoWLAN 直连"
+        }
+    }
+    private func callSection(_ d: AirSIMWidgetSnapshot.Device, limit: Int) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("最近通话").font(.caption.weight(.semibold))
+                Spacer()
+                attentionBadge(d.unseenMissedCalls ?? 0, missed: true)
+            }
+            let records = snapshot.calls.filter { $0.agentID == d.id }.prefix(limit)
+            if records.isEmpty { Text("暂无通话记录").font(.caption).foregroundStyle(secondaryText) }
+            ForEach(Array(records)) { call in
+                Link(destination: AirSIMWidgetDestination.recents.url(agentID: d.id)) {
+                    HStack(spacing: 9) {
+                        Image(systemName: call.missed ? "phone.down.fill" : call.incoming ? "phone.arrow.down.left.fill" : "phone.arrow.up.right.fill")
+                            .foregroundStyle(call.missed ? Color.red : accent).frame(width: 20)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(call.displayNumber).font(.subheadline.weight(.medium)).lineLimit(1)
+                                .foregroundStyle(call.missed ? Color.red : primaryText)
+                            Text(call.missed ? "\(call.detailText) · 未接来电" : "\(call.detailText) · \(call.incoming ? "呼入" : "呼出")")
+                                .font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        Text(recordTime(call.date)).font(.caption2).foregroundStyle(secondaryText)
+                    }.contentShape(Rectangle())
+                }.accessibilityElement(children: .combine)
+            }
+        }
+    }
+    private func messageSection(_ d: AirSIMWidgetSnapshot.Device) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text("最近短信").font(.caption.weight(.semibold))
+                Spacer()
+                attentionBadge(d.unreadMessages ?? 0, missed: false)
+            }
+            Link(destination: AirSIMWidgetDestination.messages.url(agentID: d.id)) {
+                if let message = snapshot.latestMessage(for: d.id) {
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(systemName: "message.fill").foregroundStyle(accent).frame(width: 20)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(message.sender ?? "短信") · \(message.simSlot ?? "SIM 未记录")")
+                                .font(.caption.weight(.medium)).foregroundStyle(primaryText).lineLimit(1)
+                            Text(message.displayText).font(.caption).foregroundStyle(secondaryText).lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        Text(recordTime(message.date)).font(.caption2).foregroundStyle(secondaryText)
+                    }.contentShape(Rectangle())
+                } else {
+                    Text("暂无短信记录").font(.caption).foregroundStyle(secondaryText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }.accessibilityElement(children: .combine)
+        }
+    }
+    private func recordTime(_ value: Date) -> String {
+        Calendar.current.isDate(value, inSameDayAs: date)
+            ? value.formatted(date: .omitted, time: .shortened)
+            : value.formatted(.dateTime.month().day())
+    }
+    private func widgetFooter(_ d: AirSIMWidgetSnapshot.Device) -> some View {
+        HStack(spacing: 6) {
+            updated(d).font(.caption2)
+            Spacer(minLength: 0)
+            if #available(iOS 17.0, *) {
+                Button(intent: AirSIMWidgetRefreshIntent()) {
+                    Label("刷新", systemImage: "arrow.clockwise").font(.caption)
+                        .frame(minHeight: 32).contentShape(Rectangle())
+                }.foregroundStyle(accent).accessibilityLabel("刷新安卓状态与最近记录")
+            }
         }
     }
 
@@ -194,11 +295,12 @@ struct AirSIMDeviceWidgetView: View {
         return HStack(alignment: .top, spacing: 12) {
             recordDetail("最近通话", symbol: "phone.fill", to: .recents, agent: d.id, count: d.unseenMissedCalls ?? 0) {
                 if let call {
-                    Text(call.maskedNumber)
+                    Text(call.displayNumber)
                         .font(.subheadline.weight(.semibold)).lineLimit(2)
                     if !textSize.isAccessibilitySize {
                         Text(call.missed ? "未接来电" : call.incoming ? "呼入" : "呼出")
                             .font(.caption2).foregroundStyle(call.missed ? Color.red : secondaryText)
+                        Text(call.detailText).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
                         recordDate(call.date)
                     }
                 } else {
@@ -230,7 +332,7 @@ struct AirSIMDeviceWidgetView: View {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .top, spacing: 3) {
                     Label(title, systemImage: symbol)
-                        .font(.caption.weight(.semibold)).foregroundStyle(accent).lineLimit(1)
+                        .font(.caption.weight(.semibold)).foregroundStyle(title == "未接来电" ? Color.red : accent).lineLimit(1)
                     Spacer(minLength: 0)
                     attentionBadge(count, missed: destination == .recents)
                 }
@@ -278,12 +380,12 @@ struct AirSIMDeviceWidgetView: View {
                 if snapshot.devices.count == 1 { Spacer(minLength: 0) }
             }
             Divider()
-            if snapshot.controls != nil { switchControls(vertical: false) }
+            if hasSwitchControls { switchControls(vertical: false) }
             recentHeader
             HStack(alignment: .top, spacing: 20) {
                 ForEach(Array(snapshot.devices.prefix(2).enumerated()), id: \.element.id) { index, d in
                     if index > 0 { Divider() }
-                    history(agent: d.id, limit: snapshot.controls != nil || textSize.isAccessibilitySize ? 1 : 2)
+                    history(agent: d.id, limit: hasSwitchControls || textSize.isAccessibilitySize ? 1 : 2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -296,14 +398,14 @@ struct AirSIMDeviceWidgetView: View {
             let layout = vertical ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
                                   : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
             layout {
-                switchControl(action: "device", title: "设备",
+                if controls.nextAgentID != nil { switchControl(action: "device", title: "设备",
                     value: snapshot.devices.first(where: { $0.id == controls.currentAgentID })?.name ?? "未选择",
                     expected: controls.currentAgentID, target: controls.nextAgentID ?? "",
                     hint: controls.nextAgentName.map { "切换到 \($0)" } ?? "仅有一台配对设备",
-                    disabled: controls.blockedByCall || controls.nextAgentID == nil, compact: compact)
-                switchControl(action: "mode", title: "模式", value: controls.modeTitle,
+                    disabled: controls.blockedByCall || controls.nextAgentID == nil, compact: compact) }
+                if controls.mode != controls.nextMode { switchControl(action: "mode", title: "模式", value: controls.modeTitle,
                     expected: controls.mode, target: controls.nextMode,
-                    hint: "切换为 \(controls.nextModeTitle)", disabled: controls.blockedByCall, compact: compact)
+                    hint: "切换为 \(controls.nextModeTitle)", disabled: controls.blockedByCall, compact: compact) }
             }
         }
     }
@@ -372,32 +474,32 @@ struct AirSIMDeviceWidgetView: View {
             .frame(width: size, height: size)
             // Inherit WidgetKit's corner geometry rather than assuming a
             // radius that only fits one Home Screen size or display.
-            .background(Color(uiColor: .systemBackground), in: ContainerRelativeShape())
-            .overlay(ContainerRelativeShape().stroke(Color.primary.opacity(0.05), lineWidth: 0.5))
+            .background(accent.opacity(0.09), in: RoundedRectangle(cornerRadius: size * 0.28))
+
             .accessibilityHidden(true)
     }
     private func statusDot(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        Circle().fill(d.isFresh(at: date) && d.recentlyReachable ? Color.green : Color.secondary)
+        Circle().fill(d.isFresh(at: date) && d.recentlyReachable && d.refreshFailed != true ? Color.green : Color.secondary)
             .frame(width: 8, height: 8).accessibilityHidden(true)
     }
     private func status(_ d: AirSIMWidgetSnapshot.Device) -> some View {
         HStack(spacing: 5) {
             statusDot(d)
-            Text(d.isFresh(at: date) && d.recentlyReachable && !d.transport.isEmpty
+            Text(d.isFresh(at: date) && d.recentlyReachable && d.refreshFailed != true && !d.transport.isEmpty
                  ? "\(d.status(at: date)) · \(d.transport)" : d.status(at: date))
                 .lineLimit(2)
         }.font(.caption).foregroundStyle(secondaryText)
     }
     private func updated(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        Group {
+        VStack(alignment: .leading, spacing: 2) {
+            if let attempt = d.lastRefreshAttempt {
+                Text("\(d.refreshInProgress(at: date) ? "正在刷新" : d.refreshPending == true ? "刷新中断" : d.refreshFailed == true ? "刷新失败" : "刷新成功") · 尝试 \(attempt.formatted(.dateTime.hour().minute().second()))")
+            }
             if let observed = d.observedAt {
-                if Calendar.current.isDate(observed, inSameDayAs: date) {
-                    Text("更新于 \(observed.formatted(date: .omitted, time: .shortened))")
-                } else {
-                    Text("更新于 \(observed.formatted(.dateTime.month().day().hour().minute()))")
-                }
-            } else { Text("等待首次同步") }
-        }.foregroundStyle(secondaryText).lineLimit(1)
+                Text("最近成功 \(observed.formatted(.dateTime.month().day().hour().minute().second()))")
+            } else { Text("尚无成功记录") }
+            if let reason = d.refreshFailureReason, !d.refreshInProgress(at: date) { Text(reason) }
+        }.foregroundStyle(secondaryText).lineLimit(1).minimumScaleFactor(0.8)
     }
     private func battery(_ d: AirSIMWidgetSnapshot.Device) -> some View {
         let reading = d.battery.flatMap { $0.isFresh(at: date) ? $0 : nil }
@@ -457,7 +559,7 @@ struct AirSIMDeviceWidgetView: View {
                                 .frame(width: 30, height: 30)
                                 .background(Color.secondary.opacity(0.08), in: Circle())
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(call.maskedNumber).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                Text(call.displayNumber).font(.subheadline.weight(.semibold)).lineLimit(1)
                                 Text("\(call.date.formatted(.dateTime.month().day().hour().minute())) · \(call.missed ? "未接来电" : call.incoming ? "呼入" : "呼出")")
                                     .font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
                             }
@@ -467,5 +569,16 @@ struct AirSIMDeviceWidgetView: View {
                 }
             }
         }
+    }
+}
+
+@available(iOS 17.0, *)
+struct AirSIMWidgetRefreshIntent: AppIntent {
+    static var title: LocalizedStringResource = "刷新 AirSIM 小组件"
+    static var openAppWhenRun: Bool = false
+    func perform() async throws -> some IntentResult {
+        _ = await WidgetDirectRefresh.snapshot(showProgress: true)
+        WidgetCenter.shared.reloadTimelines(ofKind: AirSIMWidgetSnapshot.kind)
+        return .result()
     }
 }

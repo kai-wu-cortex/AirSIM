@@ -379,11 +379,11 @@ enum VoWLANStatusCopy {
         if activeCall { return "通话中（VoWLAN）" }
         switch availability {
         case .unpaired: return "未配对"
-        case .discovering: return "正在发现"
+        case .discovering: return "正在重新发现安卓"
         case .discovered: return "已发现，正在验证"
         case .verified: return "VoWLAN 就绪"
         case let .unavailable(reason):
-            return reason.contains("局域网已断开") ? "局域网已断开 · 已回退云端（下一通）" : reason
+            return "连接失败，正在等待恢复：" + reason
         }
     }
 }
@@ -513,9 +513,17 @@ struct VoWLANNetworkRecoveryPlan {
 
 @MainActor
 final class VoWLANController: ObservableObject {
+    @Published private(set) var lastConnectionFailure: String?
+    @Published private(set) var lastConnectionFailureAt: Date?
+    @Published private(set) var lastConnectionSuccess: Date?
+    @Published private(set) var wifiPathAvailable: Bool?
     @Published private(set) var availability: VoWLANAvailability =
         !VoWLANCredentialStore.hasAny() ? .unpaired : .discovering {
         didSet {
+            if case .unavailable(let reason) = availability {
+                lastConnectionFailure = reason; lastConnectionFailureAt = Date()
+            }
+            if case .verified = availability { lastConnectionSuccess = Date() }
             onAvailabilityChange?(availability)
             switch availability {
             case let .discovered(endpoint, _):
@@ -530,6 +538,17 @@ final class VoWLANController: ObservableObject {
         }
     }
 
+    var connectionProgressText: String {
+        if case .unpaired = availability { return "未配对安卓" }
+        if wifiPathAvailable == false { return "Wi-Fi 路径不可用，正在等待恢复" }
+        switch availability {
+        case .discovering: return "正在重新发现安卓"
+        case .discovered: return "已发现安卓，正在验证连接"
+        case .verified: return "VoWLAN 已连接"
+        case .unavailable(let reason): return "连接失败，等待恢复：" + reason
+        case .unpaired: return "未配对安卓"
+        }
+    }
     var onAvailabilityChange: ((VoWLANAvailability) -> Void)?
     private var verifiedIdentity: (endpoint: VoWLANEndpoint, agentID: String)?
     func authenticatedAgentID(for endpoint: VoWLANEndpoint) -> String? {
@@ -906,6 +925,7 @@ final class VoWLANController: ObservableObject {
     }
 
     private func networkChanged(wifiAvailable: Bool, route: String) {
+        wifiPathAvailable = wifiAvailable
         // A duplicate snapshot must not advance recovery's generation: otherwise
         // it invalidates the one-second delayed task for the actual Wi-Fi change.
         guard networkPathGate.observe(available: wifiAvailable, route: route) else {

@@ -109,10 +109,13 @@ public final class PairingServer implements Closeable {
         }
         if (lines.length > 0 && "GET /pair/v1/info HTTP/1.1".equals(lines[0])) {
             // Same public, short-lived material as Bonjour TXT. Never reveal code or credentials.
-            respond(peer, 200, new JSONObject().put("product", "airsim-pair").put("version", 1)
+            JSONObject info = new JSONObject().put("product", "airsim-pair").put("version", 1)
                     .put("session_id", created.id()).put("server_public_key", PairingCrypto.base64URL(created.publicKey()))
                     .put("expires_at", created.expiresAtMillis())
-                    .put("server_time", System.currentTimeMillis()).toString());
+                    .put("server_time", System.currentTimeMillis());
+            // Only the Standalone Agent keeps an E2E SMS key; the AVF Linux Agent cannot (issue #24).
+            if (RuntimeMode.isStandalone(context)) info.put("capabilities", E2EPairingKey.capabilities());
+            respond(peer, 200, info.toString());
             return false;
         }
         if (lines.length == 0 || !"POST /pair/v1/claim HTTP/1.1".equals(lines[0])) {
@@ -144,6 +147,8 @@ public final class PairingServer implements Closeable {
             JSONObject registration = new JSONObject(registrationJSON);
             String vowlanSecret = registration.optString("vowlan_secret", "");
             if (vowlanSecret.isEmpty()) throw new GeneralSecurityException("VoWLAN secret missing");
+            // Removed in every mode before registerPairing: neither store nor the Relay may see it.
+            byte[] e2eKey = E2EPairingKey.take(registration, RuntimeMode.isStandalone(context));
             registration.put("android_agent_id", AndroidAgentIdentity.agentID(context));
             registration.put("android_device_name", AndroidAgentIdentity.deviceName());
             registration.put("android_manufacturer", android.os.Build.MANUFACTURER);
@@ -153,10 +158,25 @@ public final class PairingServer implements Closeable {
             // VoWLAN HMAC 密钥只属于 Android 热点网关。Linux Agent 的 Push
             // 注册结构使用严格 JSON 解码，且无须接触该密钥，因此转发前必须移除。
             registration.remove("vowlan_secret");
+            if (e2eKey != null && !registration.optBoolean("local_mode", false)) {
+                StandaloneAgentStore.validateRegistration(registration);
+                E2EKeyStore.prepareEncryptedPairing(context, registration.optString("device_id"), registration.optString("relay_url"));
+            }
             String agentResponse = new AgentClient(context).registerPairing(registration.toString());
             JSONObject response = new JSONObject(agentResponse)
                     .put("agent_id", AndroidAgentIdentity.agentID(context));
             VoWLANPairingStore.saveEncoded(context, vowlanSecret);
+            if (!registration.optBoolean("local_mode", false)) {
+                String deviceID = registration.optString("device_id", "");
+                String relayURL = registration.optString("relay_url", "");
+                if (e2eKey != null) {
+                    E2EKeyStore.save(context, deviceID, relayURL, e2eKey);
+                    BridgeLog.info("e2e_sms_key_saved");
+                } else if (E2EKeyStore.remove(context, deviceID, relayURL)) {
+                    // Each pairing replaces the key; a pairing without one turns encryption off.
+                    BridgeLog.info("e2e_sms_key_cleared");
+                }
+            }
             BridgeLog.info("vowlan_pairing_client_saved clients="
                     + VoWLANPairingStore.records(context).size());
             VoWLANGatewayService.start(context);
@@ -228,6 +248,7 @@ public final class PairingServer implements Closeable {
         info.setAttribute("session", created.id());
         info.setAttribute("key", PairingCrypto.base64URL(created.publicKey()));
         info.setAttribute("expires", Long.toString(created.expiresAtMillis()));
+        if (RuntimeMode.isStandalone(context)) info.setAttribute("e2e", "1");
         registration = new NsdManager.RegistrationListener() {
             @Override public void onServiceRegistered(NsdServiceInfo ignored) {}
             @Override public void onRegistrationFailed(NsdServiceInfo ignored, int code) {

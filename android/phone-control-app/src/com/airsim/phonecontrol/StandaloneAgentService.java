@@ -78,7 +78,7 @@ public final class StandaloneAgentService extends Service {
         if (snapshot.scope() == null || !active.store.cloudEnabled())
             throw new IllegalStateException("云端未开启或尚未配对，请先检查云端配置");
         active.relay.postJSON(snapshot.registration(), "/v1/devices/register",
-                new JSONObject(snapshot.registration().toString()), 15_000, generation);
+                RelayRegistrationPayload.forRelay(snapshot.registration()), 15_000, generation);
         if (!generation.isCurrent() || !active.commandConfiguration.isCurrent(snapshot))
             throw new IllegalStateException("连接配置已变更，请重新发送");
         try {
@@ -193,7 +193,8 @@ public final class StandaloneAgentService extends Service {
     }
 
     private void syncRegistration(JSONObject registration) throws Exception {
-        int hash = registration.toString().hashCode();
+        JSONObject payload = RelayRegistrationPayload.forRelay(registration);
+        int hash = RelayRegistrationPayload.syncKey(registration).hashCode();
         // A Relay 401 means the device record is gone; re-post the unchanged registration. The
         // signal is one-shot, so a failed re-post waits for the next back-off window instead of
         // retrying every cycle.
@@ -202,7 +203,7 @@ public final class StandaloneAgentService extends Service {
         } else if (hash == syncedRegistrationHash) {
             return;
         }
-        relay.postJSON(registration, "/v1/devices/register", new JSONObject(registration.toString()), 15_000);
+        relay.postJSON(registration, "/v1/devices/register", payload, 15_000);
         syncedRegistrationHash = hash;
         store.recordSuccess();
         BridgeLog.info("standalone_relay_registration_synced");
@@ -431,14 +432,14 @@ public final class StandaloneAgentService extends Service {
         StandaloneSMSStore smsStore = new StandaloneSMSStore(this);
         JSONArray smsPending = smsStore.cloudPending();
         Map<String, JSONObject> events = new LinkedHashMap<>();
+        // With an E2E key for this registration every SMS goes up sealed (issue #24), never in plaintext.
+        byte[] e2eKey = E2EKeyStore.forRegistration(this, registration);
+        E2ESMSCrypto.Keys keys = e2eKey == null ? null : E2ESMSCrypto.keys(e2eKey);
         for (int index = 0; index < smsPending.length(); index++) {
             if (!generation.isCurrent()) return;
             JSONObject source = smsPending.getJSONObject(index);
-            events.put(source.getString("delivery_id"), identity(registration).put("event", "incoming_sms")
-                    .put("delivery_id", source.optString("delivery_id"))
-                    .put("sender", source.optString("sender")).put("content", source.optString("content"))
-                    .put("sim_slot", source.optString("sim_slot"))
-                    .put("timestamp", CloudSMSUploader.uploadTimestamp(source.optString("timestamp", ""), System.currentTimeMillis())));
+            String timestamp = CloudSMSUploader.uploadTimestamp(source.optString("timestamp", ""), System.currentTimeMillis());
+            events.put(source.getString("delivery_id"), CloudSMSEvent.body(identity(registration), source, timestamp, keys));
         }
         // One SMS the Relay refuses or cannot push must neither stall the others nor fail the agent cycle.
         smsUploader.flush(new ArrayList<>(events.keySet()),
@@ -455,7 +456,7 @@ public final class StandaloneAgentService extends Service {
                     }
                 }, this::smsFailure, android.os.SystemClock::elapsedRealtime,
                 () -> running && generation.isCurrent() && commandConfiguration.isCurrent(snapshot.configuration())
-                        && smsTransport.isCurrent(snapshot.epoch()));
+                        && smsTransport.isCurrent(snapshot.epoch()), keys != null);
     }
 
     private void smsFailure(Throwable smsError, CloudSMSUploader.Verdict verdict, int attempt, long pauseMillis) {

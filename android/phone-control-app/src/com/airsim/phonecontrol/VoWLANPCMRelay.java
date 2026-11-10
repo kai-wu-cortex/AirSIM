@@ -74,11 +74,18 @@ public final class VoWLANPCMRelay implements Closeable {
             }
             BufferedInputStream peerInput = new BufferedInputStream(peer.getInputStream());
             String line = readLine(peerInput);
+            if (line.startsWith("AIRSIMEM1 ")) {
+                handleEarlyMedia(peer, line, owner);
+                return;
+            }
             VoWLANPCMProtocol.Preface preface = VoWLANPCMProtocol.parse(line);
             long now = System.currentTimeMillis() / 1000L;
             String canonical = VoWLANPCMProtocol.canonical(preface);
             VoWLANPairingStore.Record matched = VoWLANPairingStore.match(
                     context, preface.signature(), canonical, preface.timestamp(), now);
+            if (matched == null) {
+                matched = VoWLANPairingStore.matchWatch(context, preface.signature(), canonical, preface.timestamp(), now);
+            }
             if (matched == null || !replayCache.accept(preface.nonce(), now)) {
                 throw new SecurityException("authentication failed");
             }
@@ -125,6 +132,61 @@ public final class VoWLANPCMRelay implements Closeable {
                     + " uplink_frames=" + uplink.frames.get() + " uplink_peak=" + uplink.peak.get()
                     + " downlink_bytes=" + downlink.bytes.get() + " downlink_frames=" + downlink.frames.get()
                     + " downlink_peak=" + downlink.peak.get());
+        }
+    }
+
+    private void handleEarlyMedia(Socket peer, String line, String owner) throws Exception {
+        String[] fields = line.trim().split(" ", -1);
+        if (fields.length != 5 || line.length() > 2048) throw new SecurityException("invalid early media preface");
+        long timestamp = Long.parseLong(fields[1]), now = System.currentTimeMillis() / 1000L;
+        String binding = EarlyMediaSessions.binding(fields[4]);
+        String canonical = VoWLANAuth.canonicalRequest("PCM", "/v1/pcm/early-media",
+            binding.getBytes(StandardCharsets.UTF_8), timestamp, fields[2]);
+        var matched = VoWLANPairingStore.match(context, fields[3], canonical, timestamp, now);
+        if (matched == null || !replayCache.accept(fields[2], now)) throw new SecurityException("early media authentication failed");
+        var lease = EarlyMediaSessions.resolve(matched.id(), binding, now);
+        if (lease == null || !gate.tryAcquire(owner)) throw new SecurityException("early media lease unavailable");
+        Object earlyOwner = new Object();
+        try (Socket capture = new Socket()) {
+            if (!track(capture)) return;
+            try {
+                capture.connect(shellPCM, 3000); capture.setSoTimeout(3000); capture.setTcpNoDelay(true);
+                capture.getOutputStream().write("AIRSIMEM01\n".getBytes(StandardCharsets.US_ASCII));
+                if (!VoWLANPCMProtocol.acceptReady(capture.getInputStream())) throw new IOException("receive-only bridge unavailable");
+                peer.getOutputStream().write(VoWLANPCMProtocol.READY.getBytes(StandardCharsets.US_ASCII));
+                peer.getOutputStream().flush();
+                capture.setSoTimeout(0);
+                Thread monitor = new Thread(() -> {
+                    try {
+                        while (!peer.isClosed() && !capture.isClosed() && EarlyMediaSessions.live(lease)) Thread.sleep(100);
+                    } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                    finally { closeQuietly(capture); closeQuietly(peer); }
+                }, "early-media-lease");
+                monitor.setDaemon(true); monitor.start();
+                byte[] frame = new byte[320]; boolean audible = false;
+                try {
+                    while (EarlyMediaSessions.live(lease)) {
+                        try { new java.io.DataInputStream(capture.getInputStream()).readFully(frame); }
+                        catch (java.net.SocketTimeoutException timeout) { continue; }
+                        int peak = 0;
+                        for (int k = 0; k + 1 < frame.length; k += 2) {
+                            short sample = (short)((frame[k] & 255) | (frame[k + 1] << 8));
+                            peak = Math.max(peak, Math.abs((int) sample));
+                        }
+                        // Silence is not proof that carrier early audio is actually audible.
+                        if (!audible && peak > 64) {
+                            audible = true;
+                            RemoteAudioSessionRegistry.setEarlyMedia(earlyOwner, lease.telecom(), true);
+                        }
+                        if (audible && EarlyMediaSessions.live(lease)) {
+                            peer.getOutputStream().write(frame); peer.getOutputStream().flush();
+                        }
+                    }
+                } finally { Arrays.fill(frame, (byte) 0); closeQuietly(capture); monitor.interrupt(); }
+            } finally { sockets.remove(capture); }
+        } finally {
+            RemoteAudioSessionRegistry.setEarlyMedia(earlyOwner, lease.telecom(), false);
+            gate.release(owner);
         }
     }
 

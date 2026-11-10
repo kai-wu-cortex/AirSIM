@@ -609,6 +609,26 @@ final class RemoteDirectTests: XCTestCase {
         XCTAssertFalse(VoWLANManualRouteStore.routes().contains { $0.agentID == id })
     }
 
+    func testPublicPairingCommitsTheNegotiatedSMSKey() async throws {
+        let id = "public-e2e-" + UUID().uuidString
+        defer {
+            PairedAndroidDeviceStore.forget(id)
+            VoWLANPairingRecordStore.remove(agentID: id)
+            VoWLANManualRouteStore.remove(agentID: id)
+        }
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: RemoteTestCredentials(agentID: id, credential: credential),
+            e2eKeys: keys, healthTransport: { _ in throw URLError(.badServerResponse) })
+        let model = AppModel(localDirectory: directory,
+            callKitController: CallKitController(observesSystemCallbacks: false))
+        let endpoint = try VoWLANEndpoint(host: "phone.example.com", controlPort: 443, pcmPort: 17593, usesTLS: true)
+        let record = E2EKeyRecord(key: Data(repeating: 0x2E, count: 32), deviceID: "iphone-public")
+        try await model.completeLocalPairing(agentID: id,
+            registration: .local(vowlanSecret: credential.encodedSecret), endpoint: endpoint, e2e: .save(record))
+        // The claim's route proof authenticated this Android, as on the private-network path.
+        XCTAssertEqual(try keys.record(agentID: id), record)
+    }
+
     func testLegacyRouteDecodingAndRemoteCoexistenceRemoval() throws {
         let suite = "remote-routes-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
@@ -2206,16 +2226,27 @@ private actor ManualPairingPeerProbe {
     let secret = Data(0..<32)
     let corruptRoute: Bool
     let expectedEndpoint: NWEndpoint
-    init(corruptRoute: Bool = false, endpoint: NWEndpoint = .hostPort(host: "100.64.1.2", port: 38000)) {
+    /// Standalone advertises `capabilities.e2e_sms: 1` in /pair/v1/info.
+    let advertiseE2E: Bool
+    let badCapability: Bool
+    /// The decrypted registration JSON of the last claim.
+    private(set) var lastRegistration: Data?
+    init(corruptRoute: Bool = false, endpoint: NWEndpoint = .hostPort(host: "100.64.1.2", port: 38000),
+         advertiseE2E: Bool = false, badCapability: Bool = false) {
         self.corruptRoute = corruptRoute
         self.expectedEndpoint = endpoint
+        self.advertiseE2E = advertiseE2E
+        self.badCapability = badCapability
     }
     func exchange(endpoint: NWEndpoint, body: Data, method: String, path: String, timeout: TimeInterval) throws -> Data {
         guard endpoint == expectedEndpoint else { throw URLError(.badURL) }
         if method == "GET", path == "/pair/v1/info" {
-            return try JSONSerialization.data(withJSONObject: ["product": "airsim-pair", "version": 1,
+            var info: [String: Any] = ["product": "airsim-pair", "version": 1,
                 "session_id": "fixture-session", "server_public_key": key.publicKey.rawRepresentation.base64EncodedString(),
-                "expires_at": Date().addingTimeInterval(120).timeIntervalSince1970 * 1000])
+                "expires_at": Date().addingTimeInterval(120).timeIntervalSince1970 * 1000]
+            if advertiseE2E { info["capabilities"] = ["e2e_sms": 1] }
+            if badCapability { info["capabilities"] = ["e2e_sms": "1", "x": [1]] }
+            return try JSONSerialization.data(withJSONObject: info)
         }
         guard method == "POST", path == "/pair/v1/claim",
               let claim = try JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -2233,6 +2264,7 @@ private actor ManualPairingPeerProbe {
             sharedInfo: Data("AirSIMPair/v1:123456".utf8), outputByteCount: 32)
         let plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: decode(sealedText)), using: aes,
                                          authenticating: Data("fixture-session".utf8))
+        lastRegistration = plaintext
         let registration = try XCTUnwrap(JSONSerialization.jsonObject(with: plaintext) as? [String: Any])
         XCTAssertTrue(registration["local_mode"] as? Bool == true)
         XCTAssertNil(registration["relay_url"])
@@ -2455,6 +2487,35 @@ final class AirSIMTests: XCTestCase {
             XCTFail("tampered port must not become a dial route")
         } catch {
             XCTAssertEqual(error as? SamsungPairingClientError, .directGatewayUnavailable)
+        }
+    }
+    func testManualClaimCarriesKeyOnlyWhenNegotiated() async throws {
+        let registration = AgentPushRegistration.local(vowlanSecret: Data(0..<32).base64EncodedString())
+        let address = try SamsungManualPairingAddress(host: "100.64.1.2", port: "38000")
+        func pair(_ peer: ManualPairingPeerProbe, offer: Bool) async throws -> (SymmetricKey?, [String: Any]) {
+            let result = try await SamsungPairingClient.pairManually(address: address, code: "123456",
+                registration: registration, offerE2E: offer,
+                transport: { endpoint, body, method, path, timeout in
+                    try await peer.exchange(endpoint: endpoint, body: body, method: method, path: path, timeout: timeout)
+                })
+            let sealed = await peer.lastRegistration
+            let claim = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(sealed)) as? [String: Any])
+            return (result.e2eKey, claim)
+        }
+        let (sentKey, claim) = try await pair(ManualPairingPeerProbe(advertiseE2E: true), offer: true)
+        let encoded = try XCTUnwrap(claim["e2e_key"] as? String)
+        XCTAssertEqual(encoded.count, 43)
+        XCTAssertEqual(E2ESMS.data(base64URL: encoded)?.count, 32)
+        XCTAssertEqual(E2ESMS.data(base64URL: encoded), sentKey?.withUnsafeBytes { Data($0) })
+        XCTAssertEqual(claim["vowlan_secret"] as? String, registration.vowlanSecret)
+        XCTAssertEqual(claim["local_mode"] as? Bool, true)
+        // Only one side supports it, or the capability is malformed: pair without a key.
+        for (peer, offer) in [(ManualPairingPeerProbe(advertiseE2E: true), false),
+                              (ManualPairingPeerProbe(), true),
+                              (ManualPairingPeerProbe(badCapability: true), true)] {
+            let (key, claim) = try await pair(peer, offer: offer)
+            XCTAssertNil(key)
+            XCTAssertNil(claim["e2e_key"])
         }
     }
     func testPairingHTTPResponseDistinguishesBadCodeFromMissingManualSupport() throws {
@@ -4792,6 +4853,54 @@ final class PhoneWindowLayoutTests: XCTestCase {
 
 @MainActor
 final class AirSIMWidgetTests: XCTestCase {
+    func testIndependentRecordsStayReadAfterViewingAndRepeatPolling() throws {
+    let agent = "preview-galaxy"
+    let callData = Data(#"{"active":null,"last_poll_error":"","history":[{"id":"missed-1","direction":"incoming","state":"ended","number":"13800138000","started_at":"2026-11-07T06:25:00Z","ended_at":"2026-11-07T06:26:00Z","missed":true,"slot_index":0}]}"#.utf8)
+    let smsData = Data(#"[{"sender":"10086","content":"余额充足","timestamp":"2026-11-07T06:20:00.000Z","delivery_id":"sms-1","sim_slot":"SIM 1"}]"#.utf8)
+    let (calls, state) = try WidgetDirectRefresh.parseCalls(callData, agentID: agent)
+    let messages = try WidgetDirectRefresh.parseMessages(smsData, agentID: agent)
+    XCTAssertTrue(state == "idle" && calls.count == 1 && calls[0].missed)
+    var base = AirSIMWidgetSnapshot.preview()
+    base.devices[0].unseenMissedCalls = 0; base.devices[0].unreadMessages = 0
+    base.readCallKeys = [agent:[]]; base.unseenCallKeys = [agent:[]]
+    base.readMessageKeys = [agent:[]]; base.unreadMessageKeys = [agent:[]]
+    let unread = WidgetDirectRefresh.mergingRecords(calls: calls, messages: messages, agentID: agent, into: base)
+    XCTAssertTrue(unread.devices[0].unseenMissedCalls == 1 && unread.devices[0].unreadMessages == 1)
+    base.readCallKeys = [agent:[calls[0].id]]
+    base.readMessageKeys = [agent:[messages[0].identityKey!]]
+    let read = WidgetDirectRefresh.mergingRecords(calls: calls, messages: messages, agentID: agent, into: base)
+    XCTAssertTrue(read.devices[0].unseenMissedCalls == 0 && read.devices[0].unreadMessages == 0)
+    XCTAssertTrue(read.calls.first(where: {$0.id == calls[0].id})?.missed == true)
+    let repeated = WidgetDirectRefresh.mergingRecords(calls: calls, messages: messages, agentID: agent, into: read)
+    XCTAssertTrue(repeated.calls.filter {$0.id == calls[0].id}.count == 1)
+    XCTAssertTrue(repeated.devices[0].unreadMessages == 0)
+    }
+
+    func testWidgetDirectLANAndIdentityBoundaries() async throws {
+    let target = WidgetDirectTarget(agentID: "fixture", host: "192.168.1.8", port: 7592,
+        secret: Data(repeating: 7, count: 32), clockOffset: 0)
+    XCTAssertTrue(target.isLAN)
+    for host in ["127.0.0.1", "8.8.8.8", "example.com", "bad.192.168.1.8", "192..168.1.8", "010.0.0.1"] {
+        XCTAssertTrue(!WidgetDirectTarget(agentID: "fixture", host: host, port: 7592, secret: target.secret, clockOffset: 0).isLAN)
+    }
+    for variant in ["valid", "wrongAgent", "wrongProof", "redirect"] {
+        var accepted = false
+        do {
+            let health = try await WidgetDirectRefresh.fetch(target) { request in
+                XCTAssertTrue(request.url!.path == "/v1/health")
+                XCTAssertTrue(request.httpMethod == "GET")
+                let nonce = request.value(forHTTPHeaderField: "X-AirSIM-VoWLAN-Nonce")!
+                let proof = Data(HMAC<SHA256>.authenticationCode(for: Data("AIRSIM-HEALTH1\n\(nonce)\nfixture".utf8), using: SymmetricKey(data: target.secret)))
+                    .base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+                let body: [String:Any] = ["ok":true, "agent_id":variant == "wrongAgent" ? "other" : "fixture", "identity_proof": variant == "wrongProof" ? "bad" : proof]
+                return (try JSONSerialization.data(withJSONObject: body), HTTPURLResponse(url: request.url!, statusCode: variant == "redirect" ? 302 : 200, httpVersion: nil, headerFields: nil)!)
+            }
+            accepted = health.agent_id == "fixture"
+        } catch { }
+        XCTAssertTrue(accepted == (variant == "valid"))
+    }
+    }
+
     func testBatteryExpiryAndMalformedMetadataDoNotBreakHealth() throws {
         let now = Date(timeIntervalSince1970: 1800000000)
         let zero = AndroidBatteryReading(percent: 0, charging: true, observedAtMS: now.timeIntervalSince1970 * 1000)
@@ -4866,13 +4975,21 @@ final class AirSIMWidgetTests: XCTestCase {
             visited.insert(mode)
             mode = WidgetConnectionModeCycle.next(after: mode, pureLocal: false)
         }
-        XCTAssertEqual(visited, Set(AirSIMConnectionMode.allCases))
+        XCTAssertEqual(visited, DedicatedCallPolicy.vowlanOnly ? [.vowlan] : Set(AirSIMConnectionMode.allCases))
         XCTAssertEqual(mode, .vowlan)
     }
 
     func testRecentSummariesStayScopedAndOlderSnapshotsDecode() throws {
         let sample = AirSIMWidgetSnapshot.preview()
-        XCTAssertEqual(sample.latestMessage(for: "preview-galaxy")?.displayText, "快递已送达，请及时查收。")
+        XCTAssertEqual(sample.calls.first?.detailText, "SIM 1")
+        var fullNumberCall = try XCTUnwrap(sample.calls.first)
+        fullNumberCall.number = "13812346028"
+        XCTAssertEqual(fullNumberCall.displayNumber, "13812346028")
+        let legacy = try JSONDecoder().decode(AirSIMWidgetSnapshot.RecentCall.self,
+            from: Data(#"{"id":"old","maskedNumber":"hidden","date":0,"incoming":true,"missed":true}"#.utf8))
+        XCTAssertEqual(legacy.detailText, "SIM 未记录")
+        XCTAssertEqual(legacy.displayNumber, "hidden")
+        XCTAssertEqual(sample.latestMessage(for: "preview-galaxy")?.displayText, "话费余额充足，感谢使用。")
         XCTAssertNil(sample.latestMessage(for: "preview-redmi"))
         XCTAssertEqual(sample.latestCall(for: "preview-redmi")?.id, "example-2")
         XCTAssertNil(sample.latestCall(for: "unpaired"))
@@ -5248,5 +5365,121 @@ private actor OperationQueryTransport: AirSIMHTTPTransport {
         if mode == "newline" { value["backend_id"] = "original-backend\nforged" }
         if mode == "version2" { value["version"] = 2 }
         return .init(statusCode: 200, body: try JSONSerialization.data(withJSONObject: value))
+    }
+}
+
+@MainActor
+final class CallNotificationTruthTests: XCTestCase {
+    private func record(direction: String = "incoming", state: String = "ended", missed: Bool = true,
+                        connected: Bool = false) -> CallRecord {
+        var call = CallRecord(id: "notification-test", index: 0, direction: direction, state: state,
+            number: "10086", startedAt: Date(), updatedAt: Date(),
+            endedAt: state == "ended" ? Date() : nil, missed: missed)
+        if connected { call.connectedAt = Date() }
+        return call
+    }
+    func testOnlyExplicitUnansweredIncomingTerminalIsMissed() {
+        XCTAssertTrue(CallNotificationTruth.isMissed(record()))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(connected: true)))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(missed: false)))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(direction: "outgoing")))
+        XCTAssertFalse(CallNotificationTruth.isMissed(record(state: "incoming")))
+    }
+    func testLegacyEndAndAnsweredPushCannotBecomeMissed() {
+        var info: [AnyHashable: Any] = ["event": "call_owner", "phase": "ended", "direction": "incoming"]
+        XCTAssertFalse(CallNotificationTruth.isMissedPush(info))
+        info["missed"] = true; info["notification_status"] = "missed"
+        XCTAssertTrue(CallNotificationTruth.isMissedPush(info))
+        info["phase"] = "active"
+        XCTAssertFalse(CallNotificationTruth.isMissedPush(info))
+        info["phase"] = "ended"; info["missed"] = false
+        XCTAssertFalse(CallNotificationTruth.isMissedPush(info))
+    }
+    func testBodyUsesActualSIMAndUnknownValuesRemainUnknown() {
+        XCTAssertEqual(CallNotificationTruth.body(number: "10086", callerName: "运营商", slotIndex: 1),
+            "运营商 · 10086 · SIM 2")
+        XCTAssertEqual(CallNotificationTruth.body(number: "10086", callerName: "10086", slotIndex: nil), "10086")
+        XCTAssertEqual(CallNotificationTruth.body(number: nil, callerName: nil, slotIndex: -1), "未知号码")
+    }
+}
+
+final class WidgetRefreshFeedbackTests: XCTestCase {
+    func testPendingRefreshExpiresWithoutPretendingSuccess() {
+        let now = Date()
+        var device = AirSIMWidgetSnapshot.Device(id: "A", name: "Android", transport: "VoWLAN", recentlyReachable: false, observedAt: nil)
+        device.lastRefreshAttempt = now; device.refreshPending = true
+        XCTAssertTrue(device.refreshInProgress(at: now)); XCTAssertEqual(device.status(at: now), "正在刷新…")
+        XCTAssertFalse(device.refreshInProgress(at: now.addingTimeInterval(25)))
+        XCTAssertEqual(device.status(at: now.addingTimeInterval(25)), "上次刷新中断，请重试")
+        device.refreshPending = false; device.refreshFailed = true
+        device.refreshFailureReason = "连接安卓超时，请检查 Wi-Fi"
+        XCTAssertEqual(device.status(at: now), device.refreshFailureReason)
+    }
+    func testRefreshErrorsUseFixedMessagesWithoutLeakingServerDetails() {
+        XCTAssertEqual(WidgetDirectRefresh.refreshError("NSURLErrorDomain:-1001"), "连接安卓超时，请检查 Wi-Fi")
+        XCTAssertEqual(WidgetDirectRefresh.refreshError("AirSIM.Widget.HTTP:401"), "配对认证失败，请打开 App 检查")
+        XCTAssertEqual(WidgetDirectRefresh.refreshError("unknown secret=example"), "查询失败，请打开 App 检查连接")
+    }
+}
+
+final class CallEndConfirmationTests: XCTestCase {
+    private func record(_ id: String, _ state: String) -> CallRecord {
+        .init(id: id, index: 0, direction: "outgoing", state: state, number: nil,
+              startedAt: Date(), updatedAt: Date(), endedAt: state == "ended" ? Date() : nil, missed: false)
+    }
+    private func status(_ active: CallRecord?, _ history: [CallRecord]) -> CallStatus {
+        .init(active: active, history: history, polling: true, eventDriven: true, pollIntervalSeconds: 1, lastPollError: "", revision: 1)
+    }
+    func testOnlyExactTerminalConfirmsHangup() {
+        XCTAssertFalse(CallEndEvidence.confirms(status(record("new", "active"), []), id: "old"))
+        XCTAssertFalse(CallEndEvidence.confirms(status(nil, []), id: "old"))
+        XCTAssertTrue(CallEndEvidence.confirms(status(record("new", "active"), [record("old", "ended")]), id: "old"))
+        XCTAssertFalse(CallEndEvidence.confirms(status(record("old", "active"), [record("old", "ended")]), id: "old"))
+        XCTAssertFalse(CallEndEvidence.confirms(status(nil, [record("old", "ended")]), id: ""))
+    }
+}
+
+@MainActor final class DialPadRecallTests: XCTestCase {
+    func testEmptyDialButtonRecallsOnlyOutgoingWithoutDialing() throws {
+        let defaults = UserDefaults.standard
+        let savedNumber = defaults.object(forKey: "airsim.last-outgoing-number")
+        let savedAt = defaults.object(forKey: "airsim.last-outgoing-at")
+        defer {
+            defaults.set(savedNumber, forKey: "airsim.last-outgoing-number")
+            defaults.set(savedAt, forKey: "airsim.last-outgoing-at")
+        }
+        defaults.removeObject(forKey: "airsim.last-outgoing-number")
+        defaults.removeObject(forKey: "airsim.last-outgoing-at")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = AppModel(historyStore: LocalHistoryStore(directoryURL: directory))
+        defer { model.stop() }
+        let now = Date()
+        model.callHistory = [
+            .init(id:"out",index:0,direction:"outgoing",state:"ended",number:"5550100",startedAt:now,updatedAt:now,endedAt:now,missed:false),
+            .init(id:"in",index:1,direction:"incoming",state:"ended",number:"5550200",startedAt:now.addingTimeInterval(1),updatedAt:now,endedAt:now,missed:true)]
+        model.numberInput = ""
+        XCTAssertTrue(model.recallLastOutgoingNumber())
+        XCTAssertEqual(model.numberInput, "5550100")
+        XCTAssertFalse(model.callLifecycleSnapshot.state.representsCall)
+        model.numberInput = "5550300"
+        XCTAssertFalse(model.recallLastOutgoingNumber())
+        XCTAssertEqual(model.numberInput, "5550300")
+    }
+}
+
+final class AndroidStartupReadinessTests: XCTestCase {
+    func testLegacyResponseIsUnknownRatherThanReady() throws {
+        let value = try JSONDecoder().decode(AndroidReadinessResponse.self, from: Data("{\"ok\":true}".utf8))
+        XCTAssertNil(value.readiness)
+    }
+    func testStartupReportsMissingRequirements() throws {
+        let json = #"{"readiness":{"default_dialer":false,"phone_permission":true,"state_permission":false,"permission_channel":false,"bridge_process":false,"paired":true,"uptime_seconds":42}}"#
+        let value = try XCTUnwrap(JSONDecoder().decode(AndroidReadinessResponse.self, from: Data(json.utf8)).readiness)
+        XCTAssertFalse(value.defaultDialer); XCTAssertFalse(value.permissionChannel); XCTAssertFalse(value.bridgeProcess)
+        XCTAssertTrue(value.paired); XCTAssertEqual(value.uptimeSeconds, 42)
+    }
+    func testIncompleteRequirementsCannotDecodeAsReady() {
+        XCTAssertThrowsError(try JSONDecoder().decode(AndroidReadinessResponse.self, from: Data("{\"readiness\":{\"paired\":true}}".utf8)))
     }
 }

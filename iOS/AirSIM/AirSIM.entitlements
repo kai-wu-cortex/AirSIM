@@ -10,5 +10,10 @@
 	<true/>
 	<key>com.apple.developer.messaging-app</key>
 	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		<string>$(AppIdentifierPrefix)airsim.e2e-sms</string>
+	</array>
 </dict>
 </plist>

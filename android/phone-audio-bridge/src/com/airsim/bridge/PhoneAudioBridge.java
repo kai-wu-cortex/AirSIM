@@ -163,8 +163,8 @@ public final class PhoneAudioBridge {
             // Validate the hello before touching audio endpoints. A bare TCP
             // liveness probe (VoWLANGatewayService.portOpen) closes immediately;
             // never start AudioRecord/AudioTrack or record a session failure for it.
-            BridgeProtocol.readHello(client.getInputStream());
-            streamCallAudio(client, started, stats);
+            if (BridgeProtocol.readReceiveOnlyHello(client.getInputStream())) streamEarlyAudio(client, started, stats);
+            else streamCallAudio(client, started, stats);
         } catch (BridgeProtocol.ProbeClosed closed) {
             probe = true;
         } catch (Throwable error) {
@@ -175,6 +175,33 @@ public final class PhoneAudioBridge {
                 "result", "error"));
         } finally {
             if (!probe) emit(started, "client_closed", statsFields(stats.snapshot()));
+        }
+    }
+
+    /** Downlink capture only: never creates AudioTrack, never accepts microphone PCM. */
+    private static void streamEarlyAudio(Socket client, long started, BridgeStats stats) throws Exception {
+        int size = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING);
+        if (size <= 0) throw new IOException("early audio buffer unavailable");
+        AudioRecord recorder = new AudioRecord(captureSource(), SAMPLE_RATE, CHANNEL_IN, ENCODING, Math.max(size, 3200));
+        AtomicBoolean running = new AtomicBoolean(true);
+        Runnable stop = () -> {
+            if (!running.getAndSet(false)) return;
+            try { client.close(); } catch (IOException ignored) {}
+            try { recorder.stop(); } catch (RuntimeException ignored) {}
+        };
+        try (AudioEndpointLease capture = new AudioEndpointLease(stop, recorder::release)) {
+            if (recorder.getState() != AudioRecord.STATE_INITIALIZED) throw new IOException("early capture unavailable");
+            recorder.startRecording();
+            if (recorder.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) throw new IOException("early capture failed");
+            BridgeProtocol.writeReady(client.getOutputStream()); client.setSoTimeout(125000);
+            Thread revoke = new Thread(() -> {
+                try { client.getInputStream().read(); } catch (IOException ignored) {}
+                finally { stop.run(); }
+            }, "early-capture-revocation");
+            revoke.setDaemon(true); revoke.start();
+            stats.resetAudio();
+            emit(started, "early_media_ready", Map.of("direction", "recvonly", "microphone", false));
+            captureDownlink(recorder, client, stats, running, stop);
         }
     }
 

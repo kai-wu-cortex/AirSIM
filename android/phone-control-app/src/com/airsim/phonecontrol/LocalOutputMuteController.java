@@ -4,7 +4,7 @@ import java.io.IOException;
 
 /** One remote-call mute cycle; the backend runs with Shizuku shell/root identity. */
 final class LocalOutputMuteController {
-    enum Strategy { MUTE, MINIMUM_VOLUME, MINIMUM_NONZERO_VOLUME }
+    enum Strategy { MUTE, OUTPUT_ONLY, MINIMUM_VOLUME, MINIMUM_NONZERO_VOLUME }
     static Strategy strategyForManufacturer(String manufacturer) {
         // Some vendor HALs expose VOICE_DOWNLINK capture that is coupled to the
         // call stream mute/zero index: setting muted=true or volume=0 produces
@@ -22,6 +22,8 @@ final class LocalOutputMuteController {
     static Strategy vowlanStrategy() {
         return strategyForManufacturer(android.os.Build.MANUFACTURER);
     }
+    static Strategy physicalOutputStrategy() { return Strategy.OUTPUT_ONLY; }
+
     interface Backend {
         boolean isMuted() throws Exception;
         int volume() throws Exception;
@@ -30,6 +32,7 @@ final class LocalOutputMuteController {
         default int minimumVolume() throws Exception { throw new IOException("minimum volume unsupported"); }
         default void prepareOutputMute(boolean originalMuted) throws Exception {}
         default void applyOutputMute() throws Exception {}
+        default void applyOutputOnlyMute() throws Exception { throw new IOException("device output mute unsupported"); }
         default void restoreOutputMute() throws Exception {}
     }
 
@@ -48,13 +51,14 @@ final class LocalOutputMuteController {
     }
     boolean isVerifiedMuted() { return verifiedMuted; }
     boolean isVerifiedMinimum() { return verifiedMinimum; }
-    boolean usesMinimumVolume() { return strategy != Strategy.MUTE; }
+    boolean usesMinimumVolume() { return strategy == Strategy.MINIMUM_VOLUME || strategy == Strategy.MINIMUM_NONZERO_VOLUME; }
     /** Exposes the exact OS boundary this controller owns (tests and diagnostics). */
     Backend backend() { return backend; }
     private boolean requiresUnmutedCapture() { return strategy == Strategy.MINIMUM_NONZERO_VOLUME; }
     static String policyName(Strategy strategy) {
         return switch (strategy) {
             case MUTE -> "mute";
+            case OUTPUT_ONLY -> "device_output_only";
             case MINIMUM_VOLUME -> "minimum_volume";
             case MINIMUM_NONZERO_VOLUME -> "minimum_nonzero_volume";
         };
@@ -93,6 +97,13 @@ final class LocalOutputMuteController {
                 return "local_output_" + policyName() + " minimum_volume=" + targetMinimum
                     + (requiresUnmutedCapture() ? " capture_stream_unmuted=true" : "")
                     + " volume_verified=true acoustic_check=unavailable";
+            }
+            if (strategy == Strategy.OUTPUT_ONLY) {
+                // Suppress only the built-in output devices. Do not set STREAM_VOICE_CALL's
+                // global mute flag: vendor VOICE_DOWNLINK capture can follow that flag.
+                backend.applyOutputOnlyMute();
+                verifiedMuted = true; // device policy readback, not an acoustic measurement
+                return "local_output_device_muted policy_verified=true acoustic_check=unavailable";
             }
             // A previous call's framework flag is not proof that this call's HAL is muted.
             backend.setMuted(true);

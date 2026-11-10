@@ -410,7 +410,12 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ringing,
             transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
         peer.setCallState("incoming")
-        if answered { try await model.callKitAnswer(uuid: pushed.uuid, origin: .system) }
+        if answered {
+            try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+            XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+            _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .active,
+                transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
+        }
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ended,
             transport: .bluetooth, transportEpoch: 5, backendGeneration: 11))
         let before = model.callLifecycleSnapshot
@@ -469,6 +474,10 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
         peer.setCallState("incoming")
         try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+        XCTAssertNil(model.callConnectedAt)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "cold-call", state: .active,
+            transport: .vowlan, transportEpoch: directory.transportEpoch(for: "A"), backendCallID: "cold-call"))
         XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
         XCTAssertTrue(peer.commands.contains { $0.path == "/api/calls/answer" })
         controller.reportCurrentCallEnded(reason: .remoteEnded)
@@ -863,6 +872,86 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(directory.agentIDs, ["A"])
         XCTAssertEqual(directory.routes(for: "A")?.vowlan, fresh)
         XCTAssertNil(directory.metadata(for: "A")?.phoneNumber)
+    }
+
+    func testFailedKeyWriteDoesNotClaimPairingSucceeded() async throws {
+        let id = "e2e-failure-" + UUID().uuidString
+        defer { VoWLANPairingRecordStore.remove(agentID: id) }
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            e2eKeys: MemoryE2EKeyStore(failure: .unavailable))
+        let credential = try VoWLANCredential(secret: aSecret)
+        directory.stagePairing(agentID: id, credential: credential,
+            e2e: .save(.init(key: Data(repeating: 7, count: 32), deviceID: "fixture")))
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 39000, pcmPort: 39001)
+        for _ in 0..<2 {
+            do {
+                try await directory.persistPairing(agentID: id, credential: credential, endpoint: endpoint, deviceName: nil)
+                XCTFail("Failed E2E write must remain pending and surface on retry")
+            } catch { XCTAssertEqual(error as? E2EKeyStoreError, .unavailable) }
+        }
+    }
+
+    func testStagedKeyChangeCommitsWithCredential() async throws {
+        let id = "e2e-" + UUID().uuidString
+        defer { VoWLANPairingRecordStore.remove(agentID: id) }
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), e2eKeys: keys)
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 39000, pcmPort: 39001)
+        let credential = try VoWLANCredential(secret: aSecret)
+        let record = E2EKeyRecord(key: Data(repeating: 7, count: 32), deviceID: "iphone-air")
+        func pair(_ change: E2EPairingKeyChange?) async throws {
+            directory.stagePairing(agentID: id, credential: credential, e2e: change)
+            try await directory.persistPairing(agentID: id, credential: credential, endpoint: endpoint, deviceName: nil)
+        }
+        directory.stagePairing(agentID: id, credential: credential, e2e: .save(record))
+        XCTAssertEqual(keys.all, [:])
+        try await directory.persistPairing(agentID: id, credential: credential, endpoint: endpoint, deviceName: nil)
+        XCTAssertEqual(keys.all, [id: record])
+        // A local-only pairing leaves the key; a cloud pairing without a key removes it.
+        try await pair(nil)
+        XCTAssertEqual(keys.all, [id: record])
+        try await pair(.remove)
+        XCTAssertEqual(keys.all, [:])
+        // Deleting the device drops a change that was never committed.
+        directory.stagePairing(agentID: id, credential: credential, e2e: .save(record))
+        try await directory.forget(agentID: id)
+        try await pair(nil)
+        XCTAssertEqual(keys.all, [:])
+    }
+
+    func testSameEndpointRePairingCommitsPendingEncryptionKey() async throws {
+        let android = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        defer { android.stop(); VoWLANPairingRecordStore.remove(agentID: "A") }
+        let endpoint = try await android.start()
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), e2eKeys: keys,
+            healthTransport: AuthenticatedHealthPeer.transport)
+        let credential = try VoWLANCredential(secret: aSecret)
+        try await directory.verifyPairing(agentID: "A", endpoint: endpoint, credential: credential)
+        let record = E2EKeyRecord(key: Data(repeating: 7, count: 32), deviceID: "iphone-air")
+        directory.stagePairing(agentID: "A", credential: credential, e2e: .save(record))
+        XCTAssertTrue(directory.hasPendingPairing(agentID: "A"))
+        XCTAssertNil(try keys.record(agentID: "A"))
+        await directory.verifyCandidates([.init(id: "A", endpoint: endpoint, deviceName: "fixture", manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)])
+        XCTAssertEqual(try keys.record(agentID: "A"), record)
+        XCTAssertFalse(directory.hasPendingPairing(agentID: "A"))
+    }
+
+    func testUnprovenPairingWritesNoKey() async throws {
+        // The Bonjour claim reply is unauthenticated: only the signed health check commits the key.
+        let impostor = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, includeProof: false)
+        let android = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        defer { impostor.stop(); android.stop() }
+        let impostorEndpoint = try await impostor.start(), androidEndpoint = try await android.start()
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), e2eKeys: keys,
+                                             healthTransport: AuthenticatedHealthPeer.transport)
+        let record = E2EKeyRecord(key: Data(repeating: 7, count: 32), deviceID: "iphone-air")
+        directory.stagePairing(agentID: "A", credential: try VoWLANCredential(secret: aSecret), e2e: .save(record))
+        do { try await directory.verify(agentID: "A", endpoint: impostorEndpoint); XCTFail("unsigned health accepted") } catch {}
+        XCTAssertEqual(keys.all, [:])
+        try await directory.verify(agentID: "A", endpoint: androidEndpoint)
+        XCTAssertEqual(keys.all, ["A": record])
     }
 
     func testEndpointReplacementDropsOldPollResponse() async throws {

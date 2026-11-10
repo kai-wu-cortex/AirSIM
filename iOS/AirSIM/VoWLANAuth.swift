@@ -142,6 +142,7 @@ enum VoWLANCredentialStore {
         } else if status != errSecSuccess { throw VoWLANAuthError.randomUnavailable }
     }
     static func remove(agentID: String) {
+        WidgetDirectKeychain.remove(agentID: agentID)
         var query = queryWithoutValue()
         query[kSecAttrAccount as String] = deviceAccount(agentID)
         SecItemDelete(query as CFDictionary)

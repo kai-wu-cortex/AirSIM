@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UserNotifications
 
 /// AirSIM 只引导 Android 配对；不检查旧模块固件或网络。
 struct AirSIMFirstConnectionView: View {
@@ -20,7 +21,7 @@ struct AirSIMFirstConnectionView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("连接安卓手机")
                         .font(.largeTitle.bold())
-                    Text("AirSIM 可通过 VoWLAN、蓝牙或云端 Relay 独立连接 Android 手机。")
+                    Text(DedicatedCallPolicy.vowlanOnly ? "通话通过 VoWLAN 直连 Android 手机，Relay 仅用于推送通知。" : "AirSIM 可通过 VoWLAN、蓝牙或云端 Relay 独立连接 Android 手机。")
                         .foregroundStyle(.secondary)
                 }
 
@@ -34,8 +35,8 @@ struct AirSIMFirstConnectionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
 
-                Picker("连接模式", selection: $connectionModeRaw) {
-                    ForEach(AirSIMConnectionMode.allCases) { mode in
+                Picker("连接模式", selection: Binding(get: { selectedMode.rawValue }, set: { connectionModeRaw = $0 })) {
+                    ForEach(DedicatedCallPolicy.selectableModes) { mode in
                         Text(mode.title).tag(mode.rawValue)
                     }
                 }
@@ -91,7 +92,7 @@ struct AirSIMFirstConnectionView: View {
     }
 
     private var selectedMode: AirSIMConnectionMode {
-        AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic
+        DedicatedCallPolicy.vowlanOnly ? .vowlan : (AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic)
     }
 }
 
@@ -114,10 +115,13 @@ struct AirSIMFirstConnectionView: View {
 }
 
 private struct PairedAndroidDeviceRows: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var statusRevision = 0
     let devices: [AndroidAgentPresentation]
     let onDelete: (AndroidAgentPresentation) -> Void
 
     var body: some View {
+        let _ = statusRevision
         VStack(alignment: .leading, spacing: 12) {
             Text("已配对设备").font(.subheadline.weight(.semibold))
             if devices.isEmpty {
@@ -129,6 +133,8 @@ private struct PairedAndroidDeviceRows: View {
                         Text(device.deviceName).font(.subheadline.weight(.medium))
                         Text(device.phoneNumber ?? "号码未提供").font(.caption).foregroundStyle(.secondary)
                         Text(connectionText(device)).font(.caption2).foregroundStyle(.secondary)
+                        Label(smsEncryptionStatus(device.id), systemImage: "lock.shield")
+                            .font(.caption2).foregroundStyle(.secondary)
                         if let pairing = VoWLANPairingRecordStore.records()
                             .first(where: { $0.agentID == device.id }) {
                             Text("本机配对记录 · \(pairing.id.prefix(8)) · \(pairing.endpoints.count) 个地址")
@@ -144,10 +150,33 @@ private struct PairedAndroidDeviceRows: View {
                     .accessibilityLabel("删除 \(device.deviceName) 配对记录")
                 }
             }
+            Text("加密状态来自本机已保存的配对密钥，仅适用于云端接收短信。需两端配对一致；收到并成功解密短信后才能验证实际链路。")
+                .font(.caption2).foregroundStyle(.secondary)
             Text("重连时重新读取当前信息，离线记录不保存号码。")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { statusRevision += 1 }
+        }
+    }
+
+    private func smsEncryptionStatus(_ agentID: String) -> String {
+        do {
+            guard let record = try KeychainE2EKeyStore.shared.record(agentID: agentID) else {
+                return "云端短信：未协商加密"
+            }
+            guard record.key.count == 32, !record.deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "云端短信：密钥异常，请重新配对"
+            }
+            return "云端短信：已协商端到端加密"
+        } catch E2EKeyStoreError.locked {
+            return "云端短信：解锁后查看加密状态"
+        } catch E2EKeyStoreError.unconfigured {
+            return "云端短信：此构建无法读取加密状态"
+        } catch {
+            return "云端短信：密钥不可用，请重新配对"
+        }
     }
 
     private func connectionText(_ device: AndroidAgentPresentation) -> String {
@@ -441,6 +470,25 @@ struct AirSIMSettingsView: View {
         case remark
     }
 
+    private var carrierRingbackSection: some View {
+        Section {
+            Toggle(isOn: $settings.carrierRingbackEnabled) {
+                Text(L10n.t("运营商原始等待音"))
+            }
+            .accessibilityIdentifier("carrierRingback")
+            .onChange(of: settings.carrierRingbackEnabled) { enabled in
+                model.carrierRingbackPreferenceDidChange(enabled: enabled)
+            }
+            Text(L10n.t("呼出接通前优先播放运营商回铃音，设备不支持时用本地等待音"))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text(L10n.t("呼出等待音"))
+        } footer: {
+            Text(L10n.t("仅 VoWLAN 呼出支持接通前运营商语音；关闭后呼出等待音恢复为本地合成音。"))
+        }
+    }
+
     var body: some View {
         SettingsNavigationContainer(isRoot: category == nil) {
             Form {
@@ -503,8 +551,8 @@ struct AirSIMSettingsView: View {
                     .onChange(of: cloudSignalingEnabled) { enabled in
                         model.setCloudSignalingEnabled(enabled)
                     }
-                    Picker("连接模式", selection: $connectionModeRaw) {
-                        ForEach(AirSIMConnectionMode.allCases) { mode in
+                    Picker("连接模式", selection: Binding(get: { selectedMode.rawValue }, set: { connectionModeRaw = $0 })) {
+                        ForEach(DedicatedCallPolicy.selectableModes) { mode in
                             Label(mode.title, systemImage: modeIcon(mode)).tag(mode.rawValue)
                         }
                     }
@@ -541,10 +589,15 @@ struct AirSIMSettingsView: View {
                 }
                 }
 
+                if category == "来电与短信" {
+                    carrierRingbackSection
+                }
+
                 if category == "连接与设备" {
                 Section("当前连接") {
+                    NavigationLink("连接与推送诊断") { AirSIMPushHealthView().environmentObject(model) }
                     LabeledContent("当前模式", value: model.connectionModePresentation.title)
-                    LabeledContent("连接状态", value: model.connectionModePresentation.status)
+                    LabeledContent("连接状态", value: DedicatedCallPolicy.vowlanOnly ? model.vowlan.connectionProgressText : model.connectionModePresentation.status)
                     LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
                     LabeledContent(
                         "云端 Relay",
@@ -826,6 +879,9 @@ struct AirSIMSettingsView: View {
                 }
 
                 if category == "帮助与诊断" {
+                Section("连接与通知") {
+                    NavigationLink("连接与推送诊断") { AirSIMPushHealthView().environmentObject(model) }
+                }
                 Section("调试") {
                     NavigationLink {
                         AgentVerboseTraceView(api: model.verboseDiagnosticsAPI)
@@ -1022,7 +1078,7 @@ struct AirSIMSettingsView: View {
     }
 
     private var selectedMode: AirSIMConnectionMode {
-        AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic
+        DedicatedCallPolicy.vowlanOnly ? .vowlan : (AirSIMConnectionMode(rawValue: connectionModeRaw) ?? .automatic)
     }
 
     private var runtimePolicy: ConnectionModeRuntimePolicy {
@@ -1477,5 +1533,205 @@ private struct SettingsNavigationContainer<Content: View>: View {
     @ViewBuilder var content: () -> Content
     var body: some View {
         if isRoot { NavigationStack { content() } } else { content() }
+    }
+}
+
+struct AirSIMPushHealthView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var metadata = AirSIMHealthStore.load()
+    @State private var permission = "尚未检查"
+    @State private var soundPermission = "尚未检查"
+    @State private var alertPermission = "尚未检查"
+    @State private var relay = "尚未检查"
+    @State private var agents: [CloudAndroidAgent] = []
+    @State private var readiness: [String: AndroidReadiness] = [:]
+    @State private var readinessErrors: [String: String] = [:]
+    @State private var heartbeatResult = "尚未检查"
+    @State private var checkedAt: Date?
+    @State private var busy = false
+    @State private var selfTestReport: CloudSelfTestReport?
+    @State private var selfTestRequest = 0
+    @State private var selfTestRunning = false
+    var body: some View {
+        Form {
+            Section("完整连接与推送自检") {
+                Button(selfTestRunning ? "正在分步自检…" : "运行完整自检") {
+                    selfTestReport = .initial; selfTestRunning = true; selfTestRequest += 1
+                }
+                .disabled(selfTestRunning || RelayEgressGate.shared.isBlocked
+                    || !CloudSignalingPreference.isEnabled() || model.callLifecycleSnapshot.state.representsCall)
+                if let report = selfTestReport {
+                    ForEach(report.steps) { step in
+                        HStack(alignment: .top, spacing: 10) {
+                            Group {
+                                if step.state == .running { ProgressView() }
+                                else { Image(systemName: step.state == .passed ? "checkmark.circle.fill" : step.state == .failed ? "exclamationmark.triangle.fill" : "circle") }
+                            }.frame(width: 20)
+                                .foregroundStyle(step.state == .passed ? Color.green : step.state == .failed ? Color.orange : Color.secondary)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(step.title)
+                                Text(step.detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
+                        }
+                    }
+                    if !selfTestRunning {
+                        Text(report.allPassed ? "连接与推送自检通过" : "自检未通过，请查看具体失败步骤")
+                            .foregroundStyle(report.allPassed ? .green : .orange)
+                        Button("复制完整自检结果") { UIPasteboard.general.string = report.copyText }
+                    }
+                }
+                Text("检查本机推送凭据、Relay 身份、设备注册、安卓记录、心跳与定向命令能力；读取现有设备注册，不重复写入注册；不拨号、不发送短信、不启用云端通话。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("推送健康检查") {
+                LabeledContent("通知权限", value: permission)
+                LabeledContent("通知声音权限", value: soundPermission)
+                LabeledContent("通知提醒权限", value: alertPermission)
+                LabeledContent("云端通知", value: CloudSignalingPreference.isEnabled() ? "已开启" : "已关闭")
+                LabeledContent("Relay", value: relay)
+                LabeledContent("安卓心跳查询", value: heartbeatResult)
+                if let checkedAt { LabeledContent("最近检查", value: time(checkedAt)) }
+                Button(busy ? "正在检查…" : "立即检查") { Task { await refresh() } }.disabled(busy)
+                Text("检查为只读操作，不发起电话或短信。Relay 可达不代表苹果通知已成功送达。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("安卓启动就绪检查") {
+                ForEach(model.pairedDeviceHistory) { device in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(device.deviceName).font(.headline)
+                        if let value = readiness[device.id] {
+                            Text("本次开机已运行 \(Int(value.uptimeSeconds / 60)) 分钟").font(.caption)
+                            Label(value.defaultDialer ? "默认电话：已设置" : "默认电话：未设置", systemImage: value.defaultDialer ? "checkmark.circle" : "exclamationmark.triangle")
+                            Text("拨号权限：\(value.phonePermission ? "已允许" : "未允许") · 通话状态权限：\(value.statePermission ? "已允许" : "未允许")")
+                            Text("Shizuku／Root 通道：\(value.permissionChannel ? "已连接" : "尚未就绪，请检查安卓授权")")
+                            Text("音频桥进程：\(value.bridgeProcess ? "运行中" : "尚未运行，请检查安卓")")
+                            Text("直连配对：\(value.paired ? "存在" : "缺失，请重新配对")")
+                        } else { Text(readinessErrors[device.id] ?? "尚未检查").foregroundStyle(.secondary) }
+                    }.font(.subheadline)
+                }
+                Text("进程运行不等于端口或真实音频可用；重启后请保持安卓 AirSIM 与 Shizuku 授权正常。旧版本没有此接口时显示未知，不会误报就绪。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("挂断确认与音频自检") {
+                if let value = model.remoteEndFeedback { Text(value) } else { Text("尚无本次运行期间的挂断确认记录") }
+                Text(model.audio.audioHealthText)
+                Button("恢复本机音频播放") { model.audio.recoverLocalPlayback() }
+                    .disabled(!model.audio.active)
+                Text("只恢复本机播放引擎，不重拨、不切换通话、不关闭安卓 PCM 会话。网络数据中断仍需恢复网络。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("最近推送接收") {
+                LabeledContent("普通推送／通知扩展", value: time(metadata.lastAlert))
+                LabeledContent("PushKit 来电推送", value: time(metadata.lastVoIP))
+                Text("从此版本开始记录；没有记录不等于推送失败。系统是否唤醒 App 或通知扩展会影响记录。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("本地连接与安卓心跳") {
+                LabeledContent("VoWLAN", value: VoWLANStatusCopy.text(for: model.vowlan.availability))
+                LabeledContent("Wi-Fi 路径", value: model.vowlan.wifiPathAvailable.map { $0 ? "可用" : "当前不可用" } ?? "尚未检查")
+                LabeledContent("本地最近认证成功", value: time(model.vowlan.lastConnectionSuccess))
+                if let reason = model.vowlan.lastConnectionFailure {
+                    LabeledContent("本地最近失败", value: time(model.vowlan.lastConnectionFailureAt))
+                    Text(reason).font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(model.pairedDeviceHistory) { device in
+                    LabeledContent(device.deviceName, value: heartbeat(device.id))
+                }
+                Text("心跳来自 Relay 最近约 150 秒的在线判断，不代表局域网可达，也不代表云端通话已开启。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("短信解密异常记录") {
+                if metadata.failures.isEmpty { Text("暂无异常记录") }
+                ForEach(metadata.failures) { failure in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(deviceName(failure.agentID)).font(.headline)
+                        Text(failure.reason)
+                        Text("\(time(failure.date)) · \(failure.resolved ? "此条已重新解密成功" : "待处理")")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if !failure.resolved, let id = failure.agentID,
+                           model.pairedDeviceHistory.contains(where: { $0.id == id }) {
+                            NavigationLink("重新配对此设备（\(deviceName(id))）") {
+                                SamsungPairingView().environmentObject(model)
+                            }
+                        }
+                    }
+                }
+                if !metadata.failures.isEmpty {
+                    Button("清除异常记录", role: .destructive) {
+                        AirSIMHealthStore.clearHistory(); metadata = AirSIMHealthStore.load()
+                    }
+                }
+                Text("只保留设备、时间和错误类别，不保存短信正文或密钥。重新配对成功后旧异常记录仍保留；旧密文不一定能用新密钥解密，可连接安卓同步本地短信。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("连接与推送诊断")
+        .task(id: selfTestRequest) {
+            guard selfTestRequest > 0 else { return }
+            defer { selfTestRunning = false }
+            selfTestReport = await VoIPPushController.shared.runCloudSelfTest { report in
+                guard !Task.isCancelled else { return }
+                selfTestReport = report
+            }
+        }
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            metadata = AirSIMHealthStore.load()
+        }
+        .task { await refresh() }
+        .refreshable { await refresh() }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active { metadata = AirSIMHealthStore.load() }
+        }
+    }
+    private func deviceName(_ id: String?) -> String {
+        guard let id else { return "来源设备信息缺失" }
+        return model.pairedDeviceHistory.first(where: { $0.id == id })?.deviceName ?? "历史设备 …\(id.suffix(6))"
+    }
+    private func time(_ date: Date?) -> String {
+        date?.formatted(.dateTime.month().day().hour().minute().second()) ?? "暂无记录"
+    }
+    private func heartbeat(_ id: String) -> String {
+        guard let agent = agents.first(where: { $0.agentID == id }) else { return "未获得此设备的心跳" }
+        return agent.cloudOnline ? "Relay 心跳在线" : "Relay 心跳已过期"
+    }
+    @MainActor private func refresh() async {
+        guard !busy else { return }; busy = true
+        defer { busy = false; metadata = AirSIMHealthStore.load() }
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized: permission = "已允许"
+        case .provisional: permission = "临时授权，通知可能静默显示"
+        case .ephemeral: permission = "临时会话授权"
+        case .denied: permission = "已拒绝，请到系统设置开启"
+        case .notDetermined: permission = "尚未授权"
+        @unknown default: permission = "未知授权状态"
+        }
+        soundPermission = settings.soundSetting == .enabled ? "已开启" : "未开启"
+        alertPermission = settings.alertSetting == .enabled ? "已开启" : "未开启"
+        guard !Task.isCancelled else { return }
+        checkedAt = Date()
+        readiness = [:]; readinessErrors = [:]
+        for device in model.pairedDeviceHistory {
+            guard !Task.isCancelled else { return }
+            guard let api = model.localDevices.api(for: device.id) else {
+                readinessErrors[device.id] = "尚未连接此安卓，请恢复直连后检查"; continue
+            }
+            do {
+                if let result = try await api.androidReadiness().readiness { readiness[device.id] = result }
+                else { readinessErrors[device.id] = "此安卓版本未提供启动检查，请更新安卓" }
+            } catch { readinessErrors[device.id] = "启动检查未完成：\(error.localizedDescription)" }
+        }
+        guard CloudSignalingPreference.isEnabled(), !RelayEgressGate.shared.isBlocked else {
+            relay = "未检查：云端通知关闭或纯本地模式"; agents = []; heartbeatResult = "未检查"; return
+        }
+        relay = "正在检查…"; heartbeatResult = "正在查询…"
+        do { let version = try await VoIPPushController.shared.checkRelayForDiagnostics(); relay = "可达 · \(version)" }
+        catch { relay = "检查失败：\(error.localizedDescription)" }
+        guard !Task.isCancelled else { return }
+        do {
+            let status = try await VoIPPushController.shared.fetchCloudAgentStatusForDiagnostics(allowLocalMode: true)
+            agents = status.agents; heartbeatResult = "查询成功"
+        } catch { agents = []; heartbeatResult = "查询失败：\(error.localizedDescription)" }
     }
 }

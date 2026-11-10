@@ -10,14 +10,17 @@ struct AirSIMDeviceWidgetProvider: TimelineProvider {
         .init(date: Date(), snapshot: .preview())
     }
     func getSnapshot(in context: Context, completion: @escaping (AirSIMDeviceWidgetEntry) -> Void) {
-        completion(.init(date: Date(), snapshot: context.isPreview ? .preview() : AirSIMWidgetStore().load()))
+        completion(.init(date: Date(), snapshot: context.isPreview ? .preview() : WidgetDirectRefresh.displaySnapshot()))
     }
     func getTimeline(in context: Context, completion: @escaping (Timeline<AirSIMDeviceWidgetEntry>) -> Void) {
-        let now = Date(), snapshot = AirSIMWidgetStore().load()
-        let entries = ([now] + snapshot.expirationDates(after: now)).map {
-            AirSIMDeviceWidgetEntry(date: $0, snapshot: snapshot)
+        Task {
+            let snapshot = await WidgetDirectRefresh.snapshot()
+            let now = Date()
+            let entries = ([now] + snapshot.expirationDates(after: now)).map {
+                AirSIMDeviceWidgetEntry(date: $0, snapshot: snapshot)
+            }
+            completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(snapshot.devices.contains { $0.refreshInProgress(at: now) } ? 5 : 900))))
         }
-        completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(900))))
     }
 }
 struct AirSIMDeviceWidget: Widget {

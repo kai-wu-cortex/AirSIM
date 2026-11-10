@@ -110,7 +110,16 @@ public final class VoWLANGatewayService extends Service {
     private void lifecycleLoop() {
         while (running) {
             try {
-                if (networkRecovery.consume(android.os.SystemClock.elapsedRealtime())) {
+                long networkNow = android.os.SystemClock.elapsedRealtime();
+                // Idle network callbacks often arrive before their final interface addresses.
+                // Coalesce them before rebuilding listeners; active sessions retain existing handling.
+                if (networkRecovery.isSettling(networkNow)
+                        && !(control != null && control.ownsCall())
+                        && !(pcm != null && pcm.hasActiveSession())) {
+                    waitForNetworkCycle(networkRecovery.nextDelay(networkNow, 1_000));
+                    continue;
+                }
+                if (networkRecovery.consume(networkNow)) {
                     // Re-register discovery only. Never tear down a working control/PCM socket.
                     invalidateAdvertisementForNetworkChange();
                     BridgeLog.watchdog("vowlan_network_recovery action=republish_discovery sockets=preserved");
