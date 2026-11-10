@@ -35,6 +35,18 @@ public final class BridgeNotification {
         context.getSystemService(NotificationManager.class).createNotificationChannel(channel);
     }
 
+    /** No preferences, SIM lookup, or action construction before FGS promotion. */
+    public static Notification startup(Context context, String detail) {
+        createChannel(context);
+        return new Notification.Builder(context, CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+                .setContentTitle("AirSIM 通话桥")
+                .setContentText(detail)
+                .setGroup(GROUP)
+                .setOnlyAlertOnce(true)
+                .setOngoing(true).build();
+    }
+
     public static Notification status(Context context, String detail) {
         createChannel(context);
         PendingIntent open = PendingIntent.getActivity(context, 0, new Intent(context, MainActivity.class),

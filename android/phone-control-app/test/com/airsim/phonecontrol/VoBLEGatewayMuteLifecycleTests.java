@@ -7,6 +7,7 @@ import java.util.concurrent.*;
 /** Actual gateway methods with real TCP PCM handshakes; no Bluetooth radio or real calls. */
 public final class VoBLEGatewayMuteLifecycleTests {
     public static void main(String[] args) throws Exception {
+        foregroundStartRecoversWithoutRestartingMedia();
         failedMediaCannotBeReownedByQueuedCallState();
         handshakeAfterDestroyCannotPublishOwnership();
         var destroyed = new VoBLEGatewayService();
@@ -14,6 +15,35 @@ public final class VoBLEGatewayMuteLifecycleTests {
         destroyed.onDisconnected("retired-peer"); // must not submit work to a terminated executor
         destroyed.onAdvertisingFailed(-3);
         System.out.println("VoBLEGatewayMuteLifecycleTests passed: failed PCM rebind and post-destroy handshake");
+    }
+
+    private static void foregroundStartRecoversWithoutRestartingMedia() throws Exception {
+        var gateway = new VoBLEGatewayService();
+        var context = new android.content.Context() {
+            @Override public android.content.ComponentName startForegroundService(android.content.Intent intent) {
+                throw new AssertionError("running BLE service must not request another OS start");
+            }
+        };
+        context.grant(android.Manifest.permission.BLUETOOTH_CONNECT);
+        context.grant(android.Manifest.permission.BLUETOOTH_ADVERTISE);
+        var gateField = VoBLEGatewayService.class.getDeclaredField("START_GATE");
+        gateField.setAccessible(true);
+        var gate = (ServiceStartGate) gateField.get(null);
+        var instanceField = VoBLEGatewayService.class.getDeclaredField("instance");
+        instanceField.setAccessible(true); instanceField.set(null, gateway); gate.created(gateway);
+        var retryField = VoBLEGatewayService.class.getDeclaredField("advertisingRetries");
+        retryField.setAccessible(true);
+        var retries = (java.util.concurrent.atomic.AtomicLong) retryField.get(gateway);
+        var identity = new VoBLEMediaSession.Identity("ongoing-call", 7);
+        set(gateway, "mediaIdentity", identity);
+        try {
+            retries.set(4);
+            VoBLEGatewayService.start(context);
+            check(retries.get() == 0, "foreground start must recover exhausted advertising retry budget");
+            var mediaField = VoBLEGatewayService.class.getDeclaredField("mediaIdentity");
+            mediaField.setAccessible(true);
+            check(mediaField.get(gateway) == identity, "advertising recovery cannot replace active media identity");
+        } finally { gateway.onDestroy(); }
     }
 
     private static void failedMediaCannotBeReownedByQueuedCallState() throws Exception {

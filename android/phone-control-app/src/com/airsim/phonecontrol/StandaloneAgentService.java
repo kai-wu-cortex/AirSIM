@@ -28,8 +28,8 @@ import java.util.concurrent.Executors;
 /** AVF-free foreground Agent: Relay registration, heartbeat and command execution. */
 public final class StandaloneAgentService extends Service {
     private static final RelayEventQueue<String> CALL_EVENTS = new RelayEventQueue<>(RelayEgressGate.shared);
-    private static final Object START_LOCK = new Object();
-    private static boolean startRequested;
+    private static final com.airsim.phonecontrol.ServiceStartGate START_GATE =
+            new com.airsim.phonecontrol.ServiceStartGate();
     private static volatile StandaloneAgentService instance;
     private static final java.util.concurrent.atomic.AtomicBoolean manualHeartbeatRunning = new java.util.concurrent.atomic.AtomicBoolean();
     private final ExecutorService worker = Executors.newFixedThreadPool(3);
@@ -59,16 +59,10 @@ public final class StandaloneAgentService extends Service {
             (preferences, key) -> smsSnapshot();
 
     public static void start(Context context) {
-        synchronized (START_LOCK) {
-            if (instance != null && instance.running) return;
-            if (startRequested) return;
-            startRequested = true;
-            try { context.startForegroundService(new Intent(context, StandaloneAgentService.class)); }
-            catch (RuntimeException error) {
-                startRequested = false;
-                BridgeLog.error("standalone_agent_start_failed", error);
-            }
-        }
+        try {
+            START_GATE.request(() -> context.startForegroundService(
+                    new Intent(context, StandaloneAgentService.class)) != null);
+        } catch (RuntimeException error) { BridgeLog.error("standalone_agent_start_failed", error); }
     }
 
     /** Explicit user action; call off the UI thread. Never enables cloud or bypasses the gate. */
@@ -116,15 +110,13 @@ public final class StandaloneAgentService extends Service {
         // Android starts the FGS promotion deadline when startForegroundService() returns.
         // Promote before any preference, disk, or Shizuku initialization can delay onCreate().
         startForeground(BridgeNotification.WATCHDOG_ID,
-                BridgeNotification.status(this, "内置 Agent 正在启动"),
+                BridgeNotification.startup(this, "内置 Agent 正在启动"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
         store = new StandaloneAgentStore(this);
         relay = new StandaloneRelayClient();
         running = true;
-        synchronized (START_LOCK) {
-            instance = this;
-            startRequested = false;
-        }
+        instance = this;
+        START_GATE.created(this);
         commandConfiguration = new RelayCommandConfiguration<>(store::registration, this::commandScope, commandRetry);
         getSharedPreferences("standalone_agent", MODE_PRIVATE).registerOnSharedPreferenceChangeListener(commandPreferences);
         ShizukuBridgeManager.get(this).ensureStarted();
@@ -507,10 +499,8 @@ public final class StandaloneAgentService extends Service {
 
     @Override public void onDestroy() {
         running = false;
-        synchronized (START_LOCK) {
-            if (instance == this) instance = null;
-            startRequested = false;
-        }
+        if (instance == this) instance = null;
+        START_GATE.destroyed(this);
         eventWorker.shutdownNow();
         getSharedPreferences("standalone_agent", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(commandPreferences);
         commandConfiguration.stop();

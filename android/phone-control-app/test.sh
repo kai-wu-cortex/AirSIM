@@ -367,3 +367,9 @@ sh "$ROOT/test-audio-policy.sh"
 
 sh "$ROOT/test-privileged-sms.sh"
 sh "$ROOT/test-e2e-sms.sh"
+
+"$JAVAC" --release 17 -d "$OUT" \
+    "$ROOT/src/com/airsim/phonecontrol/ServiceStartGate.java" \
+    "$ROOT/src/com/airsim/phonecontrol/voble/VoBLERecoveryRequest.java" \
+    "$ROOT/test/com/airsim/phonecontrol/ServiceStartupTests.java"
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.ServiceStartupTests

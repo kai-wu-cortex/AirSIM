@@ -47,8 +47,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class VoBLEGatewayService extends Service implements VoBLEGattServer.Listener {
     private static final String CHANNEL_ID = "airsim_voble";
     private static final int NOTIFICATION_ID = 4108;
-    private static final Object START_LOCK = new Object();
-    private static boolean startRequested;
+    private static final com.airsim.phonecontrol.ServiceStartGate START_GATE =
+            new com.airsim.phonecontrol.ServiceStartGate();
     private static volatile VoBLEGatewayService instance;
     private static volatile VoBLEDiagnostics.Snapshot diagnostics =
             VoBLEDiagnostics.idle("Android");
@@ -104,6 +104,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     private volatile SessionContext session;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final AtomicLong advertisingRetries = new AtomicLong();
+    private final VoBLERecoveryRequest recoveryRequest = new VoBLERecoveryRequest();
     private final Runnable advertisingRetry = () -> {
         if (destroyed) return;
         if (gatt == null || !gatt.hasBluetoothPermissions()) return;
@@ -130,20 +131,19 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
 
     public static void start(Context context) {
         if (!hasPermissions(context)) return;
-        synchronized (START_LOCK) {
-            if (instance != null && !instance.destroyed) return;
-            if (startRequested) return;
-            startRequested = true;
-            Intent intent = new Intent(context, VoBLEGatewayService.class);
-            try {
-                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
-                else context.startService(intent);
-            } catch (IllegalStateException | SecurityException restricted) {
-                startRequested = false;
-                // Application/boot may run in the background. Retry when the Activity resumes;
-                // do not let an expected platform restriction kill the app or clear pairing.
-                BridgeLog.error("voble_service_start_deferred", restricted);
+        try {
+            var result = START_GATE.request(() -> {
+                Intent intent = new Intent(context, VoBLEGatewayService.class);
+                return (Build.VERSION.SDK_INT >= 26 ? context.startForegroundService(intent)
+                        : context.startService(intent)) != null;
+            });
+            VoBLEGatewayService active = instance;
+            if (result == com.airsim.phonecontrol.ServiceStartGate.Result.RUNNING && active != null) {
+                active.recoveryRequest.request(active.mainHandler::post,
+                        () -> instance == active && !active.destroyed, active::recoverAdvertising);
             }
+        } catch (IllegalStateException | SecurityException restricted) {
+            BridgeLog.error("voble_service_start_deferred", restricted);
         }
     }
 
@@ -177,7 +177,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     @Override public void onCreate() {
         super.onCreate();
         instance = this;
-        synchronized (START_LOCK) { startRequested = false; }
+        START_GATE.created(this);
         createNotificationChannel();
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
@@ -217,12 +217,19 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        recoverAdvertising();
+        return START_STICKY;
+    }
+
+    // Main thread only. GATT.start() is a no-op while its server is healthy;
+    // do not close GATT, authentication, or media to repair advertising.
+    private void recoverAdvertising() {
+        if (destroyed) return;
         advertisingRetries.set(0);
         mainHandler.removeCallbacks(advertisingRetry);
         if (gatt != null && gatt.hasBluetoothPermissions() && !gatt.start()) {
             BridgeLog.info("voble_gatt_start_deferred");
         }
-        return START_STICKY;
     }
 
     @Override public void onAdvertisingReady() {
@@ -762,10 +769,8 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
             destroyed = true;
             stopMedia("", 0);
         }
-        synchronized (START_LOCK) {
-            if (instance == this) instance = null;
-            startRequested = false;
-        }
+        if (instance == this) instance = null;
+        START_GATE.destroyed(this);
         pendingPairingCode = "";
         diagnostics = VoBLEDiagnostics.idle(RuntimeMode.agentLabel(this));
         mainHandler.removeCallbacks(advertisingRetry);
