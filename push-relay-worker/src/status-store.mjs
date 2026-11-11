@@ -1,4 +1,6 @@
 import { constantTimeEqual, sha256Hex } from "./auth-crypto.mjs";
+import { D1StatusStore, D1StorageError } from "./d1-status-store.mjs";
+import { RoutingError } from "./command-routing.mjs";
 
 const HEARTBEAT_PREFIX = "heartbeat:";
 const DEVICE_PREFIX = "device:";
@@ -215,6 +217,14 @@ function registryStub(env) {
 }
 
 export async function authenticateAndWriteAgentHeartbeat(env, heartbeat, agentID, record) {
+  if (env.RELAY_DB) {
+    const device = await authenticatedD1Device(env, heartbeat);
+    if (!device) return Response.json({ error: "unauthorized" }, { status: 401 });
+    const accepted = await new D1StatusStore(env.RELAY_DB).writeHeartbeat(
+      device.device_id, agentID, record, device.secret_hash);
+    return accepted ? Response.json({ received: true }, { status: 202 })
+      : Response.json({ error: "unauthorized" }, { status: 401 });
+  }
   const stub = registryStub(env);
   if (!stub) return null;
   return stub.fetch("https://status.internal/authenticated-heartbeat", {
@@ -230,6 +240,11 @@ export async function authenticateAndWriteAgentHeartbeat(env, heartbeat, agentID
 }
 
 export async function authenticateAndReadAgentHeartbeats(env, query) {
+  if (env.RELAY_DB) {
+    const device = await authenticatedD1Device(env, query);
+    if (!device) return Response.json({ error: "unauthorized" }, { status: 401 });
+    return Response.json(await new D1StatusStore(env.RELAY_DB).heartbeats(device.device_id));
+  }
   const stub = registryStub(env);
   if (!stub) return null;
   return withTimeout(stub.fetch("https://status.internal/authenticated-status", {
@@ -255,6 +270,14 @@ function withTimeout(promise, timeoutMS) {
 
 export async function writeAgentHeartbeat(env, deviceID, agentID, record) {
   const normalizedAgentID = agentID || "legacy";
+  if (env.RELAY_DB) {
+    const device = await readDeviceRecord(env, deviceID);
+    if (!device || !await new D1StatusStore(env.RELAY_DB).writeHeartbeat(
+      deviceID, normalizedAgentID, record, device.secret_hash)) {
+      throw new RoutingError(401, "unauthorized");
+    }
+    return;
+  }
   const stub = registryStub(env);
   if (!stub) {
     // Keep local tests and an intentionally old deployment configuration working.
@@ -281,6 +304,7 @@ export async function writeAgentHeartbeat(env, deviceID, agentID, record) {
 }
 
 export async function readAgentHeartbeats(env, deviceID) {
+  if (env.RELAY_DB) return new D1StatusStore(env.RELAY_DB).heartbeats(deviceID);
   const stub = registryStub(env);
   if (stub) {
     try {
@@ -322,6 +346,7 @@ async function readKVAgentRoster(env, deviceID) {
 }
 
 export async function readAgentHeartbeat(env, deviceID) {
+  if (env.RELAY_DB) return new D1StatusStore(env.RELAY_DB).latestHeartbeat(deviceID);
   const stub = registryStub(env);
   if (!stub) return readKVRecord(env.DEVICES, `${HEARTBEAT_PREFIX}${deviceID}`);
   try {
@@ -339,6 +364,12 @@ export async function readAgentHeartbeat(env, deviceID) {
 }
 
 export async function writeDeviceRecord(env, deviceID, record) {
+  if (env.RELAY_DB) {
+    if (!await new D1StatusStore(env.RELAY_DB).writeDevice(deviceID, record)) {
+      throw new RoutingError(401, "device authentication failed");
+    }
+    return;
+  }
   const stub = registryStub(env);
   if (!stub) {
     await env.DEVICES.put(`${DEVICE_PREFIX}${deviceID}`, JSON.stringify(record));
@@ -360,6 +391,18 @@ export async function writeDeviceRecord(env, deviceID, record) {
 }
 
 export async function readDeviceRecord(env, deviceID) {
+  if (env.RELAY_DB) {
+    const store = new D1StatusStore(env.RELAY_DB);
+    const row = await store.deviceRow(deviceID);
+    if (row) return row.deleted ? null : JSON.parse(row.record);
+    if (env.RELAY_D1_IMPORT_LEGACY === "false") return null;
+    // Import a missing registration once. Never mistake an unavailable legacy
+    // authority for a free device ID, or a caller could replace its secret.
+    const legacy = await readDeviceForD1Import(env, deviceID);
+    if (!legacy) return null;
+    const imported = await store.importDevice(deviceID, legacy);
+    return imported.deleted ? null : JSON.parse(imported.record);
+  }
   const stub = registryStub(env);
   if (stub) {
     try {
@@ -381,6 +424,10 @@ export async function readDeviceRecordFromKV(env, deviceID) {
 export async function deleteDeviceRecord(env, deviceID) {
   const id = String(deviceID || "").trim();
   if (!id) return false;
+  if (env.RELAY_DB) {
+    await new D1StatusStore(env.RELAY_DB).deleteDevice(id);
+    return true;
+  }
   const stub = registryStub(env);
   if (stub) {
     await stub.fetch("https://status.internal/device/" + encodeURIComponent(id), { method: "DELETE" });
@@ -396,6 +443,7 @@ export async function deleteDeviceRecord(env, deviceID) {
 }
 
 export async function listDeviceRecords(env) {
+  if (env.RELAY_DB) return (await new D1StatusStore(env.RELAY_DB).deviceSummaries()).map(item => item.device);
   const records = new Map();
   if (typeof env.DEVICES?.list === "function") {
     try {
@@ -427,6 +475,7 @@ export async function listDeviceRecords(env) {
 }
 
 export async function writeDashboardEvent(env, key, record, ttlSeconds) {
+  if (env.RELAY_DB) return new D1StatusStore(env.RELAY_DB).writeEvent(key, record, ttlSeconds);
   const stub = registryStub(env);
   if (!stub) {
     await bestEffortKVPut(env.DEVICES, key, record, { expirationTtl: ttlSeconds });
@@ -445,6 +494,7 @@ export async function writeDashboardEvent(env, key, record, ttlSeconds) {
 }
 
 export async function listDashboardEvents(env, limit = 60) {
+  if (env.RELAY_DB) return new D1StatusStore(env.RELAY_DB).events(limit);
   const stub = registryStub(env);
   if (stub) {
     try {
@@ -555,6 +605,40 @@ async function bestEffortKVPut(kv, key, record, options) {
   } catch {
     // Durable Object remains authoritative when KV is exhausted or unavailable.
   }
+}
+
+export async function listDeviceSummaries(env) {
+  if (env.RELAY_DB) return new D1StatusStore(env.RELAY_DB).deviceSummaries();
+  return Promise.all((await listDeviceRecords(env)).map(async device => ({
+    device, heartbeat: await readAgentHeartbeat(env, device.device_id),
+  })));
+}
+
+export async function pruneStatusEvents(env) {
+  if (env.RELAY_DB) await new D1StatusStore(env.RELAY_DB).pruneEvents();
+}
+
+async function authenticatedD1Device(env, value) {
+  if (typeof value.device_id !== "string" || !value.device_id.trim()
+      || typeof value.device_secret !== "string") return null;
+  const device = await readDeviceRecord(env, value.device_id.trim());
+  return device && constantTimeEqual(device.secret_hash, await sha256Hex(value.device_secret)) ? device : null;
+}
+
+async function readDeviceForD1Import(env, deviceID) {
+  const stub = registryStub(env);
+  if (stub) {
+    let response;
+    try {
+      response = await withTimeout(stub.fetch(
+        `https://status.internal/device/${encodeURIComponent(deviceID)}`), 2_500);
+    } catch { throw new D1StorageError(); }
+    if (response.ok) return response.json();
+    if (response.status !== 404) throw new D1StorageError();
+  }
+  // KV-only deployments can import too; storage failure is never an empty record.
+  try { return await readKVRecord(env.DEVICES, `${DEVICE_PREFIX}${deviceID}`); }
+  catch { throw new D1StorageError(); }
 }
 
 function safeError(error) {

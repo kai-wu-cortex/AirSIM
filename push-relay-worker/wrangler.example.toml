@@ -22,6 +22,9 @@ APNS_KEY_ID = "REPLACE_WITH_APNS_KEY_ID"
 ALLOWED_BUNDLE_ID = "com.example.airsim"
 WEBRTC_TRANSPORT_READY = "false"
 WEBRTC_ROLLOUT_PERCENT = "0"
+# When RELAY_DB is bound, D1 is authoritative for registration, heartbeats and
+# dashboard data. Existing records are imported once from the old backend.
+RELAY_D1_IMPORT_LEGACY = "true"
 
 # REQUIRED WORKER SECRETS
 #
@@ -60,6 +63,12 @@ required = ["APNS_P8", "DASHBOARD_TOKEN", "NOTION_TOKEN", "NOTION_DATABASE_ID"]
 [[kv_namespaces]]
 binding = "DEVICES"
 id = "REPLACE_WITH_NEW_AIRSIM_KV_NAMESPACE_ID"
+
+[[d1_databases]]
+binding = "RELAY_DB"
+database_name = "airsim-relay"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
 
 [[durable_objects.bindings]]
 name = "MEDIA"

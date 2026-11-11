@@ -10,11 +10,13 @@ import {
 import { constantTimeEqual, sha256Hex } from "./auth-crypto.mjs";
 import { handleFeedback } from "./feedback.mjs";
 import { batteryStatus } from "./battery-status.mjs";
+import { D1StorageError } from "./d1-status-store.mjs";
 import { RoutingError, parseAgentID, agentSocketKey, matchesTarget, resolveTarget, requestAgentID } from "./command-routing.mjs";
 import {
   authenticateAndReadAgentHeartbeats,
   authenticateAndWriteAgentHeartbeat,
   deleteRelayState,
+  pruneStatusEvents,
   readAgentHeartbeat,
   readAgentHeartbeats,
   readAgentHeartbeatsFromKV,
@@ -51,12 +53,18 @@ export default {
     // registered in 30 days and are not currently sending heartbeats.
     const before = new Date(Date.now() - 30 * 24 * 60 * 60 * 1_000).toISOString();
     ctx.waitUntil(pruneDashboardDevices(env, { before, onlyOffline: true }));
+    ctx.waitUntil(pruneStatusEvents(env));
   },
 };
 
 export async function handleRequest(request, env) {
   try { return await routeRequest(request, env); }
   catch (error) {
+    if (error instanceof D1StorageError) {
+      return new Response(JSON.stringify({ error: "relay_storage_unavailable" }), {
+        status: 503, headers: { "content-type": "application/json", "retry-after": "300" },
+      });
+    }
     if (isDurableObjectQuotaError(error)) return durableObjectQuotaResponse();
     if (error instanceof RoutingError) return jsonResponse(error.status,{error:error.code});
     console.error("relay request failed", safeError(error));
@@ -1561,7 +1569,7 @@ async function receiveAgentHeartbeat(request, env) {
     ecm_carrier: stringValue(heartbeat.ecm_carrier),
     ...(Number.isFinite(heartbeat.signal_dbm) ? { signal_dbm: heartbeat.signal_dbm } : {}),
   };
-  // Heartbeat must stay on the Durable Object path. KV has a free daily
+  // Heartbeat must stay on the D1/DO path. KV has a free daily
   // put() limit; writing every heartbeat there exhausts it and breaks online
   // status for all devices. KV remains a read-only fallback.
   const directResponse = await authenticateAndWriteAgentHeartbeat(env, heartbeat, agentID, record);
@@ -1600,6 +1608,11 @@ function deviceStatusResponse(heartbeats) {
 
 async function receiveDeviceStatus(request, env) {
   const query = await readJSON(request);
+  if (env.RELAY_DB) {
+    // D1 is authoritative: no KV preflight, stale fallback or swallowed outage.
+    const response = await authenticateAndReadAgentHeartbeats(env, query);
+    return response.ok ? deviceStatusResponse(await response.json()) : response;
+  }
   const kvDeviceID = String(query.device_id || "").trim();
   const kvDevice = await readDeviceRecordFromKV(env, kvDeviceID);
   if (kvDevice && !constantTimeEqual(kvDevice.secret_hash,

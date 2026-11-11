@@ -6,6 +6,7 @@ import {
   deleteDeviceRecord,
   listDashboardEvents,
   listDeviceRecords,
+  listDeviceSummaries,
   readAgentHeartbeat,
   writeDashboardEvent,
 } from "./status-store.mjs";
@@ -35,10 +36,9 @@ export function dashboardAuthorized(request, env) {
 }
 
 export async function dashboardSummary(env, now = Date.now()) {
-  const devices = (await Promise.all((await listDeviceRecords(env)).map(async (device) => {
+  const devices = (await Promise.all((await listDeviceSummaries(env)).map(async ({ device, heartbeat }) => {
     if (!device?.device_id) return null;
     const controlID = await dashboardControlID(env, device.device_id);
-    const heartbeat = await readAgentHeartbeat(env, device.device_id);
     const heartbeatAt = Number(heartbeat?.received_at_ms || 0);
     const ageSeconds = heartbeatAt > 0 ? Math.max(0, Math.floor((now - heartbeatAt) / 1000)) : null;
     return {
@@ -158,7 +158,7 @@ export async function dashboardVirtualCall(request, env, sendAPNs) {
 }
 
 export async function recordDashboardEvent(env, event) {
-  if (!env.DEVICES || !event?.device_id) return;
+  if ((!env.RELAY_DB && !env.DEVICES) || !event?.device_id) return;
   const now = Date.now();
   const reverseTimestamp = String(9_999_999_999_999 - now).padStart(13, "0");
   const key = `${DASHBOARD_EVENT_PREFIX}${reverseTimestamp}:${crypto.randomUUID()}`;

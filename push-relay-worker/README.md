@@ -141,6 +141,17 @@ CI 中不要使用交互式登录，应使用权限最小化的 Cloudflare API t
 
 ## 4. 创建 Wrangler 配置
 
+### 4.0 可选：使用 D1 承担状态数据
+
+`RELAY_DB` 是可选的 D1 绑定。启用后，设备注册、Agent 心跳、在线状态和 Dashboard 事件由 D1 直接读写；`COMMANDS`、`MEDIA` 以及实时会话仍使用 Durable Objects。首次读取尚未迁移的设备时，会从旧 STATUS/KV 导入一次；D1 删除操作保留 tombstone，避免旧镜像把设备重新导入。
+
+```sh
+npx wrangler d1 create airsim-relay
+npx wrangler d1 migrations apply airsim-relay --remote --config wrangler.toml
+```
+
+将命令返回的 `database_id` 写入 `[[d1_databases]]` 的 `RELAY_DB` 绑定。启用 D1 后，D1 是这些记录的权威来源；D1 暂时不可用时 Relay 返回可重试的 `503 relay_storage_unavailable`，不会静默回退到旧存储并产生不一致。
+
 ### 4.1 创建 KV
 
 ```sh
