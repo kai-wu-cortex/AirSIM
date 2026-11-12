@@ -195,6 +195,7 @@ final class DeviceCallActionRouter {
     @discardableResult
     func ingest(_ event: DeviceCallEvent, mode: AirSIMConnectionMode) -> [DeviceCallEffect] {
         defer { pruneRetiredCalls() }
+        if mode == .vowlan, event.transport == .bluetooth, event.state == .ringing { return [] }
         // The authenticated dial receipt, not arrival order, proves the alias.
         // Preserve early Telecom events until that proof names this operation.
         if event.replacesCallID == nil, event.direction == "outgoing",
@@ -254,7 +255,10 @@ final class DeviceCallActionRouter {
         let eventLaneAllowed = event.transport == .vowlan
             ? ConnectionModeRuntimePolicy(mode: mode).startsVoWLAN : ConnectionModeRuntimePolicy(mode: mode).startsBluetooth
         guard eventLaneAllowed, let eventService = backend(event.agentID, event.transport) else { return effects }
-        routes[key] = LockedDeviceCallRoute(key: key, transport: event.transport, systemUUID: UUID())
+        // Standalone uses the Telecom UUID for VoWLAN and incoming pushes.
+        let incomingUUID = event.transport == .vowlan && event.direction == "incoming"
+            ? UUID(uuidString: event.callID) : nil
+        routes[key] = LockedDeviceCallRoute(key: key, transport: event.transport, systemUUID: incomingUUID ?? UUID())
         targets[key] = Target(backend: transport == event.transport ? service : eventService, identity: .init(callID: event.callID,
             backendID: event.backendCallID ?? event.callID, generation: event.backendGeneration))
         return effects

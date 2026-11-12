@@ -287,8 +287,9 @@ final class CallKitController: NSObject {
         // Native presentation state alone is therefore not an admission gate.
         let model = handler as? AppModel
         if currentUUID != nil,
-           ((currentUUID == call.uuid || (call.agentID != nil && currentIncomingPush?.agentID == call.agentID))
-                && currentIncomingPush?.callID == call.callID
+           (currentUUID == call.uuid
+                || (call.agentID != nil && currentIncomingPush?.agentID == call.agentID
+                    && currentIncomingPush?.callID == call.callID)
                 || model?.ownsSystemPresentation(for: call) == true) {
             // This real call is already reported. Reporting and then ending the
             // duplicate UUID would otherwise end the active CallKit surface.

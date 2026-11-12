@@ -523,9 +523,9 @@ final class StandaloneCloudMediaManager implements Closeable {
             new SecureRandom().nextBytes(secret);
             StringBuilder encoded = new StringBuilder(64);
             for (byte value : secret) encoded.append(String.format("%02x", value & 0xff));
-            // The authenticated Telecom ID is also the LAN identity. A separate
-            // timestamp ID made the same physical call look like another device.
-            Descriptor result = new Descriptor(androidID, UUID.randomUUID().toString(), 1,
+            // Telecom already assigns a UUID. Share it across LAN and both
+            // PushKit recipients so one carrier call has one system identity.
+            Descriptor result = new Descriptor(androidID, androidID, 1,
                     encoded.toString(), registration.optString("relay_url"), "incoming", androidID);
             result.validate();
             return result;

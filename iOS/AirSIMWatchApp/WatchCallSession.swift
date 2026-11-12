@@ -73,9 +73,13 @@ final class WatchCallSession: NSObject, ObservableObject {
     private var latestMirrorUpdatedAt = [String: Date]()
     private let cloudMediaPreferenceKey = "airsim.watch.cloud-media-allowed"
 
+    private var vowlanOnly: Bool {
+        (Bundle.main.object(forInfoDictionaryKey: "AirSIMVoWLANCallsOnly") as? String) == "YES"
+    }
+
     private var cloudMediaAllowed: Bool {
         WatchReliabilityPolicy.permitsCloud(
-            vowlanOnly: (Bundle.main.object(forInfoDictionaryKey: "AirSIMVoWLANCallsOnly") as? String) == "YES",
+            vowlanOnly: vowlanOnly,
             cachedPermission: UserDefaults.standard.bool(forKey: cloudMediaPreferenceKey))
     }
 
@@ -294,6 +298,10 @@ final class WatchCallSession: NSObject, ObservableObject {
     private func request(answer: Bool) {
         guard !isSendingAction else { return }
         if isUIFixture { errorMessage = "模拟界面不操作真实通话"; return }
+        if call.phase == .incoming, voIPCall == nil, vowlanOnly {
+            errorMessage = "手表尚未收到可操作的来电，请在 iPhone 处理"
+            return
+        }
         if voIPCall == nil, let uuid = call.callUUID, call.phase == .active || call.phase == .connecting {
             guard !answer else { errorMessage = "此电话由 iPhone 接听"; return }
             let target = call
@@ -437,7 +445,9 @@ final class WatchCallSession: NSObject, ObservableObject {
             if ended && !WatchCallMirrorPolicy.acceptsTerminalForDisplay(payload, current: self.call) { return }
             let age = Date().timeIntervalSince(payload.updatedAt)
 
-            if payload.phase == .incoming, self.voIPCall == nil,
+            // A VoWLAN Watch registers the real incoming push itself. A
+            // companion mirror is display state, even if it arrives first.
+            if !self.vowlanOnly, payload.phase == .incoming, self.voIPCall == nil,
                (-5...45).contains(age),
                let uuid = payload.callUUID,
                let incoming = try? WatchVoIPCall(userInfo: [
@@ -837,6 +847,12 @@ extension WatchCallSession: @preconcurrency PKPushRegistryDelegate {
         do {
             let incoming = try WatchVoIPCall(userInfo: payload.dictionaryPayload)
             if voIPCall?.uuid == incoming.uuid {
+                // The phone mirror can reach CallKit before the Watch push.
+                // Preserve the push's device and backend call identity.
+                if let current = voIPCall, current.agentID == nil,
+                   case .pendingLocal = current.media, incoming.agentID != nil, !answered {
+                    voIPCall = incoming
+                }
                 monitorRingingCall(incoming)
                 completion()
                 return
@@ -849,6 +865,7 @@ extension WatchCallSession: @preconcurrency PKPushRegistryDelegate {
             voIPCall = incoming
             resetAnswerState()
             errorMessage = nil
+            publishLocalPhase(.incoming, notifyPhone: false)
 
             let update = CallKitNumberPresentation.update(
                 number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
@@ -861,6 +878,7 @@ extension WatchCallSession: @preconcurrency PKPushRegistryDelegate {
                 Task { @MainActor [weak self] in
                     guard let self, self.voIPCall?.uuid == incoming.uuid else { return }
                     if let error {
+                        self.publishLocalPhase(.ended, notifyPhone: false)
                         self.voIPCall = nil
                         self.errorMessage = error.localizedDescription
                     } else {
@@ -994,29 +1012,34 @@ extension WatchCallSession: @preconcurrency CXProviderDelegate {
         }
     }
 
-    private func endDirectIncoming(_ incoming: WatchVoIPCall, route: WatchDirectCallRoute) {
+    private func endDirectIncoming(_ incoming: WatchVoIPCall, route: WatchDirectCallRoute,
+                                   completion: ((Bool) -> Void)? = nil) {
         endCheckTask?.cancel()
         hangupFeedback = WatchEndDelivery(callID: incoming.callID, uuid: incoming.uuid)
         hangupFeedback?.beginVerification()
         endCheckTask = Task { [weak self] in
-            _ = try? await route.command("hangup", callID: incoming.callID)
-            for _ in 0..<8 {
+            var shouldSendHangup = true
+            for _ in 0..<3 {
                 guard let self, !Task.isCancelled, self.hangupFeedback?.uuid == incoming.uuid else { return }
+                if shouldSendHangup { try? await route.command("hangup", callID: incoming.callID) }
                 let state = try? await route.status(callID: incoming.callID)
                 guard !Task.isCancelled, self.hangupFeedback?.uuid == incoming.uuid else { return }
                 let ended = state == "ended" || state == "failed" || state == "disconnected"
                 self.hangupFeedback?.verify(callID: incoming.callID, uuid: incoming.uuid, confirmed: ended,
                                             reachable: state != nil, now: Date())
                 if ended {
+                    completion?(true)
                     try? await Task.sleep(for: .seconds(5))
                     if !Task.isCancelled, self.hangupFeedback?.uuid == incoming.uuid { self.hangupFeedback = nil }
                     return
                 }
+                shouldSendHangup = state == nil || ["active", "held", "incoming", "waiting", "connecting"].contains(state ?? "")
                 try? await Task.sleep(for: .seconds(1))
             }
             if self?.hangupFeedback?.uuid == incoming.uuid {
                 self?.hangupFeedback?.verify(callID: incoming.callID, uuid: incoming.uuid, confirmed: false,
                                              reachable: false, now: Date(), issue: "未收到安卓挂断确认")
+                completion?(false)
             }
         }
     }
@@ -1098,19 +1121,27 @@ extension WatchCallSession: @preconcurrency CXProviderDelegate {
             }
             Task {
                 do {
-                    if let agentID = voIPCall.agentID, let route = WatchDirectCallRoute.load(agentID: agentID),
-                       let state = try? await route.status(callID: voIPCall.callID) {
+                    if self.voIPCall?.agentID == nil, case .pendingLocal = voIPCall.media {
+                        // Give a matching Watch push a short chance to enrich a phone mirror.
+                        for _ in 0..<5 where self.voIPCall?.agentID == nil {
+                            try await Task.sleep(for: .milliseconds(100))
+                            guard self.voIPCall?.uuid == voIPCall.uuid, answering else { return }
+                        }
+                    }
+                    guard let directCall = self.voIPCall, directCall.uuid == voIPCall.uuid, answering else { return }
+                    if let agentID = directCall.agentID, let route = WatchDirectCallRoute.load(agentID: agentID),
+                       let state = try? await route.status(callID: directCall.callID) {
                         guard self.voIPCall?.uuid == voIPCall.uuid, answering else { return }
                         if dismissRingingCallIfResolved(state) {
                             action.fail()
                             return
                         }
                         if state == "incoming" || state == "waiting" {
-                            directIncoming = (voIPCall.uuid, route)
-                            try await route.command("answer", callID: voIPCall.callID)
+                            directIncoming = (directCall.uuid, route)
+                            try await route.command("answer", callID: directCall.callID)
                             guard self.voIPCall?.uuid == voIPCall.uuid, answering else { return }
-                            self.voIPCall = voIPCall.usingLocalMedia(route.pcm)
-                            monitorDirectIncoming(voIPCall, route: route)
+                            self.voIPCall = directCall.usingLocalMedia(route.pcm)
+                            monitorDirectIncoming(directCall, route: route)
                             connect(.local(route.pcm))
                             return
                         }
@@ -1157,6 +1188,16 @@ extension WatchCallSession: @preconcurrency CXProviderDelegate {
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         guard let voIPCall, voIPCall.uuid == action.callUUID else { action.fulfill(); return }
+        if let directIncoming, directIncoming.uuid == voIPCall.uuid {
+            // Keep the system action pending so watchOS can deliver the LAN command.
+            endDirectIncoming(voIPCall, route: directIncoming.route) { [weak self] confirmed in
+                guard let self, self.voIPCall?.uuid == action.callUUID else { action.fulfill(); return }
+                guard confirmed else { action.fail(); return }
+                self.finishRemoteCall()
+                action.fulfill()
+            }
+            return
+        }
         recordEnded(voIPCall.callID, uuid: voIPCall.uuid)
         if case .local = voIPCall.media {
             requestLocalEnd(voIPCall)
@@ -1183,6 +1224,7 @@ extension WatchCallSession: @preconcurrency CXProviderDelegate {
             provider.reportCall(with: current.uuid, endedAt: Date(), reason: .failed)
             return
         }
+        if action is CXEndCallAction, directIncoming?.uuid == current.uuid { return }
         if case .local = current.media { requestLocalEnd(current) }
         if let requestID = activeDialRequestID { abortCompanionDial(requestID) }
         isSendingAction = false

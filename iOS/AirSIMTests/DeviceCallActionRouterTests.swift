@@ -104,6 +104,22 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertTrue(ble.commands.isEmpty)
     }
 
+    func testVoWLANIncomingUsesTelecomUUIDAndIgnoresBluetoothRing() throws {
+        let backend = DeviceBackendProbe(id: "A")
+        let context = DeviceCallContext()
+        let router = DeviceCallActionRouter(context: context) { _, _ in backend }
+        let uuid = UUID()
+        let ble = DeviceCallEvent(agentID: "A", callID: "ble-event", state: .ringing,
+                                  transport: .bluetooth, transportEpoch: 1)
+        XCTAssertTrue(router.ingest(ble, mode: .vowlan).isEmpty)
+        XCTAssertTrue(context.registry.ringing.isEmpty)
+        let event = DeviceCallEvent(agentID: "A", callID: uuid.uuidString.lowercased(), state: .ringing,
+                                    transport: .vowlan, transportEpoch: 1)
+        let route = try XCTUnwrap(router.registerIncoming(event, mode: .vowlan))
+        XCTAssertEqual(route.systemUUID, uuid)
+        XCTAssertEqual(context.registry.ringing, [route.key])
+    }
+
     func testPushFirstAdoptionKeepsUUIDAndLifecycleThroughAnswerAndEnd() async throws {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
         defer { ConnectionModePreference.set(old) }
