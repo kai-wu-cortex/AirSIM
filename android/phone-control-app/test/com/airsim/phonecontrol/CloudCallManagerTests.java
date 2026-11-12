@@ -6,6 +6,7 @@ import java.lang.reflect.*;
 /** Runs the actual manager without starting a socket, dial, or background executor. */
 public final class CloudCallManagerTests {
     public static void main(String[] args) throws Exception {
+        incomingIdentityUsesTelecomUUID();
         missedCallHistoryKeepsConnectionAndSIMFacts();
         RelayEgressGate.shared.enableAfterRestore();
         localResolveRequiresCompleteIdentityAndCurrentPublishedCall();
@@ -23,6 +24,21 @@ public final class CloudCallManagerTests {
         successfulHandshakeResetsMedia401Window();
         cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
+    }
+
+    private static void incomingIdentityUsesTelecomUUID() throws Exception {
+        String id = java.util.UUID.randomUUID().toString();
+        var registration = new JSONObject().put("relay_url", "https://relay.example.test");
+        var descriptor = Class.forName("com.airsim.phonecontrol.StandaloneCloudMediaManager$Descriptor");
+        var incoming = descriptor.getDeclaredMethod("incoming", JSONObject.class, String.class);
+        incoming.setAccessible(true);
+        var first = incoming.invoke(null, registration, id);
+        var second = incoming.invoke(null, registration, id);
+        check(id.equals(field(first, "callID")) && id.equals(field(first, "callUUID")), "LAN and APNs share Telecom UUID");
+        check(field(first, "callUUID").equals(field(second, "callUUID")), "Recreating descriptor cannot split one carrier call");
+        var legacy = incoming.invoke(null, registration, "legacy-id");
+        check(field(legacy, "callID").equals("legacy-id"), "Legacy control identity stays unchanged");
+        check(java.util.UUID.fromString((String) field(legacy, "callUUID")) != null, "Legacy still gets valid CallKit UUID");
     }
 
     private static void cloudEarlyMediaTransitionsOnlyOnTelecomActive() throws Exception {

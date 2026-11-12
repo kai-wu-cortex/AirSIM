@@ -118,6 +118,44 @@ final class OtherDeviceCallReminderTests: XCTestCase {
         XCTAssertEqual(controller.currentSystemCallUUID, call.uuid)
     }
 
+    func testSameUUIDDifferentPresentationAliasDoesNotEndSystemCall() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        defer { controller.setEnabled(false) }
+        let uuid = UUID()
+        let local = IncomingVoIPCall(bluetoothCallID: "local-presentation", uuid: uuid,
+            generation: 1, number: "5550100", agentID: "A")
+        let reported = expectation(description: "local report")
+        controller.reportIncomingPush(local, systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        var reports = 0, ends = 0
+        for agent in ["A", "B"] {
+            let push = IncomingVoIPCall(bluetoothCallID: "telecom-backend", uuid: uuid,
+                generation: 1, number: "5550199", agentID: agent)
+            controller.reportRequiredVoIPPush(push, systemReport: { reportedID, update, done in
+                XCTAssertEqual(reportedID, uuid)
+                if agent == "B" { XCTAssertNotEqual(update.remoteHandle?.value, "5550199") }
+                reports += 1; done(nil)
+            }, systemEnd: { _ in ends += 1 }) { error in XCTAssertNil(error) }
+        }
+        XCTAssertEqual(reports, 2)
+        XCTAssertEqual(ends, 0)
+        XCTAssertEqual(controller.currentIncomingPush?.agentID, "A")
+        XCTAssertEqual(controller.currentIncomingPush?.callID, "local-presentation")
+    }
+
+    func testLateTerminalCannotReplaceAnotherWatchPresentation() {
+        let coordinator = WatchCallCoordinator.shared
+        let a = UUID(), b = UUID()
+        coordinator.publish(callID: "A", callUUID: a, phase: .active, number: nil, callerName: nil)
+        coordinator.publish(callID: "B", callUUID: b, phase: .incoming, number: nil, callerName: nil)
+        coordinator.publish(callID: "A", callUUID: a, phase: .ended, number: nil, callerName: nil)
+        XCTAssertEqual(coordinator.lastPayload?.callUUID, b)
+        XCTAssertEqual(coordinator.lastPayload?.phase, .incoming)
+        coordinator.publish(callID: "B", callUUID: b, phase: .ended, number: nil, callerName: nil)
+        XCTAssertEqual(coordinator.lastPayload?.phase, .ended)
+    }
+
     func testDistinctCallWaitingOnSameAndroidRemainsAvailable() {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.bluetooth)
         defer { ConnectionModePreference.set(old) }

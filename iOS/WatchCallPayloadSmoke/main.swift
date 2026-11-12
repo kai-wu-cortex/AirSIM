@@ -279,4 +279,31 @@ check(WatchReliabilityPolicy.incomingDisposition(currentUUID: first, incomingUUI
 check(WatchReliabilityPolicy.incomingDisposition(currentUUID: first, incomingUUID: second, retired: true) == .busy, "Old push cannot clear current call")
 check(WatchReliabilityPolicy.incomingDisposition(currentUUID: nil, incomingUUID: second, retired: true) == .retired, "Retired incoming does not ring again")
 check(WatchReliabilityPolicy.incomingDisposition(currentUUID: nil, incomingUUID: second, retired: false) == .newCall, "New incoming still reports")
+// Execute the production async end verifier with dropped replies and delayed state.
+do {
+    var sends = 0, reads = 0
+    let confirmed = await WatchDirectEndVerifier.verify(isCurrent: { true }, hangup: {
+        sends += 1; throw URLError(.timedOut)
+    }, status: { reads += 1; return reads >= 2 ? "ended" : "active" }, pause: {})
+    check(confirmed && sends == 1, "Lost ACK plus confirmed terminal never sends a second end")
+    sends = 0
+    let failed = await WatchDirectEndVerifier.verify(isCurrent: { true }, hangup: { sends += 1 },
+        status: { throw URLError(.timedOut) }, pause: {})
+    check(!failed && sends == 3, "Unknown status is bounded and never claimed ended")
+    sends = 0
+    let unknown = await WatchDirectEndVerifier.verify(isCurrent: { true }, hangup: { sends += 1 },
+        status: { "unknown" }, pause: {})
+    check(!unknown && sends == 0, "Unrecognized signed state cannot authorize a hangup")
+    var current = true
+    let replaced = await WatchDirectEndVerifier.verify(isCurrent: { current }, hangup: { sends += 1 },
+        status: { current = false; return "active" }, pause: {})
+    check(!replaced && sends == 0, "A late status cannot hang up after another call takes ownership")
+    let already = await WatchDirectEndVerifier.verify(isCurrent: { true }, hangup: { sends += 1 },
+        status: { "ended" }, pause: {})
+    check(already && sends == 0, "Repeated terminal requires no write")
+    sends = 0; reads = 0
+    let delayed = await WatchDirectEndVerifier.verify(isCurrent: { true }, hangup: { sends += 1 },
+        status: { reads += 1; return reads >= 4 ? "ended" : "active" }, pause: {})
+    check(delayed && sends == 2, "Delayed carrier hangup retries only the same scoped request")
+}
 print("Watch reliability checks passed: \(assertionCount) assertions")

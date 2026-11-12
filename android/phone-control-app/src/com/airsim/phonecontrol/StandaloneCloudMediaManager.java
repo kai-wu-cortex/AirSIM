@@ -602,9 +602,12 @@ final class StandaloneCloudMediaManager implements Closeable {
             new SecureRandom().nextBytes(secret);
             StringBuilder encoded = new StringBuilder(64);
             for (byte value : secret) encoded.append(String.format("%02x", value & 0xff));
-            // The authenticated Telecom ID is also the LAN identity. A separate
-            // timestamp ID made the same physical call look like another device.
-            Descriptor result = new Descriptor(androidID, UUID.randomUUID().toString(), 1,
+            // Telecom assigns a UUID. Share it across LAN, iPhone and Watch pushes.
+            // Keep compatibility with older/custom repositories using non-UUID IDs.
+            String incomingUUID;
+            try { incomingUUID = UUID.fromString(androidID).toString(); }
+            catch (IllegalArgumentException invalid) { incomingUUID = UUID.randomUUID().toString(); }
+            Descriptor result = new Descriptor(androidID, incomingUUID, 1,
                     encoded.toString(), registration.optString("relay_url"), "incoming", androidID);
             result.validate();
             return result;

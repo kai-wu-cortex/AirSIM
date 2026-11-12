@@ -55,3 +55,47 @@
 - 通话中断网、设备端撤销配对：旧媒体关闭；普通本机接听/音频恢复不回归。
 - iPhone VoWLAN、VoBLE、云端及运营商早期语音分别回归。
 - Watch 短信会话、SIM 选择、未读标记、锁屏 iPhone 回复；发送不确定时不自动重发。
+
+## 2026-11-12：220／142 源码增量整合
+
+复核 PR 最新 head `4a772b3951b88d6d011fce4e95c674d331dc0f85`。
+相对前次已审阅 `a5a85b7`，只新增一个提交、6 个文件；本轮基于
+`develop c9ab403` 在 `codex/pr36-watch-integration` 处理，保留 PR32 两批短信修复。
+
+### 采用及调整
+
+- **同一来电身份**：Standalone 的来电 descriptor 对有效 Telecom UUID 复用同一 UUID；
+  iPhone VoWLAN 路由使用该 UUID，PushKit 不因本地展示别名不同而另行结束同一系统会话。
+  旧的非 UUID 后端 ID 保留兼容；多设备原始 ID 碰撞仍隔离路由，冲突 push 不覆盖当前来源。
+- **VoWLAN 蓝牙响铃隔离**：纯 VoWLAN 连接偏好忽略蓝牙响铃事件；VoBLE 与双通道不受影响。
+- **镜像先到／push 后到**：保留现有无 push 时的 iPhone 协作入口，允许同 UUID 的 push
+  在尚未开始直连写操作前补齐 pendingLocal 身份，接听时最多等待 500 ms。
+  不复制草稿的 VoWLAN-only 编译开关，避免禁用现有 Watch 云端／纯本地协作。
+- **挂断确认**：继续使用 v2 限权认证与完整 agent/call/UUID/generation；最多三轮查询与挂断，
+  ACK 丢失不等于失败或结束，只有已签名且身份匹配的终态才成功。
+  保留系统挂断 action 等待确认，立即停止本机音频；系统超时不另起跨通道挂断。
+  新通话替换、取消和未知状态不继续写入；失败保留明确提示。
+- **补修草稿仍标记未解决的同步问题**：iPhone 因 Watch／其他设备接听而收起来电页，
+  向 Watch 发布真实的 active，而非本机 UI 的 ended；Watch 所有权消息先到时仅收起本机响铃，
+  不触发全局 ended 回调；按设备和通话保留关联，
+  后续匹配的安卓终态才发布 ended。旧通话终态不替换另一通当前电话的镜像快照。
+
+未采用草稿测试版本号、原始 117 文件整包覆盖及旧版 Watch 鉴权。
+本轮未新增 HTTP 字段或 API 路径；Watch v2 媒体授权、短信 E2E、PR32 身份迁移、
+运营商早期媒体与音频缓冲配置保持当前实现。
+
+### 验收边界
+
+- `android-standalone/test.sh` 完整通过（含云端通话、68 项 Watch 限权网关检查、18 项 PCM 回环、短信 E2E、纯本地等）。
+- `iOS/scripts/test-watch-reliability.sh`：341 项断言通过，含生产挂断确认算法的 ACK 丢失、重复终态、未知状态、换通话和延迟结束。
+- `iOS/scripts/test-watch-transport.sh`：155 项回环断言通过。
+- iOS `build-for-testing` 与 watchOS Simulator 构建通过；新增 5 项 XCTest 编译通过。
+- iOS 全组运行先通过 15 项后停在已有 `testLocalFirstCallKeepsIdentityWhenPushArrivesBeforeAnswer`。
+  停止该轮后，独立重试遇到 CoreSimulator `launchd failed to respond`，重启测试服务和新建验证模拟器仍未正常启动测试进程。
+  **新增 5 项 iOS XCTest 未取得运行结果，不算通过**；这不影响已完成的本机专项测试，但仍是模拟器验收缺口。
+- `iOS/scripts/test-watch-mirror.sh`：抽取生产 Coordinator 方法运行，8 项检查通过；仅 CallKit／AppModel／WC 边界替换为测试桩，覆盖直接接听不发送全局结束、跨通话身份、迟到终态与重复同步。
+- `git diff --check` 通过。
+
+真实 Watch 锁屏接听、双端同时响铃、挂断后的安卓状态、新旧设备混用仍需用户操作真机确认。
+本轮不安装、部署 Worker、升级设备或发布版本。
+PR 是作者明确用于挑选的 Draft，整合的是需求及增量，不直接强合并原草稿。

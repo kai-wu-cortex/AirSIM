@@ -553,3 +553,33 @@ enum WatchSMSDispatchPolicy {
         return true
     }
 }
+
+/// Only authenticated, identity-scoped status can confirm a direct hangup.
+/// A lost ACK may retry the same tuple, never another route or another call.
+enum WatchDirectEndVerifier {
+    @MainActor static func verify(
+        isCurrent: () -> Bool,
+        hangup: () async throws -> Void,
+        status: () async throws -> String,
+        pause: () async throws -> Void
+    ) async -> Bool {
+        for attempt in 0..<3 {
+            guard !Task.isCancelled, isCurrent() else { return false }
+            // Query first: a lost command reply must not resend after confirmed end.
+            let before = try? await status()
+            guard !Task.isCancelled, isCurrent() else { return false }
+            if terminal(before) { return true }
+            guard before == nil || ["incoming", "waiting", "connecting", "active", "held"].contains(before!) else { return false }
+            try? await hangup()
+            guard !Task.isCancelled, isCurrent() else { return false }
+            let after = try? await status()
+            guard !Task.isCancelled, isCurrent() else { return false }
+            if terminal(after) { return true }
+            if attempt < 2 { do { try await pause() } catch { return false } }
+        }
+        return false
+    }
+    private static func terminal(_ state: String?) -> Bool {
+        state.map { ["ended", "failed", "disconnected"].contains($0) } ?? false
+    }
+}

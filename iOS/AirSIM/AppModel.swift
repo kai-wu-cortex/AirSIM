@@ -455,6 +455,9 @@ final class AppModel: ObservableObject {
     private var ownedWLANLossTask: Task<Void, Never>?
     private var ownedWLANEpoch: UInt64?
     private var ownedRecords: [DeviceCallKey: CallRecord] = [:]
+    // A local ringing surface can end while the carrier call continues on Watch.
+    // Retain its exact presentation until the matching backend terminal arrives.
+    private var observedWatchCalls: [DeviceCallKey: (id: String, uuid: UUID)] = [:]
     private var ownedHistoryFinished = Set<DeviceCallKey>()
     @Published var focusedOtherDeviceCall: OtherDeviceCallReminder?
     private lazy var otherCallReminders: OtherDeviceCallReminderController = {
@@ -644,6 +647,10 @@ final class AppModel: ObservableObject {
         resolvePendingPushedCall(key, event: latest)
         if effects.contains(.ended(key)) {
             persistOwnedTerminal(key, event: latest, previous: previousRecord)
+            if let observed = observedWatchCalls.removeValue(forKey: key) {
+                WatchCallCoordinator.shared.publish(callID: observed.id, callUUID: observed.uuid,
+                    phase: .ended, number: latest.number, callerName: nil)
+            }
         } else if !latest.state.isTerminal {
             ownedRecords[key] = CallRecord(id: latest.callID, index: 0, direction: latest.direction,
                 state: latest.state.callRecordState, number: latest.number,
@@ -670,9 +677,10 @@ final class AppModel: ObservableObject {
             // Android itself answered. Retire this iPhone's ringing surface,
             // without acquiring PCM or ending the Android conversation.
             if let route = deviceCallRouter.route(for: key) {
+                observeWatchCall(key, id: localPresentationID(key), uuid: route.systemUUID)
                 callKit.withdrawLocalPresentation(uuid: route.systemUUID, reason: .answeredElsewhere)
                 _ = applyCallLifecycle(.init(callID: localPresentationID(key), callUUID: route.systemUUID,
-                    generation: route.presentationGeneration ?? key.generation, state: .ended, source: .agent, timestamp: Date(), traceID: nil, failure: nil))
+                    generation: route.presentationGeneration ?? key.generation, state: .ended, source: .agent, timestamp: Date(), traceID: nil, failure: nil), watchPhaseOverride: .active)
             }
             remoteCall = nil; presentedDeviceCall = nil
             updateOwnedPrimaryAlerts(nil)
@@ -689,6 +697,11 @@ final class AppModel: ObservableObject {
             presentedDeviceCall = nil
         }
         return effects
+    }
+
+    private func observeWatchCall(_ key: DeviceCallKey, id: String, uuid: UUID) {
+        if observedWatchCalls.count >= 128 { observedWatchCalls.removeAll() }
+        observedWatchCalls[key] = (id, uuid)
     }
 
     private func localPresentationID(_ key: DeviceCallKey) -> String {
@@ -721,15 +734,16 @@ final class AppModel: ObservableObject {
         // Invalidate queued answer/audio work before closing media or invoking
         // CallKit's synchronous callback. No backend hangup is sent here.
         let state: CallLifecycleState = event.state.isTerminal ? event.state : .ended
+        if action == .answeredElsewhere { observeWatchCall(key, id: call.callID, uuid: call.uuid) }
         guard applyCallLifecycle(.init(
             callID: call.callID, callUUID: call.uuid, generation: call.generation,
             state: state, source: .agent, timestamp: Date(), traceID: nil,
             failure: state == .failed ? "Agent 报告通话失败" : nil
-        )) else { return false }
+        ), watchPhaseOverride: action == .answeredElsewhere ? .active : nil) else { return false }
         beginCallTransitionProtection()
         if audio.active || audio.sessionOwner != nil { audio.deactivate() }
         if session.call?.uuid == call.uuid { session.stop() }
-        deviceCallRouter.finished(key)
+        if action == .ended { deviceCallRouter.finished(key) }
         if callKit.currentSystemCallUUID == call.uuid {
             callKit.reportCurrentCallEnded(reason: action == .answeredElsewhere ? .answeredElsewhere
                 : (state == .failed ? .failed : .remoteEnded))
@@ -4155,7 +4169,8 @@ final class AppModel: ObservableObject {
 
     @discardableResult
     private func applyCallLifecycle(_ event: CallLifecycleEvent,
-                                    replacingProvisionalCallID: String? = nil) -> Bool {
+                                    replacingProvisionalCallID: String? = nil,
+                                    watchPhaseOverride: WatchCallPhase? = nil) -> Bool {
         let previous = callLifecycleSnapshot
         let accepted = callLifecycleStore.apply(event, replacingProvisionalCallID: replacingProvisionalCallID)
         if event.state.isTerminal {
@@ -4170,6 +4185,10 @@ final class AppModel: ObservableObject {
         }
         guard accepted else { return false }
         callLifecycleSnapshot = callLifecycleStore.snapshot
+        if let watchPhaseOverride {
+            // Publish before local CallKit cleanup erases the pushed alias.
+            publishWatchLifecycle(event, phase: watchPhaseOverride, previous: previous)
+        }
         if previous.callUUID != event.callUUID || previous.generation != event.generation {
             carrierEarlyMediaEnabled = CarrierRingbackPreference.isEnabled()
             carrierEarlyMediaNotice = nil
@@ -4260,7 +4279,7 @@ final class AppModel: ObservableObject {
                 // stale VoBLE transport, showing a "Bluetooth link ended" status.
                 clearLockedTransport()
             }
-            publishWatchLifecycle(event, phase: .ended, previous: previous)
+            if watchPhaseOverride == nil { publishWatchLifecycle(event, phase: .ended, previous: previous) }
             // Return to the persistent standby activity (the island must remain visible
             // in the background); force the update so a stale call timer cannot linger.
             Task { @MainActor [weak self] in

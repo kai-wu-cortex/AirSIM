@@ -9,7 +9,7 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
     static let shared = WatchCallCoordinator()
 
     private var session: WCSession?
-    private var lastPayload: WatchCallPayload?
+    private(set) var lastPayload: WatchCallPayload?
     private var lastCloudMediaAllowed: Bool?
     private var pendingWatchDialID: UUID?
     private var cancelledWatchDialIDs = Set<UUID>()
@@ -163,6 +163,14 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
            payload.matches(callID: localWatchCall.callID, callUUID: localWatchCall.uuid) {
             if let reservation = localWatchCall.requestID { model?.deviceCallContext.releaseAdmission(reservation) }
             self.localWatchCall = nil
+        }
+        if payload.phase == .ended, let lastPayload,
+           [.incoming, .connecting, .active].contains(lastPayload.phase),
+           !lastPayload.matches(callID: payload.callID, callUUID: payload.callUUID) {
+            // Deliver the old terminal to its owner without replacing the current
+            // call's reconnect snapshot with another call's terminal.
+            send(payload)
+            return
         }
         if let lastPayload,
            lastCloudMediaAllowed == CloudModePreference.isEnabled(),
@@ -995,9 +1003,18 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
             model?.deviceCallContext.releaseAdmission(active.requestID)
             watchOutgoingCall = nil
         }
-        guard CallKitController.shared.matchesCurrentCall(callID: callID, uuid: uuid) else { return true }
-        if phase == WatchCallPhase.active.rawValue {
-            CallKitController.shared.reportCurrentCallEnded(reason: .answeredElsewhere)
+        let controller = model?.callKit ?? CallKitController.shared
+        guard controller.matchesCurrentCall(callID: callID, uuid: uuid) else { return true }
+        if phase == WatchCallPhase.active.rawValue, let uuid {
+            if localWatchCall?.uuid == uuid {
+                // The companion path already owns a scoped backend/media handoff.
+                controller.reportCurrentCallEnded(reason: .answeredElsewhere)
+            } else {
+                // Direct Watch ownership may arrive before the iPhone's Agent poll.
+                // Dismiss ringing only: invoking the global end callback here
+                // would mirror .ended back to the Watch that just answered.
+                controller.withdrawLocalPresentation(uuid: uuid, reason: .answeredElsewhere)
+            }
         }
         return true
     }
