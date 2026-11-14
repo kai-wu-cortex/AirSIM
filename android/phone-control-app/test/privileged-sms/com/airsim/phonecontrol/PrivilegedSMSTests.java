@@ -27,6 +27,7 @@ public final class PrivilegedSMSTests {
             reset(api);
             equal("ok:1", send("test", 7), "API " + api + " accepts selected SIM");
             equal(7, SmsManager.sentSubscription, "selected SIM preserved");
+            equal("com.android.shell", android.app.ActivityThread.currentOpPackageName(), "AppOps attribution initialized");
             equal(false, SmsManager.multipart, "single segment API");
             if (api >= 31) equal("com.android.shell", SmsManager.sentPackage, "shell package attribution");
             equal(api >= 30, TelephonyFrameworkInitializer.manager != null, "telephony initialized when needed");
@@ -49,14 +50,14 @@ public final class PrivilegedSMSTests {
         for (int api : new int[]{29, 30, 31, 36}) {
             reset(api);
             SmsManager.failSubscription = true;
-            equal("error:IllegalArgumentException", send("test", 7), "subscription failure returned");
+            equal("error:prepare:IllegalArgumentException", send("test", 7), "subscription failure returned");
             equal(0, SmsManager.sends, "must not fall back to another SIM");
             cases++;
         }
 
         reset(36);
         SmsManager.failSend = true;
-        equal("error:permission", send("test", 7), "permission failure returned");
+        equal("error:send_unknown:SecurityException", send("test", 7), "permission failure returned");
         equal(0, SmsManager.sends, "permission failure sends nothing");
         cases++;
 
@@ -83,6 +84,44 @@ public final class PrivilegedSMSTests {
         equal(0, Binder.clears, "invalid input does not change identity");
         equal(0, SmsManager.sends, "invalid input sends nothing");
         cases++;
+        reset(31);
+        ShizukuBridgeUserService preflightService = new ShizukuBridgeUserService();
+        CONTEXT.set(preflightService, new Context("com.airsim.test"));
+        Method preflight = ShizukuBridgeUserService.class.getDeclaredMethod("smsPreflight");
+        preflight.setAccessible(true);
+        equal("ready:parts=1 appops_attribution=true", preflight.invoke(preflightService), "preflight only divides synthetic text");
+        equal(0, SmsManager.sends, "preflight never sends");
+        SmsManager.failDivide = true;
+        String failure = (String) preflight.invoke(preflightService);
+        if (!failure.startsWith("error:divide:NullPointerException")) throw new AssertionError("missing failure stage");
+        if (failure.contains("synthetic diagnostic failure")) throw new AssertionError("exception message exposed");
+        equal(0, SmsManager.sends, "failed preflight never sends");
+        equal(Binder.clears, Binder.restores, "preflight restores identity");
+        SmsManager.failDivide = false;
+        cases += 2;
+        Method confirmed = ShizukuBridgeUserService.class.getDeclaredMethod("sendSms",
+                String.class, String.class, int.class, java.util.ArrayList.class);
+        confirmed.setAccessible(true);
+        for (int parts : new int[]{1, 2}) {
+            reset(31);
+            SmsManager.parts = parts;
+            SmsManager.failAfterSend = true;
+            var callbacks = new java.util.ArrayList<android.app.PendingIntent>();
+            for (int i = 0; i < parts; i++) callbacks.add(new android.app.PendingIntent());
+            String result = (String) confirmed.invoke(preflightService, "test-destination", "test", 9, callbacks);
+            equal("error:send_unknown:NullPointerException", result, "post-dispatch failure remains ambiguous");
+            equal(1, SmsManager.sends, "one dispatch only despite audit exception");
+            equal(callbacks, SmsManager.sentCallbacks, "original app callback tokens reach modem API");
+            equal(9, SmsManager.sentSubscription, "callback send preserves selected SIM");
+            cases++;
+        }
+        reset(31);
+        SmsManager.parts = 2;
+        equal("error:prepare:callback_count", confirmed.invoke(preflightService,
+                "test-destination", "test", 9, new java.util.ArrayList<android.app.PendingIntent>()),
+                "mismatched callback count must fail before sending");
+        equal(0, SmsManager.sends, "invalid callbacks send nothing");
+        cases++;
         System.out.println("Privileged SMS tests passed: " + cases + " cases");
     }
     private static String send(String text, int subscription) throws Exception {
@@ -94,6 +133,7 @@ public final class PrivilegedSMSTests {
         return result;
     }
     private static void reset(int api) {
+        android.app.ActivityThread.currentActivityThread().mInitialApplication = null;
         Build.VERSION.SDK_INT = api;
         Process.uid = 2000;
         Binder.callingUid = 10001;
@@ -102,6 +142,8 @@ public final class PrivilegedSMSTests {
         SmsManager.sends = 0;
         SmsManager.parts = 1;
         SmsManager.failSubscription = SmsManager.failSend = false;
+        SmsManager.failAfterSend = false;
+        SmsManager.sentCallbacks = null;
         SmsManager.multipart = false;
         SmsManager.sentPackage = null;
         Context.serviceMissing = false;

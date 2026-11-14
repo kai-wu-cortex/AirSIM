@@ -88,6 +88,12 @@ public final class ShizukuBridgeUserService extends Binder {
                 case PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT -> audioSnapshot();
                 case PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS ->
                         sendSms(data.readString(), data.readString(), data.readInt());
+                case PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS_CONFIRMED ->
+                        sendSms(data.readString(), data.readString(), data.readInt(),
+                                data.createTypedArrayList(android.app.PendingIntent.CREATOR));
+                case PrivilegedBridgeProtocol.TRANSACTION_SMS_PREFLIGHT -> smsPreflight();
+                case PrivilegedBridgeProtocol.TRANSACTION_RESOLVE_SMS_SUBSCRIPTION ->
+                        resolveSmsSubscription(data.readString());
                 case PrivilegedBridgeProtocol.TRANSACTION_RECENT_SMS ->
                         recentSms(data.readLong(), data.readLong(), data.readInt());
                 default -> null;
@@ -103,60 +109,94 @@ public final class ShizukuBridgeUserService extends Binder {
         }
     }
 
+    /** Synthetic text division only; never calls a send API. */
+    private String smsPreflight() {
+        long identity = Binder.clearCallingIdentity();
+        String stage = "manager";
+        try {
+            SmsManager manager = smsManagerForSubscription(-1);
+            if (manager == null) return "error:no_service";
+            stage = "divide";
+            var parts = manager.divideMessage("AirSIM preflight");
+            return "ready:parts=" + (parts == null ? 0 : parts.size()) + " appops_attribution=true";
+        } catch (Exception error) {
+            StringBuilder result = new StringBuilder("error:" + stage + ":" + error.getClass().getSimpleName());
+            for (int i = 0; i < Math.min(5, error.getStackTrace().length); i++) {
+                var frame = error.getStackTrace()[i];
+                result.append(" at ").append(frame.getClassName()).append('.').append(frame.getMethodName());
+            }
+            return result.toString();
+        } finally { Binder.restoreCallingIdentity(identity); }
+    }
+
     private String sendSms(String destination, String body, int subscriptionId) {
+        return sendSms(destination, body, subscriptionId, null);
+    }
+
+    private String sendSms(String destination, String body, int subscriptionId,
+            ArrayList<android.app.PendingIntent> sentIntents) {
         if (serviceContext == null) return "error:no_context";
         if (destination == null || destination.trim().isEmpty()
                 || body == null || body.trim().isEmpty()) return "error:invalid";
         long identity = Binder.clearCallingIdentity();
+        String stage = "manager";
         try {
             SmsManager manager = smsManagerForSubscription(subscriptionId);
             if (manager == null) return "error:no_service";
+            stage = "divide";
             ArrayList<String> parts = manager.divideMessage(body);
             if (parts == null || parts.isEmpty()) return "error:divide";
+            if (sentIntents != null && (sentIntents.size() != parts.size()
+                    || sentIntents.contains(null))) return "error:prepare:callback_count";
+            stage = "send";
             if (parts.size() == 1) {
-                manager.sendTextMessage(destination, null, parts.get(0), null, null);
+                manager.sendTextMessage(destination, null, parts.get(0),
+                        sentIntents == null ? null : sentIntents.get(0), null);
             } else {
-                manager.sendMultipartTextMessage(destination, null, parts, null, null);
+                manager.sendMultipartTextMessage(destination, null, parts, sentIntents, null);
             }
             Log.i(TAG, "shizuku_sms_accepted segments=" + parts.size());
             return "ok:" + parts.size();
         } catch (SecurityException error) {
             Log.w(TAG, "shizuku_sms_permission_denied");
-            return "error:permission";
+            return "error:" + ("send".equals(stage) ? "send_unknown:" : "prepare:") + "SecurityException";
         } catch (Exception error) {
-            Log.w(TAG, "shizuku_sms_failed type=" + error.getClass().getSimpleName());
-            return "error:" + error.getClass().getSimpleName();
+            StringBuilder frames = new StringBuilder();
+            for (int i = 0; i < Math.min(6, error.getStackTrace().length); i++) {
+                var frame = error.getStackTrace()[i];
+                frames.append(" at ").append(frame.getClassName()).append('.').append(frame.getMethodName());
+            }
+            Log.w(TAG, "shizuku_sms_failed stage=" + stage + " type=" + error.getClass().getSimpleName() + frames);
+            return "error:" + ("send".equals(stage) ? "send_unknown:" : "prepare:") + error.getClass().getSimpleName();
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
     }
 
     private SmsManager smsManagerForSubscription(int subscriptionId) throws Exception {
-        if (Build.VERSION.SDK_INT >= 30) {
-            // app_process does not run the app startup that initializes telephony's service registry.
-            Class<?> initializer = Class.forName("android.telephony.TelephonyFrameworkInitializer");
-            synchronized (initializer) {
-                if (initializer.getMethod("getTelephonyServiceManager").invoke(null) == null) {
-                    Class<?> manager = Class.forName("android.os.TelephonyServiceManager");
-                    initializer.getMethod("setTelephonyServiceManager", manager)
-                            .invoke(null, manager.getConstructor().newInstance());
-                }
+        return PrivilegedSmsRuntime.manager(serviceContext, subscriptionId);
+    }
+
+    private String resolveSmsSubscription(String key) {
+        if (serviceContext == null || key == null || key.isEmpty() || key.length() > 8192) return "-1";
+        long identity = Binder.clearCallingIdentity();
+        try {
+            // Initialize the telephony registry and obtain a correctly attributed
+            // shell context, just as the existing authorized SMS sender does.
+            smsManagerForSubscription(-1);
+            Context context = serviceContext;
+            if (Process.myUid() == 2000) {
+                Class<?> activityThread = Class.forName("android.app.ActivityThread");
+                Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
+                Context system = (Context) activityThread.getMethod("getSystemContext").invoke(thread);
+                context = system.createPackageContext("com.android.shell", 0);
             }
-        }
-        Context context = serviceContext;
-        if (Process.myUid() == 2000) {
-            // Use a system-derived shell context rather than attributing the send to the APK.
-            Class<?> activityThread = Class.forName("android.app.ActivityThread");
-            Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
-            Context system = (Context) activityThread.getMethod("getSystemContext").invoke(thread);
-            context = system.createPackageContext("com.android.shell", 0);
-        }
-        if (Build.VERSION.SDK_INT >= 31) {
-            SmsManager base = context.getSystemService(SmsManager.class);
-            return base == null || subscriptionId < 0 ? base : base.createForSubscriptionId(subscriptionId);
-        }
-        return subscriptionId < 0 ? SmsManager.getDefault()
-                : SmsManager.getSmsManagerForSubscriptionId(subscriptionId);
+            int subscription = DefaultCallAccount.smsSubscription(DefaultCallAccount.snapshot(context), key);
+            var subscriptions = context.getSystemService(android.telephony.SubscriptionManager.class);
+            if (subscriptions == null || subscriptions.getActiveSubscriptionInfo(subscription) == null) return "-1";
+            return Integer.toString(subscription);
+        } catch (Exception error) { return "-1"; }
+        finally { Binder.restoreCallingIdentity(identity); }
     }
 
     private String recentSms(long afterId, long cutoffMillis, int limit) {

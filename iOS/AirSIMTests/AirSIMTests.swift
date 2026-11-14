@@ -877,7 +877,7 @@ final class CloudStandbyLifecycleRegressionTests: XCTestCase {
                 requests += 1
                 if requests > 1 { throw URLError(.notConnectedToInternet) }
                 return online
-            }, cloudOutgoingStarter: { number, target, _ in
+            }, cloudOutgoingStarter: { number, target, _, _ in
                 XCTAssertEqual(number, "fixture")
                 targets.append(target)
                 throw URLError(.notConnectedToInternet)
@@ -5749,6 +5749,38 @@ final class AllTransportEarlyMediaTests: XCTestCase {
         audio.stopCallTone(deactivateSession: false)
     }
 
+    func testBLEEarlyMediaRetriesOnlyExplicitNotReadyWithoutRedial() async throws {
+        let central = VoBLECallControlProbe()
+        let media = VoBLEGATTMediaTransport(writer: VoBLEWriterProbe(canSend: true, maximumLength: 247))
+        let audio = VoBLEAudioEngine(transport: media)
+        let suite = "EarlyRetry.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let calls = VoBLECallCoordinator(central: central, media: media, audio: audio, defaults: defaults)
+        calls.earlyMediaRetryWait = { await Task.yield() }
+        var early = 0, dials = 0
+        central.sendOperation = { command, _, generation in
+            if command == "dial" { dials += 1 }
+            if command == "start_early_media" { early += 1 }
+            let pending = command == "start_early_media" && early == 1
+            return .init(requestID: command, generation: generation, success: !pending,
+                code: pending ? "early_media_not_ready" : "ok",
+                detail: command == "start_early_media" && !pending ? "early_media_ready_v1" : "")
+        }
+        let outgoing = try await calls.startOutgoing(number: "fixture")
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "dialing", number: "fixture"))
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertEqual(early, 2)
+        XCTAssertEqual(dials, 1)
+        XCTAssertTrue(media.isRunning)
+        XCTAssertTrue(audio.receiveOnly)
+        XCTAssertFalse(audio.running, "Receive-only negotiation cannot bypass CallKit audio activation")
+        central.onEvent?(.init(callID: "carrier", generation: outgoing.generation,
+            direction: "outgoing", state: "ended", number: "fixture"))
+        XCTAssertFalse(media.isRunning)
+    }
+
     func testBLEPreferenceDisablesEarlyRequestAndIsFrozenForCurrentCall() async throws {
         let saved = UserDefaults.standard.object(forKey: CarrierRingbackPreference.key)
         defer {
@@ -5978,5 +6010,66 @@ final class CloudAudioBufferPreferenceTests: XCTestCase {
         let legacy = try JSONDecoder().decode(CloudCallControlEnvelope.self, from: JSONSerialization.data(withJSONObject: wire))
         XCTAssertNil(legacy.audioBufferVersion)
         XCTAssertEqual(legacy.commandID, "operation")
+    }
+}
+
+@MainActor
+final class CloudSIMSelectionTests: XCTestCase {
+    func testCloudOnlyRosterSelectionDialAndSIMRemoval() async throws {
+        let oldMode = ConnectionModePreference.selected()
+        let oldBinding = AndroidAgentBindingPreference.selected()
+        let oldTarget = CloudAgentTargetStore.last()
+        let agent = "cloud-sim-fixture"
+        let key = "airsim.sim-account.\(agent)"
+        let oldSIM = UserDefaults.standard.string(forKey: key)
+        ConnectionModePreference.set(.cloud)
+        AndroidAgentBindingPreference.set(agent)
+        defer {
+            ConnectionModePreference.set(oldMode)
+            AndroidAgentBindingPreference.set(oldBinding)
+            if let oldTarget { CloudAgentTargetStore.remember(oldTarget) } else { CloudAgentTargetStore.forget() }
+            UserDefaults.standard.set(oldSIM, forKey: key)
+        }
+        func status(_ slots: String) throws -> CloudAgentStatus {
+            try JSONDecoder().decode(CloudAgentStatus.self, from: Data("""
+            {"cloud_online":true,"capabilities":{"agent_command_routing":1},"agents":[
+              {"agent_id":"cloud-sim-fixture","cloud_online":true,"sim_slots":\(slots)},
+              {"agent_id":"other-agent","cloud_online":true,"sim_slots":[{"id":"other","label":"SIM 1"}]}]}
+            """.utf8))
+        }
+        var response = try status("""
+        [{"id":"sim-1","label":"SIM 1","default":true},{"id":"sim-2","label":"SIM 2"}]
+        """)
+        var submitted: [String?] = []
+        var queries = 0
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            cloudStatusFetcher: { queries += 1; return response },
+            cloudOutgoingStarter: { _, target, _, sim in
+                XCTAssertEqual(target.agentID, agent)
+                submitted.append(sim)
+                throw URLError(.notConnectedToInternet)
+            })
+        defer { model.stop() }
+        _ = await model.refreshCloudStatusForDiagnostics()
+        XCTAssertEqual(model.simSlots(for: agent).map(\.id), ["sim-1", "sim-2"])
+        XCTAssertTrue(model.simSlots(for: "missing-agent").isEmpty)
+        XCTAssertEqual(model.smsSIMSlots(for: agent).map(\.id), ["sim-1", "sim-2"])
+        model.selectSIMSlot("sim-2", for: agent)
+        XCTAssertEqual(model.selectedSIMSlotID(for: agent), "sim-2")
+        do { try await model.callKitStart(number:"10086"); XCTFail("fixture must fail") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
+        XCTAssertEqual(submitted, ["sim-2"])
+        XCTAssertEqual(queries, 1, "dial must not add a status round trip")
+        response = try status("[]")
+        _ = await model.refreshCloudStatusForDiagnostics()
+        XCTAssertTrue(model.simSlots(for: agent).isEmpty)
+        XCTAssertTrue(model.smsSIMSlots(for: agent).isEmpty)
+        XCTAssertNil(model.selectedSIMSlotID(for: agent))
+    }
+
+    func testLegacyHeartbeatWithoutSIMRosterDecodes() throws {
+        let agent = try JSONDecoder().decode(CloudAndroidAgent.self,
+            from: Data(#"{"agent_id":"legacy","cloud_online":true}"#.utf8))
+        XCTAssertNil(agent.simSlots)
     }
 }

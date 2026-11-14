@@ -21,6 +21,9 @@ public final class DefaultCallAccountTests {
         telecomDialReceivesSelectedAccountOnAllRemoteEntrypoints();
         metadataIsOptionalAndNumberRequiresPermission();
         android29UsesSupportedSubscriptionLookup();
+        modernLookupFallsBackOnlyToExactAccount();
+        smsSelectionDistinguishesMissingAndUnmapped();
+        authorizedResolverPreservesExactKeyAndPermissionGate();
         supportsMoreThanTwoAccountsAndKeepsIdentityAcrossReordering();
         telecomNumbersSurviveSubscriptionFailureWithoutCrossingAccounts();
         System.out.println("default call account tests passed");
@@ -169,6 +172,74 @@ public final class DefaultCallAccountTests {
             assertEquals(0, telephony.modernLookupCount);
             assertEquals(0, subscriptions.numberReadCount);
         } finally { Build.VERSION.SDK_INT = version; }
+    }
+
+    private static void modernLookupFallsBackOnlyToExactAccount() {
+        int version = Build.VERSION.SDK_INT;
+        try {
+            Build.VERSION.SDK_INT = 31;
+            PhoneAccountHandle one = handle("opaque-one"), two = handle("opaque-two"), missing = handle("7");
+            Context context = context(telecom(one, two, missing));
+            context.setSystemService(TelephonyManager.class, new TelephonyManager() {
+                @Override public int getSubscriptionId(PhoneAccountHandle handle) {
+                    if (handle.equals(one)) throw new IllegalStateException("OEM lookup unavailable");
+                    return -1;
+                }
+                @Override public TelephonyManager createForPhoneAccountHandle(PhoneAccountHandle handle) {
+                    if (handle.equals(missing)) return null;
+                    TelephonyManager scoped = new TelephonyManager();
+                    scoped.subscriptionId = handle.equals(one) ? 42 : 73;
+                    return scoped;
+                }
+            });
+            var accounts = DefaultCallAccount.snapshot(context).accounts();
+            assertEquals(42, accounts.get(0).subscriptionId());
+            assertEquals(73, accounts.get(1).subscriptionId());
+            assertEquals(-1, accounts.get(2).subscriptionId());
+            context.setSystemService(TelephonyManager.class, new TelephonyManager() {
+                @Override public int getSubscriptionId(PhoneAccountHandle handle) { throw new SecurityException("denied"); }
+                @Override public TelephonyManager createForPhoneAccountHandle(PhoneAccountHandle handle) { throw new SecurityException("denied"); }
+            });
+            assertEquals(-1, DefaultCallAccount.snapshot(context).accounts().get(0).subscriptionId());
+        } finally { Build.VERSION.SDK_INT = version; }
+    }
+
+    private static void smsSelectionDistinguishesMissingAndUnmapped() {
+        PhoneAccountHandle one = handle("one"), two = handle("two");
+        var snapshot = new DefaultCallAccount.Snapshot(List.of(
+                new DefaultCallAccount.Account("one", "SIM 1", "", one, 0, 42, "", false, false, false),
+                new DefaultCallAccount.Account("two", "SIM 2", "", two, 1, 73, "", false, false, false)), "");
+        assertEquals(73, DefaultCallAccount.smsSubscription(snapshot, "two"));
+        assertEquals(42, DefaultCallAccount.smsSubscription(snapshot, "one"));
+        try { DefaultCallAccount.smsSubscription(snapshot, "removed"); throw new AssertionError("missing accepted"); }
+        catch (IllegalStateException e) { assertTrue(e.getMessage().contains("移除")); }
+        var unmapped = new DefaultCallAccount.Snapshot(List.of(
+                new DefaultCallAccount.Account("two", "SIM 2", "", two)), "");
+        try { DefaultCallAccount.smsSubscription(unmapped, "two"); throw new AssertionError("unmapped accepted"); }
+        catch (IllegalStateException e) { assertTrue(e.getMessage().contains("仍存在")); }
+        try { DefaultCallAccount.smsSubscription(new DefaultCallAccount.Snapshot(List.of(), "权限不可用"), "two");
+            throw new AssertionError("permission denied accepted"); }
+        catch (IllegalStateException e) { assertEquals("权限不可用", e.getMessage()); }
+    }
+
+    private static void authorizedResolverPreservesExactKeyAndPermissionGate() {
+        Context context = context(telecom(handle("opaque-one"), handle("opaque-two")));
+        var original = DefaultCallAccount.snapshot(context).accounts();
+        java.util.List<String> requested = new java.util.ArrayList<>();
+        try {
+            DefaultCallAccount.setSubscriptionResolver(key -> {
+                requested.add(key);
+                return key.equals(original.get(1).key()) ? 73 : -1;
+            });
+            var resolved = DefaultCallAccount.snapshot(context).accounts();
+            assertEquals(-1, resolved.get(0).subscriptionId());
+            assertEquals(73, resolved.get(1).subscriptionId());
+            assertEquals(List.of(original.get(0).key(), original.get(1).key()), requested);
+            context.revoke(Manifest.permission.READ_PHONE_STATE);
+            requested.clear();
+            assertTrue(!DefaultCallAccount.snapshot(context).error().isEmpty());
+            assertTrue(requested.isEmpty());
+        } finally { DefaultCallAccount.setSubscriptionResolver(null); }
     }
 
     private static void supportsMoreThanTwoAccountsAndKeepsIdentityAcrossReordering() {

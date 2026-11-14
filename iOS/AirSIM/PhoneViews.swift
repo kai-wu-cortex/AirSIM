@@ -2406,10 +2406,12 @@ struct ActiveCallView: View {
     }
 
     private var moduleIsReachable: Bool {
-        model.isOnline || model.cloudAgentStatus?.cloudOnline == true
+        model.callConnectionIsReady
     }
 
     private var connectivityText: String {
+        if model.bluetoothIncomingRecoveryPending { return "正在恢复蓝牙连接，请稍候…" }
+        if model.callUsesBluetooth { return moduleIsReachable ? "蓝牙已连接" : "蓝牙连接中" }
         let status = moduleIsReachable ? "模块在线" : "模块连接中"
         let signal = model.modemStatus?.signalDBM ?? model.cloudAgentStatus?.signalDBM
         guard let signal else { return status }

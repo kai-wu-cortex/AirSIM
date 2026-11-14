@@ -335,8 +335,10 @@ mkdir -p "$SMS_OUT"
   "$ROOT"/src/com/airsim/phonecontrol/SMSResultCode.java \
   "$ROOT"/src/com/airsim/phonecontrol/SmsSendConfirmationGate.java \
   "$ROOT"/src/com/airsim/phonecontrol/SMSCommandExecutor.java \
+  "$ROOT"/src/com/airsim/phonecontrol/SMSPrivilegedResult.java \
   "$ROOT"/test/com/airsim/phonecontrol/FeedbackUploader.java
 "$JAVAC" --release 17 -cp "$SMS_OUT:$OUT:$ANDROID_JAR" -d "$SMS_OUT" \
+  "$ROOT"/test/android/content/pm/PackageManager.java \
   "$ROOT"/test/compat/android/telephony/SmsManager.java \
   "$ROOT"/test/com/airsim/phonecontrol/SMSCompatibilityTests.java
 "$JAVA" -cp "$SMS_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.SMSCompatibilityTests
@@ -370,6 +372,11 @@ mkdir -p "$PCM_OUT"
 sh "$ROOT/test-audio-policy.sh"
 
 sh "$ROOT/test-privileged-sms.sh"
+# Read-only SIM mapping: core Telecom fixtures plus the actual privileged service.
+"$JAVAC" --release 17 -cp "$OUT:$OUT/privileged-sms:$ANDROID_JAR" -d "$OUT/privileged-sms" \
+  "$ROOT/test/com/airsim/phonecontrol/PrivilegedSIMMappingTests.java"
+"$JAVA" -cp "$OUT:$OUT/privileged-sms:$ANDROID_JAR" com.airsim.phonecontrol.PrivilegedSIMMappingTests
+
 sh "$ROOT/test-e2e-sms.sh"
 
 "$JAVAC" --release 17 -d "$OUT" \

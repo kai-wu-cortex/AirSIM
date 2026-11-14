@@ -50,12 +50,11 @@ final class AppUpdatePresenter {
     void showNotes(Runnable after) {
         Activity activity = liveOwner();
         if (activity == null || dialog != null) return;
-        String notes = "• 云端音频支持自动、稳定优先与手动缓冲，兼容 iPhone 可选 720 ms；更大缓冲也会增加通话延迟。\n\n"
-                + "• 兼容两端协商后支持云端短信端到端加密，SIM 信息随密文保护；已有配对请检查加密状态。\n\n"
-                + "• 改进 SIM 与未接通知、过期提醒清理，避免重复提醒或跨设备误清理。\n\n"
-                + "• 配套 iPhone 175 支持运营商接通前语音开关；Android 保留采集音量，并改善挂断阶段的本机漏音控制。\n\n"
-                + "• 本 APK 不更新 U30Air 固件或独立 AVF Linux Agent；旧 Agent 可能仅在 iPhone 接收侧应用缓冲。\n\n"
-                + "• 反馈仍由用户手动上传；配对和已有数据保留。";
+        String notes = "• 优化 VoBLE 来电恢复和运营商接通前音频传输；需要配套新版 iPhone，接通前不提前计时或开启麦克风。\n\n"
+                + "• 修复蓝牙电量展示、部分安卓短信 SIM 映射和 Shizuku 发送回执；未确认结果不会自动重发。\n\n"
+                + "• 系统确认短信发送成功后，iPhone 保存发信记录；发送成功不等于对方已收到。\n\n"
+                + "• 云端模式补齐 SIM 选择，需兼容 Relay；Watch 通话与短信按设备身份同步。\n\n"
+                + "• 保留云端音频缓冲、短信加密与手动反馈；本 APK 不更新 U30Air 固件或独立 AVF Linux Agent。";
         AlertDialog next = new AlertDialog.Builder(activity).setTitle("当前版本更新内容 · " + version + "（" + build + "）")
                 .setMessage(notes).setPositiveButton("知道了", (ignored, which) -> {
                     preferences.edit().putString(NOTES_SEEN, version + "#" + build).apply();

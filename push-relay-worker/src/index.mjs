@@ -1,3 +1,4 @@
+import { simSlots } from "./sim-slots.mjs";
 import {
   dashboardAuthorized,
   dashboardHTMLResponse,
@@ -259,7 +260,7 @@ async function enqueueDeviceCommand(request, env) {
     expires_at: new Date(Date.now() + (value.type === "send_sms" ? 5 : 2) * 60_000).toISOString(),
     number: normalizePhoneNumber(value.number),
     ...(value.type === "send_sms" ? { message: value.message.trim() } : {}),
-    ...(value.type === "send_sms" && value.sim_account ? { sim_account: value.sim_account } : {}),
+    ...(["dial", "send_sms"].includes(value.type) && value.sim_account ? { sim_account: value.sim_account } : {}),
     ...(dtmfCall ? {call:dtmfCall,owner:"iphone"} : {}),
   };
   let call = null;
@@ -485,6 +486,8 @@ function validateDeviceCommand(value) {
   if (value.type === "send_sms") {
     if (typeof value.message !== "string" || !value.message.trim() ||
         [...value.message].length > 2_000) return "invalid SMS content";
+  }
+  if (["dial", "send_sms"].includes(value.type)) {
     if (value.sim_account !== undefined &&
         (typeof value.sim_account !== "string" ||
          new TextEncoder().encode(value.sim_account).length > 512 ||
@@ -875,6 +878,8 @@ function sameCommandIntent(left, right) {
   if (left?.type !== "call_control" && (left?.number !== right?.number || left?.message !== right?.message)) return false;
   if (left?.type === "dtmf") return stringValue(left.call?.call_uuid).toLowerCase() === stringValue(right.call?.call_uuid).toLowerCase()
     && (Number(left.call?.generation)||1) === (Number(right.call?.generation)||1);
+  if (["dial", "send_sms"].includes(left?.type) &&
+      stringValue(left.sim_account) !== stringValue(right.sim_account)) return false;
   if (left?.type !== "call_control") return true;
   return left.action === right.action &&
     left.owner === right.owner &&
@@ -1553,6 +1558,7 @@ async function receiveAgentHeartbeat(request, env) {
     ...(Object.prototype.hasOwnProperty.call(heartbeat, "phone_number")
       ? { phone_number: stringValue(heartbeat.phone_number).trim() }
       : {}),
+    ...(Array.isArray(heartbeat.sim_slots) ? { sim_slots: simSlots(heartbeat.sim_slots) } : {}),
     agent_version: stringValue(heartbeat.agent_version),
     at_ok: heartbeat.at_ok,
     cellular_state: heartbeat.cellular_state,

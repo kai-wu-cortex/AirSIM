@@ -178,7 +178,15 @@ actor VoBLEPairingWorker {
     private let store: any VoBLEPairingStoring
     init(store: any VoBLEPairingStoring) { self.store = store }
 
-    func prepare(identity: String, androidPublic: Data, androidNonce: Data) throws -> Prepared {
+    func prepare(identity: String, androidPublic: Data, androidNonce: Data,
+                 recoveryIdentity: String? = nil, challengeID: String = "", recoveryProof: Data? = nil) throws -> Prepared {
+        let stored = try store.load(identity: identity)
+        if let recoveryIdentity {
+            guard identity == recoveryIdentity, let stored, let recoveryProof,
+                  VoBLESessionAuthenticator.authenticate(message: try VoBLESessionAuthenticator.addressRecoveryMessage(
+                    challengeID: challengeID, identity: identity, androidPublic: androidPublic, androidNonce: androidNonce),
+                    tag: recoveryProof, key: stored.pairingKey) else { throw VoBLECentralError.authenticationFailed }
+        }
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
         var nonce = Data(count: 32)
         let status = nonce.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
@@ -189,7 +197,6 @@ actor VoBLEPairingWorker {
             androidNonce: androidNonce, iphoneNonce: nonce)
         let material = try VoBLESessionAuthenticator.derivePairing(
             privateKey: privateKey.rawRepresentation, peerPublicKey: androidPublic, transcript: transcript)
-        let stored = try store.load(identity: identity)
         let tag = try stored.map {
             try VoBLESessionAuthenticator.reconnectTag(pairingKey: $0.pairingKey, transcript: transcript)
         }
@@ -282,6 +289,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     let radio: VoBLERadioController
     private let ownsRadio: Bool
     private(set) var targetPeripheralID: UUID?
+    private(set) var addressRecoveryIdentity: String?
     private var central: CBCentralManager? { radio.manager }
     private var radioObservation: AnyCancellable?
     private var enabled = false
@@ -368,7 +376,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     func setApplicationIsBackground(_ value: Bool) {
         applicationIsBackground = value
         connectionTimeoutTask?.cancel(); connectionTimeoutTask = nil
-        if !value, let peripheral {
+        if !value || addressRecoveryIdentity != nil, let peripheral {
             scheduleConnectionTimeout(for: peripheral)
         }
     }
@@ -386,7 +394,15 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
         resetConnection(); apply(.stopped)
     }
 
+    func connectRecovered(_ peer: VoBLEDiscoveredPeer, expectedIdentity: String) {
+        guard enabled, targetPeripheralID == peer.id, let selected = radio.peripheral(peer.id) else { return }
+        addressRecoveryIdentity = expectedIdentity
+        explicitPairingPeripheral = nil
+        connect(selected, restored: false)
+    }
+
     func connect(_ peer: VoBLEDiscoveredPeer) {
+        addressRecoveryIdentity = nil
         guard enabled, targetPeripheralID == nil || targetPeripheralID == peer.id,
               let selected = radio.peripheral(peer.id) else { return }
         explicitPairingPeripheral = peer.id
@@ -404,7 +420,13 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
             guard response.success, state == .ready, authenticatedIdentity == identity, sessionID == session,
                   deviceInformationRevision == revision else { return }
             deviceInformation = try AndroidAgentMetadata.decode(Data(response.detail.utf8), expectedID: identity)
+            await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "voble", phase: "battery_metadata",
+                title: "蓝牙电量元数据", fields: [
+                    "percent": String(deviceInformation?.battery?.percent ?? -1),
+                    "fresh": String(deviceInformation?.battery?.isFresh(at: Date()) == true)])
         } catch {
+            await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "voble", phase: "metadata_failed",
+                title: "蓝牙设备信息读取失败", fields: ["error_type": String(describing: type(of: error))])
             // Older Android APKs may not support metadata. Never substitute a cached SIM number.
             if sessionID == session, deviceInformationRevision == revision { deviceInformation = nil }
         }
@@ -548,6 +570,11 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
         var body = fields
         body["request_id"] = requestID
         body["timestamp_ms"] = timestamp
+        if command == "start_media" || command == "start_early_media" {
+            // Authenticated opt-in; old Android peers ignore this additive field.
+            body["audio_notification_batch_v1"] = true
+        }
+        if command == "start_early_media" { body["early_media_keepalive_v1"] = true }
         let payload = try JSONSerialization.data(withJSONObject: body)
         let keys = try VoBLESessionAuthenticator.deriveSessionKeys(
             pairingKey: peer.pairingKey, sessionID: sessionID, callID: callID, generation: generation)
@@ -640,7 +667,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     private func scheduleConnectionTimeout(for value: CBPeripheral) {
         connectionTimeoutTask?.cancel()
         guard let deadline = VoBLEConnectionTimeoutPolicy.deadline(state: state,
-            isBackground: applicationIsBackground, systemReconnecting: systemReconnecting,
+            isBackground: applicationIsBackground && addressRecoveryIdentity == nil, systemReconnecting: systemReconnecting,
             awaitingConfirmation: pendingSAS != nil) else { return }
         let revision = connectionRevision
         let phase = state
@@ -654,7 +681,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
             let elapsed = Double(duration.seconds) + Double(duration.attoseconds) / 1e18
             guard VoBLEConnectionTimeoutPolicy.shouldExpire(state: self.state,
                       enabled: self.enabled, elapsed: elapsed,
-                      isBackground: self.applicationIsBackground,
+                      isBackground: self.applicationIsBackground && self.addressRecoveryIdentity == nil,
                       systemReconnecting: self.systemReconnecting, awaitingConfirmation: self.pendingSAS != nil) else { return }
 #if DEBUG
             print("[AirSIM VoBLE Connection] connect_timeout; falling back to scan")
@@ -840,6 +867,7 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
                 throw VoBLECentralError.bluetooth(VoBLEPairingRecovery.userMessage(for: raw))
             }
             if object["op"] as? String == "prepare" {
+                guard addressRecoveryIdentity == nil else { throw VoBLECentralError.authenticationFailed }
                 guard let attempt = pairingAttempt,
                       let remoteSAS = object["sas"] as? String,
                       remoteSAS == attempt.material.sas else {
@@ -855,6 +883,11 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
                   let androidPublic = decodeBase64(object["android_public"] as? String),
                   let androidNonce = decodeBase64(object["android_nonce"] as? String),
                   androidPublic.count == 32, androidNonce.count == 32 else { throw VoBLECentralError.invalidResponse }
+            if let expected = addressRecoveryIdentity {
+                guard identity == expected, PairedAndroidDeviceStore.permits(identity) else {
+                    throw VoBLECentralError.authenticationFailed
+                }
+            }
             if !PairedAndroidDeviceStore.permits(identity), explicitPairingPeripheral != peripheral?.identifier {
                 if let peripheral {
                     PairedAndroidDeviceStore.rememberPeripheral(peripheral.identifier.uuidString, for: identity)
@@ -865,7 +898,9 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
                 return
             }
             let prepared = try await pairingWorker.prepare(
-                identity: identity, androidPublic: androidPublic, androidNonce: androidNonce)
+                identity: identity, androidPublic: androidPublic, androidNonce: androidNonce,
+                recoveryIdentity: addressRecoveryIdentity, challengeID: challengeID,
+                recoveryProof: decodeBase64(object["address_recovery_proof"] as? String))
             guard !Task.isCancelled, connectionRevision == revision, enabled else { return }
             let attempt = PairingAttempt(
                 challengeID: challengeID, androidIdentity: identity, iphonePublic: prepared.publicKey,
@@ -924,6 +959,11 @@ final class VoBLECentralController: NSObject, ObservableObject, VoBLECentralCont
     }
 
     private func failAuthentication(_ message: String) {
+        if addressRecoveryIdentity != nil {
+            // A rejected candidate must not hold GATT or open a new SAS pairing.
+            cancelCurrentConnection()
+            resetConnection()
+        }
         pairingAttempt = nil; pendingSAS = nil; apply(.authenticationFailed(message))
     }
 

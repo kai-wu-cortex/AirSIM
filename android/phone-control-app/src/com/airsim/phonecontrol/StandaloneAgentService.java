@@ -142,6 +142,38 @@ public final class StandaloneAgentService extends Service {
             registrationRecovery.onFailure(new RelayHTTPException(401, "simulated by dumpsys"), now);
         }
         writer.println("relay_recovery " + registrationRecovery.describe(now));
+        if (args != null && Arrays.asList(args).contains("sms-preflight")) {
+            writer.println("sms_preflight " + ShizukuBridgeManager.get(this).smsPreflight());
+        }
+        if (args != null && Arrays.asList(args).contains("sim-mapping")) {
+            // Read-only diagnostics: never expose account keys, ICCIDs, numbers or messages.
+            writer.println("sim_mapping caller=" + android.os.Binder.getCallingUid()
+                    + " self=" + android.os.Process.myUid());
+            long diagnosticIdentity = android.os.Binder.clearCallingIdentity();
+            try {
+                var slots = DefaultCallAccount.snapshot(this);
+                writer.println("sim_mapping count=" + slots.accounts().size() + " readable=" + slots.error().isEmpty());
+                for (int index = 0; index < slots.accounts().size(); index++) {
+                    var account = slots.accounts().get(index);
+                    writer.println("sim_mapping index=" + index + " slot=" + account.slotIndex()
+                            + " subscription=" + account.subscriptionId());
+                    if (android.os.Build.VERSION.SDK_INT >= 30) {
+                        try {
+                            var telephony = getSystemService(android.telephony.TelephonyManager.class);
+                            writer.println("sim_mapping direct_subscription="
+                                    + (telephony == null ? -1 : telephony.getSubscriptionId(account.handle())));
+                        } catch (RuntimeException error) {
+                            writer.println("sim_mapping direct_error=" + error.getClass().getSimpleName());
+                            String reason = String.valueOf(error.getMessage());
+                            writer.println("sim_mapping privileged_required=" + reason.contains("READ_PRIVILEGED_PHONE_STATE")
+                                    + " phone_state_required=" + reason.contains("READ_PHONE_STATE")
+                                    + " attribution_mismatch=" + (reason.contains("does not belong") || reason.contains("callingPackage")));
+
+                        }
+                    }
+                }
+            } finally { android.os.Binder.restoreCallingIdentity(diagnosticIdentity); }
+        }
     }
 
     private void loop() {
@@ -231,6 +263,7 @@ public final class StandaloneAgentService extends Service {
                 .put("manufacturer", registration.optString("android_manufacturer", android.os.Build.MANUFACTURER))
                 .put("model", registration.optString("android_model", android.os.Build.MODEL))
                 .put("phone_number", AndroidAgentIdentity.phoneNumber(this))
+                .put("sim_slots", SimSlotJson.slots(this))
                 .put("at_ok", true).put("cellular_state", "registered")
                 .put("cellular_registration", "Android Telecom")
                 .put("cellular_recovery", "not_required").put("ecm_carrier", "android-default");

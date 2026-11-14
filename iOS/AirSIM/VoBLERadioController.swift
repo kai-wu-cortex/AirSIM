@@ -54,6 +54,7 @@ final class VoBLERadioController: NSObject, ObservableObject {
     @Published private(set) var discoveredPeers: [VoBLEDiscoveredPeer] = []
     var onDiscovered: ((VoBLEDiscoveredPeer) -> Void)?
     var onRestored: ((UUID) -> Void)?
+    var onPoweredOn: (() -> Void)?
     private let io: any VoBLERadioIO
     private final class WeakSession {
         weak var value: VoBLECentralController?
@@ -187,6 +188,7 @@ extension VoBLERadioController: @preconcurrency CBCentralManagerDelegate {
                                       "authorization": String(CBManager.authorization.rawValue)])
         for slot in sessions.values { slot.value?.centralManagerDidUpdateState(central) }
         scanIfNeeded()
+        if central.state == .poweredOn { onPoweredOn?() }
     }
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
         let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []

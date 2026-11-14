@@ -132,6 +132,8 @@ final class VoBLECallCoordinator {
     private(set) var earlyMediaAudible = false
     private(set) var earlyMediaUnavailable = false
     private var carrierEarlyMediaEnabled = true
+    // Retry only admission or an explicit pre-start rejection, never an ambiguous timeout.
+    var earlyMediaRetryWait: () async throws -> Void = { try await Task.sleep(for: .milliseconds(250)) }
     private var earlyAttempt: VoBLECallIdentity?
     private var earlyDeadlineTask: Task<Void, Never>?
     private var mediaRequestVersion = 0
@@ -377,7 +379,7 @@ final class VoBLECallCoordinator {
         onEnded?(identity)
     }
 
-    private func startMedia(for identity: VoBLECallIdentity, receiveOnly: Bool = false) async {
+    private func startMedia(for identity: VoBLECallIdentity, receiveOnly: Bool = false, earlyRetry: Int = 0) async {
         guard !receiveOnly || carrierEarlyMediaEnabled else { return }
         guard endingIdentity != identity, reducer.current == identity, reducer.mediaRequested != receiveOnly,
               !receiveOnly || (identity.direction == "outgoing" && !identity.isProvisional) else { return }
@@ -396,7 +398,12 @@ final class VoBLECallCoordinator {
             phase: "media_admission", title: "蓝牙媒体归属检查",
             fields: ["permitted": String(permitted), "identity_current": String(matches),
                      "generation": String(identity.generation)], isFailure: !permitted || !matches) }
-        guard permitted, matches else { return }
+        guard permitted, matches else {
+            if receiveOnly, matches {
+                await retryEarlyMedia(identity, version: version, attempt: earlyRetry)
+            }
+            return
+        }
         do {
             let context = audioSessionContext()
             try await audio.prepareForCall(
@@ -412,7 +419,15 @@ final class VoBLECallCoordinator {
                 command: receiveOnly ? "start_early_media" : "start_media", callID: identity.callID,
                 generation: identity.generation, number: receiveOnly ? nonce : "")
             guard mediaRequestVersion == version, reducer.current == identity, reducer.mediaRequested != receiveOnly else { return }
-            guard response.success, response.detail == (receiveOnly ? "early_media_ready_v1" : "media_ready"),
+            if receiveOnly, !response.success, response.code == "early_media_not_ready" {
+                await retryEarlyMedia(identity, version: version, attempt: earlyRetry)
+                return
+            }
+            let earlyKeepalive = receiveOnly && response.detail == "early_media_ready_keepalive_v1"
+            let mediaReady = receiveOnly
+                ? (response.detail == "early_media_ready_v1" || earlyKeepalive)
+                : response.detail == "media_ready"
+            guard response.success, mediaReady,
                   mediaPermission(identity) else {
                 throw VoBLECentralError.bluetooth(
                     response.detail.isEmpty ? response.code : response.detail)
@@ -420,7 +435,7 @@ final class VoBLECallCoordinator {
             let key = try central.mediaKey(callID: identity.callID, generation: identity.generation)
             try media.start(identity: identity.mediaIdentity,
                             mediaKey: receiveOnly ? VoBLEGATTMediaTransport.earlyMediaKey(key, nonce: nonce) : key,
-                            receiveOnly: receiveOnly)
+                            receiveOnly: receiveOnly, earlyKeepalive: earlyKeepalive)
             audio.setMediaReady(true)
             if receiveOnly {
                 earlyDeadlineTask = Task { [weak self] in
@@ -458,6 +473,18 @@ final class VoBLECallCoordinator {
             guard !Task.isCancelled, reducer.current == identity else { return }
             await startMedia(for: identity)
         }
+    }
+
+    private func retryEarlyMedia(_ identity: VoBLECallIdentity, version: Int, attempt: Int) async {
+        guard attempt < 24 else {
+            earlyMediaUnavailable = true
+            return
+        }
+        do { try await earlyMediaRetryWait() } catch { return }
+        guard !Task.isCancelled, mediaRequestVersion == version,
+              reducer.current == identity, !reducer.mediaRequested,
+              endingIdentity != identity else { return }
+        await startMedia(for: identity, receiveOnly: true, earlyRetry: attempt + 1)
     }
 
     private func requireSuccess(_ command: String, identity: VoBLECallIdentity) async throws {

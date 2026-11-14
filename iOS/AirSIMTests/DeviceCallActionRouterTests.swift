@@ -3,6 +3,55 @@ import XCTest
 
 @MainActor
 final class DeviceCallActionRouterTests: XCTestCase {
+    func testBluetoothPushMatchRequiresAuthenticatedExactIdentityAndLiveRing() {
+        let push = IncomingVoIPCall(bluetoothCallID: "telecom", uuid: UUID(), generation: 1,
+                                   number: "same-number", agentID: "A")
+        let event = DeviceCallEvent(agentID: "A", callID: "telecom", state: .ringing,
+            transport: .bluetooth, transportEpoch: 3, backendGeneration: 9)
+        XCTAssertTrue(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "telecom", generation: 9, epoch: 3),
+            "BLE and Relay generations are intentionally different")
+        for agent: String? in [nil, "B"] {
+            XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+                authenticatedAgent: agent, callID: "telecom", generation: 9, epoch: 3))
+        }
+        XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "other", generation: 9, epoch: 3))
+        XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "telecom", generation: 10, epoch: 3))
+        XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "telecom", generation: 9, epoch: 4))
+        for state: CallLifecycleState in [.active, .ended, .ending] {
+            let stale = DeviceCallEvent(agentID: "A", callID: "telecom", state: state,
+                transport: .bluetooth, transportEpoch: 3, backendGeneration: 9)
+            XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: stale,
+                authenticatedAgent: "A", callID: "telecom", generation: 9, epoch: 3))
+        }
+    }
+
+    func testBLEPushAdoptionPreservesPresentationAndUsesOnlyBLEBackend() async throws {
+        let context = DeviceCallContext(), backend = DeviceBackendProbe(id: "A")
+        let router = DeviceCallActionRouter(context: context) { agent, transport in
+            guard agent == "A", transport == .bluetooth else { XCTFail("wrong answer lane"); return nil }
+            return backend
+        }
+        let id = UUID()
+        let event = DeviceCallEvent(agentID: "A", callID: id.uuidString.lowercased(), state: .ringing,
+            transport: .bluetooth, transportEpoch: backend.epoch, backendGeneration: 8)
+        let original = try XCTUnwrap(router.registerIncoming(event, mode: .bluetooth))
+        XCTAssertEqual(original.systemUUID, id, "BLE and APNs use the same Telecom UUID")
+        let pushUUID = UUID()
+        let adopted = try router.adoptIncoming(event, systemUUID: pushUUID, service: backend,
+            presentationCallID: event.callID, presentationGeneration: 1)
+        try await router.answer(adopted.key, source: "callkit")
+        XCTAssertEqual(router.route(for: adopted.key)?.transport, .bluetooth)
+        XCTAssertEqual(router.route(for: adopted.key)?.systemUUID, pushUUID)
+        XCTAssertEqual(router.route(for: adopted.key)?.presentationGeneration, 1)
+        XCTAssertEqual(context.registry.active, adopted.key)
+        XCTAssertEqual(context.media.owner, adopted.key)
+        XCTAssertEqual(backend.commands.count, 1)
+    }
+
     func testTelecomUUIDSharedByLANAndPushWithoutCrossDeviceCollision() throws {
         let backend = DeviceBackendProbe(id: "A")
         let router = DeviceCallActionRouter(context: DeviceCallContext()) { _, _ in backend }

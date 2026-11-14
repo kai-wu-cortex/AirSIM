@@ -275,6 +275,8 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         .put("android_public", base64(challenge.androidPublicKey()))
                         .put("android_nonce", base64(challenge.androidNonce()))
                         .put("expires_at_ms", challenge.expiresAtMillis());
+                byte[] recoveryProof = pairingManager.addressRecoveryProof(challenge);
+                if (recoveryProof != null) response.put("address_recovery_proof", base64(recoveryProof));
             } else if ("prepare".equals(operation)) {
                 VoBLEPairingManager.PairingMaterial material = pairingManager.preview(
                         request.getString("challenge_id"),
@@ -372,8 +374,15 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                 result = calls.executeOnce(request, true,
                         ignored -> VoBLECallController.Result.success("ready"));
             } else if ("device_info".equals(action)) {
+                // A reconnect can miss the original Telecom ring event. Re-publish only
+                // currently ringing calls over this authenticated control session.
+                // Keep their existing BLE generation; never issue a Telecom command.
+                replayRingingCalls();
+                JSONObject battery = com.airsim.phonecontrol.AndroidBatteryStatus.snapshot(this);
+                BridgeLog.info("voble_battery_sample present=" + (battery != null)
+                        + " percent=" + (battery == null ? -1 : battery.optInt("percent", -1)));
                 result = VoBLECallController.Result.success(new JSONObject()
-                        .put("battery", com.airsim.phonecontrol.AndroidBatteryStatus.snapshot(this))
+                        .put("battery", battery)
                         .put("agent_id", AndroidAgentIdentity.agentID(this))
                         .put("device_name", AndroidAgentIdentity.deviceName())
                         .put("agent_kind", RuntimeMode.isStandalone(this) ? "standalone" : "avf")
@@ -452,6 +461,14 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
         }
     }
 
+    private void replayRingingCalls() {
+        for (String callId : CallRepository.callIDs()) {
+            if (CallRepository.state(callId) == android.telecom.Call.STATE_RINGING) {
+                publishCallState(callId, "incoming", "incoming", CallRepository.number(callId));
+            }
+        }
+    }
+
     private void publishCallState(String callId, String direction, String state, String number) {
         // An empty Telecom ID is not an authoritative call identity. Publishing
         // generation 0 makes iOS reducers ignore the event and previously let an
@@ -527,9 +544,13 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
         }
         boolean early = "start_early_media".equals(envelope.command());
         if (early && (!com.airsim.phonecontrol.AndroidEarlyMedia.supported(this)
-                || !CallRepository.earlyMediaEligible(envelope.callId())
-                || CallRepository.state(envelope.callId()) != android.telecom.Call.STATE_DIALING)) {
+                || !CallRepository.earlyMediaEligible(envelope.callId()))) {
             return VoBLECallController.Result.failure("early_media_unavailable");
+        }
+        if (early && CallRepository.state(envelope.callId()) != android.telecom.Call.STATE_DIALING) {
+            // CONNECTING / account selection is not PCM-ready. No bridge was opened;
+            // clients may retry media setup for this identity, never the dial itself.
+            return VoBLECallController.Result.failure("early_media_not_ready");
         }
         try {
             InetSocketAddress endpoint;
@@ -552,6 +573,12 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
             }
             try {
                 stopMedia("", 0);
+                boolean batchAudio = new JSONObject(new String(envelope.ciphertext(), StandardCharsets.UTF_8))
+                        .optBoolean("audio_notification_batch_v1", false);
+                boolean earlyKeepalive = early && new JSONObject(new String(envelope.ciphertext(), StandardCharsets.UTF_8))
+                        .optBoolean("early_media_keepalive_v1", false);
+                gatt.setAudioBatching(deviceId, batchAudio);
+                BridgeLog.info("voble_media_transport receive_only=" + early + " notification_batch=" + batchAudio + " early_keepalive=" + earlyKeepalive);
                 VoBLEMediaSession next = new VoBLEMediaSession(
                         endpoint,
                         address -> VoBLEPCMBridgeSession.open(
@@ -582,6 +609,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         && calls.ownsCall(envelope.callId(), envelope.generation())
                         && CallRepository.earlyMediaEligible(envelope.callId())
                         && CallRepository.state(envelope.callId()) == android.telecom.Call.STATE_DIALING);
+                next.setEarlyKeepaliveEnabled(earlyKeepalive);
                 next.start(identity, mediaKey);
                 synchronized (mediaLifecycleLock) {
                     synchronized (next) {
@@ -606,7 +634,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
                         0, 0, 0, "");
                 publishDiagnostics();
                 BridgeLog.info("voble_media_started call_generation=" + envelope.generation());
-                return VoBLECallController.Result.success(early ? "early_media_ready_v1" : "media_ready");
+                return VoBLECallController.Result.success(early ? (earlyKeepalive ? "early_media_ready_keepalive_v1" : "early_media_ready_v1") : "media_ready");
             } finally {
                 Arrays.fill(mediaKey, (byte) 0);
             }
@@ -627,8 +655,12 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
             mediaIdentity = null;
             RemoteAudioSessionRegistry.setVoBLE(false);
             if (active != null) {
-                BridgeLog.info("voble_media_stopped");
                 VoBLEMediaSession.Stats stats = active.stats();
+                if (gatt != null && session != null) BridgeLog.info("voble_send_final early_keepalives=" + active.earlyKeepalives() + " " + gatt.audioSendSummary(session.deviceId));
+                BridgeLog.info("voble_media_stopped receive_only=" + active.receiveOnly()
+                        + " downlink_frames=" + stats.downlinkFrames()
+                        + " uplink_frames=" + stats.uplinkFrames()
+                        + " dropped_frames=" + stats.droppedFrames());
                 diagnostics = new VoBLEDiagnostics.Snapshot(
                         RuntimeMode.agentLabel(this), session != null, false,
                         "G.711-mu/8000/mono", stats.downlinkFrames(), stats.uplinkFrames(),

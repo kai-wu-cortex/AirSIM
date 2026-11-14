@@ -254,7 +254,7 @@ final class DeviceCallActionRouter {
         guard eventLaneAllowed, let eventService = backend(event.agentID, event.transport) else { return effects }
         // Match the Telecom UUID used by incoming APNs. Do not reuse a UUID
         // already owned by another device, even if it reports the same call ID.
-        let telecomUUID = event.transport == .vowlan && event.direction == "incoming"
+        let telecomUUID = event.direction == "incoming"
             ? UUID(uuidString: event.callID) : nil
         let systemUUID = telecomUUID.flatMap { candidate in
             routes.values.contains { $0.systemUUID == candidate && $0.key != key } ? nil : candidate
@@ -449,4 +449,40 @@ final class BLEDeviceCallBackend: DeviceCallBackend {
         try require(callID, generation); try await calls.end(rejectIfRinging: reject)
     }
     func dtmf(_ digits: String, callID: String, generation: UInt64?) async throws { try require(callID, generation); try await calls.sendDTMF(digits) }
+}
+
+/// Never infer a pushed call's BLE identity from a number, selected device, or
+/// coincident generation. Relay and BLE use separate generation namespaces.
+enum BluetoothIncomingCallPolicy {
+    static func matches(push: IncomingVoIPCall, event: DeviceCallEvent,
+                        authenticatedAgent: String?, callID: String,
+                        generation: UInt64, epoch: UInt64) -> Bool {
+        guard let agent = authenticatedAgent, !agent.isEmpty, generation > 0 else { return false }
+        return push.agentID == agent && event.agentID == agent
+            && push.callID == callID && event.callID == callID
+            && event.transport == .bluetooth && event.state == .ringing
+            && event.backendGeneration == generation && event.transportEpoch == epoch
+    }
+}
+
+/// A cold BLE reconnect can include an 8s connection attempt, backoff and a
+/// 20s authenticated handshake. This budget never sends a call command itself.
+@MainActor
+enum BluetoothIncomingRecovery {
+    static func wait<Value>(isCurrent: () -> Bool, resolve: () -> Value?,
+                            refresh: () -> Void,
+                            now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                            sleep: () async throws -> Void = { try await Task.sleep(for: .milliseconds(200)) }) async throws -> Value? {
+        let deadline = now() + 35
+        while now() < deadline {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw CancellationError() }
+            if let value = resolve() { return value }
+            refresh()
+            try await sleep()
+        }
+        try Task.checkCancellation()
+        guard isCurrent() else { throw CancellationError() }
+        return nil
+    }
 }

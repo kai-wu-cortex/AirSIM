@@ -111,9 +111,9 @@ struct AirSIMDeviceWidgetView: View {
             if snapshot.controls != nil {
                 switchControls(vertical: true)
                 Text(d.status(at: date)).font(.caption).lineLimit(1)
-                updated(d).font(.caption2)
+                HStack { battery(d, compact: true); Spacer(minLength: 2); updated(d).font(.caption2).lineLimit(1) }
             } else {
-            HStack { brand(size: 34); Spacer(); statusDot(d) }
+            HStack { brand(size: 34); Spacer(); battery(d, compact: true) }
             Spacer(minLength: 2)
             Text(d.name).font(.headline).lineLimit(1)
             Label(d.transport.isEmpty ? "连接待确认" : d.transport, systemImage: transportSymbol(d))
@@ -130,14 +130,18 @@ struct AirSIMDeviceWidgetView: View {
             VStack(alignment: .leading, spacing: 7) {
                 if snapshot.controls != nil {
                     switchControls(vertical: true)
-                    Text(d.status(at: date)).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(d.status(at: date)).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
+                        Spacer(minLength: 0)
+                        battery(d, compact: true).fixedSize()
+                    }
                 } else {
                 HStack(spacing: 9) {
                     if !textSize.isAccessibilitySize { brand(size: 38) }
                     Text(d.name).font(.headline).lineLimit(1)
                 }
                 status(d)
-                updated(d).font(.caption2)
+                HStack { battery(d, compact: true); Spacer(minLength: 2); updated(d).font(.caption2).lineLimit(1) }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
             Divider()
@@ -422,14 +426,14 @@ struct AirSIMDeviceWidgetView: View {
             } else { Text("等待首次同步") }
         }.foregroundStyle(secondaryText).lineLimit(1)
     }
-    private func battery(_ d: AirSIMWidgetSnapshot.Device) -> some View {
+    private func battery(_ d: AirSIMWidgetSnapshot.Device, compact: Bool = false) -> some View {
         let reading = d.battery.flatMap { $0.isFresh(at: date) ? $0 : nil }
         return HStack(spacing: 5) {
             Image(systemName: reading?.symbol ?? "battery.0percent")
                 .foregroundStyle(reading.map { $0.charging ? Color.green : $0.percent <= 20 ? Color.red : primaryText } ?? secondaryText)
             Text(reading.map { "\($0.percent)%" } ?? "—")
         }
-            .font(.subheadline.weight(.semibold))
+            .font((compact ? Font.caption2 : Font.subheadline).weight(.semibold))
             .accessibilityLabel(reading.map { "安卓电量 \($0.percent)%，\($0.charging ? "正在充电" : "未充电")，采样于 \($0.observedAt.formatted(date: .omitted, time: .shortened))" } ?? "安卓电量待刷新")
     }
     private func transportSymbol(_ d: AirSIMWidgetSnapshot.Device) -> String {

@@ -119,6 +119,7 @@ struct AgentHealth: Codable, Sendable {
 
 /// Relay 最近一次收到的 Agent 心跳。该对象只包含可展示状态，不包含设备密钥。
 struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
+    var simSlots: [AndroidSIMSlot]? = nil
     var battery: AndroidBatteryReading? = nil
     var commandRoutingVersion: Int? = nil
     let agentID: String
@@ -134,6 +135,7 @@ struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case battery
+        case simSlots = "sim_slots"
         case agentID = "agent_id"
         case agentKind = "agent_kind"
         case deviceName = "device_name"

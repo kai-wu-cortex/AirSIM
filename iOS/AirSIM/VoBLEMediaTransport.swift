@@ -272,20 +272,21 @@ private final class VoBLEMediaCodecWorker: @unchecked Sendable {
 
     func encode(
         identity candidate: VoBLEMediaSessionIdentity, epoch: UInt64,
-        pcm: Data, discontinuity: Bool, maximumPacketLength: Int,
+        pcm: Data, discontinuity: Bool, maximumPacketLength: Int, keepalive: Bool = false,
         completion: @escaping @Sendable ([Data]?, Snapshot?) -> Void
     ) {
         queue.async { [self] in
             guard candidate == identity, self.epoch == epoch else { completion(nil, nil); return }
-            guard pcm.count == 320 else { completion(nil, snapshot); return }
+            guard keepalive ? pcm.isEmpty : pcm.count == 320 else { completion(nil, snapshot); return }
             do {
-                let compressed = VoBLEMULaw.encode(pcm)
+                let compressed = keepalive ? Data() : VoBLEMULaw.encode(pcm)
+                let streamID: UInt8 = keepalive ? 2 : 1
                 let sealed = try VoBLEMediaCipher.seal(
-                    compressed, key: mediaKey, direction: .uplink, streamID: 1,
+                    compressed, key: mediaKey, direction: .uplink, streamID: streamID,
                     sequence: sequence, timestamp: timestamp)
                 let packet = VoBLEAudioPacket(
                     flags: discontinuity ? [.discontinuity] : [],
-                    codec: .g711MuLaw, streamID: 1, sequence: sequence,
+                    codec: .g711MuLaw, streamID: streamID, sequence: sequence,
                     sampleTimestamp: timestamp, payload: sealed.payload,
                     authenticationTag: sealed.authenticationTag)
                 sequence &+= 1; timestamp &+= 160
@@ -355,7 +356,7 @@ private final class VoBLEMediaCodecWorker: @unchecked Sendable {
 
 @MainActor
 final class VoBLEGATTMediaTransport {
-    private struct QueuedFrame { var fragments: [Data] }
+    private struct QueuedFrame { var fragments: [Data]; var keepalive = false }
     private struct CapturedFrame {
         let pcm: Data
         let discontinuity: Bool
@@ -364,6 +365,8 @@ final class VoBLEGATTMediaTransport {
     private var identity: VoBLEMediaSessionIdentity?
     private var epoch: UInt64 = 0
     private var receiveOnly = false
+    private var keepaliveTask: Task<Void, Never>?
+    private var keepaliveCount = 0
     private var queued: [QueuedFrame] = []
     private var captured: [CapturedFrame] = []
     private var downlink: [VoBLEMediaCodecWorker.ReceivedFragment] = []
@@ -376,6 +379,8 @@ final class VoBLEGATTMediaTransport {
     private var encodingEpoch: UInt64?
     private var diagnostics = VoBLEMediaCodecWorker.Snapshot()
     private var localDroppedFrameCount = 0
+    private var notificationCount = 0
+    private var batchedNotificationCount = 0
     private let codec: VoBLEMediaCodecWorker
 
     init(writer: any VoBLEMediaWriting,
@@ -386,27 +391,64 @@ final class VoBLEGATTMediaTransport {
     var queuedFrameCount: Int { queued.count }
     var isRunning: Bool { identity != nil }
     var droppedFrameCount: Int { localDroppedFrameCount + diagnostics.dropped }
-    var diagnosticSummary: String { diagnostics.summary }
+    var diagnosticSummary: String {
+        diagnostics.summary + " notifications=\(notificationCount) batched_notifications=\(batchedNotificationCount) early_keepalives=\(keepaliveCount)"
+    }
     var jitterTargetFrames: Int { diagnostics.jitterTarget }
 
     static func earlyMediaKey(_ key: Data, nonce: String) -> Data {
         Data(HMAC<SHA256>.authenticationCode(for: Data(("airsim-early-media-v1:" + nonce).utf8), using: SymmetricKey(data: key)))
     }
 
-    func start(identity: VoBLEMediaSessionIdentity, mediaKey: Data, receiveOnly: Bool = false) throws {
+    func start(identity: VoBLEMediaSessionIdentity, mediaKey: Data, receiveOnly: Bool = false, earlyKeepalive: Bool = false) throws {
         guard !identity.callID.isEmpty, identity.generation > 0, mediaKey.count == 32 else {
             throw VoBLEPairingError.invalidKey
         }
+        keepaliveTask?.cancel(); keepaliveTask = nil
         epoch &+= 1
         self.identity = identity
         self.receiveOnly = receiveOnly
         queued.removeAll(); captured.removeAll(); downlink.removeAll(); playback.removeAll()
         localDroppedFrameCount = 0; diagnostics = .init()
+        notificationCount = 0; batchedNotificationCount = 0; keepaliveCount = 0
         codec.start(identity: identity, epoch: epoch, mediaKey: mediaKey)
+        if receiveOnly && earlyKeepalive {
+            let sessionEpoch = epoch
+            keepaliveTask = Task { [weak self] in
+                // Match the normal 20 ms duplex cadence, but send authenticated
+                // empty metadata only. No microphone, audio samples or call state change.
+                for _ in 0..<6_000 {
+                    do { try await Task.sleep(for: .milliseconds(20)) } catch { return }
+                    guard !Task.isCancelled, let self,
+                          self.identity == identity, self.epoch == sessionEpoch else { return }
+                    self.sendEarlyKeepalive()
+                }
+            }
+        }
+    }
+
+    private func sendEarlyKeepalive() {
+        guard receiveOnly, let identity, !encoding, queued.isEmpty,
+              writer.canSendWriteWithoutResponse else { return }
+        let epoch = epoch
+        encoding = true; encodingEpoch = epoch
+        codec.encode(identity: identity, epoch: epoch, pcm: Data(), discontinuity: false,
+                     maximumPacketLength: writer.maximumWriteLength, keepalive: true) { [weak self] fragments, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.encoding = false; self.encodingEpoch = nil
+                if self.identity == identity, self.epoch == epoch, self.receiveOnly, let fragments {
+                    self.queued.append(QueuedFrame(fragments: fragments, keepalive: true))
+                    self.drain()
+                }
+                self.encodeNext()
+            }
+        }
     }
 
     func stop(identity candidate: VoBLEMediaSessionIdentity) {
         guard candidate == identity else { return }
+        keepaliveTask?.cancel(); keepaliveTask = nil
         codec.stop(identity: candidate, epoch: epoch)
         epoch &+= 1
         identity = nil; queued.removeAll(); captured.removeAll(); downlink.removeAll(); playback.removeAll()
@@ -452,12 +494,16 @@ final class VoBLEGATTMediaTransport {
 
     func receiveDownlinkFragment(_ fragment: Data, now: Date = Date()) {
         guard identity != nil else { return }
-        guard fragment.count <= VoBLEAudioPacket.headerLength + 255 else {
-            localDroppedFrameCount += 1; return
-        }
-        if downlink.count >= 64 { downlink.removeFirst(); localDroppedFrameCount += 1 }
-        downlink.append(.init(data: fragment, now: now))
-        receiveNext()
+        do {
+            let parts = try VoBLEAudioNotification.fragments(fragment)
+            notificationCount += 1
+            if parts.count > 1 { batchedNotificationCount += 1 }
+            for part in parts {
+                if downlink.count >= 64 { downlink.removeFirst(); localDroppedFrameCount += 1 }
+                downlink.append(.init(data: part, now: now))
+            }
+            receiveNext()
+        } catch { localDroppedFrameCount += 1 }
     }
 
     private func receiveNext() {
@@ -515,6 +561,7 @@ final class VoBLEGATTMediaTransport {
                 queued.insert(frame, at: 0)
                 return
             }
+            if frame.keepalive { keepaliveCount += 1 }
         }
     }
 }

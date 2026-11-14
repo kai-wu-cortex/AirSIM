@@ -481,6 +481,7 @@ struct AirSIMSettingsHomeSnapshot: Equatable {
     let deviceID: String?
     let deviceName: String
     let connectionDetail: String
+    var battery: AndroidBatteryReading? = nil
     let modeTitle: String
     let version: String
     let pureLocalEnabled: Bool
@@ -488,6 +489,21 @@ struct AirSIMSettingsHomeSnapshot: Equatable {
     let callBusy: Bool
     let pureLocalError: String?
     let language: String
+}
+
+private struct AndroidDeviceBatteryLabel: View {
+    let reading: AndroidBatteryReading?
+    var body: some View {
+        Label {
+            if let reading {
+                Text("\(reading.percent)%\(reading.charging ? " · 正在充电" : "")")
+            } else { Text("电量待刷新") }
+        } icon: {
+            Image(systemName: reading?.symbol ?? "battery.0percent")
+                .foregroundStyle(reading.map { $0.charging ? Color.green : $0.percent <= 20 ? .red : .secondary } ?? .secondary)
+        }
+        .accessibilityLabel(reading.map { "安卓电量 \($0.percent)%，\($0.charging ? "正在充电" : "未充电")" } ?? "安卓电量待刷新")
+    }
 }
 
 private struct AirSIMSettingsLink: View {
@@ -544,6 +560,7 @@ private struct AirSIMSettingsHomeContent: View, Equatable {
                                 Text(snapshot.deviceName).font(.headline)
                                 Text(snapshot.connectionDetail)
                                     .font(.subheadline).foregroundStyle(.secondary)
+                                AndroidDeviceBatteryLabel(reading: snapshot.battery).font(.caption)
                             }
                         } icon: { Image(systemName: "iphone.radiowaves.left.and.right").foregroundStyle(.blue) }
                         .padding(.vertical, 6)
@@ -929,6 +946,7 @@ struct AirSIMSettingsView: View {
         let connection = model.connectionModePresentation
         return AirSIMSettingsHomeSnapshot(deviceID: device?.id,
             deviceName: device?.deviceName ?? "", connectionDetail: connection.status + " · " + connection.title,
+            battery: device.flatMap { model.androidBattery(for: $0.id) },
             modeTitle: selectedMode.title, version: AppInformation.version,
             pureLocalEnabled: pureLocalEnabled, pureLocalBusy: pureLocalBusy,
             callBusy: updateCallBusy, pureLocalError: pureLocalError,
@@ -960,6 +978,7 @@ struct AirSIMSettingsView: View {
         if let device = model.pairedDeviceHistory.first(where: { $0.id == id }) {
             Section {
                 Text(device.deviceName).font(.title2.bold())
+                LabeledContent("电量") { AndroidDeviceBatteryLabel(reading: model.androidBattery(for: id)) }
                 LabeledContent("号码", value: device.phoneNumber ?? "运营商未提供号码")
                 LabeledContent("VoWLAN", value: device.vowlanOnline ? "在线" : "未连接")
                 LabeledContent("蓝牙", value: device.bluetoothOnline ? "在线" : "未连接")

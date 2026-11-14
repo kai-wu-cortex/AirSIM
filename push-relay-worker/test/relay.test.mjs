@@ -1961,3 +1961,55 @@ test("PR33 missed notifications require explicit facts and isolate agent/generat
     assert.equal(captured.at(-1).options.headers["apns-push-type"], "background");
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test("cloud SIM roster is authenticated, Agent scoped, bounded and clears on removal", async () => {
+  const env = testEnvironment(); env.STATUS = new MemoryStatusNamespace();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const auth = {device_id: registration.device_id, device_secret: registration.device_secret};
+  const heartbeat = { ...auth, event:"agent_heartbeat", agent_id:"android-A", at_ok:true, cellular_state:"registered" };
+  const slots = [{id:"account-A/1", label:"SIM 1", slot_index:0, default:true},
+    {id:"account-A/2", label:"SIM 2", slot_index:1, default:false}];
+  const send = body => worker.fetch(post("/v1/events/heartbeat", body), env);
+  const status = async () => (await (await worker.fetch(post("/v1/devices/status", auth),env)).json()).agents;
+  assert.equal((await send({...heartbeat,sim_slots:slots})).status,202);
+  await send({...heartbeat,agent_id:"android-B",sim_slots:[]});
+  assert.deepEqual((await status()).find(a=>a.agent_id==="android-A").sim_slots,slots);
+  assert.deepEqual((await status()).find(a=>a.agent_id==="android-B").sim_slots,[]);
+  assert.equal((await send({...heartbeat,device_secret:"wrong",sim_slots:[]})).status,401);
+  assert.deepEqual((await status()).find(a=>a.agent_id==="android-A").sim_slots,slots);
+  await send({...heartbeat,sim_slots:[...slots,slots[0],{id:"bad\n",label:"bad"},{id:"x",label:7}]});
+  assert.deepEqual((await status()).find(a=>a.agent_id==="android-A").sim_slots,slots);
+  await send({...heartbeat,sim_slots:[{id:"x".repeat(513),label:"SIM"}, {id:"x",label:"bad\n"}]});
+  assert.deepEqual((await status()).find(a=>a.agent_id==="android-A").sim_slots,[]);
+  await send({...heartbeat,sim_slots:Array.from({length:12},(_,i)=>({id:`sim-${i}`,label:"SIM"}))});
+  assert.equal((await status()).find(a=>a.agent_id==="android-A").sim_slots.length,8);
+  await send({...heartbeat,sim_slots:[]});
+  assert.deepEqual((await status()).find(a=>a.agent_id==="android-A").sim_slots,[]);
+  await send(heartbeat);
+  assert.equal((await status()).find(a=>a.agent_id==="android-A").sim_slots,undefined);
+});
+
+test("dial and SMS preserve selected SIM and reject changes to an existing intent", async () => {
+  for (const type of ["dial", "send_sms"]) {
+    const env = testEnvironment(); env.COMMANDS = new MemoryCommandNamespace();
+    await worker.fetch(post("/v1/devices/register", registration),env);
+    const auth={device_id:registration.device_id,device_secret:registration.device_secret};
+    const command={...auth,command_id:"c87f982a-1750-4f03-9a96-6553e454f522",type,
+      target_agent_id:"android-A",number:"10086",message:"synthetic",sim_account:"account/2"};
+    const enqueue = body => worker.fetch(post("/v2/commands/enqueue",body),env);
+    for (const invalid of [123, null, "bad\n", "x".repeat(513)]) {
+      assert.equal((await enqueue({...command,sim_account:invalid})).status,400);
+    }
+    assert.equal((await enqueue(command)).status,202);
+    assert.equal((await enqueue(command)).status,202);
+    assert.equal((await enqueue({...command,sim_account:"account/1"})).status,409);
+    const pulled=await (await worker.fetch(post("/v2/commands/pull",{...auth,agent_id:"android-A"}),env)).json();
+    assert.equal(pulled.commands.length,1);
+    assert.equal(pulled.commands[0].sim_account,"account/2");
+    const other=await (await worker.fetch(post("/v2/commands/pull",{...auth,agent_id:"android-B"}),env)).json();
+    assert.deepEqual(other.commands,[]);
+    const legacy={...command,command_id:"d87f982a-1750-4f03-9a96-6553e454f522"};
+    delete legacy.sim_account;
+    assert.equal((await enqueue(legacy)).status,202);
+  }
+});

@@ -99,9 +99,9 @@ assert_contains "$B" 'active.recoveryRequest.request(' \
 
 assert_contains "$MANIFEST" 'package="com.airsim.phonecontrol.standalone"' \
   'standalone package id is missing'
-assert_contains "$MANIFEST" 'android:versionCode="135"' \
+assert_contains "$MANIFEST" 'android:versionCode="140"' \
   'standalone version code does not match the current candidate build'
-assert_contains "$MANIFEST" 'android:versionName="0.9.8.24"' \
+assert_contains "$MANIFEST" 'android:versionName="0.9.8.25"' \
   'standalone version name does not match the current Android candidate'
 assert_contains "$MANIFEST" 'com.airsim.phonecontrol.STANDALONE_AGENT' \
   'standalone runtime flag is missing'

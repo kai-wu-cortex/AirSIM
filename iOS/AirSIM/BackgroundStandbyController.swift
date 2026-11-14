@@ -448,12 +448,32 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
         try await api.dial(number: number, operationID: intentID)
     }
     func callKitPrepareAudioSession() throws {
-        if CloudModePreference.isEnabled(),
+        if ConnectionModePreference.selected() == .bluetooth,
+           CallKitController.shared.currentIncomingPush?.isVirtual != true {
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat,
+                                                           options: [.allowBluetoothHFP])
+            return
+        }
+        if ConnectionModePreference.selected() != .bluetooth, CloudModePreference.isEnabled(),
            CallKitController.shared.currentIncomingPush?.authenticatedMediaURL != nil {
             try IPhoneCloudCallSession.shared.prepareAudioForCallKit()
         }
     }
     func callKitAnswer(origin: CallAnswerOrigin) async throws {
+        if ConnectionModePreference.selected() == .bluetooth,
+           CallKitController.shared.currentIncomingPush?.isVirtual != true {
+            let uuid = CallKitController.shared.currentSystemCallUUID
+            for _ in 0..<25 {
+                guard !Task.isCancelled, let uuid,
+                      CallKitController.shared.currentSystemCallUUID == uuid else { throw CancellationError() }
+                if let model = CallKitController.shared.handler as? AppModel {
+                    try await model.callKitAnswer(uuid: uuid, origin: origin)
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            throw CallKitBridgeError.bluetoothUnavailable
+        }
         if let pushedCall = CallKitController.shared.currentIncomingPush,
            pushedCall.isVirtual {
             try VirtualCallTTSController.shared.prepare(pushedCall)
@@ -468,6 +488,15 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
         }
     }
     func callKitEnd() async throws {
+        if ConnectionModePreference.selected() == .bluetooth,
+           CallKitController.shared.currentIncomingPush?.isVirtual != true {
+            guard let model = CallKitController.shared.handler as? AppModel,
+                  let uuid = CallKitController.shared.currentSystemCallUUID else {
+                throw CallKitBridgeError.bluetoothUnavailable
+            }
+            try await model.callKitEnd(uuid: uuid)
+            return
+        }
         if VirtualCallTTSController.shared.isPrepared
             || CallKitController.shared.currentIncomingPush?.isVirtual == true {
             VirtualCallTTSController.shared.stop()

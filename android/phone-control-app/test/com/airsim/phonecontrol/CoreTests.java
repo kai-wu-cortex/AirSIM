@@ -754,6 +754,10 @@ public final class CoreTests {
 	}
 
 	private static void assertVoBLEPairingAndReplay() throws Exception {
+        assertEquals("ed3246738f539a33794495649c016ab0", PairingCrypto.hex(
+                com.airsim.phonecontrol.voble.VoBLEPairingManager.addressRecoveryTag(
+                        filledBytes(32, 1), "challenge-fixture", "recovery-fixture",
+                        filledBytes(32, 2), filledBytes(32, 3))));
 		byte[] androidPrivate = new byte[32];
 		byte[] iphonePrivate = new byte[32];
 		for (int index = 0; index < 32; index++) {
@@ -844,6 +848,14 @@ public final class CoreTests {
 				reconnectChallenge.androidIdentity(), reconnectChallenge.androidPublicKey(),
 				iphonePublic, reconnectChallenge.androidNonce(), filledBytes(32, 0x33));
 		byte[] oldPairingKey = store.load("samsung-new");
+        byte[] proof = manager.addressRecoveryProof(reconnectChallenge);
+        assertTrue(java.util.Arrays.equals(proof,
+            com.airsim.phonecontrol.voble.VoBLEPairingManager.addressRecoveryTag(oldPairingKey,
+                reconnectChallenge.id(), reconnectChallenge.androidIdentity(),
+                reconnectChallenge.androidPublicKey(), reconnectChallenge.androidNonce())));
+        assertTrue(java.util.Arrays.equals(oldPairingKey, store.load("samsung-new")));
+        assertTrue(manager.addressRecoveryProof(manager.begin("unpaired-device", now)) == null);
+
 		var reconnected = manager.confirmReconnect(
 				reconnectChallenge.id(), iphonePublic, filledBytes(32, 0x33),
 				com.airsim.phonecontrol.voble.VoBLEPairingManager.reconnectTag(
@@ -1089,7 +1101,34 @@ public final class CoreTests {
         assertTrue(rxMedia.ready());
         assertTrue(!rxMedia.onUplinkFragment(rxIdentity, new byte[]{1}));
         assertEquals("AIRSIMRX01\n", new String(rxDuplex.output.toByteArray(), java.nio.charset.StandardCharsets.US_ASCII));
+        byte[] feedbackTag = com.airsim.phonecontrol.voble.VoBLEMediaSession.encrypt(
+                new byte[0], rxKey, true, 2, 0, 0).authenticationTag();
+        var feedbackPacket = new com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket(
+                0, com.airsim.phonecontrol.voble.VoBLEProtocol.CODEC_G711_MULAW, 2, 0, 0, new byte[0], feedbackTag);
+        byte[] feedbackWire = com.airsim.phonecontrol.voble.VoBLEProtocol.encodeAudioFragments(feedbackPacket, 247).get(0);
+        assertTrue(!rxMedia.onUplinkFragment(rxIdentity, feedbackWire)); // legacy: no negotiation
+        rxMedia.setEarlyKeepaliveEnabled(true);
+        assertTrue(!rxMedia.onUplinkFragment(new com.airsim.phonecontrol.voble.VoBLEMediaSession.Identity("other", 2), feedbackWire));
+        byte[] tamperedFeedback = feedbackWire.clone(); tamperedFeedback[tamperedFeedback.length - 1] ^= 1;
+        assertTrue(!rxMedia.onUplinkFragment(rxIdentity, tamperedFeedback));
+        assertTrue(rxMedia.onUplinkFragment(rxIdentity, feedbackWire));
+        assertTrue(!rxMedia.onUplinkFragment(rxIdentity, feedbackWire)); // replay
+        var forbiddenAudio = com.airsim.phonecontrol.voble.VoBLEMediaSession.encrypt(ulaw, rxKey, true, 1, 1, 160);
+        var forbiddenPacket = new com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket(0,
+                com.airsim.phonecontrol.voble.VoBLEProtocol.CODEC_G711_MULAW, 1, 1, 160,
+                forbiddenAudio.payload(), forbiddenAudio.authenticationTag());
+        assertTrue(!rxMedia.onUplinkFragment(rxIdentity,
+                com.airsim.phonecontrol.voble.VoBLEProtocol.encodeAudioFragments(forbiddenPacket, 247).get(0)));
+        var invalidFeedback = com.airsim.phonecontrol.voble.VoBLEMediaSession.encrypt(ulaw, rxKey, true, 2, 1, 160);
+        var invalidPacket = new com.airsim.phonecontrol.voble.VoBLEProtocol.AudioPacket(0,
+                com.airsim.phonecontrol.voble.VoBLEProtocol.CODEC_G711_MULAW, 2, 1, 160,
+                invalidFeedback.payload(), invalidFeedback.authenticationTag());
+        assertTrue(!rxMedia.onUplinkFragment(rxIdentity,
+                com.airsim.phonecontrol.voble.VoBLEProtocol.encodeAudioFragments(invalidPacket, 247).get(0)));
+        assertEquals("AIRSIMRX01\n", new String(rxDuplex.output.toByteArray(), java.nio.charset.StandardCharsets.US_ASCII));
+        assertEquals(0L, rxMedia.stats().uplinkFrames());
         rxMedia.stop(); assertTrue(rxDuplex.closed);
+        assertTrue(!rxMedia.onUplinkFragment(rxIdentity, feedbackWire));
         BlockingDuplex duplex = new BlockingDuplex();
 		var identity = new com.airsim.phonecontrol.voble.VoBLEMediaSession.Identity("call-media", 3);
 		var media = new com.airsim.phonecontrol.voble.VoBLEMediaSession(

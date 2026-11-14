@@ -893,6 +893,7 @@ enum CallKitBridgeError: LocalizedError {
     case callInProgress
     case noReachableTransport
     case cloudMediaDisabled
+    case bluetoothUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -901,8 +902,9 @@ enum CallKitBridgeError: LocalizedError {
         case .handlerUnavailable: return "通话控制器尚未就绪"
         case .unavailable: return "系统 CallKit 当前不可用"
         case .callInProgress: return "当前已有进行中的系统通话"
-        case .noReachableTransport: return "三星本地链路和云端语音当前都不可达"
-        case .cloudMediaDisabled: return "三星本地链路不可达，云端语音中继已关闭"
+        case .noReachableTransport: return "安卓本地链路和云端语音当前都不可达"
+        case .bluetoothUnavailable: return "蓝牙通话链路尚未就绪，请确认安卓蓝牙和 AirSIM 蓝牙服务已开启；当前模式不会改用云端接听"
+        case .cloudMediaDisabled: return "安卓本地链路不可达，云端语音中继已关闭"
         }
     }
 }

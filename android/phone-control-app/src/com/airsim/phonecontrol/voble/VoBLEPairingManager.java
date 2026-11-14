@@ -162,6 +162,25 @@ public final class VoBLEPairingManager {
         return derivePairing(value.privateKey, iphonePublicKey, transcript);
     }
 
+    /** Proves an address-rotated advertiser owns the previously paired key. */
+    public synchronized byte[] addressRecoveryProof(Challenge challenge) throws GeneralSecurityException {
+        byte[] key = credentials.load(challenge.androidIdentity());
+        if (key == null) return null;
+        try {
+            return addressRecoveryTag(key, challenge.id(), challenge.androidIdentity(),
+                    challenge.androidPublicKey(), challenge.androidNonce());
+        } finally { Arrays.fill(key, (byte) 0); }
+    }
+
+    public static byte[] addressRecoveryTag(byte[] key, String challengeId, String identity,
+                                           byte[] androidPublic, byte[] androidNonce) throws GeneralSecurityException {
+        if (challengeId == null || challengeId.isEmpty() || challengeId.length() > 128)
+            throw new GeneralSecurityException("invalid recovery challenge");
+        Transcript transcript = new Transcript(identity, androidPublic, new byte[32], androidNonce, new byte[32]);
+        return authenticationTag(concat(concat(PREFIX, utf8("address-recovery/" + challengeId)),
+                transcript.encoded()), key);
+    }
+
     public synchronized PairingMaterial confirmReconnect(
             String challengeId, byte[] iphonePublicKey, byte[] iphoneNonce,
             byte[] reconnectTag, long nowMillis) throws GeneralSecurityException {

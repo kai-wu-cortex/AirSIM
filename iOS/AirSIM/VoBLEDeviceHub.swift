@@ -46,6 +46,7 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
     var onCallEvent: ((DeviceCallEvent) -> Void)?
     private let pairingStore: any VoBLEPairingStoring
     private let knownPeripheral: (UUID) -> Bool
+    private let knownRecoveryAgent: (String) -> Bool
     private var observations: [UUID: Set<AnyCancellable>] = [:]
     private var radioObservation: AnyCancellable?
     @Published private var enabled = false
@@ -54,17 +55,29 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
     private var reconnectTasks: [UUID: Task<Void, Never>] = [:]
     private var reconnectAttempts: [UUID: Int] = [:]
     private var callActive = false
+    private var recoveryAgentID: String?
+    private var recoveryCandidates: [UUID: String] = [:]
 
     init(radio: VoBLERadioController? = nil, pairingStore: any VoBLEPairingStoring = VoBLEPairingStore(),
-         knownPeripheral: ((UUID) -> Bool)? = nil) {
+         knownPeripheral: ((UUID) -> Bool)? = nil,
+         knownRecoveryAgent: @escaping (String) -> Bool = { id in
+             PairedAndroidDeviceStore.records().contains { $0.id == id }
+         }) {
         self.radio = radio ?? VoBLERadioController()
         self.pairingStore = pairingStore
+        self.knownRecoveryAgent = knownRecoveryAgent
         self.knownPeripheral = knownPeripheral ?? { id in
             PairedAndroidDeviceStore.records().contains { PairedAndroidDeviceStore.peripheralID(for: $0.id) == id }
         }
         placeholder = VoBLEDeviceSession(central: VoBLECentralController(radio: self.radio, pairingStore: pairingStore))
         radioObservation = self.radio.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         self.radio.onDiscovered = { [weak self] peer in self?.discover(peer) }
+        self.radio.onPoweredOn = { [weak self] in
+            guard let self, self.enabled, let id = self.selectedPeripheralID else { return }
+            // A connect requested during CBCentralManager initialization must
+            // not be lost until the next 10s backoff or advertisement.
+            self.attemptReconnect(id)
+        }
         self.radio.onRestored = { [weak self] id in
             guard let self, self.isKnown(id) else { return }
             // The radio forwards the actual OS peripheral immediately after
@@ -81,6 +94,7 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
     }
     func start() {
         if !enabled { enabled = true }
+        if recoveryAgentID == nil { recoveryAgentID = AndroidAgentBindingPreference.selected() }
         // A user/mode/foreground transition starts a fresh reconnect budget.
         // Without this, five failed attempts would permanently disable recovery.
         reconnectTasks.values.forEach { $0.cancel() }
@@ -90,6 +104,8 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
         radio.start()
         if let selectedPeripheralID { attemptReconnect(selectedPeripheralID) }
         syncMediaScanPolicy()
+        // Existing scan entries may precede the PushKit target selection.
+        for peer in radio.discoveredPeers.suffix(3).reversed() { discover(peer) }
     }
 
     /// Pause the shared scanner only during a BLE call. An idle authenticated
@@ -121,6 +137,7 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
     func stop(except agentID: String?) {
         if enabled { enabled = false }
         pending.removeAll(); handshake = nil
+        recoveryCandidates.removeAll(); recoveryAgentID = nil
         reconnectTasks.values.forEach { $0.cancel() }
         reconnectTasks.removeAll()
         reconnectAttempts.removeAll()
@@ -139,21 +156,9 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
     /// enough: a stopped/never-connected session must be started and reconnected.
     func ensureConnected(agentID: String) {
         guard let peripheralID = PairedAndroidDeviceStore.peripheralID(for: agentID) else { return }
+        recoveryAgentID = agentID
         selectedPeripheralID = peripheralID
         start()
-        let value = prepare(peripheralID: peripheralID)
-        value.central.start()
-        if let peer = radio.discoveredPeers.first(where: { $0.id == peripheralID }) {
-            value.central.connect(peer)
-        } else if let peripheral = radio.peripheral(peripheralID) {
-            value.central.connect(VoBLEDiscoveredPeer(
-                id: peripheralID,
-                name: peripheral.name ?? "AirSIM Android",
-                signal: 0
-            ))
-        } else {
-            radio.start()
-        }
     }
     func session(for agentID: String) -> VoBLECentralController? { bundle(for: agentID)?.central }
     func bundle(for agentID: String) -> VoBLEDeviceSession? {
@@ -209,6 +214,20 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
         value.central.$state.dropFirst().receive(on: DispatchQueue.main).sink { [weak self, weak value] state in
             guard let self, let value, value.central.state == state else { return }
             self.objectWillChange.send()
+            if state == .ready, let expected = self.recoveryCandidates[peripheralID],
+               self.recoveryAgentID == expected,
+               value.central.authenticatedIdentity == expected {
+                let oldID = self.selectedPeripheralID
+                self.selectedPeripheralID = peripheralID
+                if let oldID, oldID != peripheralID {
+                    self.reconnectTasks.removeValue(forKey: oldID)?.cancel()
+                    self.sessions[oldID]?.central.stop()
+                }
+                self.pending.removeAll { self.recoveryCandidates[$0.id] == expected }
+                self.recoveryCandidates.removeAll()
+                Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "ios", category: "voble",
+                    phase: "address_recovery_authenticated", title: "蓝牙新地址已通过原配对密钥验证") }
+            }
             if state == .ready {
                 self.reconnectAttempts[peripheralID] = 0
                 self.reconnectTasks.removeValue(forKey: peripheralID)?.cancel()
@@ -244,6 +263,7 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
     }
 
     private func isReconnectTarget(_ id: UUID) -> Bool {
+        if let handshake, recoveryCandidates[handshake] != nil, handshake != id { return false }
         if selectedPeripheralID == id { return true }
         return selectedPeripheralID == nil && sessions.count == 1
     }
@@ -267,6 +287,10 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
         let value = prepare(peripheralID: id)
         value.central.start()
         radio.start()
+        // Do not attach a disconnected peripheral while the radio is unknown:
+        // its connect would be dropped, yet the session would look connecting.
+        guard radio.poweredOn else { return }
+        reconnectTasks.removeValue(forKey: id)?.cancel()
         if let peer = radio.discoveredPeers.first(where: { $0.id == id }) {
             value.central.connect(peer)
         } else if let peripheral = radio.peripheral(id) {
@@ -288,17 +312,50 @@ final class VoBLEDeviceHub: ObservableObject, VoBLECentralControlling {
         }
     }
     private func discover(_ peer: VoBLEDiscoveredPeer) {
-        guard enabled, isKnown(peer.id), !pending.contains(where: { $0.id == peer.id }),
+        let known = isKnown(peer.id), selected = selectedPeripheralID == peer.id
+        Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "ios", category: "voble",
+            phase: "discovered_peer_routing", title: "蓝牙发现目标匹配",
+            fields: ["known_peer": String(known), "selected_peer": String(selected)]) }
+        guard enabled, !pending.contains(where: { $0.id == peer.id }),
               sessions[peer.id]?.central.state != .ready, handshake != peer.id else { return }
+        if !known {
+            // Names/RSSI are discovery hints, never identities. Probe at most 3
+            // rotated addresses, without granting media or permitting new pairing.
+            guard !callActive, !sessions.values.contains(where: { $0.audio.running }),
+                  recoveryCandidates[peer.id] == nil, recoveryCandidates.count < 3,
+                  let agent = recoveryAgentID, bundle(for: agent) == nil,
+                  knownRecoveryAgent(agent) else { return }
+            recoveryCandidates[peer.id] = agent
+        }
         pending.append(peer)
         nextHandshake()
     }
     private func nextHandshake() {
         guard enabled, handshake == nil, !pending.isEmpty else { return }
         let peer = pending.removeFirst()
+        if let expected = recoveryCandidates[peer.id],
+           expected != recoveryAgentID || bundle(for: expected) != nil {
+            // Ready arrives before the deferred selection sink. Never start
+            // another probe in that gap and displace the authenticated link.
+            nextHandshake()
+            return
+        }
         handshake = peer.id
         let value = prepare(peripheralID: peer.id)
         value.central.start()
-        value.central.connect(peer)
+        if let expected = recoveryCandidates[peer.id] {
+            guard expected == recoveryAgentID else {
+                handshake = nil
+                nextHandshake()
+                return
+            }
+            if let old = selectedPeripheralID, old != peer.id, sessions[old]?.central.state != .ready {
+                reconnectTasks.removeValue(forKey: old)?.cancel()
+                sessions[old]?.central.stop()
+            }
+            value.central.connectRecovered(peer, expectedIdentity: expected)
+        } else {
+            value.central.connect(peer)
+        }
     }
 }

@@ -68,6 +68,22 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
         return transact(PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE, false, false);
     }
 
+    String smsPreflight() throws RemoteException {
+        return transact(PrivilegedBridgeProtocol.TRANSACTION_SMS_PREFLIGHT, false, false);
+    }
+
+    int resolveSmsSubscription(String key) throws RemoteException {
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(PrivilegedBridgeProtocol.DESCRIPTOR);
+            data.writeString(key);
+            if (!binder.transact(PrivilegedBridgeProtocol.TRANSACTION_RESOLVE_SMS_SUBSCRIPTION, data, reply, 0)) return -1;
+            reply.readException();
+            try { return Integer.parseInt(reply.readString()); }
+            catch (RuntimeException error) { return -1; }
+        } finally { reply.recycle(); data.recycle(); }
+    }
+
     String recentSms(long afterId, long cutoffMillis, int limit) throws RemoteException {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
@@ -90,6 +106,11 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
     }
 
     String sendSms(String destination, String body, int subscriptionId) throws RemoteException {
+        return sendSms(destination, body, subscriptionId, null);
+    }
+
+    String sendSms(String destination, String body, int subscriptionId,
+            java.util.ArrayList<android.app.PendingIntent> sentIntents) throws RemoteException {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
@@ -97,8 +118,12 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
             data.writeString(destination);
             data.writeString(body);
             data.writeInt(subscriptionId);
-            if (!binder.transact(PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS, data, reply, 0)) {
-                throw new RemoteException("privileged SMS transaction rejected");
+            if (sentIntents != null) data.writeTypedList(sentIntents);
+            int transaction = sentIntents == null ? PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS
+                    : PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS_CONFIRMED;
+            if (!binder.transact(transaction, data, reply, 0)) {
+                // Unsupported transaction is known not to have invoked a sender.
+                return "error:prepare:unsupported_transaction";
             }
             reply.readException();
             String result = reply.readString();

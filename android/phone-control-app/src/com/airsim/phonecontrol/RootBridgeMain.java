@@ -186,7 +186,7 @@ public final class RootBridgeMain {
         }
     }
 
-    private static Context appContext(String packageName) throws Exception {
+    static Context appContext(String packageName) throws Exception {
         Class<?> activityThread = Class.forName("android.app.ActivityThread");
         Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
         if (thread == null) thread = activityThread.getMethod("systemMain").invoke(null);

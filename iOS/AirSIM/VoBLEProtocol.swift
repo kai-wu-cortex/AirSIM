@@ -119,6 +119,32 @@ struct VoBLEAudioHeader: Equatable, Sendable {
     }
 }
 
+/// ATT may carry adjacent complete v1 fragments after authenticated opt-in.
+/// Each audio packet retains its own sequence, timestamp and AEAD tag.
+/// Validate the whole notification before admitting any fragments.
+enum VoBLEAudioNotification {
+    static func fragments(_ data: Data) throws -> [Data] {
+        guard !data.isEmpty, data.count <= 512 else { throw VoBLEProtocolError.invalidLength }
+        let bytes = Data(data) // Normalize potentially sliced Data indices.
+        var offset = 0
+        var result: [Data] = []
+        while offset < bytes.count {
+            guard bytes.count - offset >= VoBLEAudioPacket.headerLength else {
+                throw VoBLEProtocolError.packetTooSmall
+            }
+            let length = VoBLEAudioPacket.headerLength + Int(bytes[offset + 17])
+            guard length > VoBLEAudioPacket.headerLength, offset + length <= bytes.count else {
+                throw VoBLEProtocolError.invalidLength
+            }
+            let fragment = bytes.subdata(in: offset..<(offset + length))
+            _ = try VoBLEAudioHeader.decode(fragment)
+            result.append(fragment)
+            offset += length
+        }
+        return result
+    }
+}
+
 struct VoBLEAudioReassembler: Sendable {
     private struct Key: Hashable, Sendable {
         let streamID: UInt8

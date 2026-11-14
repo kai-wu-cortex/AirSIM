@@ -7,6 +7,8 @@ import java.util.concurrent.*;
 /** Actual gateway methods with real TCP PCM handshakes; no Bluetooth radio or real calls. */
 public final class VoBLEGatewayMuteLifecycleTests {
     public static void main(String[] args) throws Exception {
+        earlySetupRejectionIsExplicitAndNeverStartsPCM();
+        reconnectReplaysOnlyCurrentRingingIdentity();
         foregroundStartRecoversWithoutRestartingMedia();
         failedMediaCannotBeReownedByQueuedCallState();
         handshakeAfterDestroyCannotPublishOwnership();
@@ -15,6 +17,46 @@ public final class VoBLEGatewayMuteLifecycleTests {
         destroyed.onDisconnected("retired-peer"); // must not submit work to a terminated executor
         destroyed.onAdvertisingFailed(-3);
         System.out.println("VoBLEGatewayMuteLifecycleTests passed: failed PCM rebind and post-destroy handshake");
+    }
+
+    private static void earlySetupRejectionIsExplicitAndNeverStartsPCM() throws Exception {
+        var gateway = new VoBLEGatewayService();
+        var call = new android.telecom.Call(android.telecom.Call.STATE_CONNECTING,
+                android.telecom.Call.Details.DIRECTION_OUTGOING, "fixture");
+        String id = CallRepository.add(call);
+        var calls = new VoBLECallController(request -> { throw new AssertionError("must not dial"); });
+        calls.observeCall(id, 4, "dialing"); set(gateway, "calls", calls);
+        var envelope = new VoBLEProtocol.ControlEnvelope("start_early_media", id, 4,
+                new byte[16], new byte[12], new byte[0], new byte[16]);
+        try {
+            var response = (VoBLECallController.Result) invoke(gateway, "startMedia",
+                    new Class<?>[]{String.class, String.class, VoBLEProtocol.ControlEnvelope.class}, "peer", "fixture", envelope);
+            check(!response.success() && response.code().equals("early_media_not_ready"),
+                    "CONNECTING must explicitly permit a media-only retry before opening PCM");
+            call.setStateForTest(android.telecom.Call.STATE_DISCONNECTED);
+            response = (VoBLECallController.Result) invoke(gateway, "startMedia",
+                    new Class<?>[]{String.class, String.class, VoBLEProtocol.ControlEnvelope.class}, "peer", "fixture", envelope);
+            check(response.code().equals("early_media_unavailable"), "ended call must not invite retries");
+            check(!RemoteAudioSessionRegistry.active(), "no PCM ownership without admission");
+        } finally { CallRepository.remove(call); gateway.onDestroy(); }
+    }
+
+    private static void reconnectReplaysOnlyCurrentRingingIdentity() throws Exception {
+        var gateway = new VoBLEGatewayService();
+        var ring = new android.telecom.Call(android.telecom.Call.STATE_RINGING);
+        var ended = new android.telecom.Call(android.telecom.Call.STATE_DISCONNECTED);
+        String id = CallRepository.add(ring), dead = CallRepository.add(ended);
+        var calls = new VoBLECallController(request -> { throw new AssertionError("snapshot is read-only"); });
+        set(gateway, "calls", calls);
+        try {
+            invoke(gateway, "replayRingingCalls", new Class<?>[]{});
+            long generation = calls.currentGeneration();
+            check(calls.ownsCall(id, generation), "reconnect must restore live incoming call identity");
+            invoke(gateway, "replayRingingCalls", new Class<?>[]{});
+            check(calls.currentGeneration() == generation, "refresh must not create a new generation");
+            check(!calls.ownsCall(dead, generation), "ended call cannot be replayed");
+            check(ring.getState() == android.telecom.Call.STATE_RINGING, "snapshot must not answer");
+        } finally { CallRepository.remove(ring); CallRepository.remove(ended); gateway.onDestroy(); }
     }
 
     private static void foregroundStartRecoversWithoutRestartingMedia() throws Exception {
@@ -106,11 +148,16 @@ public final class VoBLEGatewayMuteLifecycleTests {
         });
         credentials.save("peer-fixture", new byte[32]);
         set(gateway, "pairingManager", new VoBLEPairingManager(credentials));
+        set(gateway, "gatt", new VoBLEGattServer(new android.content.Context(),
+                new VoBLEGattServer.Listener() {
+                    public void onPairingWrite(String d, byte[] v) {} public void onControlWrite(String d, byte[] v) {}
+                    public void onAudioWrite(String d, byte[] v) {} public void onDisconnected(String d) {}
+                }, new VoBLEControlChannel()));
         ExecutorService opener = Executors.newSingleThreadExecutor();
         try (ServerSocket server = new ServerSocket(7580, 1, InetAddress.getByName("127.0.0.1"))) {
             server.setSoTimeout(2000);
             var envelope = new VoBLEProtocol.ControlEnvelope("start_media", id, 1,
-                    new byte[16], new byte[12], new byte[0], new byte[16]);
+                    new byte[16], new byte[12], "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8), new byte[16]);
             Future<Object> result = opener.submit(() -> invoke(gateway, "startMedia",
                     new Class<?>[]{String.class, String.class, VoBLEProtocol.ControlEnvelope.class},
                     "device-fixture", "peer-fixture", envelope));

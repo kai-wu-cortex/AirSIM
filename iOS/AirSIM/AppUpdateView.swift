@@ -13,6 +13,10 @@ enum AppReleaseNotes {
     // Bundled: showing installed-version notes never needs GitHub, Relay or pairing.
     // Keep this summary in sync with the candidate's source and docs when publishing.
     static let items = [
+        "蓝牙来电会等待已配对设备恢复认证，再沿蓝牙链路接听；固定蓝牙模式不改用云端接听。",
+        "优化蓝牙运营商接通前语音的合包与传输节奏；保留只接收音频、不提前计时和不开启麦克风。",
+        "修复部分安卓短信 SIM 映射与发送回执，发送结果不确定时不重复发送；确认成功后保留 iPhone 发信记录。",
+        "蓝牙模式补齐安卓电量展示，云端模式补齐 SIM 选择；Watch 来电与短信按设备身份同步。",
         "云端音频缓冲新增自动、稳定优先与手动模式，支持 720 ms 弱网测试；从下一通电话生效，更大缓冲也会增加对话延迟。",
         "运营商接通前语音可在设置中开关；兼容端支持云端短信端到端加密，通知显示对应 SIM，并改进未接提醒去重。",
         "VoWLAN、蓝牙与云端支持兼容设备的运营商早期媒体；接通前只接收语音，不提前计时或开启麦克风。",
@@ -102,6 +106,18 @@ private struct NewFeaturePage: Identifiable {
 
 private enum NewFeatureCatalog {
     static let pages: [NewFeaturePage] = [
+        NewFeaturePage(
+            id: 9, kicker: "蓝牙连接与音频",
+            title: "来电沿蓝牙接听，\n提示语音更连贯",
+            body: "来电唤醒后等待已配对设备恢复认证，固定蓝牙模式不改走云端。优化接通前语音传输，只接收真实下行，不提前计时或开启麦克风。需两端配套更新。",
+            symbol: "waveform", accent: .cyan, demo: .bluetoothRecovery
+        ),
+        NewFeaturePage(
+            id: 10, kicker: "短信发送与记录",
+            title: "确认发送结果，\n留住每条发信",
+            body: "修复部分安卓的 SIM 映射与 Shizuku 发送回执。系统确认发送成功后，iPhone 保存发信内容；结果不确定时停止重试，避免重复发送。收达仍以对方为准。",
+            symbol: "message", accent: .green, demo: .smsReceipt
+        ),
         NewFeaturePage(
             id: 6,
             kicker: "云端音频缓冲",
@@ -285,7 +301,7 @@ private struct NewFeaturePageView: View {
 
 
 private enum NewFeatureDemo: String {
-    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications
+    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications, bluetoothRecovery, smsReceipt
 }
 
 private struct FeatureDemoView: View {
@@ -367,6 +383,8 @@ private enum FeatureDemoHTML {
     static func html(for demo: NewFeatureDemo, animated: Bool) -> String {
         let illustration: String
         switch demo {
+        case .bluetoothRecovery: illustration = bluetoothRecovery
+        case .smsReceipt: illustration = smsReceipt
         case .audioBuffer: illustration = audioBuffer
         case .carrierAudio: illustration = carrierAudio
         case .secureNotifications: illustration = secureNotifications
@@ -405,6 +423,28 @@ private enum FeatureDemoHTML {
         </svg></body></html>
         """
     }
+
+    private static let bluetoothRecovery = """
+    <rect x="18" y="20" width="324" height="180" rx="26" fill="#142535" stroke="#345970"/>
+    <text x="180" y="49" text-anchor="middle" fill="#B2DEFA" font-size="13">VoBLE · 认证恢复后接听</text>
+    <rect x="42" y="72" width="48" height="82" rx="12" fill="#214B67" stroke="#6ECBF7"/>
+    <rect x="270" y="72" width="48" height="82" rx="12" fill="#214B67" stroke="#6ECBF7"/>
+    <path class="route" d="M103 112h29l8-16 12 32 14-42 14 51 14-37 12 23 12-11h39" fill="none" stroke="#6ECBF7" stroke-width="3" stroke-linejoin="round"/>
+    <circle class="pulse" cx="180" cy="166" r="5" fill="#40D985"/>
+    <text x="180" y="190" text-anchor="middle" fill="white" font-size="12">接通前只收听 · 接通后再计时</text>
+    """
+
+    private static let smsReceipt = """
+    <rect x="18" y="20" width="324" height="180" rx="26" fill="#152D29" stroke="#386A57"/>
+    <text x="42" y="49" fill="#A4DDC1" font-size="13">短信发送 · 回执示意</text>
+    <rect x="43" y="65" width="207" height="44" rx="16" fill="#275B46"/>
+    <text x="60" y="92" fill="white" font-size="15">发信内容保存在 iPhone</text>
+    <path class="route" d="M68 126h211" stroke="#63E6A5" stroke-width="3" fill="none"/>
+    <circle class="reveal" cx="285" cy="87" r="19" fill="#36C77B"/>
+    <path d="M276 87l6 6 12-13" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="reveal delayed" x="180" y="158" text-anchor="middle" fill="white" font-size="16">等待系统回执 → 确认已发送</text>
+    <text x="180" y="183" text-anchor="middle" fill="#A4DDC1" font-size="12">结果未确认时不自动重发</text>
+    """
 
     private static let audioBuffer = """
     <rect x="18" y="20" width="324" height="180" rx="26" fill="#142535" stroke="#345970"/>

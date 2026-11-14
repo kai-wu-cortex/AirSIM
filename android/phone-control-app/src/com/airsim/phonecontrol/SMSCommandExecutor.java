@@ -42,15 +42,23 @@ public final class SMSCommandExecutor {
 
     private SMSCommandExecutor() {}
 
+    static boolean supportsSystemSMS(Context context) {
+        // The split messaging feature was introduced in API 33. Older phones
+        // advertise the umbrella telephony feature even when SMS is supported.
+        String feature = Build.VERSION.SDK_INT >= 33
+                ? PackageManager.FEATURE_TELEPHONY_MESSAGING : PackageManager.FEATURE_TELEPHONY;
+        return context.getPackageManager().hasSystemFeature(feature);
+    }
+
     static AgentCommandDispatcher.Result execute(Context context, AgentCommand command) {
         String destination = SMSPayloadPolicy.normalizeDestination(command.number);
         if (destination.isEmpty() || !SMSPayloadPolicy.validBody(command.message)) {
             return AgentCommandDispatcher.Result.failure("号码或短信内容无效");
         }
         if (context.checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
-            return AgentCommandDispatcher.Result.failure("AirSIM 缺少短信发送权限；请在三星应用权限中允许短信");
+            return AgentCommandDispatcher.Result.failure("AirSIM 缺少短信发送权限；请在安卓应用权限中允许短信");
         }
-        if (!context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_TELEPHONY_MESSAGING)) {
+        if (!supportsSystemSMS(context)) {
             return AgentCommandDispatcher.Result.failure("此设备不支持系统短信发送");
         }
 
@@ -58,23 +66,16 @@ public final class SMSCommandExecutor {
             int defaultSubscription = defaultSmsSubscription(context);
             int subscriptionID = defaultSubscription;
             if (!command.simAccount.isEmpty()) {
-                subscriptionID = SubscriptionManager.INVALID_SUBSCRIPTION_ID;
-                DefaultCallAccount.Snapshot slots = DefaultCallAccount.snapshot(context);
-                if (!slots.error().isEmpty()) {
-                    return AgentCommandDispatcher.Result.failure(slots.error());
-                }
-                for (DefaultCallAccount.Account account : slots.accounts()) {
-                    if (command.simAccount.equals(account.key())) {
-                        subscriptionID = account.subscriptionId();
-                        break;
-                    }
-                }
-                if (subscriptionID == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
-                    return AgentCommandDispatcher.Result.failure("所选短信卡槽已移除，请重新选择");
+                try {
+                    subscriptionID = DefaultCallAccount.smsSubscription(
+                            DefaultCallAccount.snapshot(context), command.simAccount);
+                } catch (IllegalStateException error) {
+                    return AgentCommandDispatcher.Result.failure(error.getMessage());
                 }
             }
+
             if (subscriptionID == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
-                return AgentCommandDispatcher.Result.failure("请在三星 SIM 卡设置中选择默认短信 SIM");
+                return AgentCommandDispatcher.Result.failure("请在安卓 SIM 卡设置中选择默认短信 SIM");
             }
             // Arm before every sender path: Shizuku/root may run SmsManager in
             // another process, but the MIUI confirmation window is handled here.
@@ -88,6 +89,11 @@ public final class SMSCommandExecutor {
                     BridgeLog.info("sms_send_root accepted segments=" + segments);
                     return AgentCommandDispatcher.Result.success(segments);
                 }
+                if (!SMSPrivilegedResult.mayFallback(result)) {
+                    SmsSendConfirmationGate.disarm();
+                    BridgeLog.info("sms_send_root_unconfirmed no_fallback=true");
+                    return AgentCommandDispatcher.Result.failure(SMSPrivilegedResult.failureMessage(result));
+                }
                 BridgeLog.info("sms_send_root_fallback result="
                         + (result == null || result.isEmpty() ? "unknown" : result));
             }
@@ -99,6 +105,11 @@ public final class SMSCommandExecutor {
                     int segments = segments(result);
                     BridgeLog.info("sms_send_shizuku accepted segments=" + segments);
                     return AgentCommandDispatcher.Result.success(segments);
+                }
+                if (!SMSPrivilegedResult.mayFallback(result)) {
+                    SmsSendConfirmationGate.disarm();
+                    BridgeLog.info("sms_send_shizuku_unconfirmed no_fallback=true");
+                    return AgentCommandDispatcher.Result.failure(SMSPrivilegedResult.failureMessage(result));
                 }
                 BridgeLog.info("sms_send_shizuku_fallback result="
                         + (result == null || result.isEmpty() ? "unknown" : result));

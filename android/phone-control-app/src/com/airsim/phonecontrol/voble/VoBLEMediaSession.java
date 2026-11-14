@@ -60,6 +60,10 @@ public final class VoBLEMediaSession implements Closeable {
     private volatile boolean running;
     private volatile boolean downlinkDiscontinuity;
     private java.util.function.BooleanSupplier captureAllowed = () -> true;
+    private volatile boolean earlyKeepaliveEnabled;
+    private final AtomicLong earlyKeepalives = new AtomicLong();
+    public void setEarlyKeepaliveEnabled(boolean enabled) { earlyKeepaliveEnabled = enabled; }
+    public long earlyKeepalives() { return earlyKeepalives.get(); }
     public void setCaptureAllowed(java.util.function.BooleanSupplier allowed) { captureAllowed = allowed; }
 
     public VoBLEMediaSession(
@@ -109,7 +113,9 @@ public final class VoBLEMediaSession implements Closeable {
     }
 
     public synchronized boolean onUplinkFragment(Identity call, byte[] fragment) {
-        if (!running || identity == null || !identity.equals(call) || bridge == null || bridge.receiveOnly()) return false;
+        if (!running || identity == null || !identity.equals(call) || bridge == null) return false;
+        boolean early = bridge.receiveOnly();
+        if (early && (!earlyKeepaliveEnabled || !captureAllowed.getAsBoolean())) return false;
         try {
             VoBLEProtocol.AudioPacket packet = uplinkReassembler.append(
                     fragment, System.currentTimeMillis());
@@ -122,6 +128,15 @@ public final class VoBLEMediaSession implements Closeable {
             Encrypted encrypted = new Encrypted(packet.payload(), packet.authenticationTag());
             byte[] encoded = decrypt(encrypted, mediaKey, true, packet.streamId(),
                     packet.sequence(), packet.sampleTimestamp());
+            // Stream 2 is negotiated early-media transport metadata, not PCM.
+            // Authenticate and replay-check it under this call's nonce-derived key.
+            if (early) {
+                if (packet.streamId() != 2 || encoded.length != 0) return false;
+                uplinkSequences.put(packet.streamId(), packet.sequence());
+                earlyKeepalives.incrementAndGet();
+                return true;
+            }
+            if (encoded.length != 160) return false;
             byte[] pcm = decodeMuLaw(encoded);
             uplinkSequences.put(packet.streamId(), packet.sequence());
             uplinkQueue.offer(packet.sequence(), pcm);

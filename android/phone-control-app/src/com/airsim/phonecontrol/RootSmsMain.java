@@ -18,7 +18,9 @@ public final class RootSmsMain {
     private RootSmsMain() {}
 
     public static void main(String[] args) {
+        String stage = "prepare";
         try {
+            if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
             String input = args.length > 0 && !args[0].isEmpty()
                     ? readAll(new java.io.FileInputStream(args[0])) : readAll(System.in);
             JSONObject payload = new JSONObject(input);
@@ -26,14 +28,13 @@ public final class RootSmsMain {
             String body = payload.optString("body", "");
             int subscriptionId = payload.optInt("subscription_id", -1);
             if (destination.isEmpty() || body.trim().isEmpty()) { result("error:invalid"); return; }
-            SmsManager base = SmsManager.getDefault();
-            if (base == null) { result("error:no_service"); return; }
-            SmsManager manager;
-            if (subscriptionId < 0) manager = base;
-            else if (Build.VERSION.SDK_INT >= 31) manager = base.createForSubscriptionId(subscriptionId);
-            else manager = SmsManager.getSmsManagerForSubscriptionId(subscriptionId);
+            String packageName = payload.optString("package_name", "");
+            if (!packageName.matches("[A-Za-z0-9_]+(?:\\.[A-Za-z0-9_]+)+")) { result("error:invalid"); return; }
+            SmsManager manager = PrivilegedSmsRuntime.manager(RootBridgeMain.appContext(packageName), subscriptionId);
+            if (manager == null) { result("error:no_service"); return; }
             ArrayList<String> parts = manager.divideMessage(body);
             if (parts == null || parts.isEmpty()) { result("error:divide"); return; }
+            stage = "send_unknown";
             if (parts.size() == 1) {
                 manager.sendTextMessage(destination, null, parts.get(0), null, null);
             } else {
@@ -41,9 +42,9 @@ public final class RootSmsMain {
             }
             result("ok:" + parts.size());
         } catch (SecurityException error) {
-            result("error:permission");
+            result("error:" + stage + ":SecurityException");
         } catch (Throwable error) {
-            result("error:" + error.getClass().getSimpleName());
+            result("error:" + stage + ":" + error.getClass().getSimpleName());
         }
     }
 

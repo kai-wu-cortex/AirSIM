@@ -25,6 +25,9 @@ public final class DefaultCallAccount {
         }
     }
     public record Snapshot(List<Account> accounts, String error) {}
+    interface SubscriptionResolver { int resolve(String accountKey); }
+    private static volatile SubscriptionResolver subscriptionResolver;
+    static void setSubscriptionResolver(SubscriptionResolver resolver) { subscriptionResolver = resolver; }
     private static final String SYSTEM = "跟随系统默认";
     private DefaultCallAccount() {}
 
@@ -52,17 +55,15 @@ public final class DefaultCallAccount {
                 boolean embedded = false;
                 boolean defaultVoice = false;
                 boolean defaultSms = false;
+                String key = handle.getComponentName().flattenToString() + "\n"
+                        + handle.getId() + "\n" + handle.getUserHandle();
                 // Metadata is optional. Never infer subscription IDs from opaque Telecom IDs.
                 try {
                     TelephonyManager telephony = context.getSystemService(TelephonyManager.class);
                     SubscriptionManager subscriptions = context.getSystemService(SubscriptionManager.class);
-                    if (telephony != null) {
-                        if (Build.VERSION.SDK_INT >= 30) subscriptionId = telephony.getSubscriptionId(handle);
-                        else {
-                            TelephonyManager specific = telephony.createForPhoneAccountHandle(handle);
-                            if (specific != null) subscriptionId = Integer.parseInt(specific.getNetworkSpecifier());
-                        }
-                    }
+                    subscriptionId = subscriptionForAccount(telephony, handle);
+                    SubscriptionResolver resolver = subscriptionResolver;
+                    if (subscriptionId < 0 && resolver != null) subscriptionId = resolver.resolve(key);
                     if (subscriptions != null && subscriptionId >= 0) {
                         SubscriptionInfo info = subscriptions.getActiveSubscriptionInfo(subscriptionId);
                         if (info != null) {
@@ -95,8 +96,6 @@ public final class DefaultCallAccount {
                     number = accountNumber(account);
                     if (number.isEmpty()) number = scopedNumber(context, subscriptionId);
                 }
-                String key = handle.getComponentName().flattenToString() + "\n"
-                        + handle.getId() + "\n" + handle.getUserHandle();
                 accounts.add(new Account(key, label, number == null ? "" : number, handle,
                         slotIndex, subscriptionId, carrierName, embedded, defaultVoice, defaultSms));
             }
@@ -104,6 +103,37 @@ public final class DefaultCallAccount {
         } catch (RuntimeException error) {
             return new Snapshot(List.of(), "无法读取通话卡，请检查电话状态权限及系统设置");
         }
+    }
+
+    private static int subscriptionForAccount(TelephonyManager telephony, PhoneAccountHandle handle) {
+        if (telephony == null) return -1;
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                int id = telephony.getSubscriptionId(handle);
+                if (id >= 0) return id;
+            } catch (RuntimeException ignored) {
+                // Some OEMs fail the direct lookup while exact-account scoping works.
+            }
+        }
+        try {
+            TelephonyManager scoped = telephony.createForPhoneAccountHandle(handle);
+            if (scoped == null) return -1;
+            int id = Integer.parseInt(scoped.getNetworkSpecifier());
+            return id >= 0 ? id : -1;
+        } catch (RuntimeException ignored) { return -1; }
+    }
+
+    /** Never replace an explicit SMS SIM with a default or another enabled card. */
+    static int smsSubscription(Snapshot snapshot, String key) {
+        if (!snapshot.error().isEmpty()) throw new IllegalStateException(snapshot.error());
+        for (Account account : snapshot.accounts()) {
+            if (!key.equals(account.key())) continue;
+            if (account.subscriptionId() < 0) {
+                throw new IllegalStateException("所选短信卡仍存在，但系统未提供短信订阅信息；请检查安卓电话权限与 SIM 状态后重试");
+            }
+            return account.subscriptionId();
+        }
+        throw new IllegalStateException("所选短信卡槽已关闭或移除，请刷新卡槽后重新选择");
     }
 
     private static String accountNumber(PhoneAccount account) {

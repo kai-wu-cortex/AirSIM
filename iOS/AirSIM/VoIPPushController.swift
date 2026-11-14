@@ -1537,6 +1537,7 @@ final class VoIPPushController: NSObject {
         number: String,
         target: CloudCommandTarget,
         operationID: UUID = UUID(),
+        simAccount: String? = nil,
         mediaTransport: CloudMediaTransport? = nil,
         timeout: TimeInterval = 6
     ) async throws -> IncomingVoIPCall {
@@ -1548,6 +1549,7 @@ final class VoIPPushController: NSObject {
             type: "dial",
             number: number,
             message: nil,
+            simAccount: simAccount,
             mediaTransport: mediaTransport
         )
         guard enqueue.accepted, let call = enqueue.call, call.agentID == target.agentID,
