@@ -12,6 +12,7 @@ public final class CallRepositoryTests {
         lossOfOldDirectSessionCannotEndAnotherCall();
         answerNeverTargetsAnActiveCallWithoutRinging();
         repeatedAnswerPreservesActiveAndHeldCalls();
+        mediaAnswerRejectsIncomingSetupAndEndedOutgoingCalls();
         cloudRejectTargetsOnlyItsAuthenticatedCall();
         cloudCallEventsDriveOnlyTheirOwnCall();
         localRejectUsesPublishedCallIdentity();
@@ -155,6 +156,29 @@ public final class CallRepositoryTests {
                         null, new AgentCommand("retry-answer", "answer", id, ""));
                 assertTrue(result.success);
                 assertEquals(Integer.toString(state), Integer.toString(call.getState()));
+            } finally { CallRepository.remove(call); }
+        }
+    }
+
+    private static void mediaAnswerRejectsIncomingSetupAndEndedOutgoingCalls() {
+        for (int state : new int[] { Call.STATE_CONNECTING, Call.STATE_SELECT_PHONE_ACCOUNT,
+                Call.STATE_DIALING, Call.STATE_DISCONNECTING, Call.STATE_DISCONNECTED }) {
+            for (Call call : new Call[] { new Call(state),
+                    new Call(state, Call.Details.DIRECTION_INCOMING, "2025550100") }) {
+                String id = CallRepository.add(call);
+                try {
+                    assertTrue(!CallRepository.execute(null,
+                            new AgentCommand("answer", "answer", id, "")).success);
+                    assertEquals(Integer.toString(state), Integer.toString(call.getState()));
+                } finally { CallRepository.remove(call); }
+            }
+        }
+        for (int state : new int[] { Call.STATE_DISCONNECTING, Call.STATE_DISCONNECTED }) {
+            Call call = new Call(state, Call.Details.DIRECTION_OUTGOING, "2025550100");
+            String id = CallRepository.add(call);
+            try {
+                assertTrue(!CallRepository.execute(null,
+                        new AgentCommand("answer", "answer", id, "")).success);
             } finally { CallRepository.remove(call); }
         }
     }

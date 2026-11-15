@@ -22,8 +22,90 @@ public final class CloudCallManagerTests {
         oldMediaCannotRestartAfterPureLocalExit();
         media401RetriesThenStopsWithoutReplacingLiveSlot();
         successfulHandshakeResetsMedia401Window();
+        cloudOutgoingAnswerAttachesMediaDuringSetup();
         cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
+    }
+
+    private static void cloudOutgoingAnswerAttachesMediaDuringSetup() throws Exception {
+        for (int state : new int[] { android.telecom.Call.STATE_CONNECTING,
+                android.telecom.Call.STATE_SELECT_PHONE_ACCOUNT, android.telecom.Call.STATE_DIALING }) {
+            var call = new android.telecom.Call(state, android.telecom.Call.Details.DIRECTION_OUTGOING, "5550100") {
+                @Override public void answer(int videoState) {
+                    throw new AssertionError("media attachment must never answer the outgoing carrier call");
+                }
+            };
+            String id = CallRepository.add(call);
+            var singleton = StandaloneCloudMediaManager.class.getDeclaredField("instance");
+            singleton.setAccessible(true);
+            Object previous = singleton.get(null);
+            var gatewaySingleton = StandaloneAgentGateway.class.getDeclaredField("instance");
+            gatewaySingleton.setAccessible(true);
+            Object previousGateway = gatewaySingleton.get(null);
+            var threads = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try (var f = new Fixture(id);
+                 var server = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
+                singleton.set(null, f.manager);
+                var context = new android.content.Context();
+                context.setSystemService(android.app.role.RoleManager.class, new android.app.role.RoleManager());
+                var constructor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
+                constructor.setAccessible(true);
+                var gateway = constructor.newInstance(context);
+                gatewaySingleton.set(null, gateway);
+                var identity = new JSONObject().put("call_id", field(f.descriptor, "callID"))
+                        .put("call_uuid", field(f.descriptor, "callUUID")).put("generation", 1);
+                String commandID = java.util.UUID.randomUUID().toString();
+                var command = new JSONObject().put("command_id", commandID).put("type", "call_control")
+                        .put("action", "answer").put("call", identity);
+                var receipt = gateway.executeCloudCommand(command);
+                check("completed".equals(receipt.optString("status")),
+                        "outgoing media attachment rejected during setup " + state + ": " + receipt);
+                check(call.getState() == state, "answer ACK must not manufacture carrier connection");
+                var hello = new java.util.concurrent.atomic.AtomicReference<String>();
+                threads.submit(() -> {
+                    try (var socket = server.accept()) {
+                        hello.set(new String(socket.getInputStream().readNBytes(11), java.nio.charset.StandardCharsets.US_ASCII));
+                        socket.getOutputStream().write("AIRSIMREADY".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                        for (int n = 0; n < 100; n++) {
+                            socket.getOutputStream().write(new byte[320]);
+                            socket.getOutputStream().flush();
+                            Thread.sleep(20);
+                        }
+                    } catch (java.io.IOException expectedOnClose) {
+                    } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+                });
+                set(f.manager, "pcmEndpoint", new java.net.InetSocketAddress(server.getInetAddress(), server.getLocalPort()));
+                Object session = f.active();
+                var frame = new JSONObject(identity.toString()).put("action", "answer").put("command_id", commandID);
+                var reads = new java.util.concurrent.atomic.AtomicInteger();
+                var socket = new StandaloneWebSocket(() -> {
+                    int read = reads.getAndIncrement();
+                    if (read == 1) {
+                        check((boolean) field(session, "mediaStarted"), "in-band replay must start the real PCM loop");
+                        check(call.getState() == state, "media setup changed Telecom state");
+                        check(field(session, "pcm") == null, "duplex PCM opened before carrier ACTIVE");
+                        call.setStateForTest(android.telecom.Call.STATE_ACTIVE);
+                    } else if (read == 2) {
+                        var owner = (StandaloneWebSocket) field(session, "webSocket");
+                        await(() -> owner.frames.get() > 0 && owner.text.stream().anyMatch(v -> v.contains("\"status\":\"active\"")),
+                                "same-command retry must reach active PCM after carrier connects");
+                        set(session, "running", false);
+                    }
+                    return new StandaloneWebSocket.Message(1, frame.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                });
+                set(session, "webSocket", socket);
+                var readLoop = session.getClass().getDeclaredMethod("readLoop", StandaloneWebSocket.class);
+                readLoop.setAccessible(true);
+                readLoop.invoke(session, socket);
+                check(socket.text.stream().noneMatch(v -> v.contains("action_error")), "cached answer failure poisoned media retries");
+                check("AIRSIMPCM1\n".equals(hello.get()), "connected call must open duplex PCM");
+                check(call.getState() == android.telecom.Call.STATE_ACTIVE, "media retries altered carrier call");
+            } finally {
+                singleton.set(null, previous); gatewaySingleton.set(null, previousGateway);
+                CallRepository.remove(call);
+                threads.shutdownNow(); threads.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        }
     }
 
     private static void incomingIdentityUsesTelecomUUID() throws Exception {
@@ -395,6 +477,9 @@ public final class CloudCallManagerTests {
         }
         Object active() throws Exception { return field(manager, "active"); }
         String boundID() throws Exception { return (String)field(descriptor, "androidID"); }
-        public void close() { manager.close(); }
+        public void close() throws Exception {
+            manager.close();
+            ((java.util.concurrent.ExecutorService) field(manager, "sessions")).shutdownNow();
+        }
     }
 }
