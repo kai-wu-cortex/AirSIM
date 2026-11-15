@@ -13,6 +13,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class CallRepository {
@@ -233,6 +234,7 @@ public final class CallRepository {
         Call call = CALLS.get(command.callId);
         if (call == null) return ActionResult.failure("active call id mismatch");
         CountDownLatch invoked = new CountDownLatch(1);
+		AtomicBoolean mediaAttached = new AtomicBoolean();
 		AtomicReference<Throwable> invocationError = new AtomicReference<>();
         new Handler(Looper.getMainLooper()).post(() -> {
             try {
@@ -242,8 +244,16 @@ public final class CallRepository {
                         // disturb the established audio route.
                         int state = call.getState();
                         if (state == Call.STATE_RINGING) call.answer(VideoProfile.STATE_AUDIO_ONLY);
-                        else if (state != Call.STATE_ACTIVE && state != Call.STATE_HOLDING)
-                            throw new IllegalStateException("call is not answerable");
+                        else if (state != Call.STATE_ACTIVE && state != Call.STATE_HOLDING) {
+                            // Cloud answer also attaches media to an already dialed outgoing call.
+                            // Acknowledge setup without answering Telecom or manufacturing ACTIVE.
+                            Call.Details details = call.getDetails();
+                            if (!earlyMediaSetupState(state) || details == null
+                                    || details.getCallDirection() != Call.Details.DIRECTION_OUTGOING
+                                    || details.getConnectTimeMillis() != 0)
+                                throw new IllegalStateException("call is not answerable");
+                            mediaAttached.set(true);
+                        }
                     }
                     case "reject" -> {
                         if (call.getState() == Call.STATE_RINGING) call.reject(false, null);
@@ -274,7 +284,7 @@ public final class CallRepository {
 				Throwable error = invocationError.get();
 				return ActionResult.failure(error.getClass().getSimpleName() + ": " + error.getMessage());
 			}
-            if ("dtmf".equals(command.action)) return ActionResult.success();
+            if (mediaAttached.get() || "dtmf".equals(command.action)) return ActionResult.success();
             int expected = "answer".equals(command.action) ? Call.STATE_ACTIVE : Call.STATE_DISCONNECTED;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (System.nanoTime() < deadline) {
