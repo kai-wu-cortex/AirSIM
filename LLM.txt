@@ -1,6 +1,8 @@
 AIRSIM PROJECT CONTEXT
 ======================
 
+F50 PRO LOCAL WI-FI SETUP: android-standalone/f50-wifi/README.md documents a separate authenticated local HTTP :8088 setup service for the verified MU3356 B28 Wi-Fi patch. Saved-profile preference uses SSID/security, never a reboot-unstable networkId. First installation requires a hash-guarded private boot image; shell-owned USB runtime updates are checksum-checked with embedded fallback. This is not the AirSIM pairing endpoint and does not bump APK/Relay versions. See the component VALIDATION.md for actual device scope.
+
 2026-10-31 release preparation: Apps v0.9.8.20, Android 0.9.8.20 (125), iOS/Watch/Live Activity 0.9.8 (152). See docs/releases/0.9.8.20.md. This turn authorizes committing/pushing VoBLE, GitHub Release and TestFlight upload, not Worker deployment or Linux Agent release. Preserve the existing Latest marker. Use production APNs for TestFlight; upload, processing, beta review and tester availability are separate. Historical authorization below does not authorize future operations.
 
 2026-10-19 release preparation: Apps v0.9.8.1, Android0.9.8.1(95), iOS/Watch/Live Activity0.9.8(95). See docs/releases/0.9.8.1.md. User authorizes commit/push, app Release and Xcode TestFlight upload in this turn; no Relay deployment, workflow or Linux Agent publication. Keep Linux Agentv0.4.6 Latest. Upload/processing/review/tester availability are separate. Historical candidate records below remain for traceability.

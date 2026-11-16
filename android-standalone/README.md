@@ -46,6 +46,10 @@ AirSIM Android Standalone 是推荐的 Android 端部署方式：它把原本运
 
 Standalone 复用 [`android/phone-control-app`](../android/phone-control-app/README.md) 的 Telecom、短信、VoWLAN、配对与 Shizuku 管理代码，以及 [`android/phone-audio-bridge`](../android/phone-audio-bridge/README.md) 的通话 PCM 桥。独立 Manifest 使用包名 `com.airsim.phonecontrol.standalone`，因此可与旧 AVF 版并存安装；但同一时间只能有一个 App 持有默认电话角色和 Shizuku PCM 会话。
 
+## F50 Pro 本地配网辅助服务
+
+已修复 B28 Wi-Fi 客户端的 MU3356 可使用独立的 [iPhone Wi-Fi 配置页](f50-wifi/README.md)，保存多个网络并在开机自动连接。它不是通用 APK 功能，安装需要核验特定启动镜像；不改 USB ADB、SIM 或 AirSIM 配对数据。
+
 ## 内置能力
 
 - Relay 设备注册、30 秒心跳、WebSocket 云端命令与 HTTP 补漏；

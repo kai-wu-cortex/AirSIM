@@ -1,0 +1,445 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-16T15:29:29.575116+00:00",
+  "title": "Design System: F50 Pro Wi-Fi 配置页",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {
+        "role": "neutral",
+        "displayName": "canvas",
+        "tonalRamp": [
+          "oklch(15% 0.0014 264.5)",
+          "oklch(26% 0.0029 264.5)",
+          "oklch(38% 0.0046 264.5)",
+          "oklch(49% 0.0057 264.5)",
+          "oklch(61% 0.0057 264.5)",
+          "oklch(72% 0.0046 264.5)",
+          "oklch(84% 0.0029 264.5)",
+          "oklch(95% 0.0009 264.5)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "surface",
+        "tonalRamp": [
+          "oklch(15% 0.0000 89.9)",
+          "oklch(26% 0.0000 89.9)",
+          "oklch(38% 0.0000 89.9)",
+          "oklch(49% 0.0000 89.9)",
+          "oklch(61% 0.0000 89.9)",
+          "oklch(72% 0.0000 89.9)",
+          "oklch(84% 0.0000 89.9)",
+          "oklch(95% 0.0000 89.9)"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "text",
+        "tonalRamp": [
+          "oklch(15% 0.0121 263.2)",
+          "oklch(26% 0.0243 263.2)",
+          "oklch(38% 0.0388 263.2)",
+          "oklch(49% 0.0485 263.2)",
+          "oklch(61% 0.0485 263.2)",
+          "oklch(72% 0.0388 263.2)",
+          "oklch(84% 0.0243 263.2)",
+          "oklch(95% 0.0073 263.2)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "muted",
+        "tonalRamp": [
+          "oklch(15% 0.0102 260.3)",
+          "oklch(26% 0.0205 260.3)",
+          "oklch(38% 0.0328 260.3)",
+          "oklch(49% 0.0410 260.3)",
+          "oklch(61% 0.0410 260.3)",
+          "oklch(72% 0.0328 260.3)",
+          "oklch(84% 0.0205 260.3)",
+          "oklch(95% 0.0061 260.3)"
+        ]
+      },
+      "action": {
+        "role": "primary",
+        "displayName": "action",
+        "tonalRamp": [
+          "oklch(15% 0.0475 260.8)",
+          "oklch(26% 0.0951 260.8)",
+          "oklch(38% 0.1522 260.8)",
+          "oklch(49% 0.1902 260.8)",
+          "oklch(61% 0.1902 260.8)",
+          "oklch(72% 0.1522 260.8)",
+          "oklch(84% 0.0951 260.8)",
+          "oklch(95% 0.0285 260.8)"
+        ]
+      },
+      "divider": {
+        "role": "neutral",
+        "displayName": "divider",
+        "tonalRamp": [
+          "oklch(15% 0.0042 259.4)",
+          "oklch(26% 0.0084 259.4)",
+          "oklch(38% 0.0135 259.4)",
+          "oklch(49% 0.0168 259.4)",
+          "oklch(61% 0.0168 259.4)",
+          "oklch(72% 0.0135 259.4)",
+          "oklch(84% 0.0084 259.4)",
+          "oklch(95% 0.0025 259.4)"
+        ]
+      },
+      "error": {
+        "role": "semantic",
+        "displayName": "error",
+        "tonalRamp": [
+          "oklch(15% 0.0406 26.1)",
+          "oklch(26% 0.0812 26.1)",
+          "oklch(38% 0.1300 26.1)",
+          "oklch(49% 0.1625 26.1)",
+          "oklch(61% 0.1625 26.1)",
+          "oklch(72% 0.1300 26.1)",
+          "oklch(84% 0.0812 26.1)",
+          "oklch(95% 0.0244 26.1)"
+        ]
+      },
+      "success": {
+        "role": "semantic",
+        "displayName": "success",
+        "tonalRamp": [
+          "oklch(15% 0.0219 162.0)",
+          "oklch(26% 0.0438 162.0)",
+          "oklch(38% 0.0701 162.0)",
+          "oklch(49% 0.0876 162.0)",
+          "oklch(61% 0.0876 162.0)",
+          "oklch(72% 0.0701 162.0)",
+          "oklch(84% 0.0438 162.0)",
+          "oklch(95% 0.0131 162.0)"
+        ]
+      },
+      "button-soft": {
+        "role": "primary",
+        "displayName": "button-soft",
+        "tonalRamp": [
+          "oklch(15% 0.0040 262.8)",
+          "oklch(26% 0.0081 262.8)",
+          "oklch(38% 0.0129 262.8)",
+          "oklch(49% 0.0161 262.8)",
+          "oklch(61% 0.0161 262.8)",
+          "oklch(72% 0.0129 262.8)",
+          "oklch(84% 0.0081 262.8)",
+          "oklch(95% 0.0024 262.8)"
+        ]
+      },
+      "button-soft-hover": {
+        "role": "primary",
+        "displayName": "button-soft-hover",
+        "tonalRamp": [
+          "oklch(15% 0.0070 263.4)",
+          "oklch(26% 0.0140 263.4)",
+          "oklch(38% 0.0224 263.4)",
+          "oklch(49% 0.0280 263.4)",
+          "oklch(61% 0.0280 263.4)",
+          "oklch(72% 0.0224 263.4)",
+          "oklch(84% 0.0140 263.4)",
+          "oklch(95% 0.0042 263.4)"
+        ]
+      },
+      "action-hover": {
+        "role": "primary",
+        "displayName": "action-hover",
+        "tonalRamp": [
+          "oklch(15% 0.0429 260.8)",
+          "oklch(26% 0.0857 260.8)",
+          "oklch(38% 0.1371 260.8)",
+          "oklch(49% 0.1714 260.8)",
+          "oklch(61% 0.1714 260.8)",
+          "oklch(72% 0.1371 260.8)",
+          "oklch(84% 0.0857 260.8)",
+          "oklch(95% 0.0257 260.8)"
+        ]
+      },
+      "field-border": {
+        "role": "neutral",
+        "displayName": "field-border",
+        "tonalRamp": [
+          "oklch(15% 0.0081 258.9)",
+          "oklch(26% 0.0161 258.9)",
+          "oklch(38% 0.0258 258.9)",
+          "oklch(49% 0.0322 258.9)",
+          "oklch(61% 0.0322 258.9)",
+          "oklch(72% 0.0258 258.9)",
+          "oklch(84% 0.0161 258.9)",
+          "oklch(95% 0.0048 258.9)"
+        ]
+      },
+      "placeholder": {
+        "role": "neutral",
+        "displayName": "placeholder",
+        "tonalRamp": [
+          "oklch(15% 0.0093 258.4)",
+          "oklch(26% 0.0186 258.4)",
+          "oklch(38% 0.0298 258.4)",
+          "oklch(49% 0.0372 258.4)",
+          "oklch(61% 0.0372 258.4)",
+          "oklch(72% 0.0298 258.4)",
+          "oklch(84% 0.0186 258.4)",
+          "oklch(95% 0.0056 258.4)"
+        ]
+      },
+      "notice-bg": {
+        "role": "semantic",
+        "displayName": "notice-bg",
+        "tonalRamp": [
+          "oklch(15% 0.0040 262.8)",
+          "oklch(26% 0.0080 262.8)",
+          "oklch(38% 0.0129 262.8)",
+          "oklch(49% 0.0161 262.8)",
+          "oklch(61% 0.0161 262.8)",
+          "oklch(72% 0.0129 262.8)",
+          "oklch(84% 0.0080 262.8)",
+          "oklch(95% 0.0024 262.8)"
+        ]
+      },
+      "notice-border": {
+        "role": "semantic",
+        "displayName": "notice-border",
+        "tonalRamp": [
+          "oklch(15% 0.0131 261.1)",
+          "oklch(26% 0.0262 261.1)",
+          "oklch(38% 0.0419 261.1)",
+          "oklch(49% 0.0524 261.1)",
+          "oklch(61% 0.0524 261.1)",
+          "oklch(72% 0.0419 261.1)",
+          "oklch(84% 0.0262 261.1)",
+          "oklch(95% 0.0079 261.1)"
+        ]
+      },
+      "notice-text": {
+        "role": "semantic",
+        "displayName": "notice-text",
+        "tonalRamp": [
+          "oklch(15% 0.0318 257.9)",
+          "oklch(26% 0.0636 257.9)",
+          "oklch(38% 0.1018 257.9)",
+          "oklch(49% 0.1273 257.9)",
+          "oklch(61% 0.1273 257.9)",
+          "oklch(72% 0.1018 257.9)",
+          "oklch(84% 0.0636 257.9)",
+          "oklch(95% 0.0191 257.9)"
+        ]
+      },
+      "notice-error-bg": {
+        "role": "semantic",
+        "displayName": "notice-error-bg",
+        "tonalRamp": [
+          "oklch(15% 0.0033 23.2)",
+          "oklch(26% 0.0065 23.2)",
+          "oklch(38% 0.0104 23.2)",
+          "oklch(49% 0.0130 23.2)",
+          "oklch(61% 0.0130 23.2)",
+          "oklch(72% 0.0104 23.2)",
+          "oklch(84% 0.0065 23.2)",
+          "oklch(95% 0.0020 23.2)"
+        ]
+      },
+      "notice-error-border": {
+        "role": "semantic",
+        "displayName": "notice-error-border",
+        "tonalRamp": [
+          "oklch(15% 0.0141 25.2)",
+          "oklch(26% 0.0281 25.2)",
+          "oklch(38% 0.0450 25.2)",
+          "oklch(49% 0.0562 25.2)",
+          "oklch(61% 0.0562 25.2)",
+          "oklch(72% 0.0450 25.2)",
+          "oklch(84% 0.0281 25.2)",
+          "oklch(95% 0.0084 25.2)"
+        ]
+      },
+      "scan-hover": {
+        "role": "neutral",
+        "displayName": "scan-hover",
+        "tonalRamp": [
+          "oklch(15% 0.0017 268.5)",
+          "oklch(26% 0.0035 268.5)",
+          "oklch(38% 0.0056 268.5)",
+          "oklch(49% 0.0070 268.5)",
+          "oklch(61% 0.0070 268.5)",
+          "oklch(72% 0.0056 268.5)",
+          "oklch(84% 0.0035 268.5)",
+          "oklch(95% 0.0010 268.5)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "headline",
+        "purpose": "页面标题"
+      },
+      "status": {
+        "displayName": "status",
+        "purpose": "当前网络名称"
+      },
+      "title": {
+        "displayName": "title",
+        "purpose": "分组标题"
+      },
+      "body": {
+        "displayName": "body",
+        "purpose": "正文与输入"
+      },
+      "label": {
+        "displayName": "label",
+        "purpose": "字段标签"
+      },
+      "button": {
+        "displayName": "button",
+        "purpose": "按钮操作"
+      },
+      "hint": {
+        "displayName": "hint",
+        "purpose": "帮助说明"
+      },
+      "detail": {
+        "displayName": "detail",
+        "purpose": "网络与设备详情"
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "button-press",
+        "value": "translateY(1px)",
+        "purpose": "按下反馈；prefers-reduced-motion: reduce 时取消。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "narrow-phone-max",
+        "value": "380px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "主要按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "当前界面中的按钮样式；示例不连接设备。",
+      "html": "<button class=\"ds-primary\">保存并连接</button>",
+      "css": ".ds-primary{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;background:var(--blue,#1659cc);color:var(--surface,#fff);width:100%;}.ds-primary:hover{background:#124db2}.ds-primary:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-primary:active{transform:translateY(1px)}.ds-primary:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-primary:active{transform:none}}"
+    },
+    {
+      "name": "次要按钮",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "当前界面中的按钮样式；示例不连接设备。",
+      "html": "<button class=\"ds-secondary\">切换到原热点</button>",
+      "css": ".ds-secondary{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;background:#eaf0fb;color:var(--blue,#1659cc);}.ds-secondary:hover{background:#dde7fa}.ds-secondary:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-secondary:active{transform:translateY(1px)}.ds-secondary:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-secondary:active{transform:none}}"
+    },
+    {
+      "name": "文字按钮",
+      "kind": "button",
+      "refersTo": "button-text",
+      "description": "当前界面中的按钮样式；示例不连接设备。",
+      "html": "<button class=\"ds-text\">扫描 Wi-Fi</button>",
+      "css": ".ds-text{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;background:transparent;color:var(--blue,#1659cc);padding:8px;min-height:44px;white-space:nowrap;}.ds-text:hover{background:transparent}.ds-text:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-text:active{transform:translateY(1px)}.ds-text:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-text:active{transform:none}}"
+    },
+    {
+      "name": "移除按钮",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "当前界面中的按钮样式；示例不连接设备。",
+      "html": "<button class=\"ds-danger\">移除</button>",
+      "css": ".ds-danger{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;background:transparent;color:var(--red,#a32525);padding:8px;min-height:44px;font-size:14px;white-space:nowrap;}.ds-danger:hover{background:transparent}.ds-danger:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-danger:active{transform:translateY(1px)}.ds-danger:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-danger:active{transform:none}}"
+    },
+    {
+      "name": "文本输入",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "原生标签与输入框，保留 16px 字号。",
+      "html": "<label class=\"ds-field-label\" for=\"ds-network-name\">Wi-Fi 名称</label><input class=\"ds-field\" id=\"ds-network-name\" placeholder=\"输入网络名称\" autocomplete=\"off\">",
+      "css": ".ds-field-label{display:block;font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;font-weight:550;margin:18px 0 6px;color:var(--ink,#17233b)}.ds-field{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;width:100%;min-height:48px;padding:10px 12px;border:1px solid #a4b1c5;border-radius:8px;background:var(--surface,#fff);color:var(--ink,#17233b);caret-color:var(--blue,#1659cc);}.ds-field::placeholder{color:#5f6d82}.ds-field:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}"
+    },
+    {
+      "name": "选择框",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "浏览器原生选择菜单。",
+      "html": "<label class=\"ds-select-label\" for=\"ds-security\">加密方式</label><select class=\"ds-select\" id=\"ds-security\"><option>WPA2 / WPA2-WPA3 混合</option><option>WPA3</option><option>开放网络 · 无密码</option></select>",
+      "css": ".ds-select-label{display:block;font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;font-weight:550;margin:18px 0 6px;color:var(--ink,#17233b)}.ds-select{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;width:100%;min-height:48px;padding:10px 12px;border:1px solid #a4b1c5;border-radius:8px;background:var(--surface,#fff);color:var(--ink,#17233b);caret-color:var(--blue,#1659cc);}.ds-select:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}"
+    },
+    {
+      "name": "设置分组",
+      "kind": "card",
+      "refersTo": "surface",
+      "description": "平面白色容器，使用边框分组。",
+      "html": "<section class=\"ds-surface\"><h2 class=\"ds-heading\">已保存的网络</h2><p class=\"ds-hint\">还没有保存网络，请在下方添加。</p></section>",
+      "css": ".ds-surface{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;background:var(--surface,#fff);color:var(--ink,#17233b);border:1px solid var(--line,#d9e0eb);border-radius:12px;padding:20px;margin-bottom:20px}.ds-heading{font-size:18px;line-height:1.3;margin:0}.ds-hint{font-size:14px;color:var(--muted,#526077);margin:8px 0 0}@media(max-width:380px){.ds-surface{padding:16px}}"
+    },
+    {
+      "name": "网络行",
+      "kind": "custom",
+      "refersTo": "network-row",
+      "description": "示例 SSID，仅演示名称、状态和行内操作的布局。",
+      "html": "<div class=\"ds-row\"><div class=\"ds-row-main\"><div class=\"ds-network-title\">示例网络</div><div class=\"ds-network-detail\">已保存，可自动连接</div></div><div class=\"ds-row-actions\"><button class=\"ds-row-button\">连接</button><button class=\"ds-row-button ds-row-danger\">移除</button></div></div>",
+      "css": ".ds-row{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink,#17233b);padding:14px 0;border-top:1px solid var(--line,#d9e0eb);display:flex;align-items:center;justify-content:space-between;gap:12px}.ds-row-main{min-width:0;flex:1}.ds-network-title{font-weight:600;overflow-wrap:anywhere}.ds-network-detail{font-size:13px;color:var(--muted,#526077);margin-top:2px}.ds-row-actions{display:flex;align-items:center;gap:2px}.ds-row-button{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;font-size:14px;padding:8px;min-height:44px;background:transparent;white-space:nowrap;color:var(--blue,#1659cc)}.ds-row-danger{color:var(--red,#a32525)}.ds-row-button:hover{background:transparent}.ds-row-button:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-row-button:active{transform:translateY(1px)}.ds-row-button:disabled{opacity:.55;cursor:wait}@media(max-width:380px){.ds-row-actions{flex-direction:column;gap:0}.ds-row-button{min-height:44px;padding:6px}}@media(prefers-reduced-motion:reduce){.ds-row-button:active{transform:none}}"
+    },
+    {
+      "name": "操作通知",
+      "kind": "custom",
+      "refersTo": "notice",
+      "description": "可聚焦的 polite live region；本预览不主动滚动。",
+      "html": "<div class=\"ds-notice\" role=\"status\" aria-live=\"polite\" tabindex=\"-1\">连接请求已提交。请让 iPhone 连接目标 Wi-Fi，再打开本页。</div>",
+      "css": ".ds-notice{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;padding:14px 16px;border:1px solid #b9cdef;border-radius:8px;background:#eef4ff;color:#194b91;margin:0 0 20px;overflow-wrap:anywhere}.ds-notice-error{background:#fff3f2;border-color:#e9b9b4;color:var(--red,#a32525)}.ds-notice:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}"
+    },
+    {
+      "name": "复选框标签行",
+      "kind": "custom",
+      "refersTo": "checkbox-label",
+      "description": "20px 原生复选框位于最小 48px 可点击标签内。",
+      "html": "<label class=\"ds-check\"><input class=\"ds-checkbox\" type=\"checkbox\" checked><span>重启后自动连接已保存网络</span></label>",
+      "css": ".ds-check{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink,#17233b);display:flex;align-items:center;gap:10px;margin:12px 0;min-height:48px;padding:6px 0}.ds-checkbox{width:20px;min-height:20px;margin:0;flex-shrink:0;accent-color:var(--blue,#1659cc)}.ds-checkbox:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}"
+    }
+  ],
+  "narrative": {
+    "northStar": "手机设置页",
+    "overview": "本规范仅适用于 F50 Pro 的独立本地 Wi-Fi 配置页，不替代 AirSIM 其他界面的设计规范。沿用既定 Operate 方向：白色阅读面、浅蓝灰背景、深色文字与蓝色操作，使用系统字体和原生表单，让 iPhone 用户能直接识别设备状态并完成设置。\n\n文档依据当前 web/index.html 提取，合并原有方向约定。界面优先保证状态、输入、操作反馈和恢复入口清楚可见；没有装饰图像、渐变、外部字体或阴影。它记录界面实现，不构成重启自动连接、热点恢复或 USB ADB 保持可用的真机验收结论。",
+    "keyCharacteristics": [
+      "单列信息顺序与内联表单，保持本地设置的熟悉感。",
+      "蓝色用于操作，绿色与红色用于明确的状态语义。",
+      "长网络名称换行，触控目标至少 44px，主要控件与复选框标签至少 48px。",
+      "主动操作的反馈可滚动并聚焦显示；后台轮询更新不抢占滚动位置。"
+    ],
+    "rules": [
+      {
+        "name": "The Action and State Rule",
+        "body": "蓝色标识可执行操作；连接状态与错误同时提供文字，不只依赖颜色。",
+        "section": "colors"
+      },
+      {
+        "name": "The Native Reading Rule",
+        "body": "系统字体用于操作界面的阅读与输入，不延伸为品牌展示字体；表单文字保持 16px。",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Surface Rule",
+        "body": "用白色表面、分隔线和信息间距建立层次，不为分组增加阴影。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do 保留状态、已保存网络、新网络表单和原热点恢复入口的单列阅读顺序。",
+      "Do 保持原生 label、input、select、button 和 details 语义，给键盘焦点清晰的蓝色轮廓。",
+      "Do 为长 SSID 和设备状态允许换行，保留 48px 主要触控目标与 44px 行内按钮。",
+      "Do 在用户提交操作后显示可见反馈，并说明可能断开连接时的下一步；让后台轮询保持滚动位置。",
+      "Do 使用设备返回的状态，分别说明 Wi-Fi、USB ADB 与待完成的真机验证。"
+    ],
+    "donts": [
+      "Don't 为本地设置页引入外部字体、CDN、装饰图像或渐变。",
+      "Don't 把蓝色操作、绿色连接状态和红色错误变成无语义的装饰色。",
+      "Don't 显示已保存网络的密码，或让恢复热点入口依赖隐藏导航。",
+      "Don't 将设置页截图或本地构建通过表述为重启自动连接、热点恢复和 USB ADB 的真机验证通过。"
+    ]
+  }
+}

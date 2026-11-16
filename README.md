@@ -1,5 +1,7 @@
 # AirSIM — Android 与 iPhone / Apple Watch 跨设备通话、短信和 VoWLAN
 
+F50 Pro 本地配网辅助服务见 [使用与恢复说明](android-standalone/f50-wifi/README.md)：针对已修复的 MU3356 B28，以独立管理密码保护本地 `8088` 页面，保存多个 Wi-Fi 并按 SSID／加密方式恢复选择。首次启动服务安装需核验机型限定镜像；USB 更新、回退和实测范围见组件文档。此端口不用于 AirSIM 配对，不改变现有 APK／Relay 版本。
+
 [Apps v0.9.8.21 · Android 126 / iOS 162](docs/releases/0.9.8.21.md)：U30Air 客户端支持、小组件、试验性 TLS 公网配对、未读／未接提醒与通话收尾修复。纯本地跨端协商及零 Relay 流量仍未完成端到端验收；请阅读发布限制。AVF Linux Agent 保持 v0.4.7。
 
 本版包含 [APNs 接听后的本地音频启动竞态修正](docs/vowlan-first-call-startup.md)。前后台重启轮询不再撤销同一通话的音频启动，真正挂断、媒体归属／锁定路由变化和 CallKit 停用仍会使其失效；TestFlight 上传与真机验收状态见发布说明。
