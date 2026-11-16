@@ -33,3 +33,9 @@
 保活对照期间，一次去电仍在约 4 秒内以 REMOTE / NORMAL_UNSPECIFIED 结束，没有 ACTIVE；覆盖此次去电的 120 次网关探测全部成功，平均往返约 5.6 ms。无线掉线不能解释这一轮失败，但该短时样本也不能证明 Wi-Fi 已长期稳定或锁具有确定修复效果。对照结束后已停止临时进程、删除设备上的诊断 dex，并确认 Wi-Fi/CPU 锁均释放；原 AirSIM 音频桥继续运行。仍需普通手机使用同一张卡、同一号码的语音对照。
 
 设备诊断应区分 Android 两套断开码：`android.telecom.DisconnectCause.REMOTE` 为 3，LOCAL 为 2；`android.telephony.DisconnectCause.NORMAL_UNSPECIFIED` 为 65。设备显示的网络原因 31 未给出具体拒绝原因，不能据此认定为用户主动挂断或某种运营商套餐限制。
+
+### 普通手机对照与心跳状态限制
+
+用户随后确认，同一张 SIM 在普通手机上也不能拨出同一测试号码。该对照将下一步排查重点转向号码格式、账户与语音漫游服务；它没有证明具体运营商拒绝原因，也不代表 F50 的通话兼容和音频已验收通过。
+
+复查时 USB ADB、Wi-Fi 和 Agent 心跳正常，Android 两个 SIM 状态均为 ABSENT，但 Relay 仍返回 `cellular_state=registered`。源码核对发现 `StandaloneAgentService.sendHeartbeat()` 固定填入该值和 `at_ok=true`，不能把这两个字段作为 SIM 实际注册或语音可用的证据。此处仅记录已确认的状态上报限制，本次没有修改该协议；实际接通仍以设备 Telecom 状态和用户端对照为准。
