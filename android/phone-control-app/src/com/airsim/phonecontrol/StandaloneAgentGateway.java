@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** In-process replacement for the HTTP API previously hosted by the AVF Agent. */
 final class StandaloneAgentGateway {
@@ -34,7 +35,7 @@ final class StandaloneAgentGateway {
     private final Object commandsLock = new Object();
     private final StandaloneLongPoll callEvents = new StandaloneLongPoll();
     private final StandaloneLongPoll agentEvents = new StandaloneLongPoll();
-    private volatile long simRevision;
+    private final AtomicLong simRevision = new AtomicLong();
     private final Map<String, String> commandResults = new LinkedHashMap<>();
     private JSONObject activeCall;
     private final JSONArray callHistory = new JSONArray();
@@ -212,8 +213,11 @@ final class StandaloneAgentGateway {
         };
     }
 
-    synchronized void simSlotsChanged() {
-        simRevision++;
+    void simSlotsChanged() {
+        // This callback runs on Android's main looper. Cloud commands hold the
+        // gateway monitor while waiting for Telecom on that same looper.
+        // Publishing a SIM revision must never wait for a command to finish.
+        simRevision.incrementAndGet();
         agentEvents.advance();
     }
 
@@ -287,7 +291,8 @@ final class StandaloneAgentGateway {
         try {
             if (!stillCurrent.getAsBoolean()) return new JSONObject().put("command_id", commandID)
                     .put("status", "failed").put("error", "command_configuration_changed");
-            AgentCommandDispatcher.Result result = execute(local);
+            AgentCommandDispatcher.Result result = execute(local,
+                    "call_control".equals(type) && "answer".equals(action));
             JSONObject output = new JSONObject().put("command_id", commandID)
                     .put("status", result.success() ? "completed" : "failed");
             if (result.success()) {
@@ -355,12 +360,21 @@ final class StandaloneAgentGateway {
     }
 
     private AgentCommandDispatcher.Result execute(AgentCommand command) {
+        return execute(command, false);
+    }
+
+    private AgentCommandDispatcher.Result execute(AgentCommand command, boolean cloudMediaAnswer) {
         RoleManager roles = context.getSystemService(RoleManager.class);
         android.telecom.TelecomManager telecom = context.getSystemService(android.telecom.TelecomManager.class);
         boolean dialer = (roles != null && roles.isRoleHeld(RoleManager.ROLE_DIALER))
                 || (telecom != null && context.getPackageName().equals(telecom.getDefaultDialerPackage()));
         return AgentCommandDispatcher.execute(command, dialer,
                 value -> {
+                    // iPhone also sends answer to acknowledge media for its own
+                    // outgoing call. Identity and role checks still apply; this
+                    // must not invoke Call.answer() or imply carrier ACTIVE.
+                    if (cloudMediaAnswer && CallRepository.isPendingOutgoing(value.callId))
+                        return AgentCommandDispatcher.Result.success(0);
                     CallRepository.ActionResult result = CallRepository.execute(
                             context, value);
                     return new AgentCommandDispatcher.Result(result.success, result.error, 0);
@@ -422,7 +436,7 @@ final class StandaloneAgentGateway {
         agentEvents.awaitChange(request.after(), request.timeoutMillis());
         return ok(new JSONObject().put("revision", agentEvents.revision())
                 .put("sms_revision", smsStore.revision()).put("sms_pending", smsStore.pendingCount())
-                .put("sim_revision", simRevision)
+                .put("sim_revision", simRevision.get())
                 .put("sim_slots", SimSlotJson.slots(context))
                 .put("call", callSnapshot()).toString());
     }

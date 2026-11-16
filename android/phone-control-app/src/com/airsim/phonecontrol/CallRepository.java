@@ -153,6 +153,16 @@ public final class CallRepository {
         return call == null ? -1 : call.getState();
     }
 
+    static boolean isPendingOutgoing(String callId) {
+        Call call = CALLS.get(callId);
+        if (call == null) return false;
+        int state = call.getState();
+        Call.Details details = call.getDetails();
+        return (state == Call.STATE_DIALING || state == Call.STATE_CONNECTING)
+                && details != null
+                && details.getCallDirection() == Call.Details.DIRECTION_OUTGOING;
+    }
+
     /** Privacy-safe Telecom state for feedback diagnostics; never includes numbers or IDs. */
     public static String diagnosticState() {
         for (Call call : CALLS.values()) {
