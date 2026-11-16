@@ -173,7 +173,7 @@ npx wrangler deploy --dry-run --config wrangler.toml
 
 ### iPhone 与 Apple Watch
 
-- 主 App、Watch App、Live Activity、测试 Target 的 Bundle ID 关系正确。
+- 主 App、Watch App、Live Activity、Notification Service Extension、测试 Target 的 Bundle ID 关系正确；主 App 与 Notification Service Extension 共用钥匙串组 `$(AppIdentifierPrefix)airsim.e2e-sms`。
 - Team、证书、provisioning profile、capabilities 和最终签名 entitlement 正确。
 - Relay `ALLOWED_BUNDLE_ID` 与主 App 完全一致。
 - sandbox 和 production token 未混用。

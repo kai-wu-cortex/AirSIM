@@ -33,6 +33,9 @@ public final class VoWLANGatewayService extends Service {
     public static final int CONTROL_PORT = 7592;
     public static final int PCM_PORT = 7593;
     private static final String ACTION_RELOAD_SETTINGS = "com.airsim.phonecontrol.action.RELOAD_NETWORK_SETTINGS";
+    private static final com.airsim.phonecontrol.ServiceStartGate START_GATE =
+            new com.airsim.phonecontrol.ServiceStartGate();
+    private static volatile VoWLANGatewayService instance;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final NotificationUpdateGate notificationGate = new NotificationUpdateGate();
     private volatile boolean running;
@@ -60,9 +63,10 @@ public final class VoWLANGatewayService extends Service {
     }
 
     public static void start(Context context) {
-        BridgeLog.debug("vowlan_service_start_requested");
-        try { context.startForegroundService(new Intent(context, VoWLANGatewayService.class)); }
-        catch (RuntimeException error) { BridgeLog.error("vowlan_service_start_failed", error); }
+        try {
+            START_GATE.request(() -> context.startForegroundService(
+                    new Intent(context, VoWLANGatewayService.class)) != null);
+        } catch (RuntimeException error) { BridgeLog.error("vowlan_service_start_failed", error); }
     }
 
     @Override public void onCreate() {
@@ -72,6 +76,8 @@ public final class VoWLANGatewayService extends Service {
         startForeground(BridgeNotification.VOWLAN_ID, BridgeNotification.vowlan(this, "正在发现 VoWLAN 网络"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
         running = true;
+        instance = this;
+        START_GATE.created(this);
         HeadlessIncomingCallBridge.ensureStarted(this);
         observeWiFiNetworks();
         worker.execute(this::lifecycleLoop);
@@ -526,6 +532,8 @@ public final class VoWLANGatewayService extends Service {
         BridgeLog.info("vowlan_service_destroyed");
         currentDiagnosticState = "服务已停止";
         running = false;
+        if (instance == this) instance = null;
+        START_GATE.destroyed(this);
         networkRecovery.close();
         if (connectivity != null && networkCallback != null) {
             try { connectivity.unregisterNetworkCallback(networkCallback); } catch (RuntimeException ignored) {}

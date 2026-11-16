@@ -3,6 +3,135 @@ import XCTest
 
 @MainActor
 final class DeviceCallActionRouterTests: XCTestCase {
+    func testBluetoothPushMatchRequiresAuthenticatedExactIdentityAndLiveRing() {
+        let push = IncomingVoIPCall(bluetoothCallID: "telecom", uuid: UUID(), generation: 1,
+                                   number: "same-number", agentID: "A")
+        let event = DeviceCallEvent(agentID: "A", callID: "telecom", state: .ringing,
+            transport: .bluetooth, transportEpoch: 3, backendGeneration: 9)
+        XCTAssertTrue(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "telecom", generation: 9, epoch: 3),
+            "BLE and Relay generations are intentionally different")
+        for agent: String? in [nil, "B"] {
+            XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+                authenticatedAgent: agent, callID: "telecom", generation: 9, epoch: 3))
+        }
+        XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "other", generation: 9, epoch: 3))
+        XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "telecom", generation: 10, epoch: 3))
+        XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: event,
+            authenticatedAgent: "A", callID: "telecom", generation: 9, epoch: 4))
+        for state: CallLifecycleState in [.active, .ended, .ending] {
+            let stale = DeviceCallEvent(agentID: "A", callID: "telecom", state: state,
+                transport: .bluetooth, transportEpoch: 3, backendGeneration: 9)
+            XCTAssertFalse(BluetoothIncomingCallPolicy.matches(push: push, event: stale,
+                authenticatedAgent: "A", callID: "telecom", generation: 9, epoch: 3))
+        }
+    }
+
+    func testBLEPushAdoptionPreservesPresentationAndUsesOnlyBLEBackend() async throws {
+        let context = DeviceCallContext(), backend = DeviceBackendProbe(id: "A")
+        let router = DeviceCallActionRouter(context: context) { agent, transport in
+            guard agent == "A", transport == .bluetooth else { XCTFail("wrong answer lane"); return nil }
+            return backend
+        }
+        let id = UUID()
+        let event = DeviceCallEvent(agentID: "A", callID: id.uuidString.lowercased(), state: .ringing,
+            transport: .bluetooth, transportEpoch: backend.epoch, backendGeneration: 8)
+        let original = try XCTUnwrap(router.registerIncoming(event, mode: .bluetooth))
+        XCTAssertEqual(original.systemUUID, id, "BLE and APNs use the same Telecom UUID")
+        let pushUUID = UUID()
+        let adopted = try router.adoptIncoming(event, systemUUID: pushUUID, service: backend,
+            presentationCallID: event.callID, presentationGeneration: 1)
+        try await router.answer(adopted.key, source: "callkit")
+        XCTAssertEqual(router.route(for: adopted.key)?.transport, .bluetooth)
+        XCTAssertEqual(router.route(for: adopted.key)?.systemUUID, pushUUID)
+        XCTAssertEqual(router.route(for: adopted.key)?.presentationGeneration, 1)
+        XCTAssertEqual(context.registry.active, adopted.key)
+        XCTAssertEqual(context.media.owner, adopted.key)
+        XCTAssertEqual(backend.commands.count, 1)
+    }
+
+    func testTelecomUUIDSharedByLANAndPushWithoutCrossDeviceCollision() throws {
+        let backend = DeviceBackendProbe(id: "A")
+        let router = DeviceCallActionRouter(context: DeviceCallContext()) { _, _ in backend }
+        let uuid = UUID()
+        let ble = DeviceCallEvent(agentID: "A", callID: "ble", state: .ringing,
+            transport: .bluetooth, transportEpoch: 1)
+        XCTAssertTrue(router.ingest(ble, mode: .vowlan).isEmpty)
+        XCTAssertTrue(router.context.registry.ringing.isEmpty)
+        let a = try XCTUnwrap(router.registerIncoming(.init(agentID: "A", callID: uuid.uuidString.lowercased(),
+            state: .ringing, transport: .vowlan, transportEpoch: 1), mode: .vowlan))
+        XCTAssertEqual(a.systemUUID, uuid)
+        let again = router.registerIncoming(.init(agentID: "A", callID: uuid.uuidString.lowercased(),
+            state: .ringing, transport: .vowlan, transportEpoch: 1), mode: .vowlan)
+        XCTAssertEqual(again, a)
+        let b = try XCTUnwrap(router.registerIncoming(.init(agentID: "B", callID: uuid.uuidString.lowercased(),
+            state: .ringing, transport: .vowlan, transportEpoch: 1), mode: .vowlan))
+        XCTAssertNotEqual(b.systemUUID, uuid)
+        XCTAssertNotNil(router.registerIncoming(ble, mode: .localDual), "Dual mode still accepts BLE ringing")
+        XCTAssertTrue(backend.commands.isEmpty)
+    }
+
+    func testOtherDeviceAnswerPublishesActiveThenOnlyMatchingTerminalToWatch() throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in service }, callKitController: controller)
+        defer { model.stop() }
+        let id = UUID().uuidString
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: id, state: .ringing,
+            transport: .vowlan, transportEpoch: 1))
+        let uuid = try XCTUnwrap(model.callLifecycleSnapshot.callUUID)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: id, state: .active,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal, "Only this iPhone surface retires")
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.phase, .active)
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.callUUID, uuid)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "B", callID: id, state: .ended,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.phase, .active)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: id, state: .ended,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.phase, .ended)
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.callUUID, uuid)
+        XCTAssertTrue(service.commands.isEmpty, "Retiring UI must not hang up Android")
+    }
+
+    func testPushFirstOtherDeviceAnswerDoesNotEndWatchOrLoseLaterTerminal() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in service }, callKitController: controller)
+        defer { model.stop() }
+        let uuid = UUID(), id = UUID().uuidString
+        controller.setEnabled(true)
+        let reported = expectation(description: "push reported")
+        controller.reportIncomingPush(.init(bluetoothCallID: id, uuid: uuid,
+            generation: 4, number: nil, agentID: "A"),
+            systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        let coordinator = WatchCallCoordinator(); coordinator.configure(model: model)
+        _ = await coordinator.consumeWatchOwnership(["event": "watch_call_owner", "phase": "active",
+            "call_id": id, "call_uuid": uuid.uuidString])
+        XCTAssertNil(controller.currentSystemCallUUID)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ringing,
+            "A Watch ownership message only withdraws local UI, never synthesizes backend ended")
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: id, state: .active,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.phase, .active)
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.callUUID, uuid)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: id, state: .ended,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.phase, .ended)
+        XCTAssertEqual(WatchCallCoordinator.shared.lastPayload?.callUUID, uuid)
+        XCTAssertTrue(service.commands.isEmpty)
+    }
+
     func testPushFirstAdoptionKeepsUUIDAndLifecycleThroughAnswerAndEnd() async throws {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
         defer { ConnectionModePreference.set(old) }
@@ -29,6 +158,10 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertEqual(model.callLifecycleSnapshot.callID, "backend")
         XCTAssertEqual(model.callLifecycleSnapshot.callUUID, uuid)
         XCTAssertEqual(model.callLifecycleSnapshot.generation, 7)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+        XCTAssertNil(model.callConnectedAt, "An answer ACK is not carrier connection evidence")
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "canonical", state: .active,
+            transport: .vowlan, transportEpoch: 1, backendCallID: "backend"))
         XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
         try await model.callKitAnswer(uuid: uuid, origin: .system)
         XCTAssertEqual(service.commands, ["answer:backend"])

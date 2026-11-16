@@ -17,6 +17,7 @@ struct DeviceCallEvent: Sendable {
     var number: String? = nil
     var direction: String = "incoming"
     var backendCallID: String? = nil
+    var slotIndex: Int? = nil
 }
 
 enum DeviceCallEffect: Equatable, Sendable {
@@ -69,6 +70,7 @@ struct DeviceCallRegistry: Sendable {
         }
         var entry = previous ?? Entry(event: event, epochs: [:], generations: [:])
         entry.event = event
+        if event.slotIndex == nil || event.slotIndex! < 0 { entry.event.slotIndex = previous?.event.slotIndex }
         entry.epochs[lane] = event.transportEpoch
         entry.generations[lane] = event.backendGeneration
         aliases[raw] = key
@@ -82,7 +84,9 @@ struct DeviceCallRegistry: Sendable {
             trimTerminalHistory()
             return [.dismiss(key), .ended(key)]
         }
-        if previous?.event.state == event.state, previous?.event.callID == event.callID { return [] }
+        if previous?.event.state == event.state, previous?.event.callID == event.callID {
+            return previous?.event.slotIndex != entry.event.slotIndex ? [.update(key)] : []
+        }
         if event.state == .ringing {
             return active == nil || active == key ? [.present(key)] : [.remind(key)]
         }

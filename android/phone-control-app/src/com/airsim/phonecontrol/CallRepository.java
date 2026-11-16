@@ -138,7 +138,7 @@ public final class CallRepository {
     }
 
     /** Only the one still-unconnected outgoing carrier call may expose early downlink. */
-    static boolean earlyMediaEligible(String callId) {
+    public static boolean earlyMediaEligible(String callId) {
         Call call = CALLS.get(callId);
         if (call == null || CALLS.size() != 1) return false;
         int state = call.getState();
@@ -205,6 +205,18 @@ public final class CallRepository {
                 catch (RuntimeException ignored) {}
             }
         });
+    }
+
+    /** A Watch may claim only a still-ringing exact native instance, not take over an active call. */
+    static ActionResult answerForWatch(String callID) {
+        Call expected = CALLS.get(callID);
+        if (expected == null) return ActionResult.failure("stale watch call");
+        String error = TelecomInvocation.run(task -> new Handler(Looper.getMainLooper()).post(task), () -> {
+            if (CALLS.get(callID) != expected || expected.getState() != Call.STATE_RINGING)
+                throw new IllegalStateException("call answered elsewhere");
+            expected.answer(VideoProfile.STATE_AUDIO_ONLY);
+        }, 2_000L);
+        return error.isEmpty() ? ActionResult.success() : ActionResult.failure(error);
     }
 
     public static ActionResult execute(Context context, AgentCommand command) {

@@ -80,6 +80,7 @@ type incomingPushEvent struct {
 }
 
 type incomingSMSPushEvent struct {
+	AgentID      string `json:"agent_id"`
 	Event        string `json:"event"`
 	DeviceID     string `json:"device_id"`
 	DeviceSecret string `json:"device_secret"`
@@ -348,6 +349,14 @@ func validatePushRegistration(registration pushRegistration) error {
 }
 
 func (p *pushManager) store(registration pushRegistration) error {
+	p.mu.Lock()
+	pairedAgentID := p.config.AndroidAgentID
+	p.mu.Unlock()
+	if registration.AndroidAgentID == "" {
+		// Automatic iOS registration omits Android's pairing-time identity.
+		// Preserve that proof; an explicit new identity still replaces it.
+		registration.AndroidAgentID = pairedAgentID
+	}
 	registration.DeviceID = strings.TrimSpace(registration.DeviceID)
 	registration.BundleID = strings.TrimSpace(registration.BundleID)
 	registration.RelayURL = strings.TrimRight(strings.TrimSpace(registration.RelayURL), "/")
@@ -613,6 +622,7 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
 	p.mu.Unlock()
 
 	payload := incomingSMSPushEvent{
+		AgentID: registration.AndroidAgentID,
 		Event: "incoming_sms", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, DeliveryID: message.DeliveryID,
 		Sender: message.Sender, Content: message.Content, Code: message.Code,

@@ -6,6 +6,142 @@ import CryptoKit
 
 @MainActor
 final class VoBLEMultiDeviceTests: XCTestCase {
+    func testAddressRotationProbesBoundedCandidatesAndSelectsOnlyAuthenticatedTarget() async throws {
+        let binding = AndroidAgentBindingPreference.selected()
+        AndroidAgentBindingPreference.set("recovery-A")
+        defer { AndroidAgentBindingPreference.set(binding) }
+        let old = UUID(), replacement = UUID()
+        let radio = VoBLERadioController(io: RadioIOProbe())
+        let hub = VoBLEDeviceHub(radio: radio, pairingStore: MemoryPairings(),
+            knownPeripheral: { $0 == old }, knownRecoveryAgent: { $0 == "recovery-A" })
+        defer { hub.stop() }
+        _ = hub.prepare(peripheralID: old)
+        hub.select(peripheralID: old)
+        hub.start()
+        radio.onDiscovered?(.init(id: replacement, name: "untrusted-name", signal: -40))
+        let candidate = try XCTUnwrap(hub.sessions[replacement])
+        let queued = UUID()
+        radio.onDiscovered?(.init(id: queued, name: "another-untrusted-name", signal: -35))
+        XCTAssertNil(hub.sessions[queued])
+        XCTAssertEqual(hub.selectedPeripheralID, old, "advertisement must not replace a trusted mapping")
+        // Crypto rejection is exercised by the production worker smoke tests.
+        // This test drives the real Hub's post-authenticated routing boundary.
+        authenticate(candidate.central, as: "recovery-A")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(hub.selectedPeripheralID, replacement)
+        XCTAssertNil(hub.sessions[queued], "queued recovery probe must not displace a newly authenticated peer")
+        XCTAssertEqual(hub.sessions[old]?.central.state, .stopped)
+        let unrelated = UUID()
+        radio.onDiscovered?(.init(id: unrelated, name: "same-name", signal: -30))
+        XCTAssertNil(hub.sessions[unrelated], "a ready target must not probe arbitrary nearby devices")
+    }
+
+    func testIncomingBluetoothBadgeUsesPushedDeviceInsteadOfSelectedDevice() {
+        let mode = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.bluetooth); AndroidAgentBindingPreference.set("badge-A")
+        defer { ConnectionModePreference.set(mode); AndroidAgentBindingPreference.set(binding) }
+        let hub = VoBLEDeviceHub(radio: VoBLERadioController(io: RadioIOProbe()), pairingStore: MemoryPairings())
+        let a = hub.prepare(peripheralID: UUID()), b = hub.prepare(peripheralID: UUID())
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            bluetoothHub: hub, callKitController: CallKitController(observesSystemCallbacks: false))
+        defer { model.stop() }
+        authenticate(a.central, as: "badge-A")
+        XCTAssertTrue(model.callConnectionIsReady)
+        let push = IncomingVoIPCall(bluetoothCallID: "badge-call", uuid: UUID(), generation: 1,
+                                   number: nil, agentID: "badge-B")
+        model.callKitDidReceiveIncoming(push)
+        XCTAssertFalse(model.callConnectionIsReady, "A being online cannot mark incoming B online")
+        authenticate(b.central, as: "badge-B")
+        XCTAssertTrue(model.callConnectionIsReady, "Authenticated BLE must count without WLAN or Relay heartbeat")
+        b.central.stop()
+        XCTAssertFalse(model.callConnectionIsReady)
+    }
+
+    func testColdSelectedPeerIsRetriedWhenRadioBecomesPoweredOn() {
+        let id = UUID(), other = UUID(), io = RadioIOProbe()
+        io.poweredOn = false
+        let radio = VoBLERadioController(io: io)
+        let hub = VoBLEDeviceHub(radio: radio, pairingStore: MemoryPairings(), knownPeripheral: { $0 == id })
+        defer { hub.stop() }
+        _ = hub.prepare(peripheralID: id)
+        hub.select(peripheralID: id)
+        hub.start()
+        XCTAssertTrue(io.retrieved.isEmpty, "Do not attach a phantom connecting session while radio is unknown")
+        io.poweredOn = true
+        radio.onPoweredOn?()
+        XCTAssertTrue(io.retrieved.contains(id), "Retry cached target immediately, without waiting for an advertisement or 10s timer")
+        XCTAssertFalse(io.retrieved.contains(other))
+        hub.stop()
+        io.retrieved.removeAll()
+        radio.onPoweredOn?()
+        XCTAssertTrue(io.retrieved.isEmpty, "A late radio callback must not resurrect a stopped hub")
+    }
+
+    func testIssue20CleanDisconnectMustReleaseHandshakeQueue() async throws {
+        try await verifyHandshakeDisconnect(error: nil)
+    }
+    func testIssue20FailedThenScanningMustReleaseHandshakeQueue() async throws {
+        try await verifyHandshakeDisconnect(error: "temporary disconnect")
+    }
+    private func verifyHandshakeDisconnect(error: String?) async throws {
+        let a = UUID(), b = UUID()
+        let radio = VoBLERadioController(io: RadioIOProbe())
+        let hub = VoBLEDeviceHub(radio: radio, pairingStore: MemoryPairings(), knownPeripheral: { $0 == a || $0 == b })
+        defer { hub.stop() }
+        hub.start()
+        radio.onDiscovered?(.init(id: a, name: "A", signal: -40))
+        let first = try XCTUnwrap(hub.sessions[a])
+        first.central.apply(.discovered(a))
+        first.central.apply(.connected)
+        first.central.apply(.characteristicsReady)
+        try await Task.sleep(for: .milliseconds(50))
+        // Queue B while A owns the handshake. No CBPeripheral hardware is required.
+        radio.onDiscovered?(.init(id: b, name: "B", signal: -40))
+        XCTAssertNil(hub.sessions[b])
+        // Same reducer sequence used by handleDisconnect + restoreOrScan.
+        first.central.apply(.disconnected(error))
+        if error != nil { first.central.apply(.bluetoothPoweredOn) }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(first.central.state, .scanning)
+        // A's delayed UI state must not re-acquire or release B's handshake.
+        radio.onDiscovered?(.init(id: a, name: "A", signal: -40))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNotNil(hub.sessions[b], "A disconnected during authentication: shared handshake must release so B can recover")
+    }
+
+    func testHandshakeDoesNotReleaseOnInitialScanningOrOldUIEvent() async throws {
+        let ids = [UUID(), UUID(), UUID()]
+        let radio = VoBLERadioController(io: RadioIOProbe())
+        let hub = VoBLEDeviceHub(radio: radio, pairingStore: MemoryPairings(), knownPeripheral: { ids.contains($0) })
+        defer { hub.stop() }
+        hub.start()
+        for id in ids { radio.onDiscovered?(.init(id: id, name: "fixture", signal: -40)) }
+        XCTAssertNil(hub.sessions[ids[1]], "initial scanning must not release A's pending attempt")
+        let a = try XCTUnwrap(hub.sessions[ids[0]])
+        a.central.apply(.authenticationFailed("failed"))
+        a.central.apply(.bluetoothPoweredOn)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNotNil(hub.sessions[ids[1]])
+        a.central.apply(.disconnected(nil))
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertNil(hub.sessions[ids[2]], "an event from A cannot release B's ownership")
+    }
+
+    func testHandshakeDeadlinesCoverDiscoveryAndAuthenticationButNotUserConfirmation() {
+        for state in [VoBLEConnectionState.connected, .authenticating] {
+            XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(state: state, enabled: true, elapsed: 19))
+            XCTAssertTrue(VoBLEConnectionTimeoutPolicy.shouldExpire(state: state, enabled: true, elapsed: 20))
+            XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(state: state, enabled: true,
+                elapsed: 120, awaitingConfirmation: true))
+            XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(state: state, enabled: true,
+                elapsed: 120, isBackground: true))
+        }
+        XCTAssertFalse(VoBLEConnectionTimeoutPolicy.shouldExpire(state: .connecting, enabled: true,
+            elapsed: 29, systemReconnecting: true))
+        XCTAssertTrue(VoBLEConnectionTimeoutPolicy.shouldExpire(state: .connecting, enabled: true,
+            elapsed: 30, systemReconnecting: true))
+    }
+
     func testDialPadClearsAcceptedNumber() async throws {
         try await verifyDialPadInput(initial: "10086", expected: "")
     }
@@ -518,6 +654,7 @@ private final class RadioIOProbe: VoBLERadioIO {
     var poweredOn = true
     var cancelled: [UUID] = []
     var connected: [UUID] = []
+    var retrieved: [UUID] = []
     var scans = 0
     var stops = 0
     func start(delegate: any CBCentralManagerDelegate) {}
@@ -525,5 +662,5 @@ private final class RadioIOProbe: VoBLERadioIO {
     func stopScan() { stops += 1 }
     func connect(_ id: UUID) { connected.append(id) }
     func cancel(_ id: UUID) { cancelled.append(id) }
-    func peripheral(_ id: UUID) -> CBPeripheral? { nil }
+    func peripheral(_ id: UUID) -> CBPeripheral? { retrieved.append(id); return nil }
 }

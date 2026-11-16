@@ -372,8 +372,10 @@ final class StandaloneAgentGateway {
         synchronized (callsLock) {
             String state = event.optString("state", "");
             if ("ended".equals(state)) {
-                if (activeCall != null) {
-                    activeCall.put("state", "ended").put("ended_at", Instant.now().toString())
+                if (activeCall != null && event.optString("call_id").equals(activeCall.optString("android_id"))) {
+                    activeCall.put("missed", "incoming".equals(activeCall.optString("direction"))
+                                    && !activeCall.has("connected_at"))
+                            .put("state", "ended").put("ended_at", Instant.now().toString())
                             .put("updated_at", Instant.now().toString());
                     callHistory.put(activeCall);
                     activeCall = null;
@@ -387,6 +389,9 @@ final class StandaloneAgentGateway {
                 activeCall.put("direction", event.optString("direction"))
                         .put("state", state).put("number", event.optString("number"))
                         .put("updated_at", Instant.now().toString());
+                if (("active".equals(state) || "held".equals(state)) && !activeCall.has("connected_at")) {
+                    activeCall.put("connected_at", Instant.now().toString());
+                }
                 if (event.has("slot_index")) {
                     activeCall.put("slot_index", event.optInt("slot_index", -1))
                             .put("slot_id", event.optInt("slot_id", event.optInt("slot_index", -1)));

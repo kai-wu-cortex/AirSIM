@@ -21,7 +21,8 @@ final class RootSmsSender {
     static void install(Context context) {
         Context app = context.getApplicationContext();
         SMSCommandExecutor.setRootSender((destination, body, subscriptionId) ->
-                send(app, destination, body, subscriptionId));
+                PrivilegeChannelPreference.get(app) == PrivilegeChannelPreference.Channel.SHIZUKU
+                        ? "unavailable" : send(app, destination, body, subscriptionId));
     }
 
     private static String send(Context context, String destination, String body, int subscriptionId) {
@@ -29,6 +30,7 @@ final class RootSmsSender {
         File payloadFile = new File(context.getCacheDir(), "root-sms-" + UUID.randomUUID() + ".json");
         try {
             JSONObject payload = new JSONObject()
+                    .put("package_name", context.getPackageName())
                     .put("destination", destination)
                     .put("body", body)
                     .put("subscription_id", subscriptionId);

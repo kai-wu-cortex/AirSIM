@@ -6,7 +6,7 @@ import java.util.Map;
 
 /** Observed OS flags, never an assertion that a physical speaker is acoustically silent. */
 record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speaker, boolean pcm,
-        String mediaEvidence, boolean minimumVolumePolicy, int minimumVolume, boolean requiresUnmutedCapture) {
+        String mediaEvidence, boolean minimumVolumePolicy, int minimumVolume, boolean requiresUnmutedCapture, boolean preservesVolume) {
     static AudioWatchdogSnapshot parse(String value) throws IOException {
         Map<String, String> fields = new HashMap<>();
         for (String item : (value == null ? "" : value).trim().split("\\s+")) {
@@ -27,7 +27,7 @@ record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speake
                 .filter(key -> fields.getOrDefault(key, "").matches("[a-zA-Z0-9_.$]{1,64}"))
                 .map(key -> key + "=" + fields.get(key)).collect(java.util.stream.Collectors.joining(" "));
             return new AudioWatchdogSnapshot(bool(fields, "muted"), volume, mode,
-                    bool(fields, "speaker"), bool(fields, "pcm"), evidence, minimumPolicy, minimum, captureSafe);
+                    bool(fields, "speaker"), bool(fields, "pcm"), evidence, minimumPolicy, minimum, captureSafe, "preserve_volume".equals(fields.get("output_policy")));
         } catch (RuntimeException error) { throw new IOException("invalid audio snapshot", error); }
     }
     private static boolean bool(Map<String, String> fields, String key) {
@@ -41,6 +41,7 @@ record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speake
                 + (minimumVolumePolicy ? " minimum_volume=" + minimumVolume : "");
     }
     boolean targetSatisfied() {
+        if (preservesVolume) return true; // User volume is not an output-policy fault.
         return minimumVolumePolicy
                 ? minimumVolume >= (requiresUnmutedCapture ? 1 : 0) && volume == minimumVolume
                     && (!requiresUnmutedCapture || !muted)

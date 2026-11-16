@@ -24,3 +24,11 @@ test "$(shasum -a 256 "$JSON_JAR" | awk '{print $1}')" = 3cf6cd6892e32e2b4c1c39e
   "$ROOT"/src/com/airsim/phonecontrol/AppReleaseClient.java \
   "$ROOT"/test/com/airsim/phonecontrol/AppReleaseClientTests.java
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$JSON_JAR:$BASE:$ANDROID_JAR" com.airsim.phonecontrol.AppReleaseClientTests
+
+"$TASK_JAVA_HOME/bin/javac" --release 17 -cp "$OUT:$JSON_JAR:$BUILT:$BASE:$ANDROID_JAR" -d "$OUT" \
+  "$ROOT"/test/watch-direct/com/airsim/phonecontrol/StandaloneCloudMediaManager.java \
+  "$ROOT"/src/com/airsim/phonecontrol/WatchMediaGrant.java \
+  "$ROOT"/src/com/airsim/phonecontrol/WatchMediaSessions.java \
+  "$ROOT"/src/com/airsim/phonecontrol/WatchDirectGateway.java \
+  "$ROOT"/test/com/airsim/phonecontrol/WatchDirectGatewayTests.java
+"$TASK_JAVA_HOME/bin/java" -cp "$OUT:$JSON_JAR:$BASE:$BUILT:$ANDROID_JAR" com.airsim.phonecontrol.WatchDirectGatewayTests "$ROOT/../../docs/protocols/watch-direct-v2-vectors.json"

@@ -15,7 +15,9 @@ final class StandaloneWebSocket implements Closeable {
     StandaloneWebSocket(Read reader) { this.reader = reader; }
     static StandaloneWebSocket connect(URI target, String token) throws Exception { attempts++; return next.run(); }
     Message read() throws Exception { return reader.run(); }
-    void writeText(String text) {}
-    void writeBinary(byte[] bytes) {}
+    final java.util.List<String> text = new java.util.concurrent.CopyOnWriteArrayList<>();
+    final java.util.concurrent.atomic.AtomicInteger frames = new java.util.concurrent.atomic.AtomicInteger();
+    void writeText(String text) { this.text.add(text); }
+    void writeBinary(byte[] bytes) { frames.incrementAndGet(); }
     public void close() { closed = true; }
 }

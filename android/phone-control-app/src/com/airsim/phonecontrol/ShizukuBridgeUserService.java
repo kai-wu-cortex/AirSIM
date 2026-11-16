@@ -82,10 +82,18 @@ public final class ShizukuBridgeUserService extends Binder {
                     yield setLocalOutputMuted(target,
                             data.dataAvail() > 0 ? data.readString() : "vowlan");
                 }
+                case PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_POLICY ->
+                        setLocalOutputMuted(data.readInt() != 0, data.readString(), data.readString());
                 case PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE -> ensureDialerRole();
                 case PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT -> audioSnapshot();
                 case PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS ->
                         sendSms(data.readString(), data.readString(), data.readInt());
+                case PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS_CONFIRMED ->
+                        sendSms(data.readString(), data.readString(), data.readInt(),
+                                data.createTypedArrayList(android.app.PendingIntent.CREATOR));
+                case PrivilegedBridgeProtocol.TRANSACTION_SMS_PREFLIGHT -> smsPreflight();
+                case PrivilegedBridgeProtocol.TRANSACTION_RESOLVE_SMS_SUBSCRIPTION ->
+                        resolveSmsSubscription(data.readString());
                 case PrivilegedBridgeProtocol.TRANSACTION_RECENT_SMS ->
                         recentSms(data.readLong(), data.readLong(), data.readInt());
                 default -> null;
@@ -101,60 +109,94 @@ public final class ShizukuBridgeUserService extends Binder {
         }
     }
 
+    /** Synthetic text division only; never calls a send API. */
+    private String smsPreflight() {
+        long identity = Binder.clearCallingIdentity();
+        String stage = "manager";
+        try {
+            SmsManager manager = smsManagerForSubscription(-1);
+            if (manager == null) return "error:no_service";
+            stage = "divide";
+            var parts = manager.divideMessage("AirSIM preflight");
+            return "ready:parts=" + (parts == null ? 0 : parts.size()) + " appops_attribution=true";
+        } catch (Exception error) {
+            StringBuilder result = new StringBuilder("error:" + stage + ":" + error.getClass().getSimpleName());
+            for (int i = 0; i < Math.min(5, error.getStackTrace().length); i++) {
+                var frame = error.getStackTrace()[i];
+                result.append(" at ").append(frame.getClassName()).append('.').append(frame.getMethodName());
+            }
+            return result.toString();
+        } finally { Binder.restoreCallingIdentity(identity); }
+    }
+
     private String sendSms(String destination, String body, int subscriptionId) {
+        return sendSms(destination, body, subscriptionId, null);
+    }
+
+    private String sendSms(String destination, String body, int subscriptionId,
+            ArrayList<android.app.PendingIntent> sentIntents) {
         if (serviceContext == null) return "error:no_context";
         if (destination == null || destination.trim().isEmpty()
                 || body == null || body.trim().isEmpty()) return "error:invalid";
         long identity = Binder.clearCallingIdentity();
+        String stage = "manager";
         try {
             SmsManager manager = smsManagerForSubscription(subscriptionId);
             if (manager == null) return "error:no_service";
+            stage = "divide";
             ArrayList<String> parts = manager.divideMessage(body);
             if (parts == null || parts.isEmpty()) return "error:divide";
+            if (sentIntents != null && (sentIntents.size() != parts.size()
+                    || sentIntents.contains(null))) return "error:prepare:callback_count";
+            stage = "send";
             if (parts.size() == 1) {
-                manager.sendTextMessage(destination, null, parts.get(0), null, null);
+                manager.sendTextMessage(destination, null, parts.get(0),
+                        sentIntents == null ? null : sentIntents.get(0), null);
             } else {
-                manager.sendMultipartTextMessage(destination, null, parts, null, null);
+                manager.sendMultipartTextMessage(destination, null, parts, sentIntents, null);
             }
             Log.i(TAG, "shizuku_sms_accepted segments=" + parts.size());
             return "ok:" + parts.size();
         } catch (SecurityException error) {
             Log.w(TAG, "shizuku_sms_permission_denied");
-            return "error:permission";
+            return "error:" + ("send".equals(stage) ? "send_unknown:" : "prepare:") + "SecurityException";
         } catch (Exception error) {
-            Log.w(TAG, "shizuku_sms_failed type=" + error.getClass().getSimpleName());
-            return "error:" + error.getClass().getSimpleName();
+            StringBuilder frames = new StringBuilder();
+            for (int i = 0; i < Math.min(6, error.getStackTrace().length); i++) {
+                var frame = error.getStackTrace()[i];
+                frames.append(" at ").append(frame.getClassName()).append('.').append(frame.getMethodName());
+            }
+            Log.w(TAG, "shizuku_sms_failed stage=" + stage + " type=" + error.getClass().getSimpleName() + frames);
+            return "error:" + ("send".equals(stage) ? "send_unknown:" : "prepare:") + error.getClass().getSimpleName();
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
     }
 
     private SmsManager smsManagerForSubscription(int subscriptionId) throws Exception {
-        if (Build.VERSION.SDK_INT >= 30) {
-            // app_process does not run the app startup that initializes telephony's service registry.
-            Class<?> initializer = Class.forName("android.telephony.TelephonyFrameworkInitializer");
-            synchronized (initializer) {
-                if (initializer.getMethod("getTelephonyServiceManager").invoke(null) == null) {
-                    Class<?> manager = Class.forName("android.os.TelephonyServiceManager");
-                    initializer.getMethod("setTelephonyServiceManager", manager)
-                            .invoke(null, manager.getConstructor().newInstance());
-                }
+        return PrivilegedSmsRuntime.manager(serviceContext, subscriptionId);
+    }
+
+    private String resolveSmsSubscription(String key) {
+        if (serviceContext == null || key == null || key.isEmpty() || key.length() > 8192) return "-1";
+        long identity = Binder.clearCallingIdentity();
+        try {
+            // Initialize the telephony registry and obtain a correctly attributed
+            // shell context, just as the existing authorized SMS sender does.
+            smsManagerForSubscription(-1);
+            Context context = serviceContext;
+            if (Process.myUid() == 2000) {
+                Class<?> activityThread = Class.forName("android.app.ActivityThread");
+                Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
+                Context system = (Context) activityThread.getMethod("getSystemContext").invoke(thread);
+                context = system.createPackageContext("com.android.shell", 0);
             }
-        }
-        Context context = serviceContext;
-        if (Process.myUid() == 2000) {
-            // Use a system-derived shell context rather than attributing the send to the APK.
-            Class<?> activityThread = Class.forName("android.app.ActivityThread");
-            Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
-            Context system = (Context) activityThread.getMethod("getSystemContext").invoke(thread);
-            context = system.createPackageContext("com.android.shell", 0);
-        }
-        if (Build.VERSION.SDK_INT >= 31) {
-            SmsManager base = context.getSystemService(SmsManager.class);
-            return base == null || subscriptionId < 0 ? base : base.createForSubscriptionId(subscriptionId);
-        }
-        return subscriptionId < 0 ? SmsManager.getDefault()
-                : SmsManager.getSmsManagerForSubscriptionId(subscriptionId);
+            int subscription = DefaultCallAccount.smsSubscription(DefaultCallAccount.snapshot(context), key);
+            var subscriptions = context.getSystemService(android.telephony.SubscriptionManager.class);
+            if (subscriptions == null || subscriptions.getActiveSubscriptionInfo(subscription) == null) return "-1";
+            return Integer.toString(subscription);
+        } catch (Exception error) { return "-1"; }
+        finally { Binder.restoreCallingIdentity(identity); }
     }
 
     private String recentSms(long afterId, long cutoffMillis, int limit) {
@@ -321,63 +363,31 @@ public final class ShizukuBridgeUserService extends Binder {
         return setLocalOutputMuted(muted, "vowlan");
     }
 
-    /**
-     * @param strategy "voble" or "vowlan". Both currently resolve to the vendor's
-     *                 capture-safe policy on capture-coupled HALs (Samsung must never
-     *                 use index 0, which also silences the forwarded VOICE_DOWNLINK).
-     */
-    private String setLocalOutputMuted(boolean muted, String strategy) throws Exception {
+    private String setLocalOutputMuted(boolean muted, String transport) throws Exception {
+        return setLocalOutputMuted(muted, transport, "minimum_nonzero_volume");
+    }
+
+    private String setLocalOutputMuted(boolean muted, String transport, String policy) throws Exception {
         synchronized (audioLock) {
             verifyIdentity();
-            LocalOutputMuteController.Strategy desired = "voble".equals(strategy)
-                    ? LocalOutputMuteController.vobleStrategy()
-                    : LocalOutputMuteController.vowlanStrategy();
-            if (outputMute != null && !outputStrategy.equals(strategy)) {
-                // A different policy now owns the stream. Restoring the old snapshot can
-                // only be trusted when it is still muted; if we are not applying a new
-                // restriction, the old policy's release below is the restore path.
-                if (!muted) {
-                    try { outputMute.setMuted(false); }
-                    catch (Exception ignored) { /* release path below still runs */ }
-                }
-                // Never let a stale minimum-volume snapshot leak into the next policy.
-                outputMute.suspend();
-                if (!muted) {
-                    outputMute = null;
-                    outputStrategy = strategy;
-                    return "local_output_unchanged";
-                }
+            LocalOutputMuteController.Strategy desired = LocalOutputMuteController.wireStrategy(policy);
+            outputStrategy = "voble".equals(transport) ? "voble" : "vowlan";
+            if (!muted) {
+                if (outputMute == null) return "local_output_unchanged";
+                String result = outputMute.setMuted(false);
+                outputMute = null;
+                return result;
             }
-            outputStrategy = strategy;
-            if (outputMute == null && !muted) return "local_output_unchanged";
-            Exception failure = null;
-            if (outputMute == null) {
-                outputMute = new LocalOutputMuteController(audioBackend(), desired);
-            } else if (!muted || outputMute.policyName().equals(LocalOutputMuteController.policyName(desired))) {
-                return outputMute.setMuted(muted);
-            } else {
-                outputMute = new LocalOutputMuteController(audioBackend(), desired);
+            if (outputMute != null && !outputMute.policyName().equals(policy)) {
+                // Restore the previous reduction before preserving user volume.
+                // Keep the old snapshot if restoration fails so cleanup can retry.
+                outputMute.setMuted(false);
+                outputMute = null;
             }
-            try {
-                return outputMute.setMuted(muted);
-            } catch (Exception error) {
-                failure = error;
-            }
-            // A verified mute may be refused (e.g. shell cannot change the mute bit).
-            // Fall back to the vendor's inaudible strategy instead of leaving the
-            // downlink audible; if that also fails the original error is reported.
-            if (desired != LocalOutputMuteController.Strategy.MUTE) throw failure;
-            LocalOutputMuteController fallback = new LocalOutputMuteController(
-                    audioBackend(), LocalOutputMuteController.strategyForManufacturer(
-                    android.os.Build.MANUFACTURER));
-            if (fallback.policyName().equals(LocalOutputMuteController.policyName(desired))) throw failure;
-            outputMute = fallback;
-            try {
-                return fallback.setMuted(muted) + " fallback=verified_mute_refused";
-            } catch (Exception fallbackFailure) {
-                fallbackFailure.addSuppressed(failure);
-                throw fallbackFailure;
-            }
+            if (outputMute == null) outputMute = new LocalOutputMuteController(audioBackend(), desired);
+            // A transport change does not own a new volume snapshot: all modes
+            // obey this separate, user-selected output/capture policy.
+            return outputMute.setMuted(true);
         }
     }
 
@@ -451,8 +461,9 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String outputPolicyDiagnostic() {
         LocalOutputMuteController current = outputMute;
-        if (current != null && current.usesMinimumVolume())
-            return current.policyName() + " minimum_volume=" + current.targetMinimumVolume();
+        if (current != null)
+            return current.policyName() + (current.usesMinimumVolume()
+                    ? " minimum_volume=" + current.targetMinimumVolume() : " independent_output_control=false");
         return callOutputPolicyMute != null && callOutputPolicyMute.applied() ? "zero_readback" : "not_applied";
     }
 
@@ -522,7 +533,7 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String statusLocked() {
         return "uid=" + Process.myUid()
-                + " service_revision=11"
+                + " service_revision=12"
                 + " pcm=" + (bridgeProcess != null && bridgeProcess.isAlive() ? "running" : "stopped")
                 + " local_output=" + (outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
                     : outputMute != null && outputMute.isVerifiedMuted() ? "muted" : "normal")
