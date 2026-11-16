@@ -30,4 +30,6 @@
 
 程序使用 SDK 35 的 `android.jar` 与已构建的 Standalone classes 编译，再用 D8 生成单独 dex，`adb push` 到临时目录后与已安装 APK 一起放入 CLASSPATH，用 `app_process` 启动。唯一参数为秒数；测试结束后终止该诊断进程或等待期限到达。该工具的验证范围为编译及真机锁申请，不代替通话、耗电或长期稳定性验收。
 
+保活对照期间，一次去电仍在约 4 秒内以 REMOTE / NORMAL_UNSPECIFIED 结束，没有 ACTIVE；覆盖此次去电的 120 次网关探测全部成功，平均往返约 5.6 ms。无线掉线不能解释这一轮失败，但该短时样本也不能证明 Wi-Fi 已长期稳定或锁具有确定修复效果。对照结束后已停止临时进程、删除设备上的诊断 dex，并确认 Wi-Fi/CPU 锁均释放；原 AirSIM 音频桥继续运行。仍需普通手机使用同一张卡、同一号码的语音对照。
+
 设备诊断应区分 Android 两套断开码：`android.telecom.DisconnectCause.REMOTE` 为 3，LOCAL 为 2；`android.telephony.DisconnectCause.NORMAL_UNSPECIFIED` 为 65。设备显示的网络原因 31 未给出具体拒绝原因，不能据此认定为用户主动挂断或某种运营商套餐限制。
