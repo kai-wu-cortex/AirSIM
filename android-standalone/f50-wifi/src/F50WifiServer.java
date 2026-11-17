@@ -12,7 +12,7 @@ import java.security.*;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** MU3356-specific local Wi-Fi setup. Runs as shell; never changes USB or SIM settings. */
+/** MU3356-specific local Wi-Fi setup. Runs as shell; optional SIM supervision is separately owner-enabled. */
 public final class F50WifiServer {
  final Context context; final WifiManager wifi; final File directory;
  final ScheduledExecutorService control=Executors.newSingleThreadScheduledExecutor();
@@ -26,6 +26,7 @@ public final class F50WifiServer {
  JSONObject settings;
  WifiManager.MulticastLock multicast;
  final AirSimSupervisor airSim;
+ final DualSimSupervisor dualSim;
  String lastBootReadiness="";
  F50WifiServer(File dir, boolean boot)throws Exception {
   directory=dir; if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException("settings directory unavailable");
@@ -46,7 +47,7 @@ public final class F50WifiServer {
   // Android networkId is reassigned across reboot. Persist the profile identity.
   for(WifiConfiguration c:networks())if(unquote(c.SSID).equals(preferredSsid)&&security(c).equals(preferredSecurity))selected=c.networkId;
   bootPending=boot&&!setupBootId.equals(bootId)&&!connected();
-  airSim=new AirSimSupervisor(this);
+  airSim=new AirSimSupervisor(this);dualSim=new DualSimSupervisor(this);
  }
  void persist()throws Exception {synchronized(storageLock){
   settings.remove("preferred_network");settings.put("automatic",automatic).put("preferred_ssid",preferredSsid).put("preferred_security",preferredSecurity).put("setup_boot_id",setupBootId);
@@ -81,7 +82,7 @@ public final class F50WifiServer {
   return new JSONObject().put("mode",mode.equals("rebooting")?mode:ready?"connected":mode).put("message",mode.equals("rebooting")?message:ready?"已连接，可通过此网络访问设备":message).put("error",lastError)
    .put("ssid",ready?unquote(info.getSSID()):"").put("ip",ready?address():"").put("automatic",automatic)
    .put("target_ssid",preferredSsid).put("can_reboot",preferredId()>=0)
-   .put("uptime_seconds",android.os.SystemClock.elapsedRealtime()/1000).put("usb_host_state",usbHostState()).put("airsim_bridge",airSim.status())
+   .put("uptime_seconds",android.os.SystemClock.elapsedRealtime()/1000).put("usb_host_state",usbHostState()).put("airsim_bridge",airSim.status()).put("dual_sim",dualSim.status())
    .put("hotspot_ssid",apName).put("saved",saved).put("usb_adb",run("getprop","sys.usb.config").contains("adb"))
    .put("local_url","http://f50wifi.local:8088").put("setup_url","http://192.168.0.1:8088");
  }
@@ -230,7 +231,7 @@ public final class F50WifiServer {
   Looper.prepareMainLooper();
   F50WifiServer server=new F50WifiServer(new File(args[0]),args.length>1&&args[1].equals("--boot"));
   PortalHttp http=new PortalHttp(server);http.start();
-  server.airSim.start();
+  server.airSim.start();server.dualSim.start();
   server.multicast=server.wifi.createMulticastLock("F50WifiSetup");server.multicast.setReferenceCounted(false);server.multicast.acquire();
   new LocalName(server).start();server.control.scheduleWithFixedDelay(server::tick,1,3,TimeUnit.SECONDS);
   System.out.println("F50 Wi-Fi setup listening on local port 8088");Looper.loop();

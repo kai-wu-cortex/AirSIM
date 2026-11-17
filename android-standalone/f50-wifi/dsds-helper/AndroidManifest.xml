@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.airsim.f50dsds" android:versionCode="1" android:versionName="0.1.0">
+ <uses-sdk android:minSdkVersion="34" android:targetSdkVersion="35" />
+ <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+ <application android:label="F50 双卡保持" android:allowBackup="false" android:hasCode="true">
+  <provider android:name=".DsdsProvider" android:authorities="com.airsim.f50dsds" android:exported="true" android:permission="android.permission.DUMP" android:grantUriPermissions="false" />
+ </application>
+</manifest>

@@ -4,6 +4,8 @@ MU3356 B28 的 [F50 Pro Wi-Fi 配置页](../android-standalone/f50-wifi/README.m
 
 独立供电更新须同时核对 Wi-Fi 启动脚本：旧版地址保护依赖 USB 调试状态，仅更新 DEX 不足；修复改为等待系统启动，USB ADB 初始化保持原样。实际验收结果以组件验证记录为准。B28 缺少默认电话角色时，可另行显式启用空默认值的 Telecom 绑定恢复；仅对签名匹配的 AirSIM 生效，保留其他默认应用，开关及回退见组件文档。
 
+另有所有者显式启用的 B28 双卡保持辅助 APK，可延后原厂副卡无服务自动关闭检查；该功能不保证运营商注册，启用、权限、固件摘要限制及回退见组件文档。
+
 未发布源码已适配 [Relay v2 设备定向协议](relay-agent-routing.md)，不是新的 Debian Release。缺 AndroidAgentID 的旧配置需补全原配对，不从号码生成身份。先更新 Relay 后再升级 Agent；本轮未触碰 installerd 或现网。
 
 候选 build 85 的[同网 VoWLAN 恢复](vowlan-network-return.md)修改安卓 App 与 iOS 客户端，不要求升级本指南的 Linux Agent 或部署 Relay。保留既有认证、固定模式与通话链路，不能以构建通过替代锁屏／回家真机验收。候选版尚未发布。
