@@ -18,10 +18,11 @@ public final class F50WifiServer {
  final ScheduledExecutorService control=Executors.newSingleThreadScheduledExecutor();
  final Object storageLock=new Object();
  volatile String mode="starting",message="正在准备网络服务",lastError="";
- volatile long attemptStarted=0,disconnectedAt=0,hotspotSince=0,lastVisit=0;
+ volatile long attemptStarted=0,disconnectedAt=0;
  volatile int selected=-1; volatile boolean automatic=true;
- volatile String preferredSsid="",preferredSecurity="";
- volatile boolean bootPending; volatile long bootStart;
+ volatile String preferredSsid="",preferredSecurity="",setupBootId="";
+ final String bootId;
+ volatile boolean bootPending; boolean operationPending,bootHotspotReady;
  JSONObject settings;
  WifiManager.MulticastLock multicast;
  F50WifiServer(File dir, boolean boot)throws Exception {
@@ -39,12 +40,13 @@ public final class F50WifiServer {
   settings=file.isFile()?new JSONObject(read(file)):new JSONObject();
   automatic=settings.optBoolean("automatic",true);
   preferredSsid=settings.optString("preferred_ssid","");preferredSecurity=settings.optString("preferred_security","");
+  bootId=read(new File("/proc/sys/kernel/random/boot_id")).trim();setupBootId=settings.optString("setup_boot_id","");
   // Android networkId is reassigned across reboot. Persist the profile identity.
   for(WifiConfiguration c:networks())if(unquote(c.SSID).equals(preferredSsid)&&security(c).equals(preferredSecurity))selected=c.networkId;
-  bootPending=boot;bootStart=android.os.SystemClock.elapsedRealtime();
+  bootPending=boot&&!setupBootId.equals(bootId)&&!connected();
  }
  void persist()throws Exception {synchronized(storageLock){
-  settings.remove("preferred_network");settings.put("automatic",automatic).put("preferred_ssid",preferredSsid).put("preferred_security",preferredSecurity);
+  settings.remove("preferred_network");settings.put("automatic",automatic).put("preferred_ssid",preferredSsid).put("preferred_security",preferredSecurity).put("setup_boot_id",setupBootId);
   File temp=new File(directory,"settings.tmp");
   try(FileOutputStream output=new FileOutputStream(temp)){output.write(settings.toString().getBytes(StandardCharsets.UTF_8));output.getFD().sync();} if(!temp.renameTo(new File(directory,"settings.json")))throw new IOException("settings rename failed");
  }}
@@ -72,8 +74,9 @@ public final class F50WifiServer {
   JSONArray saved=new JSONArray();for(WifiConfiguration c:networks())saved.put(new JSONObject().put("id",c.networkId).put("ssid",unquote(c.SSID)).put("security",security(c)).put("preferred",c.networkId==selected).put("connected",ready&&info.getNetworkId()==c.networkId));
   String apName="F50 Pro 原热点";
   try {Object ap=wifi.getClass().getMethod("getSoftApConfiguration").invoke(wifi);String name=(String)ap.getClass().getMethod("getSsid").invoke(ap);if(name!=null)apName=name;}catch(Exception ignored){}
-  return new JSONObject().put("mode",ready?"connected":mode).put("message",ready?"已连接，可通过此网络访问设备":message).put("error",lastError)
+  return new JSONObject().put("mode",mode.equals("rebooting")?mode:ready?"connected":mode).put("message",mode.equals("rebooting")?message:ready?"已连接，可通过此网络访问设备":message).put("error",lastError)
    .put("ssid",ready?unquote(info.getSSID()):"").put("ip",ready?address():"").put("automatic",automatic)
+   .put("target_ssid",preferredSsid).put("can_reboot",preferredId()>=0)
    .put("hotspot_ssid",apName).put("saved",saved).put("usb_adb",run("getprop","sys.usb.config").contains("adb"))
    .put("local_url","http://f50wifi.local:8088").put("setup_url","http://192.168.0.1:8088");
  }
@@ -101,7 +104,9 @@ public final class F50WifiServer {
   type.getMethod("startTethering",request,Executor.class,callback).invoke(manager,spec,(Executor)Runnable::run,cb);
   if(!done.await(7,TimeUnit.SECONDS)||!result[0])throw new IOException("hotspot start failed");
  }
- void enableAll(){for(WifiConfiguration c:networks())wifi.enableNetwork(c.networkId,false);}
+ void onlyTarget(int id)throws Exception {
+  for(WifiConfiguration c:networks())if(c.networkId!=id&&!wifi.disableNetwork(c.networkId))throw new IOException("other profile disable failed");
+ }
  int preferredId(){for(WifiConfiguration c:networks())if(unquote(c.SSID).equals(preferredSsid)&&security(c).equals(preferredSecurity))return c.networkId;return -1;}
  void prefer(int id)throws Exception {
   selected=-1;preferredSsid="";preferredSecurity="";
@@ -109,9 +114,13 @@ public final class F50WifiServer {
   persist();
  }
  void beginConnect(int id)throws Exception {
-  bootPending=false;lastError="";prefer(id);id=selected;
+  if(id<0)throw new IllegalArgumentException("请先指定要连接的 Wi-Fi，再重启设备。");
+  bootPending=false;lastError="";selected=id;
   mode="connecting";message="正在连接，最多等待 90 秒；失败会恢复原热点";
   if(!new File("/dev/f50-ifconfig-ready").exists())throw new IOException("IP protection unavailable");
+  // Disable alternatives before enabling STA: a saved home network must never
+  // hide a failed travel-network setup by taking over automatically.
+  onlyTarget(id);
   if(!wifi.isWifiEnabled()){
    tether(false);
    for(int i=0;i<10&&run("getprop","init.svc.hostapd").equals("running");i++)Thread.sleep(500);
@@ -121,24 +130,43 @@ public final class F50WifiServer {
   }
   // Keep the firmware's next boot in hotspot-first mode, as in the verified B28 patch.
   run("settings","put","global","wifi_on","0");
-  enableAll();
   if(id>=0&&!wifi.enableNetwork(id,true))throw new IOException("saved network unavailable");
   wifi.reconnect();wifi.startScan();attemptStarted=android.os.SystemClock.elapsedRealtime();disconnectedAt=0;
  }
  void hotspot(String reason)throws Exception {
-  bootPending=false;mode="recovering";message="正在恢复原热点";
+  bootPending=false;setupBootId=bootId;persist();mode="recovering";message="正在恢复原热点";
   wifi.setWifiEnabled(false);run("settings","put","global","wifi_on","0");
   for(int i=0;i<12&&wifi.getWifiState()!=WifiManager.WIFI_STATE_DISABLED;i++)Thread.sleep(500);
-  Thread.sleep(1000);tether(true);
-  mode="hotspot";message="请连接设备原热点，在此添加或选择 Wi-Fi";lastError=reason;hotspotSince=android.os.SystemClock.elapsedRealtime();
+  Thread.sleep(1000);
+  // init can restart this service while the AP is already active. B28 reports
+  // a failed callback for a duplicate start, although the existing AP is fine.
+  if(!run("getprop","init.svc.hostapd").equals("running"))tether(true);
+  mode="hotspot";message="请填写目标 Wi-Fi；保存后保持热点，重启后才切换连接";lastError=reason;
+ }
+ void stage(int id)throws Exception {automatic=true;bootPending=false;setupBootId=bootId;prefer(id);lastError="";}
+ synchronized void openedSetup()throws Exception {
+  // An authenticated person using the boot-time AP owns this setup session.
+  // Do not interrupt their form when the normal boot delay expires.
+  if(bootPending&&!wifi.isWifiEnabled()&&run("getprop","init.svc.hostapd").equals("running")){
+   setupBootId=bootId;persist();bootPending=false;mode="hotspot";
+   message="配网热点已保留，请填写目标 Wi-Fi，准备好后保存并重启";
+  }
+ }
+ void requestReboot()throws Exception {
+  if(preferredId()<0)throw new IllegalArgumentException("请先保存或指定一个 Wi-Fi。");
+  if(context.checkSelfPermission("android.permission.REBOOT")!=android.content.pm.PackageManager.PERMISSION_GRANTED)throw new IllegalArgumentException("当前设备不允许页面重启，请手动重启。");
+  run("settings","put","global","wifi_on","0");
+  automatic=true;bootPending=false;persist();mode="rebooting";message="设备即将重启，系统启动满 1 分钟且就绪后开始连接 Wi-Fi";
+  guarded(()->context.getSystemService(android.os.PowerManager.class).reboot(null));
  }
  static void reportFailure(Exception e){System.err.println("network_operation_failed="+e.getClass().getSimpleName());for(StackTraceElement frame:e.getStackTrace())if(frame.getClassName().startsWith("com.airsim.f50wifi"))System.err.println(frame);}
- void guarded(RunnableWithException action){control.schedule(()->{try{action.run();}catch(Exception e){reportFailure(e);lastError="网络操作未完成，请重试；USB 管理仍可用。";try{hotspot(lastError);}catch(Exception ignored){mode="error";message="热点恢复失败，请通过 USB 检查设备";}}},1500,TimeUnit.MILLISECONDS);}
+ void guarded(RunnableWithException action){operationPending=true;control.schedule(()->{synchronized(this){try{action.run();}catch(Exception e){reportFailure(e);lastError="网络操作未完成，请重试；USB 管理仍可用。";try{hotspot(lastError);}catch(Exception ignored){mode="error";message="热点恢复失败，请通过 USB 检查设备";}}finally{operationPending=false;}}},1500,TimeUnit.MILLISECONDS);}
  interface RunnableWithException{void run()throws Exception;}
- JSONObject action(String path,JSONObject in)throws Exception {
+ synchronized JSONObject action(String path,JSONObject in)throws Exception {
+  if(operationPending||mode.equals("rebooting")||mode.equals("recovering")||mode.equals("connecting"))throw new IllegalArgumentException("设备正在切换，请等待完成后再操作。");
   switch(path){
-   case "/api/scan": boolean accepted=wifi.startScan();return new JSONObject().put("accepted",accepted).put("networks",scans());
-   case "/api/connect":{
+   case "/api/scan": boolean accepted=wifi.isWifiEnabled()&&wifi.startScan();return new JSONObject().put("accepted",accepted).put("networks",wifi.isWifiEnabled()?scans():new JSONArray());
+   case "/api/save":{
     String ssid=in.optString("ssid"),security=in.optString("security"),password=in.optString("password");PortalRules.validate(ssid,security,password);
     WifiConfiguration config=new WifiConfiguration();config.SSID=PortalRules.quoted(ssid);config.hiddenSSID=in.optBoolean("hidden",false);
     for(WifiConfiguration existing:networks())if(unquote(existing.SSID).equals(ssid)&&security(existing).equals(security)){config.networkId=existing.networkId;break;}
@@ -146,32 +174,45 @@ public final class F50WifiServer {
     else if(security.equals("wpa3")){config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.SAE);config.preSharedKey=PortalRules.quoted(password);}
     else config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
     int id=wifi.addNetwork(config);if(id<0)throw new IllegalArgumentException("保存失败，请核对网络名称和加密方式。");
-    automatic=true;prefer(id);guarded(()->beginConnect(id));return new JSONObject().put("accepted",true);
+    stage(id);if(in.optBoolean("reboot",false))requestReboot();return new JSONObject().put("saved",true).put("rebooting",in.optBoolean("reboot",false));
    }
-   case "/api/select":{int id=in.getInt("id");if(networks().stream().noneMatch(c->c.networkId==id&&!security(c).equals("unsupported")))throw new IllegalArgumentException("该网络已不存在，请刷新列表。");guarded(()->beginConnect(id));return new JSONObject().put("accepted",true);}
+   case "/api/select":{int id=in.getInt("id");if(networks().stream().noneMatch(c->c.networkId==id&&!security(c).equals("unsupported")))throw new IllegalArgumentException("该网络已不存在，请刷新列表。");stage(id);return new JSONObject().put("saved",true);}
    case "/api/forget":{int id=in.getInt("id");WifiInfo current=wifi.getConnectionInfo();if(connected()&&current.getNetworkId()==id)throw new IllegalArgumentException("请先连接其他网络，再移除当前网络。");if(!wifi.removeNetwork(id))throw new IllegalArgumentException("没有移除该网络，请刷新后重试。");if(selected==id)prefer(-1);else persist();return new JSONObject().put("ok",true);}
    case "/api/automatic":automatic=in.getBoolean("enabled");persist();return new JSONObject().put("ok",true);
-   case "/api/retry":guarded(()->beginConnect(-1));return new JSONObject().put("accepted",true);
+   case "/api/reboot":requestReboot();return new JSONObject().put("accepted",true);
+   case "/api/connect":case "/api/retry":throw new IllegalArgumentException("配网流程已更新，请刷新页面后保存并重启。");
    case "/api/hotspot":guarded(()->hotspot(""));return new JSONObject().put("accepted",true);
    default:throw new IllegalArgumentException("未知操作。");
   }
  }
- void tick(){try{
+ synchronized void tick(){try{
   long now=android.os.SystemClock.elapsedRealtime();
-  if(bootPending){if(now<160000){message="开机准备中，稍后连接已保存网络";return;}bootPending=false;if(automatic&&!networks().isEmpty())beginConnect(preferredId());else hotspot("");return;}
+  if(operationPending||mode.equals("rebooting"))return;
+  if(bootPending){
+   boolean ready=run("getprop","sys.boot_completed").equals("1")&&run("getprop","sys.usb.state").contains("adb")&&new File("/dev/f50-ifconfig-ready").exists();
+   if(!ready){if(now<180000){message="等待设备完成启动，准备好后自动连接 Wi-Fi";return;}hotspot("启动准备尚未完成，已保留热点；请稍后重启重试。");return;}
+   // Stock B28 may remember that tethering was stopped before a STA reboot.
+   // Explicitly offer the setup AP before the one-minute transition. Do not
+   // disturb a STA attempt when init merely restarts this process mid-connect.
+   if(!bootHotspotReady){if(!wifi.isWifiEnabled()&&!run("getprop","init.svc.hostapd").equals("running"))tether(true);bootHotspotReady=true;}
+   if(now<60000){message="开机准备中，系统启动满 1 分钟后尝试指定 Wi-Fi";return;}
+   if(automatic&&preferredId()>=0){
+    beginConnect(preferredId());
+   }else hotspot("");
+   return;
+  }
   if(connected()){
-   if(!mode.equals("connected")){run("settings","put","global","wifi_on","0");enableAll();lastError="";}
+   if(!mode.equals("connected")){run("settings","put","global","wifi_on","0");lastError="";}
    mode="connected";message="已连接";disconnectedAt=0;return;
   }
-  if(mode.equals("starting")){mode=wifi.isWifiEnabled()?"connecting":"hotspot";attemptStarted=now;hotspotSince=now;}
+  if(mode.equals("starting")){if(!wifi.isWifiEnabled()){hotspot("");return;}mode="connecting";attemptStarted=now;}
   if(mode.equals("connecting")){
    if(now-attemptStarted>90000){hotspot("未能连接。请核对密码、信号和网络认证要求。");return;}
    if((now-attemptStarted)/3000%5==0)wifi.startScan();
-   if(now-attemptStarted>35000)enableAll(); // Another saved network may still work.
   }else if(mode.equals("connected")){
    if(disconnectedAt==0)disconnectedAt=now;
-   if(now-disconnectedAt>20000)beginConnect(-1);
-  }else if(mode.equals("hotspot")&&automatic&&!networks().isEmpty()&&now-hotspotSince>300000&&now-lastVisit>120000)beginConnect(-1);
+   if(now-disconnectedAt>20000)beginConnect(preferredId());
+  }
  }catch(SecurityException e){reportFailure(e);mode="error";message="网络权限需要检查，已停止自动切换";}catch(Exception e){reportFailure(e);try{hotspot("自动连接未完成，已返回本地配置。");}catch(Exception ignored){mode="error";message="需要通过 USB 检查网络服务";}}}
  public static void main(String[] args)throws Exception {
   Thread.currentThread().setUncaughtExceptionHandler((thread,error)->{error.printStackTrace();System.exit(1);});

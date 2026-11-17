@@ -4,7 +4,7 @@
 web
 
 ## Users and purpose
-设备所有者用 iPhone Safari 在本地配置 F50 Pro 的上游 Wi-Fi。需要保存多个网络，重启自动连接可用的已保存网络，同时保持 USB ADB 可用。
+设备所有者用 iPhone Safari 在本地配置 F50 Pro 的上游 Wi-Fi。先连接设备原热点，填写并保存目标网络，点击“保存并重启”后切换指定网络；连接失败恢复并保持热点。可保存多个网络但仅自动连接指定目标，USB ADB 在重启后仍可用。
 
 ## Scope
 本页只管理 Wi-Fi，不改变 SIM、AirSIM 配对、USB 组合或固件版本。当前 MU3356 B28 已有客户端补丁和 wlan0 地址保护。无可用网络时返回原热点，让 iPhone 仍能进入设置。页面需登录，不显示已保存网络的密码。

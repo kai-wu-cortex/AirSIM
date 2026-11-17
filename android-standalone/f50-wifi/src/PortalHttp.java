@@ -60,11 +60,10 @@ final class PortalHttp {
   }
   if(method.equals("POST")&&path.equals("/api/login")){
    String password=body.optString("password");if(password.length()>64||!authenticate(password)){error(s,401,"管理密码不正确；连续失败后请等待一分钟。");return;}
-   if(sessions.size()>32)sessions.clear();String key=token();Session session=new Session(token());sessions.put(key,session);json(s,200,new JSONObject().put("csrf",session.csrf),key);return;
+   server.openedSetup();if(sessions.size()>32)sessions.clear();String key=token();Session session=new Session(token());sessions.put(key,session);json(s,200,new JSONObject().put("csrf",session.csrf),key);return;
   }
   String key="";for(String part:headers.getOrDefault("cookie","").split(";")){part=part.trim();if(part.startsWith("f50wifi_session="))key=part.substring(16);}
   Session session=sessions.get(key);if(session==null||System.currentTimeMillis()>session.expires){error(s,401,"请先输入管理密码。");return;}
-  server.lastVisit=android.os.SystemClock.elapsedRealtime();
   if(method.equals("GET")&&path.equals("/api/status")){json(s,200,server.status().put("csrf",session.csrf),null);return;}
   if(method.equals("GET")&&path.equals("/api/networks")){json(s,200,new JSONObject().put("networks",server.scans()),null);return;}
   if(!method.equals("POST")){error(s,404,"页面不存在。");return;}

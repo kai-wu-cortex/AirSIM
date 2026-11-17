@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-16T15:29:29.575116+00:00",
+  "generatedAt": "2026-11-17T00:41:53.437773+00:00",
   "title": "Design System: F50 Pro Wi-Fi 配置页",
   "extensions": {
     "colorMeta": {
@@ -325,16 +325,16 @@
       "name": "主要按钮",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "当前界面中的按钮样式；示例不连接设备。",
-      "html": "<button class=\"ds-primary\">保存并连接</button>",
+      "description": "保存并指定表单中的网络，然后重启；重启后仅连接指定网络，失败恢复并保持热点。示例不连接设备。",
+      "html": "<button class=\"ds-primary\">保存并重启</button>",
       "css": ".ds-primary{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;background:var(--blue,#1659cc);color:var(--surface,#fff);width:100%;}.ds-primary:hover{background:#124db2}.ds-primary:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-primary:active{transform:translateY(1px)}.ds-primary:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-primary:active{transform:none}}"
     },
     {
       "name": "次要按钮",
       "kind": "button",
       "refersTo": "button-secondary",
-      "description": "当前界面中的按钮样式；示例不连接设备。",
-      "html": "<button class=\"ds-secondary\">切换到原热点</button>",
+      "description": "仅保存并指定目标，当前网络保持不变。同款次要按钮也用于单独的“重启并连接指定网络”及原热点恢复操作；示例不连接设备。",
+      "html": "<button class=\"ds-secondary\">仅保存，暂不重启</button>",
       "css": ".ds-secondary{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;background:#eaf0fb;color:var(--blue,#1659cc);}.ds-secondary:hover{background:#dde7fa}.ds-secondary:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-secondary:active{transform:translateY(1px)}.ds-secondary:disabled{opacity:.55;cursor:wait}@media(prefers-reduced-motion:reduce){.ds-secondary:active{transform:none}}"
     },
     {
@@ -381,30 +381,30 @@
       "name": "网络行",
       "kind": "custom",
       "refersTo": "network-row",
-      "description": "示例 SSID，仅演示名称、状态和行内操作的布局。",
-      "html": "<div class=\"ds-row\"><div class=\"ds-row-main\"><div class=\"ds-network-title\">示例网络</div><div class=\"ds-network-detail\">已保存，可自动连接</div></div><div class=\"ds-row-actions\"><button class=\"ds-row-button\">连接</button><button class=\"ds-row-button ds-row-danger\">移除</button></div></div>",
+      "description": "示例 SSID；指定只更新重启目标，不立即切网。目标项显示“已指定”并禁用指定，当前连接项禁用移除，两个状态分别表达。",
+      "html": "<div class=\"ds-row\"><div class=\"ds-row-main\"><div class=\"ds-network-title\">示例网络</div><div class=\"ds-network-detail\">已保存，待选择</div></div><div class=\"ds-row-actions\"><button class=\"ds-row-button\">指定</button><button class=\"ds-row-button ds-row-danger\">移除</button></div></div>",
       "css": ".ds-row{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink,#17233b);padding:14px 0;border-top:1px solid var(--line,#d9e0eb);display:flex;align-items:center;justify-content:space-between;gap:12px}.ds-row-main{min-width:0;flex:1}.ds-network-title{font-weight:600;overflow-wrap:anywhere}.ds-network-detail{font-size:13px;color:var(--muted,#526077);margin-top:2px}.ds-row-actions{display:flex;align-items:center;gap:2px}.ds-row-button{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;min-height:48px;border:0;border-radius:8px;padding:10px 16px;cursor:pointer;font-weight:600;font-size:14px;padding:8px;min-height:44px;background:transparent;white-space:nowrap;color:var(--blue,#1659cc)}.ds-row-danger{color:var(--red,#a32525)}.ds-row-button:hover{background:transparent}.ds-row-button:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}.ds-row-button:active{transform:translateY(1px)}.ds-row-button:disabled{opacity:.55;cursor:wait}@media(max-width:380px){.ds-row-actions{flex-direction:column;gap:0}.ds-row-button{min-height:44px;padding:6px}}@media(prefers-reduced-motion:reduce){.ds-row-button:active{transform:none}}"
     },
     {
       "name": "操作通知",
       "kind": "custom",
       "refersTo": "notice",
-      "description": "可聚焦的 polite live region；本预览不主动滚动。",
-      "html": "<div class=\"ds-notice\" role=\"status\" aria-live=\"polite\" tabindex=\"-1\">连接请求已提交。请让 iPhone 连接目标 Wi-Fi，再打开本页。</div>",
+      "description": "可聚焦的 polite live region；区分保存而不切网与重启联网，说明等待时间和失败恢复入口。主动操作揭示通知，后台轮询不抢占滚动；本预览不主动滚动。",
+      "html": "<div class=\"ds-notice\" role=\"status\" aria-live=\"polite\" tabindex=\"-1\">已保存，设备正在重启。系统启动满 1 分钟且就绪后，关闭热点并连接指定 Wi-Fi。已配置 AirSIM 云端时可通过它连接；要再打开本页，请让 iPhone 连接同一 Wi-Fi，使用路由器分配给设备的 IP 加 :8088。失败时重新连接 F50 原热点，打开 192.168.0.1:8088。</div>",
       "css": ".ds-notice{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;padding:14px 16px;border:1px solid #b9cdef;border-radius:8px;background:#eef4ff;color:#194b91;margin:0 0 20px;overflow-wrap:anywhere}.ds-notice-error{background:#fff3f2;border-color:#e9b9b4;color:var(--red,#a32525)}.ds-notice:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}"
     },
     {
       "name": "复选框标签行",
       "kind": "custom",
       "refersTo": "checkbox-label",
-      "description": "20px 原生复选框位于最小 48px 可点击标签内。",
-      "html": "<label class=\"ds-check\"><input class=\"ds-checkbox\" type=\"checkbox\" checked><span>重启后自动连接已保存网络</span></label>",
+      "description": "20px 原生复选框位于最小 48px 可点击标签内；只控制开机连接指定目标，修改不切换当前网络。",
+      "html": "<label class=\"ds-check\"><input class=\"ds-checkbox\" type=\"checkbox\" checked><span>开机连接指定网络</span></label>",
       "css": ".ds-check{font:16px/1.55 -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;color:var(--ink,#17233b);display:flex;align-items:center;gap:10px;margin:12px 0;min-height:48px;padding:6px 0}.ds-checkbox{width:20px;min-height:20px;margin:0;flex-shrink:0;accent-color:var(--blue,#1659cc)}.ds-checkbox:focus-visible{outline:3px solid var(--blue,#1659cc);outline-offset:3px}"
     }
   ],
   "narrative": {
     "northStar": "手机设置页",
-    "overview": "本规范仅适用于 F50 Pro 的独立本地 Wi-Fi 配置页，不替代 AirSIM 其他界面的设计规范。沿用既定 Operate 方向：白色阅读面、浅蓝灰背景、深色文字与蓝色操作，使用系统字体和原生表单，让 iPhone 用户能直接识别设备状态并完成设置。\n\n文档依据当前 web/index.html 提取，合并原有方向约定。界面优先保证状态、输入、操作反馈和恢复入口清楚可见；没有装饰图像、渐变、外部字体或阴影。它记录界面实现，不构成重启自动连接、热点恢复或 USB ADB 保持可用的真机验收结论。",
+    "overview": "本规范仅适用于 F50 Pro 的独立本地 Wi-Fi 配置页，不替代 AirSIM 其他界面的设计规范。沿用既定 Operate 方向：白色阅读面、浅蓝灰背景、深色文字与蓝色操作，使用系统字体和原生表单，让 iPhone 用户能直接识别设备状态并完成设置。\n\n文档依据当前 web/index.html 提取，合并原有方向约定。界面优先保证状态、输入、操作反馈和恢复入口清楚可见；没有装饰图像、渐变、外部字体或阴影。它记录界面实现，不构成重启后仅连接指定网络、失败恢复并保持热点或 USB ADB 保持可用的真机验收结论。",
     "keyCharacteristics": [
       "单列信息顺序与内联表单，保持本地设置的熟悉感。",
       "蓝色用于操作，绿色与红色用于明确的状态语义。",
@@ -432,14 +432,15 @@
       "Do 保留状态、已保存网络、新网络表单和原热点恢复入口的单列阅读顺序。",
       "Do 保持原生 label、input、select、button 和 details 语义，给键盘焦点清晰的蓝色轮廓。",
       "Do 为长 SSID 和设备状态允许换行，保留 48px 主要触控目标与 44px 行内按钮。",
-      "Do 在用户提交操作后显示可见反馈，并说明可能断开连接时的下一步；让后台轮询保持滚动位置。",
+      "Do 在用户提交操作后显示可见反馈，区分仅保存／指定与重启联网，说明重启等待和失败后返回热点的下一步；让后台轮询保持滚动位置。",
       "Do 使用设备返回的状态，分别说明 Wi-Fi、USB ADB 与待完成的真机验证。"
     ],
     "donts": [
       "Don't 为本地设置页引入外部字体、CDN、装饰图像或渐变。",
       "Don't 把蓝色操作、绿色连接状态和红色错误变成无语义的装饰色。",
       "Don't 显示已保存网络的密码，或让恢复热点入口依赖隐藏导航。",
-      "Don't 将设置页截图或本地构建通过表述为重启自动连接、热点恢复和 USB ADB 的真机验证通过。"
+      "Don't 将仅保存或指定描述为立即切网，也不把其他保存项描述为连接失败后的自动候选。",
+      "Don't 将设置页截图或本地构建通过表述为重启后连接指定网络、失败恢复并保持热点和 USB ADB 的真机验证通过。"
     ]
   }
 }

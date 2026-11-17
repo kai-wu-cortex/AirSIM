@@ -1,6 +1,6 @@
 # AirSIM 全项目 Codex 部署辅助
 
-F50 Pro 本地配网辅助服务见 [使用与恢复说明](android-standalone/f50-wifi/README.md)：针对已修复的 MU3356 B28，以独立管理密码保护本地 `8088` 页面，保存多个 Wi-Fi 并按 SSID／加密方式恢复选择。首次启动服务安装需核验机型限定镜像；USB 更新、回退和实测范围见组件文档。此端口不用于 AirSIM 配对，不改变现有 APK／Relay 版本。
+F50 Pro 本地配网辅助服务见 [使用与恢复说明](android-standalone/f50-wifi/README.md)：针对已修复的 MU3356 B28，以独立管理密码保护本地 `8088` 页面，先连原热点配网，保存后重启才连接指定 Wi-Fi；失败恢复热点等待配置。可保存多个网络，目标按 SSID／加密方式识别。首次启动服务安装需核验机型限定镜像；USB 更新、回退和实测范围见组件文档。此端口不用于 AirSIM 配对，不改变现有 APK／Relay 版本。
 
 2026-10-31 发布准备：Apps `v0.9.8.20`，Android `0.9.8.20 (125)`、iOS／Watch／Live Activity `0.9.8 (152)`，见 `docs/releases/0.9.8.20.md`。用户授权本轮提交推送 VoBLE、GitHub Release 与 TestFlight 上传；不部署 Worker、不发布 Linux Agent、不改变现有 Latest 标记。TestFlight 必须使用 production APNs，上传／处理／外测状态分开记录。以下版本和授权仅为历史记录，不能扩展未来任务权限。
 
