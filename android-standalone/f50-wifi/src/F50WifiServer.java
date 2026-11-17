@@ -25,6 +25,8 @@ public final class F50WifiServer {
  volatile boolean bootPending; boolean operationPending,bootHotspotReady;
  JSONObject settings;
  WifiManager.MulticastLock multicast;
+ final AirSimSupervisor airSim;
+ String lastBootReadiness="";
  F50WifiServer(File dir, boolean boot)throws Exception {
   directory=dir; if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException("settings directory unavailable");
   Class<?> type=Class.forName("android.app.ActivityThread");
@@ -44,6 +46,7 @@ public final class F50WifiServer {
   // Android networkId is reassigned across reboot. Persist the profile identity.
   for(WifiConfiguration c:networks())if(unquote(c.SSID).equals(preferredSsid)&&security(c).equals(preferredSecurity))selected=c.networkId;
   bootPending=boot&&!setupBootId.equals(bootId)&&!connected();
+  airSim=new AirSimSupervisor(this);
  }
  void persist()throws Exception {synchronized(storageLock){
   settings.remove("preferred_network");settings.put("automatic",automatic).put("preferred_ssid",preferredSsid).put("preferred_security",preferredSecurity).put("setup_boot_id",setupBootId);
@@ -68,6 +71,7 @@ public final class F50WifiServer {
  String address(){try {NetworkInterface n=NetworkInterface.getByName("wlan0"); if(n!=null)for(InetAddress a:Collections.list(n.getInetAddresses()))if(a instanceof Inet4Address&&!a.isLinkLocalAddress())return a.getHostAddress();}catch(Exception ignored){}return "";}
  boolean hasRoute(){try{return run("ip","-4","route","show","table","wlan0").lines().anyMatch(line->line.startsWith("default "));}catch(Exception e){return false;}}
  boolean connected(){WifiInfo info=wifi.getConnectionInfo();return wifi.isWifiEnabled()&&info!=null&&info.getSupplicantState()==SupplicantState.COMPLETED&&info.getNetworkId()>=0&&!address().isEmpty()&&hasRoute();}
+ String usbHostState(){try{File[] controllers=new File("/sys/class/udc").listFiles();if(controllers!=null&&controllers.length>0)return read(new File(controllers[0],"state")).trim();}catch(Exception ignored){}return "unknown";}
  String security(WifiConfiguration c){return c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.SAE)?"wpa3":c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA_PSK)?"wpa2":c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA_EAP)||c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.IEEE8021X)||Arrays.stream(c.wepKeys).anyMatch(Objects::nonNull)?"unsupported":"open";}
  JSONObject status()throws Exception {
   WifiInfo info=wifi.getConnectionInfo(); boolean ready=connected();
@@ -77,6 +81,7 @@ public final class F50WifiServer {
   return new JSONObject().put("mode",mode.equals("rebooting")?mode:ready?"connected":mode).put("message",mode.equals("rebooting")?message:ready?"已连接，可通过此网络访问设备":message).put("error",lastError)
    .put("ssid",ready?unquote(info.getSSID()):"").put("ip",ready?address():"").put("automatic",automatic)
    .put("target_ssid",preferredSsid).put("can_reboot",preferredId()>=0)
+   .put("uptime_seconds",android.os.SystemClock.elapsedRealtime()/1000).put("usb_host_state",usbHostState()).put("airsim_bridge",airSim.status())
    .put("hotspot_ssid",apName).put("saved",saved).put("usb_adb",run("getprop","sys.usb.config").contains("adb"))
    .put("local_url","http://f50wifi.local:8088").put("setup_url","http://192.168.0.1:8088");
  }
@@ -189,7 +194,12 @@ public final class F50WifiServer {
   long now=android.os.SystemClock.elapsedRealtime();
   if(operationPending||mode.equals("rebooting"))return;
   if(bootPending){
-   boolean ready=run("getprop","sys.boot_completed").equals("1")&&run("getprop","sys.usb.state").contains("adb")&&new File("/dev/f50-ifconfig-ready").exists();
+   boolean systemReady=run("getprop","sys.boot_completed").equals("1"),guardReady=new File("/dev/f50-ifconfig-ready").exists();
+   // The verified guard is installed after USB setup. A connected USB host is
+   // not a prerequisite for Wi-Fi or AirSIM when powered by a charger.
+   boolean ready=systemReady&&guardReady;
+   String readiness="system="+systemReady+" guard="+guardReady+" usb="+run("getprop","sys.usb.state")+" host="+usbHostState();
+   if(!readiness.equals(lastBootReadiness)){System.out.println("boot_readiness uptime="+(now/1000)+" "+readiness);lastBootReadiness=readiness;}
    if(!ready){if(now<180000){message="等待设备完成启动，准备好后自动连接 Wi-Fi";return;}hotspot("启动准备尚未完成，已保留热点；请稍后重启重试。");return;}
    // Stock B28 may remember that tethering was stopped before a STA reboot.
    // Explicitly offer the setup AP before the one-minute transition. Do not
@@ -220,6 +230,7 @@ public final class F50WifiServer {
   Looper.prepareMainLooper();
   F50WifiServer server=new F50WifiServer(new File(args[0]),args.length>1&&args[1].equals("--boot"));
   PortalHttp http=new PortalHttp(server);http.start();
+  server.airSim.start();
   server.multicast=server.wifi.createMulticastLock("F50WifiSetup");server.multicast.setReferenceCounted(false);server.multicast.acquire();
   new LocalName(server).start();server.control.scheduleWithFixedDelay(server::tick,1,3,TimeUnit.SECONDS);
   System.out.println("F50 Wi-Fi setup listening on local port 8088");Looper.loop();
