@@ -1,5 +1,7 @@
 # AirSIM Android Standalone
 
+未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](../docs/f50pro-cloud-hangup.md)。
+
 2026-11-08：[Apps v0.9.8.24](../docs/releases/0.9.8.24.md)，Android Standalone `0.9.8.24（135）`。包含云端音频缓冲、兼容端短信加密、SIM 与未接通知和运营商语音开关；AVF Linux Agent 未更新，不能仅通过更新 Bridge 获得新媒体能力。发布及实机验证范围见说明；以下旧版本记录保留追溯。
 
 ## 通用安卓应用与机型适配

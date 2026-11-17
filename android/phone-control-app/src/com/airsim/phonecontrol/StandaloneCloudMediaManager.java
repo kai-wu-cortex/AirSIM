@@ -153,6 +153,10 @@ final class StandaloneCloudMediaManager implements Closeable {
             return;
         }
         if (descriptor != null) {
+            // HTTP lifecycle storage / Live Activity updates do not deliver a
+            // terminal media control to iPhone. Send the native terminal fact
+            // on this call's authenticated socket before HTTP or socket close.
+            if ("ended".equals(state)) notifyEnded(descriptor);
             String phase = phase(state);
             if (!phase.isEmpty()) {
                 JSONObject lifecycle = identity(registration).put("event", "call_state")
@@ -271,6 +275,14 @@ final class StandaloneCloudMediaManager implements Closeable {
                 active = null;
             }
         }
+    }
+
+    private void notifyEnded(Descriptor descriptor) {
+        CloudSession session;
+        synchronized (lock) {
+            session = active != null && active.descriptor.same(descriptor) ? active : null;
+        }
+        if (session != null) session.notifyEnded();
     }
 
     private final InetSocketAddress pcmEndpoint = new InetSocketAddress("127.0.0.1", 7580);
@@ -553,6 +565,20 @@ final class StandaloneCloudMediaManager implements Closeable {
                     .put("call_uuid", descriptor.callUUID).put("generation", descriptor.generation);
             if (!message.isEmpty()) result.put("message", message);
             return result.toString();
+        }
+
+        void notifyEnded() {
+            StandaloneWebSocket owner = webSocket;
+            if (!running || owner == null || !relayGeneration.isCurrent()) return;
+            try {
+                owner.writeText(status("ended", ""));
+                BridgeLog.info("standalone_cloud_terminal_control_sent");
+            } catch (Exception error) {
+                // Keep the existing HTTP retry / cleanup path even if the
+                // media socket was already lost. Never manufacture a new call.
+                BridgeLog.info("standalone_cloud_terminal_control_failed type="
+                        + error.getClass().getSimpleName());
+            }
         }
 
         @Override public synchronized void close() {

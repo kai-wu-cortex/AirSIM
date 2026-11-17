@@ -16,6 +16,9 @@ public final class CloudCallManagerTests {
         lateOutgoingCannotBindUnownedSession("active");
         otherCallCannotEndOwnedSession();
         ownEndedClosesSession();
+        endedControlPrecedesHTTPAndUsesOwnedIdentity();
+        terminalControlFailureKeepsCleanup();
+        genericCloseDoesNotClaimRemoteHangup();
         droppedEndedClosesOnlyOwner();
         pendingDialBindsOnlyUniqueNewMatchingCall();
         cachedDialCannotRecreateEndedSession();
@@ -349,6 +352,52 @@ public final class CloudCallManagerTests {
             f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
             check(f.active() == null && f.relay.states.size() == 1, "owner ended must close and notify");
             check("new-cloud-call".equals(f.relay.states.get(0).optString("call_id")), "Relay identity must stay fixed");
+        }
+    }
+
+    private static void endedControlPrecedesHTTPAndUsesOwnedIdentity() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            set(f.active(), "webSocket", socket);
+            f.manager.handleCallEvent(registration(), event("other", "incoming", "ended"), f.relay);
+            f.manager.handleCallEvent(registration(), event("owner", "outgoing", "active"), f.relay);
+            check(socket.text.isEmpty(), "another call or ACTIVE cannot send terminal control");
+            f.relay.onState = () -> {
+                check(socket.text.size() == 1 && !socket.closed, "terminal control must precede HTTP and close");
+                throw new java.io.IOException("synthetic HTTP failure");
+            };
+            try {
+                f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+                throw new AssertionError("HTTP failure expected");
+            } catch (java.io.IOException expected) {}
+            var control = new JSONObject(socket.text.get(0));
+            check("ended".equals(control.optString("status")), "iOS 176 terminal control required");
+            check("new-cloud-call".equals(control.optString("call_id"))
+                    && "11111111-1111-4111-8111-111111111111".equals(control.optString("call_uuid"))
+                    && control.optLong("generation") == 1, "full exact lifecycle identity required");
+            f.relay.onState = null;
+            f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+            check(f.active() == null && socket.closed, "HTTP retry must still clean up owner");
+        }
+    }
+
+    private static void terminalControlFailureKeepsCleanup() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            socket.failWrites = true;
+            set(f.active(), "webSocket", socket);
+            f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+            check(f.active() == null && socket.closed && f.relay.states.size() == 1,
+                    "lost socket must not prevent HTTP terminal / cleanup");
+        }
+    }
+
+    private static void genericCloseDoesNotClaimRemoteHangup() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            set(f.active(), "webSocket", socket);
+            f.manager.close();
+            check(socket.closed && socket.text.isEmpty(), "ordinary shutdown is not a native hangup");
         }
     }
 

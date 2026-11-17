@@ -1,5 +1,7 @@
 # AirSIM AVF Linux Agent 安装与无损排障
 
+未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](f50pro-cloud-hangup.md)。
+
 未发布源码已适配 [Relay v2 设备定向协议](relay-agent-routing.md)，不是新的 Debian Release。缺 AndroidAgentID 的旧配置需补全原配对，不从号码生成身份。先更新 Relay 后再升级 Agent；本轮未触碰 installerd 或现网。
 
 候选 build 85 的[同网 VoWLAN 恢复](vowlan-network-return.md)修改安卓 App 与 iOS 客户端，不要求升级本指南的 Linux Agent 或部署 Relay。保留既有认证、固定模式与通话链路，不能以构建通过替代锁屏／回家真机验收。候选版尚未发布。

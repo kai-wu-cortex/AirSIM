@@ -1,4 +1,6 @@
 AIRSIM PROJECT CONTEXT
+
+未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](docs/f50pro-cloud-hangup.md)。
 ======================
 
 2026-10-31 release preparation: Apps v0.9.8.20, Android 0.9.8.20 (125), iOS/Watch/Live Activity 0.9.8 (152). See docs/releases/0.9.8.20.md. This turn authorizes committing/pushing VoBLE, GitHub Release and TestFlight upload, not Worker deployment or Linux Agent release. Preserve the existing Latest marker. Use production APNs for TestFlight; upload, processing, beta review and tester availability are separate. Historical authorization below does not authorize future operations.
