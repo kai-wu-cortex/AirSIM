@@ -18,6 +18,7 @@ public final class VoBLEPCMBridgeSession implements Closeable {
     public interface Duplex extends Closeable {
         InputStream input() throws IOException;
         OutputStream output() throws IOException;
+        default void handshakeComplete() throws IOException {}
     }
 
     public interface Connector { Duplex connect(InetSocketAddress endpoint) throws IOException; }
@@ -26,6 +27,7 @@ public final class VoBLEPCMBridgeSession implements Closeable {
     private final InputStream input;
     private final OutputStream output;
     private volatile boolean ready;
+    private boolean receiveOnly;
 
     private VoBLEPCMBridgeSession(Duplex duplex, InputStream input, OutputStream output) {
         this.duplex = duplex;
@@ -36,16 +38,24 @@ public final class VoBLEPCMBridgeSession implements Closeable {
 
     public static VoBLEPCMBridgeSession open(InetSocketAddress endpoint, Connector connector)
             throws IOException {
+        return open(endpoint, connector, false);
+    }
+
+    public static VoBLEPCMBridgeSession open(InetSocketAddress endpoint, Connector connector, boolean receiveOnly)
+            throws IOException {
         if (endpoint == null || connector == null) throw new IOException("PCM endpoint is unavailable");
         Duplex duplex = connector.connect(endpoint);
         try {
             InputStream input = duplex.input();
             OutputStream output = duplex.output();
-            output.write(HELLO);
+            output.write(receiveOnly ? "AIRSIMRX01\n".getBytes(StandardCharsets.US_ASCII) : HELLO);
             output.flush();
             byte[] response = readExactly(input, READY.length);
             if (!Arrays.equals(response, READY)) throw new IOException("PCM handshake failed");
-            return new VoBLEPCMBridgeSession(duplex, input, output);
+            duplex.handshakeComplete();
+            var session = new VoBLEPCMBridgeSession(duplex, input, output);
+            session.receiveOnly = receiveOnly;
+            return session;
         } catch (IOException | RuntimeException error) {
             try { duplex.close(); } catch (IOException ignored) {}
             throw error;
@@ -58,9 +68,11 @@ public final class VoBLEPCMBridgeSession implements Closeable {
             socket.connect(endpoint, 3_000);
             socket.setTcpNoDelay(true);
             socket.setKeepAlive(true);
+            socket.setSoTimeout(5_000);
             return new Duplex() {
                 @Override public InputStream input() throws IOException { return socket.getInputStream(); }
                 @Override public OutputStream output() throws IOException { return socket.getOutputStream(); }
+                @Override public void handshakeComplete() throws IOException { socket.setSoTimeout(0); }
                 @Override public void close() throws IOException { socket.close(); }
             };
         };
@@ -71,7 +83,9 @@ public final class VoBLEPCMBridgeSession implements Closeable {
         if (!ready) throw new IOException("PCM session is closed");
         return input;
     }
+    public boolean receiveOnly() { return receiveOnly; }
     public OutputStream output() throws IOException {
+        if (receiveOnly) throw new IOException("receive-only session forbids uplink");
         if (!ready) throw new IOException("PCM session is closed");
         return output;
     }

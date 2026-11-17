@@ -2,6 +2,8 @@
 
 2026-11-04，VoBLE 工作树，Android Standalone Debug 130。
 
+> 此文保留当时的 Redmi 9 实机调查记录。2026-11-05 的 develop 已取消早期媒体厂商/型号白名单，并增加 VoBLE 与云端协商；最新范围、兼容边界与验收见 [全连接模式早期媒体](handoff/2026-11-05-all-transport-early-media.md)。以下旧版限制不代表当前代码。
+
 ## 实机基线与本次范围
 
 用户已确认 Debug 129 + 官方 Shizuku 13.5.4 下，Redmi 9 与 iPhone 的通话双向都有声音。这是用户手动通话的反馈，不代表所有联发科设备已兼容。

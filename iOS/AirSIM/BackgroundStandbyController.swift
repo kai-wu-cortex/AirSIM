@@ -191,6 +191,9 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
             completionHandler(.noData)
             return
         }
+        if userInfo["event"] as? String == "call_owner" {
+            IncomingCallNotifier.shared.reconcilePush(userInfo)
+        }
         if userInfo["event"] as? String == "call_owner",
            let owner = userInfo["owner"] as? String,
            owner == "watch" || owner == "android" {
@@ -248,6 +251,15 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        let info = notification.request.content.userInfo
+        if info["event"] as? String == "call_owner" {
+            IncomingCallNotifier.shared.reconcilePush(info)
+            completionHandler(CallNotificationTruth.isMissedPush(info) ? [.banner, .list] : [])
+            return
+        }
+        if info["event"] as? String == "missed_call" {
+            completionHandler([.banner, .list]); return
+        }
         if notification.request.content.userInfo["event"] as? String == "other_android_incoming" {
             completionHandler([.banner, .list]); return
         }
@@ -276,14 +288,16 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         }
         if response.notification.request.content.userInfo["event"] as? String == "incoming_sms" {
             let userInfo = response.notification.request.content.userInfo
-            if let pushed = try? IncomingRemoteSMS(userInfo: userInfo) {
+            let pushed = try? IncomingRemoteSMS(userInfo: userInfo)
+            if let pushed {
                 SMSNotificationCoordinator.shared.markPush(agentID: pushed.agentID,
                                                             deliveryID: pushed.deliveryID)
+                if persistRemoteSMS(pushed) {
+                    NotificationCenter.default.post(name: .airsimRemoteSMSReceived, object: nil)
+                }
             }
-            if let pushed = try? IncomingRemoteSMS(userInfo: userInfo), persistRemoteSMS(pushed) {
-                NotificationCenter.default.post(name: .airsimRemoteSMSReceived, object: nil)
-            }
-            let sender = userInfo["sender"] as? String
+            // Encrypted pushes carry no plaintext sender; the decrypted one opens the conversation.
+            let sender = pushed?.sender ?? userInfo["sender"] as? String
             if let sender { IncomingSMSPresentationRequest.markPending(sender: sender) }
             NotificationCenter.default.post(
                 name: .airsimOpenSMSConversation,
@@ -302,9 +316,8 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         }
         guard actionIdentifier == IncomingCallNotification.answerActionIdentifier
                 || actionIdentifier == IncomingCallNotification.rejectActionIdentifier,
-              let callID = response.notification.request.content.userInfo[
-                  IncomingCallNotification.callIDKey
-              ] as? String else {
+              let callID = (response.notification.request.content.userInfo["action_call_id"]
+                ?? response.notification.request.content.userInfo[IncomingCallNotification.callIDKey]) as? String else {
             completionHandler()
             return
         }
@@ -360,15 +373,10 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
     private func persistRemoteSMS(_ pushed: IncomingRemoteSMS) -> Bool {
         // 超长内容在 APNs payload 中只带预览，等待下次与 Agent 同步完整正文，避免本地出现两条。
         guard !pushed.contentTruncated else { return false }
-        guard !historyStore.visibleMessages([pushed.message]).isEmpty else { return false }
-        var messages = historyStore.loadMessages()
-        guard !messages.contains(where: { $0.id == pushed.message.id }) else { return false }
-        messages.append(pushed.message)
-        messages.sort { $0.timestamp > $1.timestamp }
-        if messages.count > 2_000 {
-            messages = Array(messages.prefix(2_000))
+        let saved = PairedAndroidDeviceStore.withSMSIdentitySnapshot { current in
+            historyStore.ingestMessages([pushed.message], legacySourceAgentID: current.uniqueAgentID)
         }
-        guard historyStore.saveMessages(messages) else { return false }
+        guard let saved, saved.changed else { return false }
         // A background notification need not create a SwiftUI scene/AppModel.
         // Refresh counts from durable state without starting any connection.
         let store = AirSIMWidgetStore()
@@ -440,12 +448,32 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
         try await api.dial(number: number, operationID: intentID)
     }
     func callKitPrepareAudioSession() throws {
-        if CloudModePreference.isEnabled(),
+        if ConnectionModePreference.selected() == .bluetooth,
+           CallKitController.shared.currentIncomingPush?.isVirtual != true {
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat,
+                                                           options: [.allowBluetoothHFP])
+            return
+        }
+        if ConnectionModePreference.selected() != .bluetooth, CloudModePreference.isEnabled(),
            CallKitController.shared.currentIncomingPush?.authenticatedMediaURL != nil {
             try IPhoneCloudCallSession.shared.prepareAudioForCallKit()
         }
     }
     func callKitAnswer(origin: CallAnswerOrigin) async throws {
+        if ConnectionModePreference.selected() == .bluetooth,
+           CallKitController.shared.currentIncomingPush?.isVirtual != true {
+            let uuid = CallKitController.shared.currentSystemCallUUID
+            for _ in 0..<25 {
+                guard !Task.isCancelled, let uuid,
+                      CallKitController.shared.currentSystemCallUUID == uuid else { throw CancellationError() }
+                if let model = CallKitController.shared.handler as? AppModel {
+                    try await model.callKitAnswer(uuid: uuid, origin: origin)
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            throw CallKitBridgeError.bluetoothUnavailable
+        }
         if let pushedCall = CallKitController.shared.currentIncomingPush,
            pushedCall.isVirtual {
             try VirtualCallTTSController.shared.prepare(pushedCall)
@@ -460,6 +488,15 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
         }
     }
     func callKitEnd() async throws {
+        if ConnectionModePreference.selected() == .bluetooth,
+           CallKitController.shared.currentIncomingPush?.isVirtual != true {
+            guard let model = CallKitController.shared.handler as? AppModel,
+                  let uuid = CallKitController.shared.currentSystemCallUUID else {
+                throw CallKitBridgeError.bluetoothUnavailable
+            }
+            try await model.callKitEnd(uuid: uuid)
+            return
+        }
         if VirtualCallTTSController.shared.isPrepared
             || CallKitController.shared.currentIncomingPush?.isVirtual == true {
             VirtualCallTTSController.shared.stop()
@@ -694,9 +731,52 @@ final class BackgroundStandbyController {
     }
 }
 
+/// Only explicit terminal evidence may label a notification as missed.
+enum CallNotificationTruth {
+    static func isMissed(_ call: CallRecord) -> Bool {
+        call.isTerminal && call.direction == "incoming" && call.missed && call.connectedAt == nil
+    }
+    static func isMissedPush(_ info: [AnyHashable: Any]) -> Bool {
+        info["event"] as? String == "call_owner" && info["phase"] as? String == "ended"
+            && info["direction"] as? String == "incoming" && info["missed"] as? Bool == true
+            && info["notification_status"] as? String == "missed"
+    }
+    // An absent agent must never act as a wildcard across paired devices.
+    static func matches(_ left: [AnyHashable: Any], _ right: [AnyHashable: Any]) -> Bool {
+        guard let agent = left["agent_id"] as? String, !agent.isEmpty,
+              agent == right["agent_id"] as? String,
+              let call = left["call_id"] as? String, !call.isEmpty,
+              call == right["call_id"] as? String else { return false }
+        if let a = left["generation"] as? NSNumber, let b = right["generation"] as? NSNumber, a != b { return false }
+        if let a = left["call_uuid"] as? String, let b = right["call_uuid"] as? String, a != b { return false }
+        return true
+    }
+    static func key(_ info: [AnyHashable: Any]) -> String? {
+        guard let agent = info["agent_id"] as? String, !agent.isEmpty,
+              let call = info["call_id"] as? String, !call.isEmpty else { return nil }
+        // Native Android IDs are UUIDs, never reused across calls. Legacy history
+        // without a generation can therefore match its cloud notification safely.
+        return Data(agent.utf8).base64EncodedString() + ":" + Data(call.utf8).base64EncodedString()
+    }
+    static func info(_ call: CallRecord) -> [AnyHashable: Any] {
+        ["agent_id": call.sourceAgentID ?? "", "call_id": call.androidID ?? call.sourceCallID ?? call.id]
+    }
+    static func body(number: String?, callerName: String?, slotIndex: Int?) -> String {
+        let number = number.flatMap { $0.isEmpty ? nil : $0 } ?? "未知号码"
+        let name = callerName.flatMap { $0.isEmpty ? nil : $0 }
+        var parts = [name == nil || name == number ? number : "\(name!) · \(number)"]
+        if let slotIndex, slotIndex >= 0 { parts.append("SIM \(slotIndex + 1)") }
+        return parts.joined(separator: " · ")
+    }
+}
+
 /// App 在后台检测到模块来电后发送本地通知；不依赖 APNs 或远程服务器。
 @MainActor
 final class IncomingCallNotifier {
+    static let shared = IncomingCallNotifier()
+    private let launchedAt = Date()
+    private var missedTasks: [String: Task<Void, Never>] = [:]
+    private var missedIDs = Set(UserDefaults.standard.stringArray(forKey: "airsim.missed-notification.ids.v1") ?? [])
     private(set) var currentCallID: String?
     private var notifiedCallIDs: [String] = []
 
@@ -718,7 +798,93 @@ final class IncomingCallNotifier {
         }
     }
 
-    func update(call: CallRecord?, callerName: String?, appIsActive: Bool) {
+    func reconcilePush(_ info: [AnyHashable: Any]) {
+        guard ["active", "ended"].contains(info["phase"] as? String ?? "") else { return }
+        removeStaleIncoming(info: info)
+        if CallNotificationTruth.isMissedPush(info), let key = CallNotificationTruth.key(info) {
+            missedTasks.removeValue(forKey: key)?.cancel()
+            remember(key)
+            let center = UNUserNotificationCenter.current()
+            center.removeDeliveredNotifications(withIdentifiers: [localMissedID(key)])
+            center.removePendingNotificationRequests(withIdentifiers: [localMissedID(key)])
+        }
+    }
+
+    private func localMissedID(_ key: String) -> String {
+        "airsim.missed." + SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    private func remember(_ key: String) {
+        missedIDs.insert(key)
+        if missedIDs.count > 512 { missedIDs = [key] }
+        UserDefaults.standard.set(Array(missedIDs), forKey: "airsim.missed-notification.ids.v1")
+    }
+    private func removeStaleIncoming(info: [AnyHashable: Any]) {
+        let center = UNUserNotificationCenter.current()
+        Task { @MainActor in
+            let delivered = await center.deliveredNotifications()
+            let stale = delivered.filter {
+                [IncomingCallNotification.categoryIdentifier, IncomingCallNotification.mirrorCategoryIdentifier]
+                    .contains($0.request.content.categoryIdentifier)
+                    && CallNotificationTruth.matches(info, $0.request.content.userInfo)
+            }.map { $0.request.identifier }
+            center.removeDeliveredNotifications(withIdentifiers: stale)
+        }
+    }
+
+    func reconcileHistory(_ records: [CallRecord], previous: [CallRecord], callerName: (String?) -> String) {
+        let old = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        for call in records where call.isTerminal && old[call.id] != call {
+            let info = CallNotificationTruth.info(call)
+            removeStaleIncoming(info: info)
+            if let key = CallNotificationTruth.key(info), !CallNotificationTruth.isMissed(call) {
+                missedTasks.removeValue(forKey: key)?.cancel()
+                if call.connectedAt != nil {
+                    remember(key)
+                    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [localMissedID(key)])
+                }
+            }
+            // Never replay imported history on launch. An old Agent's explicit
+            // missed fact remains eligible even when cloud signaling is enabled.
+            guard (call.endedAt ?? call.updatedAt).timeIntervalSinceReferenceDate >= launchedAt.timeIntervalSinceReferenceDate,
+                  CallNotificationTruth.isMissed(call), let key = CallNotificationTruth.key(info),
+                  !missedIDs.contains(key), missedTasks[key] == nil else { continue }
+            let body = CallNotificationTruth.body(number: call.number, callerName: callerName(call.number),
+                slotIndex: call.slotIndex ?? call.slotID)
+            missedTasks[key] = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard let self else { return }
+                defer { self.missedTasks[key] = nil }
+                guard !Task.isCancelled, !self.missedIDs.contains(key) else { return }
+                let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
+                guard !Task.isCancelled, !self.missedIDs.contains(key) else { return }
+                if delivered.contains(where: { CallNotificationTruth.isMissedPush($0.request.content.userInfo)
+                    && CallNotificationTruth.matches(info, $0.request.content.userInfo) }) {
+                    self.remember(key)
+                    return
+                }
+                let content = UNMutableNotificationContent()
+                content.title = "AirSIM 未接来电"
+                content.body = body
+                content.userInfo = info.merging(["event": "missed_call"]) { _, new in new }
+                content.categoryIdentifier = "AIRSIM_MISSED_CALL"
+                // No second ring. Cloud's later alert replaces this local record.
+                do {
+                    try await UNUserNotificationCenter.current().add(UNNotificationRequest(
+                        identifier: self.localMissedID(key), content: content, trigger: nil))
+                    // APNs or corrected history may arrive while add() yields.
+                    if Task.isCancelled || self.missedIDs.contains(key) {
+                        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [self.localMissedID(key)])
+                        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [self.localMissedID(key)])
+                    } else { self.remember(key) }
+                } catch { /* A later history update may retry. */ }
+            }
+        }
+    }
+
+    func update(call: CallRecord?, callerName: String?, appIsActive: Bool, presentIncoming: Bool = true) {
+        if let call, !["incoming", "waiting"].contains(call.state) {
+            removeStaleIncoming(info: CallNotificationTruth.info(call))
+        }
         let nextID = call.flatMap { ["incoming", "waiting"].contains($0.state) ? $0.id : nil }
         if let old = currentCallID, old != nextID {
             let center = UNUserNotificationCenter.current()
@@ -726,7 +892,7 @@ final class IncomingCallNotifier {
             center.removePendingNotificationRequests(withIdentifiers: ["airsim.incoming.\(old)"])
         }
         currentCallID = nextID
-        guard !appIsActive,
+        guard presentIncoming, !appIsActive,
               let call,
               call.direction == "incoming",
               ["incoming", "waiting"].contains(call.state),
@@ -736,15 +902,14 @@ final class IncomingCallNotifier {
         if notifiedCallIDs.count > 32 { notifiedCallIDs.removeFirst() }
 
         let content = UNMutableNotificationContent()
-        let number = call.number?.isEmpty == false ? call.number! : "未知号码"
-        let displayName = callerName?.isEmpty == false ? callerName! : number
         content.title = "AirSIM 来电"
-        // 同时保留姓名和号码，用户可以在锁屏直接确认来电者。
-        content.body = displayName == number ? number : "\(displayName) · \(number)"
+        content.body = CallNotificationTruth.body(number: call.number, callerName: callerName,
+            slotIndex: call.slotIndex ?? call.slotID)
         content.sound = .default
         content.interruptionLevel = .timeSensitive
         content.categoryIdentifier = IncomingCallNotification.categoryIdentifier
-        content.userInfo = [IncomingCallNotification.callIDKey: call.id]
+        content.userInfo = CallNotificationTruth.info(call)
+        content.userInfo["action_call_id"] = call.id
         let request = UNNotificationRequest(
             identifier: "airsim.incoming.\(call.id)",
             content: content,

@@ -48,7 +48,8 @@ public final class IncomingSMSReceiver extends BroadcastReceiver {
                 }
                 if (content.length() == 0) return;
                 long eventTimestamp = timestamp > 0 ? timestamp : System.currentTimeMillis();
-                String id = SMSDeliveryIdentity.id(sender, content.toString(), eventTimestamp);
+                String id = SMSDeliveryIdentity.id(StandaloneAgentStore.currentE2EKey(application),
+                        sender, content.toString(), eventTimestamp);
                 JSONObject event = new JSONObject(WireJson.smsEvent(UUID.randomUUID().toString(),
                         id, sender == null ? "" : sender, content.toString(),
                         Instant.ofEpochMilli(eventTimestamp).toString(),

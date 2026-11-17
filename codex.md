@@ -1,5 +1,9 @@
 # AirSIM 全项目 Codex 部署辅助
 
+F50 Pro 另附[临时 USB 注册诊断工具与 CMHK 对照记录](docs/f50pro-cmhk-diagnostic.md)，独立于 APK/AVF 安装；英国卡无服务尚未修复，不能将双卡启用视为双卡已注册。
+
+未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](docs/f50pro-cloud-hangup.md)。
+
 2026-10-31 发布准备：Apps `v0.9.8.20`，Android `0.9.8.20 (125)`、iOS／Watch／Live Activity `0.9.8 (152)`，见 `docs/releases/0.9.8.20.md`。用户授权本轮提交推送 VoBLE、GitHub Release 与 TestFlight 上传；不部署 Worker、不发布 Linux Agent、不改变现有 Latest 标记。TestFlight 必须使用 production APNs，上传／处理／外测状态分开记录。以下版本和授权仅为历史记录，不能扩展未来任务权限。
 
 未发布试验性功能：NAS／软路由自建域名 TLS 直连见 `docs/self-hosted-tls-direct.md`。支持 HTTPS 域名首次配对，以及已配对设备主动添加 HTTPS／PCM TLS 路由；沿用 Android 私网网关和 HMAC／身份验证。首次配对使用临时 TLS 入口，不直接暴露安卓明文配对或 AVF 内部端口，不新增后台推送。修改时同步 iPhone 与 Watch 的可选 `pcm_tls` 字段，保留旧路由解码、设备绑定、关闭／删除清理及通话路径固定。
@@ -173,7 +177,7 @@ npx wrangler deploy --dry-run --config wrangler.toml
 
 ### iPhone 与 Apple Watch
 
-- 主 App、Watch App、Live Activity、测试 Target 的 Bundle ID 关系正确。
+- 主 App、Watch App、Live Activity、Notification Service Extension、测试 Target 的 Bundle ID 关系正确；主 App 与 Notification Service Extension 共用钥匙串组 `$(AppIdentifierPrefix)airsim.e2e-sms`。
 - Team、证书、provisioning profile、capabilities 和最终签名 entitlement 正确。
 - Relay `ALLOWED_BUNDLE_ID` 与主 App 完全一致。
 - sandbox 和 production token 未混用。

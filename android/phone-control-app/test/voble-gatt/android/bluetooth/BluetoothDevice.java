@@ -1,2 +1,7 @@
 package android.bluetooth;
-public class BluetoothDevice { public String getAddress() { return "fixture-device"; } }
+public class BluetoothDevice {
+    private final String address;
+    public BluetoothDevice() { this("fixture-device"); }
+    public BluetoothDevice(String address) { this.address = address; }
+    public String getAddress() { return address; }
+}

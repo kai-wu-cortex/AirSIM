@@ -8,6 +8,7 @@ public final class RemoteCallMuteLifecycleTests {
     public static void main(String[] args) throws Exception {
         dialingWaitsForAnswerBeforeReducingSamsungOutput();
         ordinaryCallsStayAudible();
+        routeChangePreservesUserCaptureVolume();
         for (String mode : new String[]{"remote_silent", "local_and_push"}) {
             for (String transport : new String[]{"vowlan", "voble", "cloud"}) {
                 remoteLifecycle(mode, transport);
@@ -15,7 +16,7 @@ public final class RemoteCallMuteLifecycleTests {
         }
         ringingIsNotAnsweredOwnership();
         extraNativeCallRestoresOutput();
-        disconnectingRestoresBeforeRemoval();
+        disconnectingRetainsUntilRemoval();
         destroyRestoresOriginalVolume();
         deadBLEPCMRestoresOutput();
         queuedRefreshCannotRemuteAfterDestroy();
@@ -236,6 +237,26 @@ public final class RemoteCallMuteLifecycleTests {
         passed++;
     }
 
+    private static void routeChangePreservesUserCaptureVolume() {
+        ShizukuBridgeManager manager = ShizukuBridgeManager.INSTANCE;
+        try (Fixture f = new Fixture(Call.STATE_ACTIVE)) {
+            manager.output = new LocalOutputMuteController(f.audio,
+                    LocalOutputMuteController.Strategy.PRESERVE_VOLUME);
+            Object owner = new Object();
+            RemoteAudioSessionRegistry.setCloud(owner, true, f.id);
+            f.audio.volume = 9;
+            f.service.onCallAudioStateChanged(null);
+            check(f.audio.volume == 9 && !f.audio.muted,
+                    "route reassertion must respect preserve-volume instead of globally muting");
+            f.call.setStateForTest(Call.STATE_DISCONNECTING);
+            RemoteAudioSessionRegistry.setCloud(owner, false, "");
+            check(f.audio.volume == 9, "teardown hold must not turn preserve into suppression");
+            f.service.onCallRemoved(f.call);
+            check(f.audio.volume == 9 && !f.audio.muted, "manual capture volume survives hangup");
+        } finally { manager.output = new LocalOutputMuteController(manager.platform); }
+        passed++;
+    }
+
     private static void ringingIsNotAnsweredOwnership() {
         try (Fixture f = new Fixture(Call.STATE_RINGING)) {
             Object owner = new Object();
@@ -244,7 +265,9 @@ public final class RemoteCallMuteLifecycleTests {
             f.call.answer(0);
             check(f.audio.muted, "answer state must activate remote output mute");
             f.call.disconnect();
-            check(!f.audio.muted, "terminal call must restore output even before media teardown");
+            check(f.audio.muted, "confirmed teardown retains previous output policy briefly");
+            f.service.onCallRemoved(f.call);
+            check(!f.audio.muted, "native removal restores output immediately");
             RemoteAudioSessionRegistry.setCloud(owner, false, "");
         }
         passed++;
@@ -265,14 +288,17 @@ public final class RemoteCallMuteLifecycleTests {
         passed++;
     }
 
-    private static void disconnectingRestoresBeforeRemoval() {
+    private static void disconnectingRetainsUntilRemoval() {
         try (Fixture f = new Fixture(Call.STATE_ACTIVE)) {
             Object owner = new Object();
             RemoteAudioSessionRegistry.setCloud(owner, true, f.id);
             check(f.audio.muted, "remote call should initially mute");
             f.call.setStateForTest(Call.STATE_DISCONNECTING);
-            check(!f.audio.muted, "disconnecting must never be interpreted as a fresh dialing request");
+            check(f.audio.muted, "disconnecting retains only its previously owned output policy");
             RemoteAudioSessionRegistry.setCloud(owner, false, "");
+            check(f.audio.muted, "PCM release during confirmed teardown must not briefly leak audio");
+            f.service.onCallRemoved(f.call);
+            check(!f.audio.muted && f.audio.volume == 6, "removal restores original volume");
         }
         passed++;
     }

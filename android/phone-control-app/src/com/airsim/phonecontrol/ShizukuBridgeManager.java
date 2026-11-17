@@ -110,6 +110,8 @@ final class ShizukuBridgeManager {
 
     private ShizukuBridgeManager(Context context) {
         app = context.getApplicationContext();
+        try { coordinator.setOutputPolicy(AppConfig.callAudioVolumePolicy(app)); }
+        catch (Exception error) { throw new IllegalStateException(error); }
         muteRetrier = new MuteRequestRetrier(new MuteRequestRetrier.Scheduler() {
             @Override public void execute(Runnable task) { worker.execute(task); }
             @Override public void schedule(Runnable task, long delayMillis) {
@@ -152,6 +154,7 @@ final class ShizukuBridgeManager {
         Shizuku.addBinderDeadListener(binderDead);
         Shizuku.addRequestPermissionResultListener(permissionResult);
         SMSCommandExecutor.setPrivilegedSender(this::sendSms);
+        DefaultCallAccount.setSubscriptionResolver(this::resolveSmsSubscription);
     }
 
     static ShizukuBridgeManager initialize(Context context) {
@@ -410,6 +413,24 @@ final class ShizukuBridgeManager {
         bindPrivilegedService();
     }
 
+    /** Resolve only an exact enabled account through the existing authorized service. */
+    String smsPreflight() {
+        PrivilegedBridgeClient client = privilegedClient;
+        if (client == null) return "unavailable";
+        try { return client.smsPreflight(); }
+        catch (Exception error) { return "error:" + error.getClass().getSimpleName(); }
+    }
+
+    private int resolveSmsSubscription(String key) {
+        // Use only the already-authorized selected privilege channel; never launch
+        // root or request new privileges as a side effect of reading SIM metadata.
+        if (rootTransport != null || channel == PrivilegeChannelPreference.Channel.ROOT) return -1;
+        PrivilegedBridgeClient client = privilegedClient;
+        if (client == null) return -1;
+        try { return client.resolveSmsSubscription(key); }
+        catch (android.os.RemoteException | RuntimeException error) { return -1; }
+    }
+
     /** Read recent inbox rows as shell (Shizuku); null when unavailable. */
     String recentSms(long afterId, long cutoffMillis, int limit) {
         if (rootTransport != null) return null; // Root inbox bridge is not implemented.
@@ -435,11 +456,8 @@ final class ShizukuBridgeManager {
         if (channel == PrivilegeChannelPreference.Channel.ROOT) return "unavailable";
         PrivilegedBridgeClient client = privilegedClient;
         if (client == null) return "unavailable";
-        try {
-            return client.sendSms(destination, body, subscriptionId);
-        } catch (android.os.RemoteException error) {
-            return "error:remote";
-        }
+        return PrivilegedSmsConfirmation.send(app, destination, body, subscriptionId,
+                callbacks -> client.sendSms(destination, body, subscriptionId, callbacks));
     }
 
     boolean dialerRoleAutomationAuthorized() {
@@ -573,6 +591,19 @@ final class ShizukuBridgeManager {
             roleRequestInFlight = false;
         }
         if (deliver) mainHandler.post(() -> callback.onResult(success, detail));
+    }
+
+    void refreshCallAudioVolumePolicy() {
+        worker.execute(() -> {
+            try {
+                coordinator.setOutputPolicy(AppConfig.callAudioVolumePolicy(app));
+                status = coordinator.connected() ? "音量策略已应用 · " + coordinator.lastResult() : "音量策略已保存，等待权限服务连接";
+                BridgeLog.info("call_audio_volume_policy=" + AppConfig.callAudioVolumePolicy(app));
+            } catch (Exception error) {
+                status = "音量策略应用失败，请重新启动权限服务";
+                BridgeLog.error("call_audio_volume_policy_failed", error);
+            }
+        });
     }
 
     void setLocalOutputMuted(boolean muted) {

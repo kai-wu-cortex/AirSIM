@@ -26,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.ArrayDeque;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -60,6 +61,41 @@ public final class VoBLEGattServer implements AutoCloseable {
     private final Map<String, Integer> negotiatedMtus = new ConcurrentHashMap<>();
     private final Map<String, ArrayDeque<Outbound>> outbound = new ConcurrentHashMap<>();
     private final Set<String> sending = new HashSet<>();
+    private final Set<String> audioBatchPeers = new HashSet<>();
+    private final Map<String, Integer> sentFragmentCounts = new HashMap<>();
+    private final Map<String, AudioSendStats> audioSendStats = new HashMap<>();
+    private static final class AudioSendStats {
+        long attempts, accepted, queueFull, notSubscribed, previousFailure, sendRejected;
+        long callbacks, callbackErrors, callbackNanos, maxCallbackNanos, callbacksOver40ms;
+        long sentAtNanos, lastLogNanos;
+        boolean audioInFlight;
+        int lastStatus;
+    }
+
+    private AudioSendStats audioStats(String deviceId) {
+        return audioSendStats.computeIfAbsent(deviceId, ignored -> new AudioSendStats());
+    }
+
+    public synchronized String audioSendSummary(String deviceId) {
+        AudioSendStats s = audioSendStats.get(deviceId);
+        if (s == null) return "available=false";
+        return "attempts=" + s.attempts + " accepted=" + s.accepted + " queue_full=" + s.queueFull
+                + " not_subscribed=" + s.notSubscribed + " previous_failure=" + s.previousFailure
+                + " send_rejected=" + s.sendRejected + " callbacks=" + s.callbacks
+                + " callback_errors=" + s.callbackErrors + " last_status=" + s.lastStatus
+                + " callback_avg_ms=" + (s.callbacks == 0 ? 0 : s.callbackNanos / s.callbacks / 1_000_000)
+                + " callback_max_ms=" + s.maxCallbackNanos / 1_000_000
+                + " callbacks_over_40ms=" + s.callbacksOver40ms
+                + " queued_fragments=" + (outbound.containsKey(deviceId) ? outbound.get(deviceId).size() : 0)
+                + " in_flight=" + sending.contains(deviceId);
+    }
+
+    private void logAudioSendStats(String deviceId, AudioSendStats s) {
+        long now = System.nanoTime();
+        if (now - s.lastLogNanos < 2_000_000_000L) return;
+        s.lastLogNanos = now;
+        com.airsim.phonecontrol.BridgeLog.info("voble_send_stats " + audioSendSummary(deviceId));
+    }
     private final Set<String> notificationFailures = new HashSet<>();
     private final Map<String, VoBLEProtocol.MessageReassembler> inbound = new ConcurrentHashMap<>();
     private final AtomicInteger messageIds = new AtomicInteger();
@@ -75,7 +111,12 @@ public final class VoBLEGattServer implements AutoCloseable {
     private boolean includeAdvertisedName = true;
     private long generation;
 
-    private record Outbound(BluetoothGattCharacteristic characteristic, byte[] value, boolean confirm) {}
+    // Up to 80 ms of audio, including the in-flight packet. Keep the next
+    // frame queued so onNotificationSent can feed the stack immediately rather
+    // than waiting for the PCM producer's 5 ms retry (which can miss a BLE event).
+    private static final int MAX_QUEUED_AUDIO_FRAMES = 4;
+    private record Outbound(BluetoothGattCharacteristic characteristic, byte[] value,
+                            boolean confirm, boolean packetEnd) {}
 
     public VoBLEGattServer(Context context, Listener listener, VoBLEControlChannel channel) {
         this.context = context.getApplicationContext();
@@ -91,14 +132,17 @@ public final class VoBLEGattServer implements AutoCloseable {
         adapter = manager == null ? null : manager.getAdapter();
         if (adapter == null || !adapter.isEnabled() || adapter.getBluetoothLeAdvertiser() == null) return false;
         long token = ++generation;
-        server = manager.openGattServer(context, callback(token));
-        if (server == null) return false;
-        BluetoothGattService service = createService();
-        if (!server.addService(service)) {
-            close();
+        try {
+            server = manager.openGattServer(context, callback(token));
+            if (server == null) { failStart(-1); return false; }
+            BluetoothGattService service = createService();
+            if (!server.addService(service)) { failStart(-2); return false; }
+            return true;
+        } catch (RuntimeException error) {
+            com.airsim.phonecontrol.BridgeLog.info("voble_gatt_start_exception type=" + error.getClass().getSimpleName());
+            failStart(-3);
             return false;
         }
-        return true;
     }
 
     @SuppressLint("MissingPermission")
@@ -142,8 +186,8 @@ public final class VoBLEGattServer implements AutoCloseable {
         try {
             adapter.getBluetoothLeAdvertiser().startAdvertising(settings, data, advertiseCallback);
         } catch (RuntimeException error) {
-            close();
             com.airsim.phonecontrol.BridgeLog.info("voble_gatt_advertising_exception type=" + error.getClass().getSimpleName());
+            failStart(-4);
         }
     }
 
@@ -190,7 +234,7 @@ public final class VoBLEGattServer implements AutoCloseable {
             if (adapter.isEnabled() && adapter.setName(previous)) {
                 com.airsim.phonecontrol.BridgeLog.info("voble_adapter_name_restored");
             }
-        } catch (SecurityException ignored) {
+        } catch (RuntimeException ignored) {
             com.airsim.phonecontrol.BridgeLog.info("voble_adapter_name_restore_rejected");
         }
     }
@@ -232,14 +276,30 @@ public final class VoBLEGattServer implements AutoCloseable {
     @SuppressLint("MissingPermission")
     public synchronized boolean notifyAudioPacket(
             String deviceId, VoBLEProtocol.AudioPacket packet) {
-        if (!channel.isAudioSubscribed(deviceId) || !devices.containsKey(deviceId)) return false;
-        if (notificationFailures.remove(deviceId)) return false;
+        AudioSendStats stats = audioStats(deviceId);
+        logAudioSendStats(deviceId, stats);
+        stats.attempts++;
+        if (!channel.isAudioSubscribed(deviceId) || !devices.containsKey(deviceId)) {
+            stats.notSubscribed++; return false;
+        }
+        if (notificationFailures.remove(deviceId)) { stats.previousFailure++; return false; }
         ArrayDeque<Outbound> queue = outbound.get(deviceId);
-        if (queue != null && queue.stream().anyMatch(
-                value -> value.characteristic == audioDownlink)) return false;
+        if (queue != null && queue.stream().filter(
+                value -> value.characteristic == audioDownlink && value.packetEnd).count()
+                >= MAX_QUEUED_AUDIO_FRAMES) { stats.queueFull++; return false; }
         int packetLength = Math.max(23, negotiatedMtus.getOrDefault(deviceId, 23) - 3);
         List<byte[]> fragments = VoBLEProtocol.encodeAudioFragments(packet, packetLength);
-        return enqueue(deviceId, audioDownlink, fragments, false);
+        boolean accepted = enqueue(deviceId, audioDownlink, fragments, false);
+        if (accepted) stats.accepted++;
+        return accepted;
+    }
+
+    // Called only after authenticated media-start admission. Old clients never
+    // opt in and continue receiving one protocol fragment per ATT notification.
+    public synchronized void setAudioBatching(String deviceId, boolean enabled) {
+        audioSendStats.put(deviceId, new AudioSendStats());
+        if (enabled && devices.containsKey(deviceId)) audioBatchPeers.add(deviceId);
+        else audioBatchPeers.remove(deviceId);
     }
 
     @SuppressLint("MissingPermission")
@@ -268,7 +328,10 @@ public final class VoBLEGattServer implements AutoCloseable {
                                          List<byte[]> values, boolean confirm) {
         if (!devices.containsKey(deviceId) || characteristic == null) return false;
         ArrayDeque<Outbound> queue = outbound.computeIfAbsent(deviceId, ignored -> new ArrayDeque<>());
-        for (byte[] value : values) queue.add(new Outbound(characteristic, value.clone(), confirm));
+        for (int index = 0; index < values.size(); index++) {
+            queue.add(new Outbound(characteristic, values.get(index).clone(), confirm,
+                    index == values.size() - 1));
+        }
         if (!sending.add(deviceId)) return true;
         return sendNext(deviceId);
     }
@@ -280,8 +343,30 @@ public final class VoBLEGattServer implements AutoCloseable {
             sending.remove(deviceId);
             return true;
         }
-        if (send(deviceId, next.characteristic, next.value, next.confirm)) return true;
-        queue.poll();
+        byte[] value = next.value;
+        int count = 1;
+        if (next.characteristic == audioDownlink && !next.confirm && audioBatchPeers.contains(deviceId)) {
+            int limit = Math.min(512, negotiatedMtus.getOrDefault(deviceId, 23) - 3);
+            var batch = new java.io.ByteArrayOutputStream();
+            count = 0;
+            for (Outbound part : queue) {
+                if (part.characteristic != audioDownlink || part.confirm
+                        || batch.size() + part.value.length > limit) break;
+                batch.write(part.value, 0, part.value.length);
+                count++;
+            }
+            if (count > 0) value = batch.toByteArray();
+            else count = 1;
+        }
+        sentFragmentCounts.put(deviceId, count);
+        AudioSendStats stats = audioStats(deviceId);
+        stats.audioInFlight = next.characteristic == audioDownlink;
+        stats.sentAtNanos = System.nanoTime();
+        if (send(deviceId, next.characteristic, value, next.confirm)) return true;
+        if (stats.audioInFlight) stats.sendRejected++;
+        stats.audioInFlight = false;
+        sentFragmentCounts.remove(deviceId);
+        for (int i = 0; i < count; i++) queue.poll();
         sending.remove(deviceId);
         return false;
     }
@@ -353,7 +438,7 @@ public final class VoBLEGattServer implements AutoCloseable {
                 if (!isCurrent(token) || !SERVICE_UUID.equals(service.getUuid())) return;
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     com.airsim.phonecontrol.BridgeLog.info("voble_gatt_service_failed code=" + status);
-                    close();
+                    failStart(status);
                     return;
                 }
                 com.airsim.phonecontrol.BridgeLog.info("voble_gatt_service_ready characteristics=" + service.getCharacteristics().size());
@@ -362,35 +447,44 @@ public final class VoBLEGattServer implements AutoCloseable {
         }
         @Override @SuppressLint("MissingPermission") public void onConnectionStateChange(
                 BluetoothDevice device, int status, int newState) {
-            if (!isCurrent(token)) return;
-            com.airsim.phonecontrol.BridgeLog.info("voble_gatt_connection status=" + status
-                    + " state=" + newState);
-            String id = device.getAddress();
-            if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
-                // One iPhone must own at most one GATT connection. A rotated BLE
-                // address or a stale session otherwise leaves control subscribed on
-                // one link while responses are queued on another.
-                for (Map.Entry<String, BluetoothDevice> entry :
-                        new java.util.ArrayList<>(devices.entrySet())) {
-                    if (entry.getKey().equals(id)) continue;
-                    com.airsim.phonecontrol.BridgeLog.info("voble_gatt_stale_connection_closed");
-                    devices.remove(entry.getKey());
-                    negotiatedMtus.remove(entry.getKey());
-                    outbound.remove(entry.getKey());
-                    inbound.keySet().removeIf(key -> key.startsWith(entry.getKey() + ":"));
-                    channel.disconnect(entry.getKey());
-                    server.cancelConnection(entry.getValue());
+            synchronized (VoBLEGattServer.this) {
+                if (!isCurrent(token)) return;
+                com.airsim.phonecontrol.BridgeLog.info("voble_gatt_connection status=" + status
+                        + " state=" + newState);
+                String id = device.getAddress();
+                if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
+                    // One iPhone must own at most one GATT connection. A rotated BLE
+                    // address or a stale session otherwise leaves control subscribed on
+                    // one link while responses are queued on another.
+                    for (Map.Entry<String, BluetoothDevice> entry :
+                            new java.util.ArrayList<>(devices.entrySet())) {
+                        if (entry.getKey().equals(id)) continue;
+                        com.airsim.phonecontrol.BridgeLog.info("voble_gatt_stale_connection_closed");
+                        devices.remove(entry.getKey());
+                        negotiatedMtus.remove(entry.getKey());
+                        outbound.remove(entry.getKey());
+                        sending.remove(entry.getKey());
+                        sentFragmentCounts.remove(entry.getKey());
+                        audioBatchPeers.remove(entry.getKey());
+                        audioSendStats.remove(entry.getKey());
+                        inbound.keySet().removeIf(key -> key.startsWith(entry.getKey() + ":"));
+                        channel.disconnect(entry.getKey());
+                        server.cancelConnection(entry.getValue());
+                    }
+                    devices.put(id, device);
+                    negotiatedMtus.put(id, 23);
+                } else {
+                    devices.remove(id);
+                    negotiatedMtus.remove(id);
+                    outbound.remove(id);
+                    sentFragmentCounts.remove(id);
+                    audioBatchPeers.remove(id);
+                    audioSendStats.remove(id);
+                    inbound.keySet().removeIf(key -> key.startsWith(id + ":"));
+                    synchronized (VoBLEGattServer.this) { sending.remove(id); }
+                    channel.disconnect(id);
+                    listener.onDisconnected(id);
                 }
-                devices.put(id, device);
-                negotiatedMtus.put(id, 23);
-            } else {
-                devices.remove(id);
-                negotiatedMtus.remove(id);
-                outbound.remove(id);
-                inbound.keySet().removeIf(key -> key.startsWith(id + ":"));
-                synchronized (VoBLEGattServer.this) { sending.remove(id); }
-                channel.disconnect(id);
-                listener.onDisconnected(id);
             }
         }
 
@@ -417,21 +511,23 @@ public final class VoBLEGattServer implements AutoCloseable {
         @Override @SuppressLint("MissingPermission") public void onCharacteristicWriteRequest(
                 BluetoothDevice device, int requestId, BluetoothGattCharacteristic characteristic,
                 boolean preparedWrite, boolean responseNeeded, int offset, byte[] value) {
-            if (!isCurrent(token)) return;
-            int status = preparedWrite || offset != 0 || value == null
-                    ? BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED : BluetoothGatt.GATT_SUCCESS;
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                String id = device.getAddress();
-                com.airsim.phonecontrol.BridgeLog.info("voble_gatt_write bytes="
-                        + (value == null ? 0 : value.length));
-                if (PAIRING_UUID.equals(characteristic.getUuid())) acceptMessage(
-                        id, value, VoBLEProtocol.MESSAGE_PAIRING);
-                else if (CONTROL_RX_UUID.equals(characteristic.getUuid())) acceptMessage(
-                        id, value, VoBLEProtocol.MESSAGE_CONTROL);
-                else if (AUDIO_UPLINK_UUID.equals(characteristic.getUuid())) listener.onAudioWrite(id, value.clone());
-                else status = BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED;
+            synchronized (VoBLEGattServer.this) {
+                if (!isCurrent(token)) return;
+                int status = preparedWrite || offset != 0 || value == null
+                        ? BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED : BluetoothGatt.GATT_SUCCESS;
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    String id = device.getAddress();
+                    com.airsim.phonecontrol.BridgeLog.info("voble_gatt_write bytes="
+                            + (value == null ? 0 : value.length));
+                    if (PAIRING_UUID.equals(characteristic.getUuid())) acceptMessage(
+                            id, value, VoBLEProtocol.MESSAGE_PAIRING);
+                    else if (CONTROL_RX_UUID.equals(characteristic.getUuid())) acceptMessage(
+                            id, value, VoBLEProtocol.MESSAGE_CONTROL);
+                    else if (AUDIO_UPLINK_UUID.equals(characteristic.getUuid())) listener.onAudioWrite(id, value.clone());
+                    else status = BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED;
+                }
+                if (responseNeeded) server.sendResponse(device, requestId, status, offset, null);
             }
-            if (responseNeeded) server.sendResponse(device, requestId, status, offset, null);
         }
 
         @Override public void onNotificationSent(BluetoothDevice device, int status) {
@@ -439,7 +535,20 @@ public final class VoBLEGattServer implements AutoCloseable {
             String id = device.getAddress();
             synchronized (VoBLEGattServer.this) {
                 ArrayDeque<Outbound> queue = outbound.get(id);
-                Outbound completed = queue == null ? null : queue.poll();
+                Outbound completed = queue == null ? null : queue.peek();
+                AudioSendStats stats = audioStats(id);
+                if (stats.audioInFlight) {
+                    long elapsed = Math.max(0, System.nanoTime() - stats.sentAtNanos);
+                    stats.callbacks++; stats.callbackNanos += elapsed;
+                    stats.maxCallbackNanos = Math.max(stats.maxCallbackNanos, elapsed);
+                    if (elapsed > 40_000_000L) stats.callbacksOver40ms++;
+                    if (status != BluetoothGatt.GATT_SUCCESS) stats.callbackErrors++;
+                    stats.lastStatus = status;
+                    stats.audioInFlight = false;
+                }
+                int count = sentFragmentCounts.getOrDefault(id, 0);
+                sentFragmentCounts.remove(id);
+                if (queue != null) for (int i = 0; i < count; i++) queue.poll();
                 if (completed != null && completed.characteristic == controlTx) {
                     com.airsim.phonecontrol.BridgeLog.info(
                             "voble_control_indication status=" + status);
@@ -460,25 +569,27 @@ public final class VoBLEGattServer implements AutoCloseable {
         @Override @SuppressLint("MissingPermission") public void onDescriptorWriteRequest(
                 BluetoothDevice device, int requestId, BluetoothGattDescriptor descriptor,
                 boolean preparedWrite, boolean responseNeeded, int offset, byte[] value) {
-            if (!isCurrent(token)) return;
-            int status = preparedWrite || offset != 0 || !CCCD_UUID.equals(descriptor.getUuid())
-                    ? BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED : BluetoothGatt.GATT_SUCCESS;
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                boolean enabled = Arrays.equals(value, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                        || Arrays.equals(value, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE);
-                UUID owner = descriptor.getCharacteristic().getUuid();
-                String id = device.getAddress();
-                com.airsim.phonecontrol.BridgeLog.info("voble_gatt_subscription channel="
-                        + (CONTROL_TX_UUID.equals(owner) ? "control" : "audio")
-                        + " enabled=" + enabled);
-                if (CONTROL_TX_UUID.equals(owner)) {
-                    if (enabled) channel.subscribeControl(id); else channel.unsubscribeControl(id);
-                } else if (AUDIO_DOWNLINK_UUID.equals(owner)) {
-                    if (enabled) channel.subscribeAudio(id); else channel.unsubscribeAudio(id);
+            synchronized (VoBLEGattServer.this) {
+                if (!isCurrent(token)) return;
+                int status = preparedWrite || offset != 0 || !CCCD_UUID.equals(descriptor.getUuid())
+                        ? BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED : BluetoothGatt.GATT_SUCCESS;
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    boolean enabled = Arrays.equals(value, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                            || Arrays.equals(value, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE);
+                    UUID owner = descriptor.getCharacteristic().getUuid();
+                    String id = device.getAddress();
+                    com.airsim.phonecontrol.BridgeLog.info("voble_gatt_subscription channel="
+                            + (CONTROL_TX_UUID.equals(owner) ? "control" : "audio")
+                            + " enabled=" + enabled);
+                    if (CONTROL_TX_UUID.equals(owner)) {
+                        if (enabled) channel.subscribeControl(id); else channel.unsubscribeControl(id);
+                    } else if (AUDIO_DOWNLINK_UUID.equals(owner)) {
+                        if (enabled) channel.subscribeAudio(id); else channel.unsubscribeAudio(id);
+                    }
+                    descriptor.setValue(value);
                 }
-                descriptor.setValue(value);
+                if (responseNeeded) server.sendResponse(device, requestId, status, offset, null);
             }
-            if (responseNeeded) server.sendResponse(device, requestId, status, offset, null);
         }
     }; }
 
@@ -499,21 +610,44 @@ public final class VoBLEGattServer implements AutoCloseable {
         }
     }
 
+    private void failStart(int code) {
+        close();
+        listener.onAdvertisingFailed(code);
+    }
+
     @Override @SuppressLint("MissingPermission") public synchronized void close() {
         ++generation;
-        if (adapter != null && advertiseCallback != null && adapter.getBluetoothLeAdvertiser() != null) {
-            adapter.getBluetoothLeAdvertiser().stopAdvertising(advertiseCallback);
-        }
-        advertiseCallback = null;
-        restoreAdvertisingName();
-        includeAdvertisedName = true;
-        if (server != null) server.close();
+        // Fence callbacks before closing, then retire all ownership ourselves:
+        // callbacks from the old server are intentionally ignored after this point.
+        var peers = new java.util.HashSet<>(devices.keySet());
+        peers.addAll(channel.disconnectAll());
+        BluetoothGattServer previousServer = server;
+        AdvertiseCallback previousAdvertise = advertiseCallback;
         server = null;
+        advertiseCallback = null;
         devices.clear();
         negotiatedMtus.clear();
         outbound.clear();
         inbound.clear();
         sending.clear();
+        sentFragmentCounts.clear();
+        audioBatchPeers.clear();
+        audioSendStats.clear();
         notificationFailures.clear();
+        includeAdvertisedName = true;
+        try {
+            if (adapter != null && previousAdvertise != null && adapter.getBluetoothLeAdvertiser() != null) {
+                adapter.getBluetoothLeAdvertiser().stopAdvertising(previousAdvertise);
+            }
+        } catch (RuntimeException error) {
+            com.airsim.phonecontrol.BridgeLog.info("voble_gatt_stop_advertising_exception type=" + error.getClass().getSimpleName());
+        }
+        restoreAdvertisingName();
+        try {
+            if (previousServer != null) previousServer.close();
+        } catch (RuntimeException error) {
+            com.airsim.phonecontrol.BridgeLog.info("voble_gatt_close_exception type=" + error.getClass().getSimpleName());
+        }
+        for (String peer : peers) listener.onDisconnected(peer);
     }
 }

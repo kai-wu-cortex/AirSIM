@@ -41,7 +41,52 @@ public final class CloudPCMMediaPumpTests {
         int before = playback.size();
         pump.receive(new byte[320 * 12]);
         check(playback.size() == before, "closed old stream must not accept PCM into another session");
+        receiveOnlyRejectsUplink();
+        manualBufferDoesNotDelayCapture();
         System.out.println("CloudPCMMediaPumpTests passed (synthetic PCM only)");
+    }
+    private static void manualBufferDoesNotDelayCapture() throws Exception {
+        var workers = Executors.newCachedThreadPool();
+        var capture = new PipedInputStream(4096);
+        var source = new PipedOutputStream(capture);
+        var sent = new CountDownLatch(1);
+        var played = new CountDownLatch(1);
+        var playback = new java.io.OutputStream() {
+            @Override public void write(int ignored) { played.countDown(); }
+        };
+        var pump = new CloudPCMMediaPump(capture, playback, frame -> sent.countDown(),
+            error -> {}, workers, false, CloudPCMAudioQueue.Policy.fromWire(1, "manual", 720));
+        try {
+            pump.start();
+            source.write(new byte[320]); source.flush();
+            check(sent.await(2, TimeUnit.SECONDS), "manual receive buffer must not hold capture");
+            pump.receive(new byte[320 * 35]);
+            check(!played.await(100, TimeUnit.MILLISECONDS), "35 frames must not prime 720ms playback");
+            pump.receive(new byte[320]);
+            check(played.await(2, TimeUnit.SECONDS), "36th frame primes actual media pump playback");
+        } finally {
+            pump.close(); source.close(); workers.shutdownNow(); workers.awaitTermination(2, TimeUnit.SECONDS);
+        }
+    }
+    private static void receiveOnlyRejectsUplink() throws Exception {
+        var workers = Executors.newCachedThreadPool();
+        var capture = new PipedInputStream(4096);
+        var source = new PipedOutputStream(capture);
+        var downlink = new CountDownLatch(1);
+        var writes = new java.util.concurrent.atomic.AtomicInteger();
+        var playback = new java.io.OutputStream() {
+            @Override public void write(int ignored) { writes.incrementAndGet(); }
+        };
+        var pump = new CloudPCMMediaPump(capture, playback, frame -> downlink.countDown(),
+                error -> {}, workers, true);
+        try {
+            pump.start();
+            for (int j=0;j<8;j++) pump.receive(new byte[320]);
+            source.write(new byte[320]); source.flush();
+            check(downlink.await(2, TimeUnit.SECONDS), "recvonly downlink must reach network");
+            Thread.sleep(150);
+            check(writes.get()==0, "recvonly must never inject uplink, including queue concealment");
+        } finally { pump.close(); source.close(); workers.shutdownNow(); workers.awaitTermination(2, TimeUnit.SECONDS); }
     }
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
 }

@@ -6,9 +6,14 @@ import java.util.List;
 
 /** External HTTP boundary only; the call-event manager under test is production code. */
 final class StandaloneRelayClient {
+    interface OnState { void run() throws Exception; }
+    OnState onState;
     final List<JSONObject> states = new ArrayList<>();
     JSONObject postJSON(JSONObject registration, String path, JSONObject payload, int timeout) throws Exception {
-        if (path.equals("/v2/events/call-state")) states.add(new JSONObject(payload.toString()));
+        if (path.equals("/v2/events/call-state")) {
+            if (onState != null) onState.run();
+            states.add(new JSONObject(payload.toString()));
+        }
         return new JSONObject();
     }
 }

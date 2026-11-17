@@ -6,6 +6,8 @@ import java.lang.reflect.*;
 /** Runs the actual manager without starting a socket, dial, or background executor. */
 public final class CloudCallManagerTests {
     public static void main(String[] args) throws Exception {
+        incomingIdentityUsesTelecomUUID();
+        missedCallHistoryKeepsConnectionAndSIMFacts();
         RelayEgressGate.shared.enableAfterRestore();
         localResolveRequiresCompleteIdentityAndCurrentPublishedCall();
         endedBeforeEventDrainStillReleasesOutgoing();
@@ -14,25 +16,101 @@ public final class CloudCallManagerTests {
         lateOutgoingCannotBindUnownedSession("active");
         otherCallCannotEndOwnedSession();
         ownEndedClosesSession();
+        endedControlPrecedesHTTPAndUsesOwnedIdentity();
+        terminalControlFailureKeepsCleanup();
+        genericCloseDoesNotClaimRemoteHangup();
         droppedEndedClosesOnlyOwner();
         pendingDialBindsOnlyUniqueNewMatchingCall();
         cachedDialCannotRecreateEndedSession();
         oldMediaCannotRestartAfterPureLocalExit();
         media401RetriesThenStopsWithoutReplacingLiveSlot();
         successfulHandshakeResetsMedia401Window();
+        cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
+    }
+
+    private static void incomingIdentityUsesTelecomUUID() throws Exception {
+        String id = java.util.UUID.randomUUID().toString();
+        var registration = new JSONObject().put("relay_url", "https://relay.example.test");
+        var descriptor = Class.forName("com.airsim.phonecontrol.StandaloneCloudMediaManager$Descriptor");
+        var incoming = descriptor.getDeclaredMethod("incoming", JSONObject.class, String.class);
+        incoming.setAccessible(true);
+        var first = incoming.invoke(null, registration, id);
+        var second = incoming.invoke(null, registration, id);
+        check(id.equals(field(first, "callID")) && id.equals(field(first, "callUUID")), "LAN and APNs share Telecom UUID");
+        check(field(first, "callUUID").equals(field(second, "callUUID")), "Recreating descriptor cannot split one carrier call");
+        var legacy = incoming.invoke(null, registration, "legacy-id");
+        check(field(legacy, "callID").equals("legacy-id"), "Legacy control identity stays unchanged");
+        check(java.util.UUID.fromString((String) field(legacy, "callUUID")) != null, "Legacy still gets valid CallKit UUID");
+    }
+
+    private static void cloudEarlyMediaTransitionsOnlyOnTelecomActive() throws Exception {
+        RuntimeMode.standalone = true;
+        var call = new android.telecom.Call(android.telecom.Call.STATE_DIALING, 1, "5550100");
+        String id = CallRepository.add(call);
+        var threads = java.util.concurrent.Executors.newCachedThreadPool();
+        var hellos = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        try (var f = new Fixture(id); var server = new java.net.ServerSocket(0, 2, java.net.InetAddress.getLoopbackAddress())) {
+            set(f.manager, "pcmEndpoint", new java.net.InetSocketAddress(server.getInetAddress(), server.getLocalPort()));
+            Object session = f.active();
+            var owner = new StandaloneWebSocket(() -> { throw new AssertionError("no network reads"); });
+            set(session, "webSocket", owner); set(session, "mediaStarted", true);
+            var eligible = session.getClass().getDeclaredMethod("earlyEligible"); eligible.setAccessible(true);
+            check(!(boolean)eligible.invoke(session), "old client cannot open early media");
+            set(session, "earlyMediaAccepted", true);
+            check((boolean)eligible.invoke(session), "generic standalone outgoing is eligible");
+            var other = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550199");
+            CallRepository.add(other);
+            check(!(boolean)eligible.invoke(session), "global carrier source cannot mix a second call");
+            CallRepository.remove(other);
+            threads.submit(() -> {
+                try {
+                    for (int index=0; index<2; index++) {
+                        final java.net.Socket socket = server.accept();
+                        threads.submit(() -> {
+                            try (socket) {
+                                hellos.add(new String(socket.getInputStream().readNBytes(11), java.nio.charset.StandardCharsets.US_ASCII));
+                                socket.getOutputStream().write("AIRSIMREADY".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                                for (int n=0;n<100;n++) {
+                                    socket.getOutputStream().write(new byte[320]); socket.getOutputStream().flush(); Thread.sleep(20);
+                                }
+                            } catch (Exception expectedOnClose) {}
+                        });
+                    }
+                } catch (Exception expectedOnClose) {}
+            });
+            var run = session.getClass().getDeclaredMethod("runPCM", StandaloneWebSocket.class); run.setAccessible(true);
+            var pump = threads.submit(() -> { try { run.invoke(session, owner); } catch (Exception e) { throw new RuntimeException(e); } });
+            await(() -> owner.frames.get()>0, "early downlink frame");
+            check(hellos.get(0).equals("AIRSIMRX01\n"), "early bridge must be recvonly");
+            check(owner.text.stream().anyMatch(v -> v.contains("early_media_ready_v1")), "capability ACK required");
+            check(owner.text.stream().noneMatch(v -> v.contains("\"status\":\"active\"")), "PCM READY cannot manufacture ACTIVE");
+            call.setStateForTest(android.telecom.Call.STATE_ACTIVE);
+            await(() -> hellos.size()==2 && owner.text.stream().anyMatch(v -> v.contains("\"status\":\"active\"")), "active duplex transition");
+            check(hellos.get(1).equals("AIRSIMPCM1\n"), "active must reopen duplex bridge");
+            ((java.io.Closeable)session).close();
+            pump.get(3, java.util.concurrent.TimeUnit.SECONDS);
+            check(field(session, "pcm")==null, "terminal must release bridge");
+        } finally { CallRepository.remove(call); RuntimeMode.standalone=false; threads.shutdownNow(); threads.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS); }
+    }
+    private static void await(java.util.function.BooleanSupplier ready, String description) throws Exception {
+        long until=System.nanoTime()+3_000_000_000L;
+        while(!ready.getAsBoolean() && System.nanoTime()<until) Thread.sleep(10);
+        check(ready.getAsBoolean(), description);
     }
 
     private static void localResolveRequiresCompleteIdentityAndCurrentPublishedCall() throws Exception {
         var instance = StandaloneCloudMediaManager.class.getDeclaredField("instance");
         instance.setAccessible(true);
         Object previous = instance.get(null);
-        try (var f = new Fixture("telecom-owner")) {
+        var owner = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100");
+        String ownerID = CallRepository.add(owner);
+        try (var f = new Fixture(ownerID)) {
             instance.set(null, f.manager);
             var constructor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
             constructor.setAccessible(true);
             var gateway = constructor.newInstance(new android.content.Context());
-            var published = new JSONObject().put("id", "local-owner").put("android_id", "telecom-owner")
+            var published = new JSONObject().put("id", "local-owner").put("android_id", ownerID)
                     .put("state", "incoming");
             set(gateway, "activeCall", published);
             var identity = new JSONObject().put("call_id", "new-cloud-call")
@@ -61,7 +139,34 @@ public final class CloudCallManagerTests {
             set(gateway, "activeCall", null);
             check(gateway.forward("POST", "/api/calls/resolve", identity.toString()).status() == 409,
                     "ended mapping still resolved");
-        } finally { instance.set(null, previous); }
+        } finally { instance.set(null, previous); CallRepository.remove(owner); }
+    }
+
+    private static void missedCallHistoryKeepsConnectionAndSIMFacts() throws Exception {
+        var ctor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
+        ctor.setAccessible(true);
+        var gateway = ctor.newInstance(new android.content.Context());
+        var apply = StandaloneAgentGateway.class.getDeclaredMethod("applyCallEvent", JSONObject.class);
+        apply.setAccessible(true);
+        var history = StandaloneAgentGateway.class.getDeclaredField("callHistory"); history.setAccessible(true);
+        for (int index = 0; index < 3; index++) {
+            String direction = index == 2 ? "outgoing" : "incoming";
+            var event = new JSONObject().put("call_id", "history-" + index).put("direction", direction)
+                    .put("state", index == 2 ? "dialing" : "incoming").put("slot_index", index % 2);
+            apply.invoke(gateway, event);
+            if (index == 1) apply.invoke(gateway, new JSONObject(event.toString()).put("state", "active"));
+            apply.invoke(gateway, new JSONObject(event.toString()).put("state", "ended"));
+        }
+        var replacement = new JSONObject().put("call_id", "replacement").put("direction", "incoming").put("state", "incoming");
+        apply.invoke(gateway, replacement);
+        apply.invoke(gateway, new JSONObject().put("call_id", "history-0").put("state", "ended"));
+        check(field(gateway, "activeCall") != null, "late terminal cleared replacement call");
+        var records = (org.json.JSONArray) history.get(gateway);
+        check(records.length() == 3, "late terminal wrote false history");
+        check(records.getJSONObject(0).optBoolean("missed"), "unanswered incoming missing from history");
+        check(!records.getJSONObject(1).optBoolean("missed") && records.getJSONObject(1).has("connected_at"), "answered call marked missed");
+        check(!records.getJSONObject(2).optBoolean("missed"), "outgoing call marked missed");
+        check(records.getJSONObject(0).optInt("slot_index", -1) == 0 && records.getJSONObject(1).optInt("slot_index", -1) == 1, "history lost SIM slots");
     }
 
     private static void oldMediaCannotRestartAfterPureLocalExit() throws Exception {
@@ -250,6 +355,52 @@ public final class CloudCallManagerTests {
         }
     }
 
+    private static void endedControlPrecedesHTTPAndUsesOwnedIdentity() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            set(f.active(), "webSocket", socket);
+            f.manager.handleCallEvent(registration(), event("other", "incoming", "ended"), f.relay);
+            f.manager.handleCallEvent(registration(), event("owner", "outgoing", "active"), f.relay);
+            check(socket.text.isEmpty(), "another call or ACTIVE cannot send terminal control");
+            f.relay.onState = () -> {
+                check(socket.text.size() == 1 && !socket.closed, "terminal control must precede HTTP and close");
+                throw new java.io.IOException("synthetic HTTP failure");
+            };
+            try {
+                f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+                throw new AssertionError("HTTP failure expected");
+            } catch (java.io.IOException expected) {}
+            var control = new JSONObject(socket.text.get(0));
+            check("ended".equals(control.optString("status")), "iOS 176 terminal control required");
+            check("new-cloud-call".equals(control.optString("call_id"))
+                    && "11111111-1111-4111-8111-111111111111".equals(control.optString("call_uuid"))
+                    && control.optLong("generation") == 1, "full exact lifecycle identity required");
+            f.relay.onState = null;
+            f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+            check(f.active() == null && socket.closed, "HTTP retry must still clean up owner");
+        }
+    }
+
+    private static void terminalControlFailureKeepsCleanup() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            socket.failWrites = true;
+            set(f.active(), "webSocket", socket);
+            f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+            check(f.active() == null && socket.closed && f.relay.states.size() == 1,
+                    "lost socket must not prevent HTTP terminal / cleanup");
+        }
+    }
+
+    private static void genericCloseDoesNotClaimRemoteHangup() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            set(f.active(), "webSocket", socket);
+            f.manager.close();
+            check(socket.closed && socket.text.isEmpty(), "ordinary shutdown is not a native hangup");
+        }
+    }
+
     private static void droppedEndedClosesOnlyOwner() throws Exception {
         try (var f = new Fixture("owner")) {
             f.manager.abandonCallEvent(event("other", "incoming", "ended").toString());
@@ -288,7 +439,7 @@ public final class CloudCallManagerTests {
             descriptor = descriptorConstructor.newInstance("new-cloud-call", "11111111-1111-4111-8111-111111111111", 1L,
                     "synthetic-secret", "https://example.invalid", "outgoing", androidID);
             var sessionType = Class.forName("com.airsim.phonecontrol.StandaloneCloudMediaManager$CloudSession");
-            var sessionConstructor = sessionType.getDeclaredConstructors()[0]; sessionConstructor.setAccessible(true);
+            var sessionConstructor = sessionType.getDeclaredConstructor(StandaloneCloudMediaManager.class, type); sessionConstructor.setAccessible(true);
             set(manager, "active", sessionConstructor.newInstance(manager, descriptor));
         }
         Object active() throws Exception { return field(manager, "active"); }

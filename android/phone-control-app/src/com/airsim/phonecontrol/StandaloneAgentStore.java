@@ -153,7 +153,18 @@ final class StandaloneAgentStore {
         return result;
     }
 
+    /** The current cloud registration's E2E SMS key, or null (AVF, local mode, or no key yet). */
+    static byte[] currentE2EKey(Context context) {
+        try {
+            return E2EKeyStore.forRegistration(context, new StandaloneAgentStore(context).registration());
+        } catch (RuntimeException unreadable) {
+            return null;
+        }
+    }
+
     static void validateRegistration(JSONObject value) throws Exception {
+        // The E2E SMS key arrives only in the sealed pairing claim, never in a stored registration.
+        value.remove("e2e_key");
         if (value.optBoolean("local_mode", false)) {
             if (value.optBoolean("cloud_enabled", false)) {
                 throw new IllegalArgumentException("本地模式不能启用云端模式");
