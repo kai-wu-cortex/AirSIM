@@ -17,11 +17,14 @@ final class AirSimSupervisor {
  final F50WifiServer server;
  final ScheduledExecutorService worker=Executors.newSingleThreadScheduledExecutor();
  volatile String state="disabled"; volatile boolean healthy; volatile int starts;
+ volatile String dialerState="disabled"; volatile boolean dialerReady;
  long lastStart; String lastReported="";
+ String lastDialerReported="";
  AirSimSupervisor(F50WifiServer server){this.server=server;}
  File data(String name){return new File(server.directory,name);}
  boolean enabled(){return data("airsim-autostart.enabled").isFile();}
- JSONObject status()throws Exception {return new JSONObject().put("enabled",enabled()).put("healthy",healthy).put("state",state).put("starts_this_process",starts);}
+ JSONObject status()throws Exception {return new JSONObject().put("enabled",enabled()).put("healthy",healthy).put("state",state).put("starts_this_process",starts)
+  .put("default_dialer_enabled",data("airsim-default-dialer.enabled").isFile()).put("default_dialer_ready",dialerReady).put("default_dialer_state",dialerState);}
  void start(){worker.scheduleWithFixedDelay(this::tick,2,15,TimeUnit.SECONDS);}
  static boolean ordinary(File file)throws IOException {return !Files.isSymbolicLink(file.toPath())&&file.getCanonicalFile().equals(file.getAbsoluteFile());}
  String packageApk()throws Exception {
@@ -63,10 +66,24 @@ final class AirSimSupervisor {
   ByteArrayOutputStream line=new ByteArrayOutputStream();InputStream input=socket.getInputStream();
   for(int i=0;i<8192;i++){int c=input.read();if(c<0)return false;if(c=='\n'){JSONObject reply=new JSONObject(line.toString("UTF-8"));String result=reply.optString("result");return !reply.has("error")&&(result.startsWith("uid=2000 ")||result.startsWith("uid=0 "));}line.write(c);}
  }catch(Exception ignored){}return false;}
+ void ensureDefaultDialer(){try{
+  // B28 can omit ROLE_DIALER entirely. Its shell-only Telecom override is
+  // memory-only, so the owner may opt in to restoring an empty default at boot.
+  // Called only after APK certificate verification. Preserve another chosen app.
+  if(!data("airsim-default-dialer.enabled").isFile()){dialerReady=false;dialerState="disabled";return;}
+  String current=F50WifiServer.run("cmd","telecom","get-default-dialer");
+  if(PACKAGE.equals(current)){dialerReady=true;dialerState="ready";return;}
+  dialerReady=false;
+  if(!current.isEmpty()&&!current.equals("null")){dialerState="other_default_preserved";return;}
+  F50WifiServer.run("cmd","telecom","set-default-dialer",PACKAGE);
+  dialerReady=PACKAGE.equals(F50WifiServer.run("cmd","telecom","get-default-dialer"));
+  dialerState=dialerReady?"ready":"not_applied";
+ }catch(Exception ignored){dialerReady=false;dialerState="unavailable";}
+ finally{if(!dialerState.equals(lastDialerReported)){System.out.println("airsim_default_dialer state="+dialerState);lastDialerReported=dialerState;}}}
  void tick(){try{
-  if(!enabled()){healthy=false;state="disabled";return;}
+  if(!enabled()){healthy=false;state="disabled";dialerReady=false;dialerState="disabled";return;}
   if(!F50WifiServer.run("getprop","sys.boot_completed").equals("1")){state="waiting_for_boot";return;}
-  String apk=packageApk(),token=existingToken();healthy=probe(token);
+  String apk=packageApk(),token=existingToken();ensureDefaultDialer();healthy=probe(token);
   if(healthy){state="ready";return;}
   // Do not kill an existing bridge or its media session on a slow response.
   if(!F50WifiServer.run("pidof","airsim-root-bridge").isEmpty()){state="waiting_for_bridge";return;}

@@ -37,11 +37,15 @@
 - `airsim-package-signer.sha256`：从当前已核验 APK 签名证书取得的 SHA-256。只允许固定包名 `com.airsim.phonecontrol.standalone` 且签名匹配的已安装 APK；不同签名会停止启动尝试。
 - 设备原有的 `/data/local/tmp/airsim-bridge.token`：沿用既有凭据，不生成或轮换。首次启用后保存于私有目录的 `airsim-daemon.token`；若原厂清理 tmp，则以既有 0644 权限恢复同一文件，供原 APK 读取。私有副本保留在 0700 目录中。
 
+B28 可能没有标准 `ROLE_DIALER`，普通角色分配会失败，从而使手动配对返回“密钥已保存，但直连网关未就绪”。该设备可另行显式创建 `airsim-default-dialer.enabled`：监督器在 APK 签名匹配后，仅当默认电话应用为空时，调用设备支持的 `cmd telecom set-default-dialer` 为固定 AirSIM 包恢复绑定，并读回确认；已有其他默认应用时保持原选择。该开关默认关闭，不绕过整个系统的角色资格检查。该 Telecom override 是内存状态，不能只在安装时执行一次；相关 [AOSP 实现](https://android.googlesource.com/platform/packages/services/Telecomm/+/refs/heads/android15-release/src/com/android/server/telecom/RoleManagerAdapterImpl.java) 及本机恢复测试见验证记录。
+
+删除此标记停止后续自动恢复；若要立即取消已有的临时绑定，可在没有通话时使用 `cmd telecom set-default-dialer default`。此项不删除配对、不切换 SIM、不拨号；状态接口增加 `default_dialer_enabled` / `default_dialer_ready` / `default_dialer_state`。
+
 监督线程与 Wi-Fi 控制线程分开：每 15 秒通过原 token 认证读取 loopback `127.0.0.1:27580` 状态；桥接进程退出后自动启动，失败重试至少间隔 45 秒。慢响应或现存进程不被强制杀死，不因健康检查中断通话。主 APK 仍通过自己的开机广播和 START_STICKY 服务启动，不依赖网页登录。
 
 已登录的 `/api/status` 提供 `airsim_bridge` 的启用、健康、状态和本次进程启动次数，以及 `uptime_seconds` / `usb_host_state`，便于区分新一次开机、USB 调试配置与真实 USB 主机连接。这里只返回状态，不提供任意命令接口。
 
-删除启用标记会停止后续监督，但不主动结束现有桥接或通话。完整回退时应在空闲状态结束既有桥接进程，再恢复更新前 runtime；保留原 token 和配对资料。升级已有服务时，必须同时核对启动镜像中的地址保护脚本：旧版要求 `sys.usb.state=ncm,mtp,adb`，仅替换 runtime 不能解除这项依赖。修复版等待系统启动完成，并保持原有固件摘要校验与 USB ADB 初始化不变。本次单台 MU3356 B28 已完成“只接电源”冷启动：自动 Wi-Fi、控制桥与云端恢复在线，用户反馈 iPhone 4G/5G 云端自检全部通过；详见 [验证记录](VALIDATION.md)。不同电源/固件仍需实际验收；连接 Mac 时的重启结果不能替代独立供电。
+删除启用标记会停止后续监督，但不主动结束现有桥接或通话。完整回退时应在空闲状态结束既有桥接进程，再恢复更新前 runtime；保留原 token 和配对资料。升级已有服务时，必须同时核对启动镜像中的地址保护脚本：旧版要求 `sys.usb.state=ncm,mtp,adb`，仅替换 runtime 不能解除这项依赖。修复版等待系统启动完成，并保持原有固件摘要校验与 USB ADB 初始化不变。本次两台 MU3356 B28 已分别完成“只接电源”冷启动：自动 Wi-Fi、控制桥与各自云端身份恢复在线，用户分别反馈 iPhone 4G/5G 云端自检全部通过；追加设备还验证了可选默认电话绑定的冷启动恢复。详见 [验证记录](VALIDATION.md)。不同电源/固件仍需实际验收；连接 Mac 时的重启结果不能替代独立供电。
 
 ## 构建与部署范围
 
