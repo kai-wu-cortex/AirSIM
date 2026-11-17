@@ -195,8 +195,8 @@ public final class F50WifiServer {
   if(operationPending||mode.equals("rebooting"))return;
   if(bootPending){
    boolean systemReady=run("getprop","sys.boot_completed").equals("1"),guardReady=new File("/dev/f50-ifconfig-ready").exists();
-   // The verified guard is installed after USB setup. A connected USB host is
-   // not a prerequisite for Wi-Fi or AirSIM when powered by a charger.
+   // The verified guard is installed after system boot, independently of USB.
+   // A connected USB host is not a prerequisite for Wi-Fi or AirSIM.
    boolean ready=systemReady&&guardReady;
    String readiness="system="+systemReady+" guard="+guardReady+" usb="+run("getprop","sys.usb.state")+" host="+usbHostState();
    if(!readiness.equals(lastBootReadiness)){System.out.println("boot_readiness uptime="+(now/1000)+" "+readiness);lastBootReadiness=readiness;}

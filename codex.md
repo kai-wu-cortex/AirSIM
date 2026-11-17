@@ -2,6 +2,8 @@
 
 F50 Pro 本地配网辅助服务见 [使用与恢复说明](android-standalone/f50-wifi/README.md)：针对已修复的 MU3356 B28，以独立管理密码保护本地 `8088` 页面，先连原热点配网，保存后重启才连接指定 Wi-Fi；失败恢复热点等待配置。可保存多个网络，目标按 SSID／加密方式识别。首次启动服务安装需核验机型限定镜像；USB 更新、回退、可选的签名固定控制桥自启动及独立供电实测范围见组件文档。此端口不用于 AirSIM 配对，不改变现有 APK／Relay 版本。
 
+独立供电更新须同时核对 Wi-Fi 启动脚本：旧版地址保护依赖 USB 调试状态，仅更新 DEX 不足；修复改为等待系统启动，USB ADB 初始化保持原样。实际验收结果以组件验证记录为准。
+
 2026-10-31 发布准备：Apps `v0.9.8.20`，Android `0.9.8.20 (125)`、iOS／Watch／Live Activity `0.9.8 (152)`，见 `docs/releases/0.9.8.20.md`。用户授权本轮提交推送 VoBLE、GitHub Release 与 TestFlight 上传；不部署 Worker、不发布 Linux Agent、不改变现有 Latest 标记。TestFlight 必须使用 production APNs，上传／处理／外测状态分开记录。以下版本和授权仅为历史记录，不能扩展未来任务权限。
 
 未发布试验性功能：NAS／软路由自建域名 TLS 直连见 `docs/self-hosted-tls-direct.md`。支持 HTTPS 域名首次配对，以及已配对设备主动添加 HTTPS／PCM TLS 路由；沿用 Android 私网网关和 HMAC／身份验证。首次配对使用临时 TLS 入口，不直接暴露安卓明文配对或 AVF 内部端口，不新增后台推送。修改时同步 iPhone 与 Watch 的可选 `pcm_tls` 字段，保留旧路由解码、设备绑定、关闭／删除清理及通话路径固定。

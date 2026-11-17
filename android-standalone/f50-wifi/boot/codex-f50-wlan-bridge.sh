@@ -16,7 +16,9 @@ fi
 read -r uptime idle </proc/uptime
 uptime=${uptime%%.*}
 [ "$uptime" -ge 25 ] || sleep "$((25 - uptime))"
-[ "$(getprop sys.usb.state)" = ncm,mtp,adb ] || { report 'USB not ready'; exit 1; }
+# A charger has no USB host: B28 can remain in the charging configuration.
+# Address protection is independent of the gadget; keep USB setup untouched.
+[ "$(getprop sys.boot_completed)" = 1 ] || { report 'system boot not ready'; exit 1; }
 netd_hash=$(sha256sum /system/bin/netd)
 [ "${netd_hash%% *}" = edfea436579c95f39dd43ec5f3dc458ebc091ad60fed57c5174ead3d771448f3 ] || exit 1
 guard=$1
@@ -44,7 +46,7 @@ chcon u:object_r:system_file:s0 /dev/f50-ifconfig-ready
 logcat -v threadtime -s F50Sta:I > /dev/f50-ifconfig-events.log 2>&1 &
 capture=$!
 chcon u:object_r:system_file:s0 /dev/f50-ifconfig-events.log || true
-report 'command overlay installed after USB ready'
+report 'command overlay installed after system boot'
 report 'waiting for Wi-Fi client mode'
 flag=/dev/f50-ifconfig-sta
 intervals=0
