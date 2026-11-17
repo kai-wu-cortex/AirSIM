@@ -1,5 +1,7 @@
 # AirSIM 全项目 Claude 部署辅助
 
+F50 Pro 另附[临时 USB 注册诊断工具与 CMHK 对照记录](docs/f50pro-cmhk-diagnostic.md)，独立于 APK/AVF 安装；英国卡无服务尚未修复，不能将双卡启用视为双卡已注册。
+
 未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](docs/f50pro-cloud-hangup.md)。
 
 2026-10-31 发布准备：Apps `v0.9.8.20`，Android `0.9.8.20 (125)`、Apple `0.9.8 (152)`，见 `docs/releases/0.9.8.20.md`。本轮授权提交推送 VoBLE、GitHub Release 与 TestFlight 上传；不部署 Worker、不发布 Linux Agent、不改变现有 Latest 标记。TestFlight 使用 production APNs，上传／处理／外测可用分别核实。下文旧候选与授权仅为历史记录。
