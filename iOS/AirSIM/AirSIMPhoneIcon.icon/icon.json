@@ -1,0 +1,46 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "srgb:0.298364,0.949333,0.432013,1.000000",
+      "srgb:0.134545,0.802667,0.234329,1.000000"
+    ]
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "fill": {
+            "linear-gradient": [
+              "srgb:0.963000,0.991000,0.976862,1.000000",
+              "srgb:1.000000,1.000000,1.000000,1.000000"
+            ]
+          },
+          "image-name": "phone-system-outline.svg",
+          "name": "Phone",
+          "position": {
+            "scale": 1.0,
+            "translation-in-points": [
+              2.5,
+              2.5
+            ]
+          }
+        }
+      ],
+      "name": "Phone Symbol",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.18
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.35
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

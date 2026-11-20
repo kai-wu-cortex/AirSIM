@@ -33,7 +33,7 @@ public final class CallScreenActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         setShowWhenLocked(true);
-        setTurnScreenOn(true);
+        setTurnScreenOn(BridgeNotification.wakesForCalls(this, AppConfig.mode(this)));
         callId = getIntent().getStringExtra(EXTRA_CALL_ID);
         if (callId == null || callId.isEmpty()) { finish(); return; }
 

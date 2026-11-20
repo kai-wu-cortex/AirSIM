@@ -18,13 +18,37 @@ final class FixtureToneOutput: CallToneOutput {
 
 @MainActor
 final class OtherDeviceCallReminderTests: XCTestCase {
+    private let routingDefaultsKeys = [
+        "airsim.paired-android-devices.v1", "airsim.forgotten-android-devices.v1",
+        AndroidAgentBindingPreference.key, ConnectionModePreference.key,
+        LocalModePreference.key, CloudModePreference.key, CloudSignalingPreference.key,
+        RelayEgressGate.persistenceKey,
+    ]
+    private var savedRoutingDefaults: [String: Any] = [:]
+    private var savedArguments: [String: Any] = [:]
+
     override func setUp() {
         super.setUp()
-        // The test host uses the simulator SMS fixture to avoid startup networking.
-        // Let each routing test choose its own mode after that startup completes.
-        var arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
-        arguments.removeValue(forKey: ConnectionModePreference.key)
-        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        let defaults = UserDefaults.standard
+        savedArguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = savedArguments
+        let persistent = Bundle.main.bundleIdentifier.flatMap { defaults.persistentDomain(forName: $0) } ?? [:]
+        for key in routingDefaultsKeys {
+            savedRoutingDefaults[key] = persistent[key]
+            defaults.removeObject(forKey: key)
+            arguments.removeValue(forKey: key)
+        }
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+    }
+
+    override func tearDown() {
+        let defaults = UserDefaults.standard
+        for key in routingDefaultsKeys {
+            if let value = savedRoutingDefaults[key] { defaults.set(value, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
+        }
+        defaults.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+        super.tearDown()
     }
 
     func testResolvedPushBindsLANSessionWithoutRemovingRealCallWaiting() throws {
@@ -102,7 +126,138 @@ final class OtherDeviceCallReminderTests: XCTestCase {
         XCTAssertEqual(DialToneTiming.releaseDelay(held: 1), 0)
     }
 
-    func testRepeatedPushDoesNotReportOrEndCurrentSystemCall() async throws {
+    func testVoWLANAppDialStillStartsSystemCallTransaction() async throws {
+        ConnectionModePreference.set(.vowlan)
+        XCTAssertTrue(LocalModePreference.isEnabled())
+        var starts: [CXStartCallAction] = []
+        let controller = CallKitController(observesSystemCallbacks: false, systemTransactionRequest: { action in
+            if let start = action as? CXStartCallAction { starts.append(start) }
+        })
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            callKitController: controller)
+        defer { model.stop(); controller.setEnabled(false) }
+        model.numberInput = "10086"
+        await model.dial()
+        XCTAssertEqual(starts.count, 1)
+        XCTAssertEqual(starts.first?.handle.value, "10086")
+        XCTAssertEqual(controller.currentSystemCallUUID, starts.first?.callUUID)
+    }
+
+    func testAppAnswerWaitsForIncomingReportAndRetainsSameSystemUUID() async throws {
+        var submitted: [CXAnswerCallAction] = []
+        let controller = CallKitController(observesSystemCallbacks: false, systemTransactionRequest: { action in
+            if let answer = action as? CXAnswerCallAction { submitted.append(answer) }
+        })
+        controller.setEnabled(true)
+        let handler = PendingSystemAnswerHandler()
+        controller.handler = handler
+        let call = IncomingVoIPCall(bluetoothCallID: "pending-report", uuid: UUID(), generation: 1,
+                                   number: nil, agentID: "A")
+        var report: ((Error?) -> Void)?
+        controller.reportIncomingPush(call, systemReport: { _, _, done in report = done }) { _ in }
+        let answer = Task { try await controller.answerCurrentCall(presentInApp: true) }
+        await Task.yield()
+        XCTAssertTrue(submitted.isEmpty)
+        report?(nil)
+        try await answer.value
+        XCTAssertEqual(submitted.map(\.callUUID), [call.uuid])
+        let nativeAnswer = expectation(description: "native answer reaches backend")
+        handler.onAnswer = { nativeAnswer.fulfill() }
+        let provider = CXProvider(configuration: CXProviderConfiguration())
+        defer { handler.release(); provider.invalidate(); controller.setEnabled(false) }
+        controller.provider(provider, perform: try XCTUnwrap(submitted.first))
+        await fulfillment(of: [nativeAnswer], timeout: 2)
+        XCTAssertEqual(handler.origins, [.app])
+        XCTAssertTrue(controller.managesCurrentCall)
+        XCTAssertTrue(controller.currentCallIsAnswered)
+        XCTAssertEqual(controller.currentSystemCallUUID, call.uuid)
+    }
+
+    func testAppModelAnswerKeepsNativeCallWhenReturningHome() async throws {
+        var submitted: [CXAnswerCallAction] = []
+        let controller = CallKitController(observesSystemCallbacks: false, systemTransactionRequest: { action in
+            if let answer = action as? CXAnswerCallAction { submitted.append(answer) }
+        })
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in ReminderBackend() }, callKitController: controller)
+        controller.setEnabled(true)
+        let handler = PendingSystemAnswerHandler()
+        controller.handler = handler
+        let provider = CXProvider(configuration: CXProviderConfiguration())
+        defer { handler.release(); model.stop(); controller.setEnabled(false); provider.invalidate() }
+        let call = IncomingVoIPCall(bluetoothCallID: "app-answer-home", uuid: UUID(), generation: 1,
+                                   number: nil, agentID: "A")
+        var report: ((Error?) -> Void)?
+        controller.reportIncomingPush(call, systemReport: { _, _, done in report = done }) { _ in }
+        let answer = Task { await model.answer() }
+        await Task.yield()
+        XCTAssertTrue(submitted.isEmpty)
+        report?(nil)
+        await answer.value
+        XCTAssertEqual(submitted.map(\.callUUID), [call.uuid])
+        let nativeAnswer = expectation(description: "App answer uses native callback")
+        handler.onAnswer = { nativeAnswer.fulfill() }
+        controller.provider(provider, perform: try XCTUnwrap(submitted.first))
+        await fulfillment(of: [nativeAnswer], timeout: 2)
+        model.didEnterBackground()
+        XCTAssertTrue(controller.managesCurrentCall)
+        XCTAssertTrue(controller.currentCallIsAnswered)
+        XCTAssertEqual(controller.currentSystemCallUUID, call.uuid)
+        XCTAssertEqual(handler.origins, [.app])
+    }
+
+    func testPendingAppAnswerCannotAnswerReplacementCall() async throws {
+        var submitted = 0
+        let controller = CallKitController(observesSystemCallbacks: false, systemTransactionRequest: { _ in submitted += 1 })
+        controller.setEnabled(true)
+        defer { controller.setEnabled(false) }
+        let old = IncomingVoIPCall(bluetoothCallID: "old-pending", uuid: UUID(), generation: 1, number: nil, agentID: "A")
+        var oldReport: ((Error?) -> Void)?
+        controller.reportIncomingPush(old, systemReport: { _, _, done in oldReport = done }) { _ in }
+        let answer = Task { try await controller.answerCurrentCall(presentInApp: true) }
+        await Task.yield()
+        controller.reportCurrentCallEnded(reason: .remoteEnded)
+        let next = IncomingVoIPCall(bluetoothCallID: "new-pending", uuid: UUID(), generation: 2, number: nil, agentID: "A")
+        controller.reportIncomingPush(next, systemReport: { _, _, done in done(nil) }) { _ in }
+        oldReport?(nil)
+        do { try await answer.value; XCTFail("stale app answer submitted a system transaction") } catch {}
+        XCTAssertEqual(submitted, 0)
+        XCTAssertEqual(controller.currentSystemCallUUID, next.uuid)
+    }
+
+    func testFailedIncomingReportDoesNotSubmitAppAnswer() async {
+        var submitted = 0
+        let controller = CallKitController(observesSystemCallbacks: false, systemTransactionRequest: { _ in submitted += 1 })
+        controller.setEnabled(true)
+        defer { controller.setEnabled(false) }
+        let call = IncomingVoIPCall(bluetoothCallID: "failed-report", uuid: UUID(), generation: 1, number: nil, agentID: "A")
+        var report: ((Error?) -> Void)?
+        controller.reportIncomingPush(call, systemReport: { _, _, done in report = done }) { _ in }
+        let answer = Task { try await controller.answerCurrentCall(presentInApp: true) }
+        await Task.yield()
+        report?(NSError(domain: "fixture", code: 1))
+        do { try await answer.value; XCTFail("failed report allowed answer") } catch {}
+        XCTAssertEqual(submitted, 0)
+    }
+
+    func testEmptySnapshotsCannotDismissFreshIncomingPush() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        defer { controller.setEnabled(false) }
+        let call = IncomingVoIPCall(bluetoothCallID: "ringing-continuity", uuid: UUID(), generation: 1, number: nil, agentID: "A")
+        let reported = expectation(description: "reported")
+        controller.reportIncomingPush(call, systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        for _ in 0..<5 { controller.synchronize(call: nil, previous: nil, callerName: nil) }
+        XCTAssertEqual(controller.currentSystemCallUUID, call.uuid)
+        let now = Date()
+        let terminal = CallRecord(id: call.callID, index: 0, direction: "incoming", state: "ended", number: nil,
+            startedAt: now, updatedAt: now, endedAt: now, missed: true)
+        controller.synchronize(call: nil, previous: terminal, callerName: nil)
+        XCTAssertNil(controller.currentSystemCallUUID)
+    }
+
+    func testRepeatedPushReportsSameSystemCallWithoutEndingIt() async throws {
         let controller = CallKitController(observesSystemCallbacks: false)
         controller.setEnabled(true)
         defer { controller.setEnabled(false) }
@@ -110,12 +265,39 @@ final class OtherDeviceCallReminderTests: XCTestCase {
         let reported = expectation(description: "reported")
         controller.reportIncomingPush(call, systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
         await fulfillment(of: [reported], timeout: 2)
-        var reports = 0, ends = 0
-        controller.reportRequiredVoIPPush(call, systemReport: { _, _, done in reports += 1; done(nil) },
+        var reports = [UUID](), ends = 0
+        controller.reportRequiredVoIPPush(call, systemReport: { uuid, _, done in reports.append(uuid); done(nil) },
             systemEnd: { _ in ends += 1 }) { error in XCTAssertNil(error) }
-        XCTAssertEqual(reports, 0)
+        XCTAssertEqual(reports, [call.uuid])
         XCTAssertEqual(ends, 0)
         XCTAssertEqual(controller.currentSystemCallUUID, call.uuid)
+    }
+
+    func testPairedWLANMissedCallStopsRingingAndPersistsDuration() async throws {
+        ConnectionModePreference.set(.vowlan)
+        PairedAndroidDeviceStore.remember(.init(id: "A", deviceName: "Fixture", agentKind: "standalone"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalHistoryStore(directoryURL: directory)
+        let controller = CallKitController(observesSystemCallbacks: false)
+        let output = FixtureToneOutput()
+        let model = AppModel(audioController: AudioSessionController(toneOutput: output),
+            deviceBackend: { _, _ in ReminderBackend() }, callKitController: controller, historyStore: store)
+        controller.setEnabled(false)
+        defer { model.stop() }
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "missed", state: .ringing,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertTrue(output.isPlaying)
+        try await Task.sleep(for: .milliseconds(1100))
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "missed", state: .ended,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertFalse(output.isPlaying)
+        let record = try XCTUnwrap(store.loadCallHistory().first)
+        XCTAssertTrue(record.missed)
+        XCTAssertNotNil(record.ringingDurationLabel)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "missed", state: .ringing,
+            transport: .vowlan, transportEpoch: 1))
+        XCTAssertFalse(output.isPlaying)
     }
 
     func testDistinctCallWaitingOnSameAndroidRemainsAvailable() {
@@ -213,7 +395,7 @@ final class OtherDeviceCallReminderTests: XCTestCase {
         model.deviceCallRouter.systemUUID = { uuid }
         _ = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .vowlan)
         let id = try XCTUnwrap(model.remoteCall?.id)
-        XCTAssertEqual(controller.watchCallUUID(for: id), uuid)
+        XCTAssertEqual(controller.systemUUID(forBackendID: id), uuid)
         XCTAssertTrue(controller.matchesCurrentCall(callID: id, uuid: uuid, agentID: "A"))
         XCTAssertFalse(controller.matchesCurrentCall(callID: id, uuid: uuid, agentID: "B"))
         await model.hangup()
@@ -609,10 +791,12 @@ private final class ReminderBackend: DeviceCallBackend {
 @MainActor
 private final class PendingSystemAnswerHandler: CallKitActionHandling {
     var onAnswer: (() -> Void)?
+    var origins: [CallAnswerOrigin] = []
     private var continuation: CheckedContinuation<Void, Never>?
     func release() { continuation?.resume(); continuation = nil }
     func callKitStart(number: String) async throws {}
     func callKitAnswer(origin: CallAnswerOrigin) async throws {
+        origins.append(origin)
         await withCheckedContinuation { continuation = $0; onAnswer?() }
     }
     func callKitEnd() async throws {}

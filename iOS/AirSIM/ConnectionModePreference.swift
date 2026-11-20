@@ -157,28 +157,39 @@ enum PairedAndroidDeviceStore {
     private static let forgottenKey = "airsim.forgotten-android-devices.v1"
     private static let peripheralsKey = "airsim.android-device-peripherals.v1"
 
-    static func records(defaults: UserDefaults = .standard) -> [PairedAndroidDeviceRecord] {
+    static func storedRecords(defaults: UserDefaults = .standard) -> [PairedAndroidDeviceRecord] {
         guard let data = defaults.data(forKey: recordsKey),
               let values = try? JSONDecoder().decode([PairedAndroidDeviceRecord].self, from: data) else { return [] }
-        return values.filter { permits($0.id, defaults: defaults) }
+        let forgotten = Set(defaults.stringArray(forKey: forgottenKey) ?? [])
+        return values.filter { !forgotten.contains($0.id) }
+    }
+    static func records(defaults: UserDefaults = .standard) -> [PairedAndroidDeviceRecord] {
+        let values = storedRecords(defaults: defaults)
+        let selected = AndroidAgentBindingPreference.selected(defaults: defaults)
+        return (values.first { $0.id == selected } ?? values.first).map { [$0] } ?? []
     }
     static func remember(_ record: PairedAndroidDeviceRecord, defaults: UserDefaults = .standard) {
         guard !record.id.isEmpty, permits(record.id, defaults: defaults) else { return }
-        var values = records(defaults: defaults).filter { $0.id != record.id }
-        values.append(record)
+        var values = storedRecords(defaults: defaults)
+        if let index = values.firstIndex(where: { $0.id == record.id }) { values[index] = record }
+        else { values.append(record) }
         defaults.set(try? JSONEncoder().encode(values), forKey: recordsKey)
     }
     static func forget(_ id: String, defaults: UserDefaults = .standard) {
         var forgotten = Set(defaults.stringArray(forKey: forgottenKey) ?? [])
         forgotten.insert(id)
         defaults.set(Array(forgotten), forKey: forgottenKey)
-        defaults.set(try? JSONEncoder().encode(records(defaults: defaults)), forKey: recordsKey)
+        defaults.set(try? JSONEncoder().encode(storedRecords(defaults: defaults)), forKey: recordsKey)
+        var peripherals = defaults.dictionary(forKey: peripheralsKey) as? [String: String] ?? [:]
+        peripherals.removeValue(forKey: id)
+        defaults.set(peripherals, forKey: peripheralsKey)
         if AndroidAgentBindingPreference.selected(defaults: defaults) == id {
             AndroidAgentBindingPreference.set(nil, defaults: defaults)
         }
     }
     static func permits(_ id: String, defaults: UserDefaults = .standard) -> Bool {
-        !(defaults.stringArray(forKey: forgottenKey) ?? []).contains(id)
+        guard !(defaults.stringArray(forKey: forgottenKey) ?? []).contains(id) else { return false }
+        return records(defaults: defaults).first.map { $0.id == id } ?? true
     }
     static func hasForgottenDevices(defaults: UserDefaults = .standard) -> Bool {
         !(defaults.stringArray(forKey: forgottenKey) ?? []).isEmpty

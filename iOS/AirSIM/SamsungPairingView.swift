@@ -93,8 +93,10 @@ struct SamsungPairingView: View {
                     if usesTLS {
                         Text("填写域名，不含 https:// 或路径。三个端口都是 NAS 对外提供的 TLS 端口；配对端口转发到安卓本次配对窗口，控制与音频各自转发。证书必须可信且匹配域名，不支持明文公网连接或跳过证书校验。无需开启 AirSIM 云端模式。")
                     } else {
-                      Text("先在安卓打开一次性配对窗口，填写该页的配对端口，不是 ADB 或通话端口。使用 Tailscale 时填安卓的 Tailscale IPv4，两端须已接入且允许互访；无需开启 AirSIM 云端模式。"
-                        + "若局域网使用特殊网段（如 30.0.0.0/8），先在设置 → 私有网络中添加该网段。配对后选择 VoWLAN 或自动连接模式。")
+                        Text(DedicatedCallPolicy.vowlanOnly
+                             ? "在同一 Wi‑Fi 下，填写安卓一次性配对页显示的 IP 地址和配对端口。"
+                             : "先在安卓打开一次性配对窗口，填写该页的配对端口，不是 ADB 或通话端口。使用 Tailscale 时填安卓的 Tailscale IPv4，两端须已接入且允许互访；无需开启 AirSIM 云端模式。"
+                                + "若局域网使用特殊网段（如 30.0.0.0/8），先在设置 → 私有网络中添加该网段。配对后选择 VoWLAN 或自动连接模式。")
                     }
                 }
                 .disabled(pairingServiceID != nil)

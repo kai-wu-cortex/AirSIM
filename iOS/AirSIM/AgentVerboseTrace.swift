@@ -14,6 +14,13 @@ struct AgentVerboseTraceContext: Sendable {
     let path: String
     let startedAt: Date
     let category: String
+    let pollRoute: String?
+
+    var pollEndpoint: String? {
+        guard method == "GET", category == "vowlan", pollRoute != nil else { return nil }
+        let endpoint = path.components(separatedBy: "?")[0]
+        return ["/api/events", "/api/calls/events"].contains(endpoint) ? endpoint : nil
+    }
 }
 
 struct AgentVerboseTraceEntry: Codable, Identifiable, Sendable {
@@ -52,34 +59,46 @@ actor AgentVerboseTraceRecorder {
     private let maxEntries: Int
     private let persistenceURL: URL?
     private var entries: [AgentVerboseTraceEntry]
+    private var pollRuns: [String: PollRun] = [:]
+
+    private struct PollRun {
+        let path: String
+        let route: String
+        let fingerprint: String
+        let first: Date
+        var last: Date
+        var count: Int
+        let id: UUID
+    }
 
     init(initiallyEnabled: Bool, maxEntries: Int, persistenceURL: URL?) {
         enabled = initiallyEnabled
         self.maxEntries = max(1, maxEntries)
         self.persistenceURL = persistenceURL
         let loaded = Self.load(from: persistenceURL)
-        entries = loaded.count > self.maxEntries
-            ? Array(loaded.suffix(self.maxEntries))
-            : loaded
+        entries = loaded
+        trimIfNeeded()
     }
 
     func isEnabled() -> Bool { enabled }
 
     func setEnabled(_ enabled: Bool) {
         self.enabled = enabled
+        if !enabled { pollRuns.removeAll() }
         if persistenceURL != nil {
             UserDefaults.standard.set(enabled, forKey: Self.preferenceKey)
         }
     }
 
-    func begin(method: String, path: String, bodyBytes: Int, category: String = "http") -> AgentVerboseTraceContext? {
+    func begin(method: String, path: String, bodyBytes: Int, category: String = "http", pollRoute: String? = nil) -> AgentVerboseTraceContext? {
         guard enabled else { return nil }
         let context = AgentVerboseTraceContext(
             id: String(UUID().uuidString.prefix(8)).lowercased(),
             method: method.uppercased(),
             path: path,
-            startedAt: Date(), category: category
+            startedAt: Date(), category: category, pollRoute: pollRoute
         )
+        if context.pollEndpoint != nil { return context }
         append(
             context,
             stage: .request,
@@ -89,14 +108,22 @@ actor AgentVerboseTraceRecorder {
     }
 
     func recordRoute(_ context: AgentVerboseTraceContext, route: String, attempt: Int, error: String? = nil) {
-        guard enabled else { return }
+        guard enabled, context.pollEndpoint == nil else { return }
         var detail = "第 \(attempt) 次尝试 · \(route)"
         if let error, !error.isEmpty { detail += " · \(error)" }
         append(context, stage: .route, detail: detail)
     }
 
-    func finish(_ context: AgentVerboseTraceContext, statusCode: Int, responseBytes: Int) {
+    func finish(_ context: AgentVerboseTraceContext, statusCode: Int, responseBytes: Int, fingerprint: String? = nil) {
         guard enabled else { return }
+        if let endpoint = context.pollEndpoint {
+            if let fingerprint, let route = context.pollRoute, (200..<300).contains(statusCode) {
+                recordPoll(context, endpoint: endpoint, route: route, fingerprint: fingerprint,
+                           statusCode: statusCode, responseBytes: responseBytes)
+                return
+            }
+            recordPollAttempt(context)
+        }
         append(
             context,
             stage: .response,
@@ -108,12 +135,47 @@ actor AgentVerboseTraceRecorder {
 
     func fail(_ context: AgentVerboseTraceContext, error: String) {
         guard enabled else { return }
+        recordPollAttempt(context)
         append(
             context,
             stage: .failure,
             detail: Self.redact(error),
             elapsedMilliseconds: elapsed(from: context)
         )
+        persist()
+    }
+
+    private func recordPollAttempt(_ context: AgentVerboseTraceContext) {
+        guard let endpoint = context.pollEndpoint else { return }
+        pollRuns.removeValue(forKey: endpoint)
+        append(context, stage: .request, detail: "发起轮询", timestamp: context.startedAt)
+        if let route = context.pollRoute {
+            append(context, stage: .route, detail: route, timestamp: context.startedAt)
+        }
+    }
+
+    private func recordPoll(_ context: AgentVerboseTraceContext, endpoint: String, route: String,
+                            fingerprint: String, statusCode: Int, responseBytes: Int) {
+        let now = Date()
+        var run = PollRun(path: context.path, route: route, fingerprint: fingerprint,
+                          first: now, last: now, count: 1, id: UUID())
+        if var prior = pollRuns[endpoint], prior.path == context.path, prior.route == route,
+           prior.fingerprint == fingerprint, now.timeIntervalSince(prior.last) <= 90,
+           let index = entries.firstIndex(where: { $0.id == prior.id }) {
+            entries.remove(at: index)
+            prior.count += 1
+            prior.last = now
+            run = prior
+        }
+        pollRuns[endpoint] = run
+        entries.append(AgentVerboseTraceEntry(
+            id: run.id, traceID: context.id, timestamp: now, stage: .response,
+            method: context.method, path: context.path,
+            detail: "HTTP \(statusCode) · \(responseBytes) B · 同一响应连续 \(run.count) 次",
+            elapsedMilliseconds: elapsed(from: context), source: "APP", category: context.category,
+            fields: ["first_success": Self.iso8601.string(from: run.first), "route": route]
+        ))
+        trimIfNeeded()
         persist()
     }
 
@@ -126,7 +188,10 @@ actor AgentVerboseTraceRecorder {
         fields: [String: String] = [:],
         isFailure: Bool = false
     ) {
-        guard enabled else { return }
+        // Call-control failures must remain diagnosable without full request tracing.
+        let recoveryVerification = category == "audio" && phase == "bridge_recovery_verified"
+        guard enabled || recoveryVerification || (isFailure && ["call-control", "audio", "sms"].contains(category)) else { return }
+        if isFailure && (category == "vowlan" || category == "call-terminal") { pollRuns.removeAll() }
         let traceID = fields["trace_id"] ?? fields["command_id"].map { String($0.prefix(8)) }
         entries.append(
             AgentVerboseTraceEntry(
@@ -150,12 +215,13 @@ actor AgentVerboseTraceRecorder {
     /// Always retain a bounded, non-identifying startup timeline, even when full
     /// request tracing is off. Never accept arbitrary call data through this API.
     func recordAudioStartup(phase: String, elapsedMilliseconds: Int? = nil,
-                            rollbackReason: LocalCallAudioRollbackReason? = nil) {
+                            rollbackReason: LocalCallAudioRollbackReason? = nil, carrierRingback: Bool = false) {
         let allowed: Set<String> = ["answer_observed", "phone_start", "engine_ready",
                                     "agent_register", "agent_ready", "pcm_ready",
                                     "first_downlink", "stopped", "failed", "rollback"]
         guard allowed.contains(phase) else { return }
         var fields = ["phase": phase]
+        if carrierRingback { fields["audio_mode"] = "carrier_ringback" }
         if phase == "rollback", let rollbackReason { fields["reason"] = rollbackReason.rawValue }
         entries.append(AgentVerboseTraceEntry(
             id: UUID(), traceID: "--------", timestamp: Date(),
@@ -200,6 +266,7 @@ actor AgentVerboseTraceRecorder {
 
     func clear() {
         entries.removeAll(keepingCapacity: true)
+        pollRuns.removeAll()
         persist()
     }
 
@@ -245,13 +312,14 @@ actor AgentVerboseTraceRecorder {
         _ context: AgentVerboseTraceContext,
         stage: AgentVerboseTraceStage,
         detail: String,
-        elapsedMilliseconds: Int? = nil
+        elapsedMilliseconds: Int? = nil,
+        timestamp: Date = Date()
     ) {
         entries.append(
             AgentVerboseTraceEntry(
                 id: UUID(),
                 traceID: context.id,
-                timestamp: Date(),
+                timestamp: timestamp,
                 stage: stage,
                 method: context.method,
                 path: context.path,
@@ -270,8 +338,20 @@ actor AgentVerboseTraceRecorder {
     }
 
     private func trimIfNeeded() {
-        if entries.count > maxEntries {
-            entries.removeFirst(entries.count - maxEntries)
+        guard entries.count > maxEntries else { return }
+        // Reserve up to 20 recent call failures so standby polling cannot erase
+        // yesterday's dial error. Keep the same total storage bound and ordering.
+        let calls = entries.filter { $0.category == "call-control" && $0.stage == .failure }
+            .suffix(min(20, maxEntries))
+        let groups = Dictionary(grouping: entries.filter { $0.category != "call-control" && $0.stage == .failure }, by: \.category)
+        let others = groups.values.compactMap { $0.last }.sorted { $0.timestamp < $1.timestamp }
+            .suffix(min(20, maxEntries - calls.count))
+        let retained = Set((Array(calls) + Array(others)).map(\.id))
+        var excess = entries.count - maxEntries
+        entries.removeAll { entry in
+            guard excess > 0, !retained.contains(entry.id) else { return false }
+            excess -= 1
+            return true
         }
     }
 

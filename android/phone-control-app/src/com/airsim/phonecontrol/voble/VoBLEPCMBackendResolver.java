@@ -1,5 +1,7 @@
 package com.airsim.phonecontrol.voble;
 
+import com.airsim.phonecontrol.PhoneAudioBridgeProcessPolicy;
+
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -10,11 +12,12 @@ public final class VoBLEPCMBackendResolver {
 
     private VoBLEPCMBackendResolver() {}
 
-    public static InetSocketAddress resolve(Runtime runtime, String avfAddress) {
+    public static InetSocketAddress resolve(Runtime runtime, String avfAddress, String packageName) {
         if (runtime == null) throw new IllegalArgumentException("runtime is required");
         try {
             if (runtime == Runtime.STANDALONE) {
-                return new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 7580);
+                return new InetSocketAddress(InetAddress.getByName("127.0.0.1"),
+                        PhoneAudioBridgeProcessPolicy.standalonePort(packageName));
             }
             String candidate = avfAddress == null ? "" : avfAddress.trim();
             if (!candidate.matches("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")) {
@@ -25,7 +28,7 @@ public final class VoBLEPCMBackendResolver {
                     || address.isLoopbackAddress()) {
                 throw new IllegalArgumentException("AVF address must be private IPv4");
             }
-            return new InetSocketAddress(address, 7580);
+            return new InetSocketAddress(address, PhoneAudioBridgeProcessPolicy.DEFAULT_PORT);
         } catch (IllegalArgumentException error) {
             throw error;
         } catch (Exception error) {

@@ -201,7 +201,11 @@ public final class PhoneAudioBridge {
             revoke.setDaemon(true); revoke.start();
             stats.resetAudio();
             emit(started, "early_media_ready", Map.of("direction", "recvonly", "microphone", false));
-            captureDownlink(recorder, client, stats, running, stop);
+            Thread health = new Thread(() -> reportStats(started, stats, running), "early-capture-stats");
+            health.setDaemon(true);
+            health.start();
+            try { captureDownlink(recorder, client, stats, running, stop); }
+            finally { health.interrupt(); }
         }
     }
 

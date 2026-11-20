@@ -6,14 +6,19 @@ public final class VoWLANControlPolicy {
     private static final Set<String> GET_ROUTES = Set.of(
             "/v1/health", "/api/health", "/api/status", "/api/debug", "/api/events",
             "/api/calls/early-media", "/api/calls/status", "/api/calls/events", "/api/calls/audio/host/config",
-            "/api/push/status", "/api/sms", "/api/sms/status", "/api/feedback", "/api/local-mode");
+            "/api/push/status", "/api/sms", "/api/sms/status", "/api/feedback", "/api/local-mode", "/api/watch/sms");
     private static final Set<String> POST_ROUTES = Set.of(
-            "/api/calls/resolve", "/api/calls/dial", "/api/calls/answer", "/api/calls/reject",
+            "/api/calls/regions", "/api/calls/resolve", "/api/calls/dial", "/api/calls/answer", "/api/calls/reject",
             "/api/calls/hangup", "/api/calls/history/ack", "/api/calls/dtmf", "/api/calls/audio/mute",
-            "/api/calls/audio/host/warmup", "/api/calls/audio/host/register", "/api/push/register", "/api/push/mode",
-			"/api/sms/send", "/api/sms/ack", "/api/sms/refresh", "/api/local-mode");
+            "/api/calls/audio/host/warmup", "/api/calls/audio/host/register", "/api/push/register", "/api/push/mode", "/api/pairing/revoke",
+			"/api/sms/send", "/api/sms/ack", "/api/sms/refresh", "/api/local-mode", "/api/watch/sms/send");
 
     private VoWLANControlPolicy() {}
+
+    static boolean watchSMS(String method, String path) {
+        return ("GET".equals(method) && "/api/watch/sms".equals(path))
+                || ("POST".equals(method) && "/api/watch/sms/send".equals(path));
+    }
 
     public static boolean allowed(String method, String pathAndQuery) {
         if (method == null || pathAndQuery == null) return false;
@@ -22,12 +27,6 @@ public final class VoWLANControlPolicy {
         if ("GET".equalsIgnoreCase(method)) return GET_ROUTES.contains(path);
         if ("POST".equalsIgnoreCase(method)) return POST_ROUTES.contains(path);
         return false;
-    }
-
-    static boolean watchAllowed(String method, String path, String callID) {
-        if (callID == null || callID.isBlank() || callID.length() > 128) return false;
-        if ("GET".equals(method)) return path.startsWith("/api/calls/status?call_id=");
-        return "POST".equals(method) && ("/api/calls/answer".equals(path) || "/api/calls/hangup".equals(path));
     }
 
     static boolean ownsCallAfterResponse(String path, int status, boolean currentlyOwnsCall) {

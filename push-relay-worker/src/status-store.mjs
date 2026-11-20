@@ -517,7 +517,7 @@ export async function claimRateLimit(env, key, now, windowMS) {
     const kvKey = `dashboard:virtual-call-rate:${key}`;
     const previous = Number(await env.DEVICES.get(kvKey));
     if (Number.isFinite(previous) && now - previous < windowMS) return false;
-    await env.DEVICES.put(kvKey, String(now), { expirationTtl: 60 });
+    await env.DEVICES.put(kvKey, String(now), { expirationTtl: Math.max(60, Math.ceil(windowMS / 1000)) });
     return true;
   }
   const response = await stub.fetch(`https://status.internal/rate/${encodeURIComponent(key)}`, {

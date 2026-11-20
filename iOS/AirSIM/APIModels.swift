@@ -21,11 +21,64 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     var historyEstimated: Bool? = nil
     var slotIndex: Int? = nil
     var slotID: Int? = nil
+    var numberRegion: String? = nil
+    var observedRingingDuration: TimeInterval? = nil
+    var observedConnectedDuration: TimeInterval? = nil
+    var androidRingingDurationMS: Int64? = nil
+    var androidConnectedDurationMS: Int64? = nil
+    var disconnectReason: String? = nil
+
+    var disconnectReasonLabel: String {
+        switch disconnectReason {
+        case "local": return "本端挂断"
+        case "remote": return direction == "outgoing" && connectedAt == nil && androidConnectedDurationMS == nil
+            ? "对端未接通" : "对端结束"
+        case "error": return "通话异常"
+        case "missed": return "无人接听"
+        case "rejected": return "本端拒接"
+        case "busy": return "线路忙"
+        case "canceled": return "通话取消"
+        case "restricted": return "呼叫受限"
+        default: return "原因未确认"
+        }
+    }
+
     var connectedDuration: TimeInterval? {
-        guard !missed, let connectedAt, let endedAt, endedAt.timeIntervalSinceReferenceDate >= connectedAt.timeIntervalSinceReferenceDate else { return nil }
-        return endedAt.timeIntervalSince(connectedAt)
+        guard isTerminal, !missed else { return nil }
+        if let duration = Self.seconds(fromMilliseconds: androidConnectedDurationMS) { return duration }
+        if let observedConnectedDuration { return observedConnectedDuration }
+        guard let connectedAt, let endedAt else { return nil }
+        let duration = endedAt.timeIntervalSince(connectedAt)
+        return duration >= 0 ? duration : nil
+    }
+
+    var connectedDurationLabel: String? {
+        guard let connectedDuration else { return nil }
+        let prefix = Self.seconds(fromMilliseconds: androidConnectedDurationMS) == nil ? "通话约" : "通话"
+        return Self.durationLabel(connectedDuration, prefix: prefix)
     }
     var isTerminal: Bool { endedAt != nil || state == "ended" || state == "failed" }
+    var ringingDurationLabel: String? {
+        guard isTerminal, direction == "incoming", missed, connectedAt == nil else { return nil }
+        if let duration = Self.seconds(fromMilliseconds: androidRingingDurationMS) {
+            return Self.durationLabel(duration, prefix: "响铃")
+        }
+        let elapsed = historyEstimated == true ? observedRingingDuration : endedAt?.timeIntervalSince(startedAt)
+        guard let elapsed, elapsed >= 1 else { return nil }
+        return Self.durationLabel(elapsed, prefix: "响铃约")
+    }
+
+    private static func seconds(fromMilliseconds value: Int64?) -> TimeInterval? {
+        guard let value, value >= 0 else { return nil }
+        return TimeInterval(value) / 1_000
+    }
+
+    private static func durationLabel(_ duration: TimeInterval, prefix: String) -> String? {
+        guard duration.isFinite, duration >= 0, duration < Double(Int.max) else { return nil }
+        let seconds = Int(duration)
+        if seconds == 0 { return "\(prefix)不足 1 秒" }
+        return seconds < 60 ? "\(prefix) \(seconds) 秒" : "\(prefix) \(seconds / 60) 分 \(seconds % 60) 秒"
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, index, direction, state, number, missed
@@ -37,17 +90,34 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
         case sourceAgentID = "source_agent_id", sourceCallID = "source_call_id"
         case historyEstimated = "history_estimated"
         case slotIndex = "slot_index", slotID = "slot_id"
+        case numberRegion = "number_region"
+        case observedRingingDuration = "observed_ringing_duration"
+        case observedConnectedDuration = "observed_connected_duration"
+        case androidRingingDurationMS = "ringing_duration_ms"
+        case androidConnectedDurationMS = "connected_duration_ms"
+        case disconnectReason = "disconnect_reason"
     }
     // Merge history facts only. Missing legacy connected_at is not evidence
     // that every incoming call was missed; retain an already observed outcome.
     func preservingHistoryEvidence(from previous: CallRecord) -> CallRecord {
         guard id == previous.id, sourceAgentID == previous.sourceAgentID else { return self }
         var result = self
-        if result.connectedAt == nil { result.connectedAt = previous.connectedAt }
+        if result.numberRegion == nil { result.numberRegion = previous.numberRegion }
+        if result.androidRingingDurationMS == nil, result.missed {
+            result.androidRingingDurationMS = previous.androidRingingDurationMS
+        }
+        if result.androidConnectedDurationMS == nil, !result.missed {
+            result.androidConnectedDurationMS = previous.androidConnectedDurationMS
+        }
+        if result.connectedAt == nil, result.androidRingingDurationMS == nil {
+            result.connectedAt = previous.connectedAt
+            result.observedConnectedDuration = previous.connectedDuration
+        }
+        if result.disconnectReason == nil { result.disconnectReason = previous.disconnectReason }
         if result.slotIndex == nil { result.slotIndex = previous.slotIndex }
         if result.slotID == nil { result.slotID = previous.slotID }
         if result.direction == "incoming", result.isTerminal {
-            if result.connectedAt != nil { result.missed = false }
+            if result.connectedAt != nil || result.androidConnectedDurationMS != nil { result.missed = false }
             else if previous.missed { result.missed = true }
         }
         return result
@@ -57,6 +127,12 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
             index: index, direction: direction, state: state, number: number, startedAt: startedAt,
             updatedAt: updatedAt, endedAt: endedAt, missed: missed, androidID: androidID)
         copy.connectedAt = connectedAt
+        copy.observedRingingDuration = observedRingingDuration
+        copy.observedConnectedDuration = observedConnectedDuration
+        copy.androidRingingDurationMS = androidRingingDurationMS
+        copy.androidConnectedDurationMS = androidConnectedDurationMS
+        copy.disconnectReason = disconnectReason
+        copy.numberRegion = numberRegion
         copy.slotIndex = slotIndex; copy.slotID = slotID
         copy.sourceAgentID = agentID; copy.sourceCallID = id; copy.historyEstimated = historyEstimated
         return copy
@@ -411,14 +487,15 @@ enum SMSHistoryPolicy {
         to messages: [SMSMessage],
         limit: Int,
         sourceAgentID: String? = nil,
-        simSlot: String? = nil
+        simSlot: String? = nil,
+        deliveryID: String? = nil
     ) -> [SMSMessage] {
         let sentMessage = SMSMessage(
             sender: recipient,
             content: content,
             code: nil,
             timestamp: timestamp,
-            deliveryID: nil,
+            deliveryID: deliveryID,
             direction: .outgoing,
             sourceAgentID: sourceAgentID,
             simSlot: simSlot
@@ -470,6 +547,7 @@ struct ModemStatus: Codable, Equatable, Sendable {
     let simInserted: Bool?
     let signalDBM: Int?
     let networkMode: String?
+    let androidDataNetwork: String?
     let radioBand: String?
     let registrationText: String?
     let cellularState: String?
@@ -482,6 +560,7 @@ struct ModemStatus: Codable, Equatable, Sendable {
         case simInserted = "sim_inserted"
         case signalDBM = "signal_dbm"
         case networkMode = "network_mode"
+        case androidDataNetwork = "android_data_network"
         case radioBand = "radio_band"
         case registrationText = "reg_status_text"
         case cellularState = "cellular_state"
@@ -951,6 +1030,61 @@ struct ModuleDebugSnapshot: Codable, Sendable {
     let sms: ModuleDebugSMSStatus
     let voice: VoiceRuntimeStatus
     let events: [ModuleDebugEvent]
+}
+
+struct AndroidAudioIsolationEvidence: Equatable, Sendable {
+    let checkedAt: Date
+    let speakerMuted: Bool?
+    let microphoneMuted: Bool?
+    let restoredAt: Date?
+    let verificationFailed: Bool
+
+    init?(bridgeLog: String) {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let whole = ISO8601DateFormatter()
+        var restore: Date?
+        for raw in bridgeLog.split(whereSeparator: \.isNewline).reversed() {
+            guard raw.contains("audio_watchdog"),
+                  let time = raw.split(separator: " ", maxSplits: 1).first,
+                  let date = fractional.date(from: String(time)) ?? whole.date(from: String(time)) else { continue }
+            let words = Set(raw.split(whereSeparator: \.isWhitespace))
+            if raw.contains("audio_watchdog phase=restore"),
+               words.contains("success=true"), words.contains("result=local_output_restored"),
+               words.contains("android_microphone_restored=true") {
+                if restore == nil { restore = date }
+                continue
+            }
+            let output: Bool?
+            let microphone: Bool?
+            let failed = raw.contains("audio_watchdog phase=mute") && words.contains("success=false")
+            if raw.contains("audio_watchdog sample") {
+                output = words.contains("device_output_required=true")
+                    ? Self.boolean("device_output_muted", words: words) : nil
+                microphone = words.contains("microphone_required=true")
+                    ? Self.boolean("microphone_muted", words: words) : nil
+            } else if raw.contains("audio_watchdog phase=mute") {
+                output = words.contains("result=local_output_device_muted")
+                    ? Self.boolean("policy_verified", words: words) : nil
+                microphone = words.contains("microphone_verified=true")
+                    ? Self.boolean("android_microphone_muted", words: words) : nil
+            } else { continue }
+            guard failed || output != nil || microphone != nil else { continue }
+            checkedAt = date
+            speakerMuted = output
+            microphoneMuted = microphone
+            restoredAt = restore
+            verificationFailed = failed || output == false || microphone == false
+            return
+        }
+        return nil
+    }
+
+    private static func boolean(_ key: String, words: Set<Substring>) -> Bool? {
+        if words.contains(Substring(key + "=true")) { return true }
+        if words.contains(Substring(key + "=false")) { return false }
+        return nil
+    }
 }
 
 struct ModuleDebugBufferStatus: Codable, Sendable {

@@ -34,6 +34,8 @@ public final class ShizukuBridgeUserService extends Binder {
     private static final int DESTROY_TRANSACTION_AIDL = 16777114;
 
     private final Object lock = new Object();
+    private final PCMProcessLease processLease = new PCMProcessLease();
+    private final PCMRestartBudget restartBudget = new PCMRestartBudget();
     private final Object audioLock = new Object();
     private final BoundedAudioOperation audioOperations = new BoundedAudioOperation(250);
     private String sourceApk = "";
@@ -73,6 +75,7 @@ public final class ShizukuBridgeUserService extends Binder {
         data.enforceInterface(PrivilegedBridgeProtocol.DESCRIPTOR);
         try {
             String result = switch (code) {
+                case PrivilegedBridgeProtocol.TRANSACTION_RESTORE_REMOTE_SCREEN_OFF -> restoreRemoteScreenOff(data.readLong(), data.readLong());
                 case PrivilegedBridgeProtocol.TRANSACTION_START_BRIDGE -> ensureBridgeStarted();
                 case PrivilegedBridgeProtocol.TRANSACTION_STATUS -> status();
                 case PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_MUTED -> {
@@ -200,6 +203,8 @@ public final class ShizukuBridgeUserService extends Binder {
             verifyIdentity();
             bridgeDesired = true;
             if (bridgeProcess != null && bridgeProcess.isAlive()) return statusLocked();
+            if (!restartBudget.permits(android.os.SystemClock.elapsedRealtime()))
+                throw new IOException("PCM restart cooldown; wait two minutes before repair");
             if (sourceApk.isEmpty()) throw new IOException("application source path unavailable");
             // AVF mode must not spawn a bridge that can only exit and restart
             // forever when the AVF tap has not been created yet. Standalone uses
@@ -207,6 +212,9 @@ public final class ShizukuBridgeUserService extends Binder {
             if (!standalonePCM && NetworkInterface.getByName("avf_tap_fixed") == null) {
                 throw new IOException("AVF interface unavailable: avf_tap_fixed");
             }
+            // Hold ownership across child exits/restarts. Other service instances
+            // must never kill a live owner's child as a supposedly stale bridge.
+            processLease.acquire(new File("/data/local/tmp/" + packageName + ".pcm-owner.lock"));
             stopStaleAudioBridges();
             List<String> command = new ArrayList<>();
             command.add("/system/bin/app_process");
@@ -215,13 +223,16 @@ public final class ShizukuBridgeUserService extends Binder {
             command.add(standalonePCM ? "--listen-host" : "--listen-interface");
             command.add(standalonePCM ? "127.0.0.1" : "avf_tap_fixed");
             command.add("--listen-port");
-            command.add("7580");
+            int port = standalonePCM ? PhoneAudioBridgeProcessPolicy.standalonePort(packageName)
+                    : PhoneAudioBridgeProcessPolicy.DEFAULT_PORT;
+            command.add(Integer.toString(port));
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
             builder.environment().put("CLASSPATH", sourceApk);
             bridgeProcess = builder.start();
             pcmEvidence.reset();
             java.lang.Process launched = bridgeProcess;
-            Thread monitor = new Thread(() -> monitorBridge(launched), "airsim-shizuku-pcm-monitor");
+            long launchedAt = android.os.SystemClock.elapsedRealtime();
+            Thread monitor = new Thread(() -> monitorBridge(launched, launchedAt), "airsim-shizuku-pcm-monitor");
             monitor.setDaemon(true);
             monitor.start();
             Log.i(TAG, "PCM bridge process started");
@@ -278,13 +289,13 @@ public final class ShizukuBridgeUserService extends Binder {
         return result;
     }
 
-    private void monitorBridge(java.lang.Process launched) {
+    private void monitorBridge(java.lang.Process launched, long launchedAt) {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(
                 launched.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 synchronized (lock) {
-                    if (bridgeProcess == launched) pcmEvidence.observe(line);
+                    if (bridgeProcess == launched) pcmEvidence.observe(line, android.os.SystemClock.elapsedRealtime());
                 }
                 Log.i("AirSIMPCM", line);
             }
@@ -296,13 +307,19 @@ public final class ShizukuBridgeUserService extends Binder {
         catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         boolean restart;
         synchronized (lock) {
-            if (bridgeProcess == launched) bridgeProcess = null;
+            if (bridgeProcess != launched) return; // a newer owner or deliberate stop wins
+            bridgeProcess = null;
+            pcmEvidence.processExited(exit);
             restart = bridgeDesired;
         }
         Log.w(TAG, "PCM bridge exited code=" + exit + " restart=" + restart);
         if (restart) {
             try {
-                Thread.sleep(1_000);
+                long now = android.os.SystemClock.elapsedRealtime();
+                long delay = restartBudget.exited(now, now - launchedAt);
+                if (delay < 0) { Log.e(TAG, "PCM restart budget exhausted; cooldown=120s"); return; }
+                pcmEvidence.recoveryScheduled(now);
+                Thread.sleep(delay);
                 ensureBridgeStarted();
             } catch (Throwable error) {
                 Log.e(TAG, "PCM bridge restart failed", error);
@@ -321,16 +338,6 @@ public final class ShizukuBridgeUserService extends Binder {
     private String setLocalOutputMuted(boolean muted, String strategy) throws Exception {
         synchronized (audioLock) {
             verifyIdentity();
-            String result;
-            try { result = setLocalOutputPolicyMuted(muted, strategy); }
-            catch (Exception error) {
-                // A failed output restore must not prevent restoring the microphone.
-                if (!muted && microphoneMute != null) {
-                    try { microphoneMute.setMuted(false); }
-                    catch (Exception micFailure) { error.addSuppressed(micFailure); }
-                }
-                throw error;
-            }
             if (microphoneMute == null && muted && !"voble".equals(strategy)) {
                 AudioManager audio = shellAudioManager();
                 microphoneMute = new LocalMicrophoneMuteController(new LocalMicrophoneMuteController.Backend() {
@@ -342,9 +349,23 @@ public final class ShizukuBridgeUserService extends Binder {
                     }
                 });
             }
-            if (microphoneMute != null)
-                result += " " + microphoneMute.setMuted(muted && !"voble".equals(strategy));
-            return result;
+            String microphoneResult = "";
+            if (muted && microphoneMute != null)
+                microphoneResult = microphoneMute.setMuted(!"voble".equals(strategy));
+            String result;
+            try { result = setLocalOutputPolicyMuted(muted, strategy); }
+            catch (Exception error) {
+                // Retain requested microphone isolation while an OEM output route becomes ready.
+                // Restoration must still attempt both devices when ending the native call.
+                if (!muted && microphoneMute != null) {
+                    try { microphoneMute.setMuted(false); }
+                    catch (Exception micFailure) { error.addSuppressed(micFailure); }
+                }
+                throw error;
+            }
+            if (!muted && microphoneMute != null)
+                microphoneResult = microphoneMute.setMuted(false);
+            return result + (microphoneResult.isEmpty() ? "" : " " + microphoneResult);
         }
     }
 
@@ -516,6 +537,28 @@ public final class ShizukuBridgeUserService extends Binder {
         return "dialer_role=granted verified=true";
     }
 
+    private String restoreRemoteScreenOff(long since, long observedAt) throws Exception {
+        verifyIdentity();
+        long identity = Binder.clearCallingIdentity();
+        try {
+        Class<?> api = Class.forName("android.os.IPowerManager");
+        Object binder = Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "power");
+        Object power = Class.forName("android.os.IPowerManager$Stub").getMethod("asInterface", IBinder.class).invoke(null, binder);
+        if (!Boolean.TRUE.equals(api.getMethod("isInteractive").invoke(power))) return "screen_guard=already_off";
+        RemoteCallScreenPolicy.Wake wake = RemoteCallScreenPolicy.parse(runCommand(new String[]{"dumpsys", "power"}));
+        long now = android.os.SystemClock.uptimeMillis();
+        if (wake.reason() != 2) return "screen_guard=user_override";
+        if (observedAt < since || observedAt > now || wake.time() > observedAt) return "screen_guard=newer_wake";
+        if (!RemoteCallScreenPolicy.suppress(wake, since, now)) return "screen_guard=unrelated_wake";
+        // Check again immediately before sleeping so a newer power-key wake wins.
+        RemoteCallScreenPolicy.Wake latest = RemoteCallScreenPolicy.parse(runCommand(new String[]{"dumpsys", "power"}));
+        if (latest.time() != wake.time() || latest.reason() != 2) return "screen_guard=user_override";
+        api.getMethod("goToSleep", long.class, int.class, int.class)
+                .invoke(power, android.os.SystemClock.uptimeMillis(), 0, 0);
+        return "screen_guard=sleep_requested";
+        } finally { Binder.restoreCallingIdentity(identity); }
+    }
+
     private String runCommand(String[] command) throws Exception {
         java.lang.Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
         StringBuilder output = new StringBuilder();
@@ -542,13 +585,18 @@ public final class ShizukuBridgeUserService extends Binder {
     }
 
     private String statusLocked() {
+        String bridgeState = "stopped";
+        if (bridgeProcess != null && bridgeProcess.isAlive()) {
+            bridgeState = pcmEvidence.isListening() ? "running" : "starting";
+        }
         return "uid=" + Process.myUid()
-                + " service_revision=13"
-                + " pcm=" + (bridgeProcess != null && bridgeProcess.isAlive() ? "running" : "stopped")
+                + " service_revision=16"
+                + " pcm=" + bridgeState
                 + " local_output=" + (outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
                     : outputMute != null && outputMute.isVerifiedMuted() ? "muted" : "normal")
                 + " output_policy=" + outputPolicyDiagnostic()
-                + " " + pcmEvidence.snapshot();
+                + " " + pcmEvidence.snapshot()
+                + " " + restartBudget.diagnostic(android.os.SystemClock.elapsedRealtime());
     }
 
     private void verifyIdentity() {

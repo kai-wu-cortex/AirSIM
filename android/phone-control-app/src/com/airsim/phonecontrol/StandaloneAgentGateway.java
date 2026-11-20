@@ -2,6 +2,7 @@ package com.airsim.phonecontrol;
 
 import android.app.role.RoleManager;
 import android.content.Context;
+import android.content.SharedPreferences;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -30,6 +31,7 @@ final class StandaloneAgentGateway {
     private final Context context;
     private final StandaloneAgentStore store;
     private final StandaloneSMSStore smsStore;
+    private final Object watchOperationsLock = new Object();
     private final Object callsLock = new Object();
     private final Object commandsLock = new Object();
     private final StandaloneLongPoll callEvents = new StandaloneLongPoll();
@@ -37,12 +39,20 @@ final class StandaloneAgentGateway {
     private volatile long simRevision;
     private final Map<String, String> commandResults = new LinkedHashMap<>();
     private JSONObject activeCall;
-    private final JSONArray callHistory = new JSONArray();
+    private final SharedPreferences historyPreferences;
+    private JSONArray callHistory;
 
     private StandaloneAgentGateway(Context context) {
         this.context = context.getApplicationContext();
         store = new StandaloneAgentStore(context);
         smsStore = new StandaloneSMSStore(context);
+        historyPreferences = this.context.getSharedPreferences("standalone_call_history", Context.MODE_PRIVATE);
+        try {
+            callHistory = new JSONArray(historyPreferences.getString("pending", "[]"));
+        } catch (org.json.JSONException error) {
+            BridgeLog.error("call_history_restore_failed", error);
+            callHistory = new JSONArray();
+        }
     }
 
     String health() throws Exception {
@@ -54,6 +64,7 @@ final class StandaloneAgentGateway {
 
     String status() throws Exception {
         return new JSONObject().put("ok", true).put("configured", store.configured())
+                .put("android_data_network", StandaloneAgentService.activeDataNetwork())
                 .put("runtime_profile", "android-standalone").put("pending_commands", 0)
                 .put("last_seen", store.lastSeen() == 0 ? "" : Instant.ofEpochMilli(store.lastSeen()).toString())
                 .put("transport", "in_process").put("readiness", readiness()).toString();
@@ -74,9 +85,125 @@ final class StandaloneAgentGateway {
 
     String pushStatus() throws Exception { return store.pushStatus().toString(); }
 
+    String watchSMS(String method, byte[] body, String nonce, String pairingID, byte[] parentSecret) throws Exception {
+        byte[] scoped = VoWLANAuth.mac(parentSecret, "AirSIM.watch.sms.v1");
+        byte[] encryption = VoWLANAuth.mac(scoped, "AirSIM.watch.sms.encryption.v1");
+        java.util.Arrays.fill(scoped, (byte) 0);
+        try {
+            JSONObject response;
+            if ("GET".equals(method)) {
+                response = new JSONObject().put("agent_id", AndroidAgentIdentity.agentID(context))
+                        .put("name", AndroidAgentIdentity.deviceName()).put("operation_status", true)
+                        .put("slots", SimSlotJson.slots(context)).put("messages", smsStore.watchMessages());
+            } else {
+                JSONObject input = new JSONObject(new String(watchCipher(false, encryption, "request:" + nonce,
+                        java.util.Base64.getDecoder().decode(body)), java.nio.charset.StandardCharsets.UTF_8));
+                response = input.has("operation_id") || input.optBoolean("status_only")
+                        ? watchSMSOperation(pairingID, input) : sendWatchSMS(input);
+            }
+            return java.util.Base64.getEncoder().encodeToString(watchCipher(true, encryption, "response:" + nonce,
+                    response.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } finally { java.util.Arrays.fill(encryption, (byte) 0); }
+    }
+
+    private JSONObject watchSMSOperation(String pairingID, JSONObject input) throws Exception {
+        String operation = input.optString("operation_id");
+        if (!operation.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+            return new JSONObject().put("error", "发送记录标识无效");
+        }
+        boolean statusOnly = input.optBoolean("status_only");
+        String key = pairingID + ":" + operation;
+        var operations = context.getSharedPreferences("watch_sms_operations", Context.MODE_PRIVATE);
+        synchronized (watchOperationsLock) {
+            String previous = operations.getString(key, null);
+            if (previous != null) return new JSONObject(previous);
+            if (statusOnly) return new JSONObject().put("unknown", true);
+            if (operations.getAll().size() >= 8192
+                    || !operations.edit().putString(key, "{\"pending\":true}").commit()) {
+                return new JSONObject().put("error", "安卓无法保存发送记录，短信未发送");
+            }
+        }
+        JSONObject result;
+        try {
+            result = sendWatchSMS(input);
+        } catch (Exception error) {
+            BridgeLog.error("watch_sms_send_unconfirmed", error);
+            result = new JSONObject().put("uncertain", true);
+        }
+        synchronized (watchOperationsLock) {
+            if (!operations.edit().putString(key, result.toString()).commit()) {
+                return new JSONObject().put("uncertain", true);
+            }
+        }
+        return result;
+    }
+
+    private synchronized JSONObject sendWatchSMS(JSONObject input) throws Exception {
+        String number = input.optString("number");
+        String body = input.optString("body").trim();
+        String slotID = input.optString("slot");
+        if (!CallRepository.callIDs().isEmpty()) {
+            return new JSONObject().put("error", "通话结束后再发送短信");
+        }
+        if (!number.matches("\\+?[0-9]{1,30}") || body.isEmpty()
+                || body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 8000 || slotID.isEmpty()) {
+            return new JSONObject().put("error", "短信内容或发送卡无效");
+        }
+        JSONArray slots = SimSlotJson.slots(context);
+        for (int i = 0; i < slots.length(); i++) {
+            JSONObject slot = slots.getJSONObject(i);
+            if (!slotID.equals(slot.optString("id"))) continue;
+            AgentClient.ForwardResponse result = command("send_sms", "", number, body, slotID);
+            if (result.status() < 200 || result.status() >= 300) {
+                return new JSONObject().put("uncertain", true);
+            }
+            try {
+                smsStore.rememberWatchSent(number, body, slot.optString("label", ""), input.optString("operation_id"));
+            } catch (Exception error) { BridgeLog.error("watch_sms_archive_failed", error); }
+            return new JSONObject().put("sent", true);
+        }
+        return new JSONObject().put("error", "发送卡已变化，请重新选择");
+    }
+
+    private static byte[] watchCipher(boolean seal, byte[] key, String context, byte[] data) throws Exception {
+        int nonceSize = 12;
+        byte[] iv = seal ? new byte[nonceSize] : java.util.Arrays.copyOf(data, nonceSize);
+        if (seal) new java.security.SecureRandom().nextBytes(iv);
+        if (!seal && data.length < nonceSize + 16) throw new IllegalArgumentException("invalid encrypted SMS");
+        var cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(seal ? javax.crypto.Cipher.ENCRYPT_MODE : javax.crypto.Cipher.DECRYPT_MODE,
+                new javax.crypto.spec.SecretKeySpec(key, "AES"), new javax.crypto.spec.GCMParameterSpec(128, iv));
+        cipher.updateAAD(context.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        if (!seal) return cipher.doFinal(data, nonceSize, data.length - nonceSize);
+        byte[] ciphertext = cipher.doFinal(data);
+        byte[] combined = java.util.Arrays.copyOf(iv, nonceSize + ciphertext.length);
+        System.arraycopy(ciphertext, 0, combined, nonceSize, ciphertext.length);
+        return combined;
+    }
+
     String registrationSnapshot() { JSONObject value = store.registration(); return value == null ? "" : value.toString(); }
     void restoreRegistrationSnapshot(String snapshot) throws Exception { store.restoreSnapshot(snapshot); }
     void discardCloudBacklog() throws Exception { smsStore.discardCloudBacklog(); }
+
+    void revokePairing(String pairingID, String operation) throws Exception {
+        synchronized (VoWLANPairingStore.class) {
+            var clients = VoWLANPairingStore.records(context);
+            if (!clients.isEmpty() && clients.get(0).id().equals(pairingID)) {
+                JSONObject registration = store.registration();
+                if (registration != null && !registration.optBoolean("local_mode", false)) {
+                    E2EKeyStore.remove(context, registration.optString("device_id"),
+                            registration.optString("relay_url"));
+                }
+                if (!ForwardingConfigStore.clear(context)) {
+                    throw new IllegalStateException("forwarding_revoke_storage_failed");
+                }
+                store.restoreSnapshot("");
+                StandaloneAgentService.discardCallEvents();
+                context.stopService(new android.content.Intent(context, StandaloneAgentService.class));
+            }
+            VoWLANPairingStore.revoke(context, pairingID, operation);
+        }
+    }
 
     String debugSnapshot() throws Exception {
         return new JSONObject().put("events", new JSONArray()).put("runtime_profile", "android-standalone")
@@ -158,7 +285,7 @@ final class StandaloneAgentGateway {
                         .put("count", smsStore.pendingCount()).put("last_poll_error", "").toString());
                 case "/api/calls/audio/host/config" -> ok(new JSONObject()
                         .put("transport", "tcp_pcm_s16le").put("host", "127.0.0.1")
-                        .put("port", 7580).put("sample_rate", 8000).put("channels", 1)
+                        .put("port", PhoneAudioBridgeProcessPolicy.standalonePort(context.getPackageName())).put("sample_rate", 8000).put("channels", 1)
                         .put("route_ready", true).put("route_listening", true).toString());
                 default -> error(404, "not_found");
             };
@@ -166,6 +293,18 @@ final class StandaloneAgentGateway {
         if (!"POST".equalsIgnoreCase(method)) return error(405, "method_not_allowed");
         JSONObject input = body == null || body.isBlank() ? new JSONObject() : new JSONObject(body);
         return switch (path) {
+            case "/api/calls/regions" -> {
+                JSONArray numbers = input.optJSONArray("numbers");
+                if (numbers == null || numbers.length() > 100) yield error(400, "invalid_numbers");
+                JSONObject regions = new JSONObject();
+                for (int i = 0; i < numbers.length(); i++) {
+                    String number = numbers.optString(i, "");
+                    if (number.length() > 32) continue;
+                    String region = AndroidNumberRegion.lookup(context, number);
+                    if (!region.isEmpty()) regions.put(number, region);
+                }
+                yield ok(new JSONObject().put("regions", regions).toString());
+            }
             case "/api/push/register" -> ok(registerPairing(input.toString()));
             case "/api/push/mode" -> ok(store.setCloudEnabled(
                     input.optBoolean("enabled", false)).toString());
@@ -189,18 +328,25 @@ final class StandaloneAgentGateway {
             case "/api/calls/history/ack" -> {
                 JSONArray ids = input.optJSONArray("ids") == null ? new JSONArray() : input.getJSONArray("ids");
                 synchronized (callsLock) {
-                    for (int index = callHistory.length() - 1; index >= 0; index--) {
+                    JSONArray remaining = new JSONArray();
+                    for (int index = 0; index < callHistory.length(); index++) {
                         JSONObject record = callHistory.optJSONObject(index);
                         if (record == null) continue;
+                        boolean acknowledged = false;
                         for (int id = 0; id < ids.length(); id++) {
                             String value = ids.optString(id, "");
                             if (!value.isEmpty() && (value.equals(record.optString("id"))
                                     || value.equals(record.optString("android_id"))
                                     || value.equals(record.optString("backend_id")))) {
-                                callHistory.remove(index);
+                                acknowledged = true;
                                 break;
                             }
                         }
+                        if (!acknowledged) remaining.put(record);
+                    }
+                    if (remaining.length() != callHistory.length()) {
+                        if (!saveCallHistory(remaining)) yield error(503, "call_history_ack_storage_failed");
+                        callHistory = remaining;
                     }
                 }
                 yield ok("{\"accepted\":true}");
@@ -229,6 +375,10 @@ final class StandaloneAgentGateway {
     }
 
     synchronized JSONObject executeCloudCommand(JSONObject command, java.util.function.BooleanSupplier stillCurrent) throws Exception {
+        if (RuntimeMode.vowlanPushOnly(context)) {
+            return new JSONObject().put("command_id", command.optString("command_id", ""))
+                    .put("status", "failed").put("error", "relay_push_only");
+        }
         RelayEgressGate.Lease lease;
         try { lease = RelayEgressGate.shared.acquire(() -> {}); }
         catch (java.io.IOException denied) {
@@ -376,13 +526,25 @@ final class StandaloneAgentGateway {
     private void applyCallEvent(JSONObject event) throws Exception {
         synchronized (callsLock) {
             String state = event.optString("state", "");
+            long connectedAt = event.optLong("telecom_connected_at_ms", 0);
             if ("ended".equals(state)) {
                 if (activeCall != null && event.optString("call_id").equals(activeCall.optString("android_id"))) {
-                    activeCall.put("missed", "incoming".equals(activeCall.optString("direction"))
-                                    && !activeCall.has("connected_at"))
-                            .put("state", "ended").put("ended_at", Instant.now().toString())
-                            .put("updated_at", Instant.now().toString());
-                    callHistory.put(activeCall);
+                    if (connectedAt > 0) activeCall.put("connected_at", Instant.ofEpochMilli(connectedAt).toString());
+                    boolean missed = "incoming".equals(activeCall.optString("direction")) && !activeCall.has("connected_at");
+                    activeCall.put("missed", missed).put("state", "ended")
+                            .put("ended_at", Instant.now().toString()).put("updated_at", Instant.now().toString());
+                    long ringingDuration = event.optLong("ringing_duration_ms", -1);
+                    long connectedDuration = event.optLong("connected_duration_ms", -1);
+                    if (missed && ringingDuration >= 0) activeCall.put("ringing_duration_ms", ringingDuration);
+                    if (!missed && connectedDuration >= 0) activeCall.put("connected_duration_ms", connectedDuration);
+                    String reason = event.optString("disconnect_reason");
+                    if (!reason.isEmpty()) activeCall.put("disconnect_reason", reason);
+                    if (!event.optString("number_region").isBlank()) activeCall.put("number_region", event.optString("number_region"));
+                    JSONArray queued = new JSONArray(callHistory.toString()).put(activeCall);
+                    if (!saveCallHistory(queued)) {
+                        BridgeLog.info("call_history_persist_failed_pending_in_memory");
+                    }
+                    callHistory = queued;
                     activeCall = null;
                 }
             } else {
@@ -394,7 +556,10 @@ final class StandaloneAgentGateway {
                 activeCall.put("direction", event.optString("direction"))
                         .put("state", state).put("number", event.optString("number"))
                         .put("updated_at", Instant.now().toString());
-                if (("active".equals(state) || "held".equals(state)) && !activeCall.has("connected_at")) {
+                if (!event.optString("number_region").isBlank()) activeCall.put("number_region", event.optString("number_region"));
+                if (connectedAt > 0) {
+                    activeCall.put("connected_at", Instant.ofEpochMilli(connectedAt).toString());
+                } else if (("active".equals(state) || "held".equals(state)) && !activeCall.has("connected_at")) {
                     activeCall.put("connected_at", Instant.now().toString());
                 }
                 if (event.has("slot_index")) {
@@ -405,6 +570,10 @@ final class StandaloneAgentGateway {
         }
         callEvents.advance();
         agentEvents.advance();
+    }
+
+    private boolean saveCallHistory(JSONArray records) {
+        return historyPreferences.edit().putString("pending", records.toString()).commit();
     }
 
     private JSONObject callSnapshot() throws Exception {

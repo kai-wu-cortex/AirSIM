@@ -65,6 +65,11 @@ public final class VoWLANControlGateway implements Closeable {
                 respond(peer, 404, "{\"error\":\"not_found\"}");
                 return;
             }
+            boolean watchSMS = VoWLANControlPolicy.watchSMS(request.method, request.path);
+            if (request.path.startsWith("/api/watch/") && !watchSMS) {
+                respond(peer, 404, "{\"error\":\"not_found\"}");
+                return;
+            }
             long timestamp = Long.parseLong(request.headers.getOrDefault("x-airsim-vowlan-timestamp", "0"));
             String nonce = request.headers.getOrDefault("x-airsim-vowlan-nonce", "");
             String signature = request.headers.getOrDefault("x-airsim-vowlan-signature", "");
@@ -75,25 +80,56 @@ public final class VoWLANControlGateway implements Closeable {
             String canonical = VoWLANAuth.canonicalRequest(
                     request.method, request.path, request.body, timestamp, nonce);
             long now = System.currentTimeMillis() / 1000L;
-            boolean watch = "1".equals(request.headers.get("x-airsim-watch-control"));
-            String watchCallID = null;
-            if (watch) {
-                if ("GET".equals(request.method)) {
-                    watchCallID = android.net.Uri.parse(request.path).getQueryParameter("call_id");
-                } else {
-                    watchCallID = new org.json.JSONObject(
-                            new String(request.body, StandardCharsets.UTF_8)).optString("call_id");
-                }
-                if (!VoWLANControlPolicy.watchAllowed(request.method, request.path, watchCallID)) {
-                    respond(peer, 403, "{\"error\":\"watch_scope_forbidden\"}");
+            String revokeOperation = null;
+            if ("/api/pairing/revoke".equals(request.path) && "POST".equals(request.method)) {
+                revokeOperation = java.util.UUID.fromString(new org.json.JSONObject(
+                        new String(request.body, StandardCharsets.UTF_8)).getString("operation")).toString();
+                if (VoWLANPairingStore.wasRevoked(context, revokeOperation)) {
+                    respond(peer, 200, "{\"ok\":true}");
                     return;
                 }
             }
-            VoWLANPairingStore.Record matched = watch
-                    ? VoWLANPairingStore.matchWatch(context, signature, canonical, timestamp, now)
-                    : VoWLANPairingStore.match(context, signature, canonical, timestamp, now);
+            VoWLANPairingStore.Record matched =
+                    VoWLANPairingStore.match(context, signature, canonical, timestamp, now, watchSMS);
             if (matched == null || !replayCache.accept(nonce, now)) {
                 respond(peer, 401, "{\"error\":\"authentication_failed\"}");
+                return;
+            }
+            if (watchSMS) {
+                if (!RuntimeMode.isStandalone(context)) {
+                    respond(peer, 404, "{\"error\":\"standalone_required\"}");
+                    return;
+                }
+                byte[] parent = matched.secretCopy();
+                try {
+                    String payload = StandaloneAgentGateway.get(context).watchSMS(request.method, request.body, nonce, matched.id(), parent);
+                    respond(peer, 200, payload);
+                } finally { Arrays.fill(parent, (byte) 0); }
+                return;
+            }
+            if (revokeOperation != null) {
+                if (!RuntimeMode.isStandalone(context)) {
+                    respond(peer, 404, "{\"error\":\"standalone_required\"}");
+                    return;
+                }
+                if (!CallRepository.callIDs().isEmpty()) {
+                    respond(peer, 409, "{\"error\":\"call_in_progress\"}");
+                    return;
+                }
+                StandaloneAgentGateway.get(context).revokePairing(matched.id(), revokeOperation);
+                respond(peer, 200, "{\"ok\":true}");
+                return;
+            }
+            if ("/api/push/register".equals(request.path)) {
+                synchronized (VoWLANPairingStore.class) {
+                    if (VoWLANPairingStore.records(context).stream().noneMatch(record -> record.id().equals(matched.id()))) {
+                        respond(peer, 401, "{\"error\":\"pairing_revoked\"}");
+                        return;
+                    }
+                    AgentClient.ForwardResponse registration = new AgentClient(context).forwardVoWLAN(
+                            request.method, request.path, new String(request.body, StandardCharsets.UTF_8));
+                    respond(peer, registration.status(), registration.payload());
+                }
                 return;
             }
             if ("/api/local-mode".equals(request.path)) {
@@ -161,24 +197,18 @@ public final class VoWLANControlGateway implements Closeable {
                 DirectCallOwnership.Lease callLease = DirectCallOwnership.capture(local);
                 java.util.Set<String> before = CallRepository.callIDs();
                 String answerTarget = "";
-                String watchBackendID = null;
-                if ("/api/calls/answer".equals(request.path) || (watch && "POST".equals(request.method))) {
+                if ("/api/calls/answer".equals(request.path)) {
                     String requested = request.body.length == 0 ? "" : new org.json.JSONObject(
                             new String(request.body, StandardCharsets.UTF_8)).optString("call_id");
                     AgentClient.ForwardResponse status = new AgentClient(context).forwardVoWLAN("GET", "/api/calls/status", null);
                     org.json.JSONObject active = new org.json.JSONObject(status.payload()).optJSONObject("active");
-                    if (active != null && (requested.isEmpty() || requested.equals(active.optString("id"))
-                            || (watch && watchMatchesCall(active, requested)))) {
+                    if (active != null && (requested.isEmpty() || requested.equals(active.optString("id")))) {
                         String exactID = active.optString("android_id", active.optString("id"));
-                        if (CallRepository.state(exactID) == android.telecom.Call.STATE_RINGING) answerTarget = exactID;
-                        if (watch) watchBackendID = active.optString("id");
+                        if (CallRepository.state(exactID) == android.telecom.Call.STATE_RINGING) {
+                            answerTarget = exactID;
+                            DirectCallOwnership.record(local, exactID, callLease);
+                        }
                     }
-                }
-                if (watch && "POST".equals(request.method)
-                        && (watchBackendID == null || watchBackendID.isEmpty()
-                            || ("/api/calls/answer".equals(request.path) && answerTarget.isEmpty()))) {
-                    respond(peer, 409, "{\"error\":\"watch_call_state_changed\"}");
-                    return;
                 }
                 String dialNumber = "/api/calls/dial".equals(request.path)
                         ? new org.json.JSONObject(new String(request.body, StandardCharsets.UTF_8)).optString("number") : "";
@@ -189,10 +219,9 @@ public final class VoWLANControlGateway implements Closeable {
                     return;
                 }
                 String body = request.body.length == 0 ? null : new String(request.body, StandardCharsets.UTF_8);
-                if (watchBackendID != null) body = new org.json.JSONObject().put("call_id", watchBackendID).toString();
                 AgentClient.ForwardResponse forwarded =
                         new AgentClient(context).forwardVoWLAN(request.method,
-                                watch && "GET".equals(request.method) ? "/api/calls/status" : request.path, body);
+                                request.path, body);
                 responseStatus = forwarded.status();
                 output = forwarded.payload();
                 if (output.isEmpty()) output = "{}";
@@ -251,35 +280,6 @@ public final class VoWLANControlGateway implements Closeable {
                     }
                 }
             }
-            if (watch) {
-                String state = "";
-                if ("GET".equals(request.method) && responseStatus == 200) {
-                    org.json.JSONObject snapshot = new org.json.JSONObject(output);
-                    org.json.JSONObject active = snapshot.optJSONObject("active");
-                    if (active != null && watchMatchesCall(active, watchCallID)) {
-                        state = active.optString("state");
-                    } else {
-                        org.json.JSONArray history = snapshot.optJSONArray("history");
-                        for (int i = 0; history != null && i < history.length(); i++) {
-                            org.json.JSONObject call = history.optJSONObject(i);
-                            if (call != null && watchMatchesCall(call, watchCallID)) {
-                                state = call.optString("state");
-                                break;
-                            }
-                        }
-                    }
-                }
-                byte[] root = matched.secretCopy();
-                byte[] key = VoWLANAuth.watchCallKey(root);
-                try {
-                    String proof = VoWLANAuth.sign(key, "watch-response\n" + nonce + "\n" + watchCallID
-                            + "\n" + responseStatus + "\n" + state);
-                    output = new org.json.JSONObject().put("state", state).put("proof", proof).toString();
-                } finally {
-                    Arrays.fill(root, (byte) 0);
-                    Arrays.fill(key, (byte) 0);
-                }
-            }
             respond(peer, responseStatus, output);
             BridgeLog.info("vowlan_control_forwarded method=" + request.method + " path=" + safePath(request.path));
         }, error -> {
@@ -290,10 +290,6 @@ public final class VoWLANControlGateway implements Closeable {
             BridgeLog.error("vowlan_control_failed path=" + safePath(pathForLog[0]), error);
             respond(peer, 502, "{\"error\":\"agent_unavailable\"}");
         });
-    }
-
-    private static boolean watchMatchesCall(org.json.JSONObject record, String id) {
-        return id.equals(record.optString("id")) || id.equals(record.optString("android_id"));
     }
 
     private boolean canonicalCallIDsSupported() {

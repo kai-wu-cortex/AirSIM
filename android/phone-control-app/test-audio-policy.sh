@@ -9,15 +9,20 @@ ANDROID_JAR="$SDK/platforms/android-35/android.jar"
 mkdir -p "$OUT"
 "$TASK_JAVA_HOME/bin/javac" --release 17 -cp "$BASE:$ANDROID_JAR" -d "$OUT" \
   "$ROOT"/test/android/telecom/Call.java \
+  "$ROOT"/test/android/telecom/DisconnectCause.java \
   "$ROOT"/test/com/airsim/phonecontrol/AppConfig.java \
   "$ROOT"/test/audio-policy/android/os/Handler.java \
+  "$ROOT"/test/cloud-call/android/os/SystemClock.java \
   "$ROOT"/test/audio-policy/android/telecom/InCallService.java \
   "$ROOT"/test/audio-policy/com/airsim/phonecontrol/*.java \
   "$ROOT"/test/audio-policy/com/airsim/phonecontrol/voble/VoBLEGatewayService.java \
   "$ROOT"/src/com/airsim/phonecontrol/TelecomStateMapper.java \
+  "$ROOT"/src/com/airsim/phonecontrol/WireJson.java \
   "$ROOT"/src/com/airsim/phonecontrol/LocalOutputMuteController.java \
   "$ROOT"/src/com/airsim/phonecontrol/LocalCallAudioController.java \
+  "$ROOT"/src/com/airsim/phonecontrol/LocalMicrophoneMuteController.java \
   "$ROOT"/src/com/airsim/phonecontrol/RemoteAudioSessionRegistry.java \
+  "$ROOT"/src/com/airsim/phonecontrol/DirectCallOwnership.java \
   "$ROOT"/src/com/airsim/phonecontrol/voble/VoBLEMediaSession.java \
   "$ROOT"/src/com/airsim/phonecontrol/AirSIMInCallService.java \
   "$ROOT"/test/com/airsim/phonecontrol/RemoteCallMuteLifecycleTests.java

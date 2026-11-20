@@ -158,23 +158,26 @@ public final class PairingServer implements Closeable {
             // VoWLAN HMAC 密钥只属于 Android 热点网关。Linux Agent 的 Push
             // 注册结构使用严格 JSON 解码，且无须接触该密钥，因此转发前必须移除。
             registration.remove("vowlan_secret");
-            if (e2eKey != null && !registration.optBoolean("local_mode", false)) {
-                StandaloneAgentStore.validateRegistration(registration);
-                E2EKeyStore.prepareEncryptedPairing(context, registration.optString("device_id"), registration.optString("relay_url"));
-            }
-            String agentResponse = new AgentClient(context).registerPairing(registration.toString());
-            JSONObject response = new JSONObject(agentResponse)
-                    .put("agent_id", AndroidAgentIdentity.agentID(context));
-            VoWLANPairingStore.saveEncoded(context, vowlanSecret);
-            if (!registration.optBoolean("local_mode", false)) {
-                String deviceID = registration.optString("device_id", "");
-                String relayURL = registration.optString("relay_url", "");
-                if (e2eKey != null) {
-                    E2EKeyStore.save(context, deviceID, relayURL, e2eKey);
-                    BridgeLog.info("e2e_sms_key_saved");
-                } else if (E2EKeyStore.remove(context, deviceID, relayURL)) {
-                    // Each pairing replaces the key; a pairing without one turns encryption off.
-                    BridgeLog.info("e2e_sms_key_cleared");
+            JSONObject response;
+            synchronized (VoWLANPairingStore.class) {
+                if (e2eKey != null && !registration.optBoolean("local_mode", false)) {
+                    StandaloneAgentStore.validateRegistration(registration);
+                    E2EKeyStore.prepareEncryptedPairing(context, registration.optString("device_id"), registration.optString("relay_url"));
+                }
+                String agentResponse = new AgentClient(context).registerPairing(registration.toString());
+                response = new JSONObject(agentResponse)
+                        .put("agent_id", AndroidAgentIdentity.agentID(context));
+                VoWLANPairingStore.saveEncoded(context, vowlanSecret);
+                if (!registration.optBoolean("local_mode", false)) {
+                    String deviceID = registration.optString("device_id", "");
+                    String relayURL = registration.optString("relay_url", "");
+                    if (e2eKey != null) {
+                        E2EKeyStore.save(context, deviceID, relayURL, e2eKey);
+                        BridgeLog.info("e2e_sms_key_saved");
+                    } else if (E2EKeyStore.remove(context, deviceID, relayURL)) {
+                        // Each pairing replaces the key; a pairing without one turns encryption off.
+                        BridgeLog.info("e2e_sms_key_cleared");
+                    }
                 }
             }
             BridgeLog.info("vowlan_pairing_client_saved clients="

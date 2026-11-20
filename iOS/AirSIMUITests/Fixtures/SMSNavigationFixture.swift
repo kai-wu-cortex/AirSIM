@@ -14,10 +14,12 @@ struct SMSNavigationFixture {
     static var previewCall: CallRecord? {
         guard let phase = ProcessInfo.processInfo.environment["AIRSIM_UI_CALL"],
               ["incoming", "active"].contains(phase) else { return nil }
+        let design = ProcessInfo.processInfo.environment["AIRSIM_UI_DESIGN"] == "1"
         return CallRecord(id: "layout-preview", index: 0, direction: "incoming", state: phase,
-            number: ProcessInfo.processInfo.environment["AIRSIM_UI_REGION_NUMBER"] ?? (ProcessInfo.processInfo.environment["AIRSIM_UI_REGION"] == "1" ? "+86 138 0013 8000" : "+86 138 0000 0000"),
+            number: design ? "13800138000" : ProcessInfo.processInfo.environment["AIRSIM_UI_REGION_NUMBER"] ?? (ProcessInfo.processInfo.environment["AIRSIM_UI_REGION"] == "1" ? "+86 138 0013 8000" : "+86 138 0000 0000"),
             startedAt: previewStartedAt, updatedAt: previewStartedAt, endedAt: nil, missed: false,
-            slotIndex: ProcessInfo.processInfo.environment["AIRSIM_UI_REGION"] == "1" ? 1 : nil)
+            sourceAgentID: design ? "ui-offline-device" : nil,
+            slotIndex: design || ProcessInfo.processInfo.environment["AIRSIM_UI_REGION"] == "1" ? 1 : nil)
     }
 
     static func fromLaunchEnvironment() -> Self? {
@@ -39,6 +41,16 @@ struct SMSNavigationFixture {
             SMSSIMPreference.forget(agentID: agentID)
             SMSSIMPreference.remember(agentID: agentID, slots: slots)
         }
+        if ProcessInfo.processInfo.environment["AIRSIM_UI_DEVICE"] == "1" {
+            let device = PairedAndroidDeviceRecord(id: "ui-offline-device", deviceName: "OnePlus PLR110", agentKind: "standalone")
+            arguments["airsim.paired-android-devices.v1"] = try! JSONEncoder().encode([device])
+            arguments[AndroidAgentBindingPreference.key] = device.id
+            let slots = try! JSONDecoder().decode([AndroidSIMSlot].self, from: Data("""
+            [{"id":"ui-sim-1","label":"SIM 1","slot_index":0,"carrier_name":"中国联通","number":"+8613800138000"},
+             {"id":"ui-sim-2","label":"SIM 2","slot_index":1,"carrier_name":"中国移动","number":"+8613900139000"}]
+            """.utf8))
+            SMSSIMPreference.remember(agentID: device.id, slots: slots)
+        }
         UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         let defaults = UserDefaults(suiteName: "AirSIM.UITest.\(UUID().uuidString)")!
         defaults.set(true, forKey: "airsim.first-connection-complete")
@@ -57,6 +69,10 @@ struct SMSNavigationFixture {
         }
         let contactCache = ContactCacheStore(fileURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("AirSIM-UI-contacts-\(UUID().uuidString).json"))
+        if ProcessInfo.processInfo.environment["AIRSIM_UI_DESIGN"] == "1" {
+            _ = contactCache.save([ContactStore.Contact(id: "design-contact", name: "张先生",
+                phones: ["13800138000"], emails: [], photoData: nil)])
+        }
         let model = AppModel(contactStore: ContactStore(fetcher: NavigationContactFetcher(), cache: contactCache),
                              historyStore: history)
         model.messages = history.loadMessages()
@@ -68,6 +84,11 @@ struct SMSNavigationFixture {
                 calls.append(CallRecord(id: "recent-long", index: 0, direction: "incoming", state: "ended",
                     number: "18844737195", startedAt: now.addingTimeInterval(-300), updatedAt: now,
                     endedAt: now, missed: false))
+            }
+            if ProcessInfo.processInfo.environment["AIRSIM_UI_VERIFIED_DURATIONS"] == "1" {
+                calls[0].androidRingingDurationMS = 12_500
+                calls[1].androidConnectedDurationMS = 63_000
+                _ = history.unseenMissedCallIDs(in: [])
             }
             history.saveCallHistory(calls); model.callHistory = calls
         }
@@ -81,7 +102,11 @@ private struct NavigationContactFetcher: ContactFetching {
     func authorizationState() -> ContactAuthorizationState { .authorized }
     func requestAccess() async throws -> Bool { true }
     func fetchAll() throws -> [ContactStore.Contact] {
-        [.init(id: "navigation-contact", name: "Navigation Alice", phones: ["2025550100"], emails: [], photoData: nil)]
+        var contacts = [ContactStore.Contact(id: "navigation-contact", name: "Navigation Alice", phones: ["2025550100"], emails: [], photoData: nil)]
+        if ProcessInfo.processInfo.environment["AIRSIM_UI_DESIGN"] == "1" {
+            contacts.append(.init(id: "design-contact", name: "张先生", phones: ["13800138000"], emails: [], photoData: nil))
+        }
+        return contacts
     }
 }
 #endif

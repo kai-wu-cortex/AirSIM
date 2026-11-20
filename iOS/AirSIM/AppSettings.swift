@@ -64,7 +64,7 @@ enum AppTheme: String, CaseIterable, Identifiable {
     case forest, sky
     var id: String { rawValue }
     var title: String { self == .forest ? "墨绿" : "天蓝" }
-    var accent: Color { self == .forest ? Color(red: 0.12, green: 0.47, blue: 0.38) : Color(red: 0.12, green: 0.56, blue: 0.88) }
+    var accent: Color { self == .forest ? Color(uiColor: .systemGreen) : Color(uiColor: .systemBlue) }
 }
 
 /// 运营商原始等待音开关：默认开启。未写入 UserDefaults 时视为开启，

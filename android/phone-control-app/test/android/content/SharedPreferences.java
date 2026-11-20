@@ -5,6 +5,7 @@ public final class SharedPreferences {
     public String getString(String key, String fallback) { return (String) values.getOrDefault(key, fallback); }
     public long getLong(String key, long fallback) { return (Long) values.getOrDefault(key, fallback); }
     public boolean getBoolean(String key, boolean fallback) { return (Boolean) values.getOrDefault(key, fallback); }
+    public java.util.Map<String, ?> getAll() { return new java.util.HashMap<>(values); }
     public Editor edit() { return new Editor(); }
     public final class Editor {
         private final java.util.Map<String, Object> pending = new java.util.HashMap<>();

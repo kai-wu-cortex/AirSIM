@@ -101,6 +101,10 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
         return request("ensure_dialer_role", new JSONObject());
     }
 
+    String restoreRemoteScreenOff(long since, long observedAt) throws Exception {
+        return request("restore_remote_screen_off", new JSONObject().put("since", since).put("observed_at", observedAt));
+    }
+
     String sendSms(String destination, String body, int subscriptionId) throws Exception {
         return request("send_sms", new JSONObject()
                 .put("destination", destination)

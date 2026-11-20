@@ -14,6 +14,7 @@ import { RoutingError, parseAgentID, agentSocketKey, matchesTarget, resolveTarge
 import {
   authenticateAndReadAgentHeartbeats,
   authenticateAndWriteAgentHeartbeat,
+  claimRateLimit,
   deleteRelayState,
   readAgentHeartbeat,
   readAgentHeartbeats,
@@ -43,8 +44,8 @@ let cachedProviderTokenAt = 0;
 let cachedProviderTokenKey = "";
 
 export default {
-  async fetch(request, env) {
-    return handleRequest(request, env);
+  async fetch(request, env, ctx) {
+    return handleRequest(request, env, ctx);
   },
   async scheduled(event, env, ctx) {
     // Keep the relay registration table small: remove devices that have not
@@ -54,8 +55,8 @@ export default {
   },
 };
 
-export async function handleRequest(request, env) {
-  try { return await routeRequest(request, env); }
+export async function handleRequest(request, env, ctx) {
+  try { return await routeRequest(request, env, ctx); }
   catch (error) {
     if (isDurableObjectQuotaError(error)) return durableObjectQuotaResponse();
     if (error instanceof RoutingError) return jsonResponse(error.status,{error:error.code});
@@ -72,7 +73,7 @@ function agentHeaders(request, value) {
   return headers;
 }
 
-async function routeRequest(request, env) {
+async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
   if (routingV2(request)) {
     if (!/^\/v2\/(commands\/(enqueue|pull|complete|result)|events\/(call|call-state)|devices\/[^/]+\/commands\/connect|calls\/[^/]+\/actions(?:\/[^/]+)?)$/.test(url.pathname)) {
@@ -162,6 +163,10 @@ async function routeRequest(request, env) {
     if (url.pathname === "/v1/live-activities/register") {
       return await registerLiveActivity(request, env);
     }
+    if (url.pathname === "/v1/live-activities/device-status") {
+      if (!env.DEVICE_STATUS_ACTIVITY_DEVICE_ID) return jsonResponse(404, { error: "not found" });
+      return await registerDeviceStatusActivity(request, env);
+    }
     if (url.pathname === "/v1/events/call") {
       return await receiveCall(request, env);
     }
@@ -175,7 +180,7 @@ async function routeRequest(request, env) {
       return await receiveSMS(request, env);
     }
     if (url.pathname === "/v1/events/heartbeat") {
-      return await receiveAgentHeartbeat(request, env);
+      return await receiveAgentHeartbeat(request, env, ctx);
     }
     if (url.pathname === "/v1/devices/status") {
       return await receiveDeviceStatus(request, env);
@@ -1195,6 +1200,76 @@ async function registerLiveActivity(request, env) {
   return jsonResponse(200, { registered: true });
 }
 
+const STATUS_ACTIVITY_TTL = 8 * 60 * 60;
+const STATUS_ACTIVITY_STALE = 5 * 60;
+const STATUS_ACTIVITY_INTERVAL = 120;
+
+async function registerDeviceStatusActivity(request, env) {
+  const value = await readJSON(request);
+  const authenticated = await authenticate(value, env);
+  if (authenticated.response) return authenticated.response;
+  const { device } = authenticated;
+  if (device.device_id !== env.DEVICE_STATUS_ACTIVITY_DEVICE_ID) {
+    return jsonResponse(404, { error: "not found" });
+  }
+  if (device.live_activity_presentation !== "agent_status" ||
+      !nonEmpty(value.activity_id) || value.activity_id.length > 128 ||
+      !TOKEN_PATTERN.test(value.update_token || "") || typeof value.background !== "boolean") {
+    return jsonResponse(400, { error: "invalid device status activity" });
+  }
+  const agentID = parseAgentID(value.agent_id);
+  const key = `liveactivity:status:${device.device_id}`;
+  const previous = await readRelayRecord(env, key);
+  const sameActivity = previous?.activity_id === value.activity_id;
+  if (!value.background && !sameActivity) return jsonResponse(200, { registered: true });
+  await writeRelayState(env, key, JSON.stringify({
+    activity_id: value.activity_id,
+    agent_id: agentID,
+    update_token: value.update_token.toLowerCase(),
+    background: value.background,
+  }), STATUS_ACTIVITY_TTL);
+  return jsonResponse(200, { registered: true });
+}
+
+async function pushDeviceStatusActivity(env, deviceID, status) {
+  const key = `liveactivity:status:${deviceID}`;
+  const subscription = await readRelayRecord(env, key);
+  const now = Math.floor(status.received_at_ms / 1000);
+  if (!subscription?.background || subscription.agent_id !== status.agent_id) return;
+  const rateKey = `status-activity:${deviceID}`;
+  if (!await claimRateLimit(env, rateKey, now * 1000, STATUS_ACTIVITY_INTERVAL * 1000)) return;
+  const device = await readDeviceRecord(env, deviceID);
+  if (device?.live_activity_presentation !== "agent_status") return;
+  const latest = await readRelayRecord(env, key);
+  if (!latest?.background || latest.activity_id !== subscription.activity_id ||
+      latest.update_token !== subscription.update_token || latest.agent_id !== subscription.agent_id) return;
+  await sendAPNs(env, device, latest.update_token, {
+    topic: `${device.bundle_id}.push-type.liveactivity`,
+    pushType: "liveactivity",
+    priority: 5,
+    expiration: now + 60,
+    collapseID: `device-status:${latest.activity_id}`,
+    payload: { aps: {
+      timestamp: now,
+      event: "update",
+      "stale-date": now + STATUS_ACTIVITY_STALE,
+      "content-state": {
+        callID: "",
+        number: "",
+        displayName: "",
+        phase: "standby",
+        startedAt: now - 978307200,
+        agentDeviceName: status.device_name?.slice(0, 80),
+        agentBatteryPercent: status.battery?.percent,
+        androidDataNetwork: status.android_data_network,
+        signalDBM: Number.isInteger(status.signal_dbm) ? status.signal_dbm : undefined,
+        pairedAgentCount: 1,
+        deviceStatusFromRelay: true,
+      },
+    } },
+  });
+}
+
 async function receiveCall(request, env) {
   const call = await readJSON(request);
   const authenticated = await authenticate(call, env);
@@ -1226,6 +1301,10 @@ async function receiveCall(request, env) {
     return jsonResponse(403, { error: "wrong_agent" });
   }
   const lifecycleKey = callLifecycleKey(authenticated.device.device_id, agentID, call.call_uuid);
+  const notificationScope = JSON.stringify([authenticated.device.device_id, agentID, call.call_uuid.toLowerCase(), generation]);
+  const notificationKey = `call-notification:${notificationScope}`;
+  const priorNotification = await bestEffortReadRelayRecord(env, notificationKey);
+  if (priorNotification?.answered || priorNotification?.ended) return jsonResponse(202, { stale: true });
   const lifecycle = applyCallLifecycle(await readScopedCallLifecycle(env, lifecycleKey,
     authenticated.device.device_id, call.call_uuid), {
     call_id: call.call_id.trim(),
@@ -1288,6 +1367,10 @@ async function receiveCall(request, env) {
     generation,
     number: stringValue(call.number),
     caller_name: stringValue(call.caller_name),
+    slot_index: Number.isInteger(call.slot_index) && call.slot_index >= 0 ? call.slot_index : -1,
+    android_received_at: stringValue(call.android_received_at).slice(0, 40),
+    android_uploaded_at: stringValue(call.android_uploaded_at).slice(0, 40),
+    relay_received_at: new Date(now).toISOString(),
     issued_at: call.issued_at,
     expires_at: call.expires_at,
     ...(mediaReady ? { call_secret: call.call_secret, media_url: mediaURL } : {}),
@@ -1333,8 +1416,10 @@ async function receiveCall(request, env) {
   }
 
   let alertPushed = false;
+  const iphoneVoIPAccepted = Boolean(authenticated.device.voip_token) && (voipPushed || voipDuplicate);
   try {
-    if (!alertDuplicate) {
+    const notification = await bestEffortReadRelayRecord(env, notificationKey);
+    if (!iphoneVoIPAccepted && !alertDuplicate && !notification?.answered && !notification?.ended) {
       const displayName = stringValue(call.caller_name) || stringValue(call.number) || "未知号码";
       const alertBody = [stringValue(call.caller_name) && stringValue(call.number) && displayName !== stringValue(call.number)
         ? `${displayName} · ${stringValue(call.number)}` : displayName,
@@ -1406,7 +1491,7 @@ async function receiveCall(request, env) {
       }
     }
 
-    if (voipDuplicate && watchDuplicate && alertDuplicate && activityDuplicate) {
+    if (voipDuplicate && watchDuplicate && (alertDuplicate || iphoneVoIPAccepted) && activityDuplicate) {
       return jsonResponse(202, { duplicate: true });
     }
     if (!voipPushed && !watchPushed && !alertPushed && !activityPushed) {
@@ -1491,6 +1576,7 @@ async function receiveSMS(request, env) {
       sound: "default",
       "thread-id": `airsim-sms-${sender}`.slice(0, 64),
       "content-available": 1,
+      "mutable-content": 1,
     },
     event: "incoming_sms",
     delivery_id: message.delivery_id,
@@ -1502,6 +1588,12 @@ async function receiveSMS(request, env) {
     code: stringValue(message.code),
     timestamp: deliveryTimestamp,
   }));
+  payload.android_received_at = stringValue(message.android_received_at).slice(0, 40);
+  payload.android_uploaded_at = stringValue(message.android_uploaded_at).slice(0, 40);
+  payload.relay_received_at = new Date(now).toISOString();
+  if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > MAX_APNS_PAYLOAD_BYTES) {
+    delete payload.android_received_at; delete payload.android_uploaded_at; delete payload.relay_received_at;
+  }
   try {
     await sendAPNs(env, authenticated.device, authenticated.device.alert_token, {
       topic: authenticated.device.bundle_id,
@@ -1527,7 +1619,7 @@ async function receiveSMS(request, env) {
   }
 }
 
-async function receiveAgentHeartbeat(request, env) {
+async function receiveAgentHeartbeat(request, env, ctx) {
   const heartbeat = await readJSON(request);
   if (heartbeat.event !== "agent_heartbeat" ||
       !["registered", "searching", "denied", "unregistered"].includes(heartbeat.cellular_state) ||
@@ -1560,16 +1652,26 @@ async function receiveAgentHeartbeat(request, env) {
     cellular_recovery: stringValue(heartbeat.cellular_recovery),
     ecm_carrier: stringValue(heartbeat.ecm_carrier),
     ...(Number.isFinite(heartbeat.signal_dbm) ? { signal_dbm: heartbeat.signal_dbm } : {}),
+    ...(["wifi", "5g", "4g", "cellular"].includes(heartbeat.android_data_network)
+      ? { android_data_network: heartbeat.android_data_network } : {}),
   };
   // Heartbeat must stay on the Durable Object path. KV has a free daily
   // put() limit; writing every heartbeat there exhausts it and breaks online
   // status for all devices. KV remains a read-only fallback.
   const directResponse = await authenticateAndWriteAgentHeartbeat(env, heartbeat, agentID, record);
-  if (directResponse) return directResponse;
-  const authenticated = await authenticate(heartbeat, env);
-  if (authenticated.response) return authenticated.response;
-  await writeAgentHeartbeat(env, authenticated.device.device_id, agentID, record);
-  return jsonResponse(202, { received: true });
+  if (directResponse && !directResponse.ok) return directResponse;
+  if (!directResponse) {
+    const authenticated = await authenticate(heartbeat, env);
+    if (authenticated.response) return authenticated.response;
+    await writeAgentHeartbeat(env, authenticated.device.device_id, agentID, record);
+  }
+  const deviceID = heartbeat.device_id.trim();
+  if (deviceID === env.DEVICE_STATUS_ACTIVITY_DEVICE_ID && ctx?.waitUntil &&
+      record.agent_kind === "standalone") {
+    ctx.waitUntil(pushDeviceStatusActivity(env, deviceID, record)
+      .catch(() => console.warn("device status activity update failed")));
+  }
+  return directResponse ?? jsonResponse(202, { received: true });
 }
 
 function deviceStatusResponse(heartbeats) {
@@ -1642,7 +1744,7 @@ async function receiveCallOwner(request, env) {
   }
   const generation = Number.isInteger(event.generation) && event.generation > 0 ? event.generation : 1;
   const agentID = stringValue(event.agent_id);
-  const scope = JSON.stringify([authenticated.device.device_id, agentID, event.call_uuid, generation]);
+  const scope = JSON.stringify([authenticated.device.device_id, agentID, event.call_uuid.toLowerCase(), generation]);
   const dedupeKey = `dedupe:owner:${scope}:${event.phase}`;
   if (await readRelayState(env, dedupeKey)) return jsonResponse(202, { duplicate: true });
 

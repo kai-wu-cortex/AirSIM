@@ -37,9 +37,13 @@ public final class VoWLANPCMRelay implements Closeable {
 
     public synchronized int start(Inet4Address hotspot, int port, InetSocketAddress internal) throws IOException {
         if (server != null) return server.getLocalPort();
-        if (internal.getPort() != 7580 || internal.getAddress() == null
-                || !(internal.getAddress().isSiteLocalAddress() || internal.getAddress().isLoopbackAddress())) {
-            throw new IllegalArgumentException("shell PCM must be loopback or AVF-private port 7580");
+        var address = internal.getAddress();
+        boolean standalone = address != null && address.isLoopbackAddress()
+                && internal.getPort() == PhoneAudioBridgeProcessPolicy.standalonePort(context.getPackageName());
+        boolean avf = address != null && address.isSiteLocalAddress()
+                && internal.getPort() == PhoneAudioBridgeProcessPolicy.DEFAULT_PORT;
+        if (!standalone && !avf) {
+            throw new IllegalArgumentException("shell PCM must use the configured loopback or AVF endpoint");
         }
         ServerSocket created = VoWLANPortBinder.bind(hotspot, port, 2);
         shellPCM = internal;
@@ -83,9 +87,6 @@ public final class VoWLANPCMRelay implements Closeable {
             String canonical = VoWLANPCMProtocol.canonical(preface);
             VoWLANPairingStore.Record matched = VoWLANPairingStore.match(
                     context, preface.signature(), canonical, preface.timestamp(), now);
-            if (matched == null) {
-                matched = VoWLANPairingStore.matchWatch(context, preface.signature(), canonical, preface.timestamp(), now);
-            }
             if (matched == null || !replayCache.accept(preface.nonce(), now)) {
                 throw new SecurityException("authentication failed");
             }
@@ -146,44 +147,98 @@ public final class VoWLANPCMRelay implements Closeable {
         if (matched == null || !replayCache.accept(fields[2], now)) throw new SecurityException("early media authentication failed");
         var lease = EarlyMediaSessions.resolve(matched.id(), binding, now);
         if (lease == null || !gate.tryAcquire(owner)) throw new SecurityException("early media lease unavailable");
+        // Isolation belongs to authenticated control, not to the presence of sound.
+        RemoteAudioSessionRegistry.reserveVoWLANCall(lease.telecom());
         Object earlyOwner = new Object();
-        try (Socket capture = new Socket()) {
-            if (!track(capture)) return;
-            try {
-                capture.connect(shellPCM, 3000); capture.setSoTimeout(3000); capture.setTcpNoDelay(true);
-                capture.getOutputStream().write("AIRSIMEM01\n".getBytes(StandardCharsets.US_ASCII));
-                if (!VoWLANPCMProtocol.acceptReady(capture.getInputStream())) throw new IOException("receive-only bridge unavailable");
-                peer.getOutputStream().write(VoWLANPCMProtocol.READY.getBytes(StandardCharsets.US_ASCII));
-                peer.getOutputStream().flush();
-                capture.setSoTimeout(0);
-                Thread monitor = new Thread(() -> {
+        boolean peerReady = false;
+        boolean audible = false;
+        try {
+            while (EarlyMediaSessions.live(lease) && !peer.isClosed() && EarlyMediaSessions.captureAvailable(lease)) {
+                String failure = "capture_unavailable";
+                try (Socket capture = new Socket()) {
+                    if (!track(capture)) return;
                     try {
-                        while (!peer.isClosed() && !capture.isClosed() && EarlyMediaSessions.live(lease)) Thread.sleep(100);
-                    } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                    finally { closeQuietly(capture); closeQuietly(peer); }
-                }, "early-media-lease");
-                monitor.setDaemon(true); monitor.start();
-                byte[] frame = new byte[320]; boolean audible = false;
-                try {
-                    while (EarlyMediaSessions.live(lease)) {
-                        try { new java.io.DataInputStream(capture.getInputStream()).readFully(frame); }
-                        catch (java.net.SocketTimeoutException timeout) { continue; }
-                        int peak = 0;
-                        for (int k = 0; k + 1 < frame.length; k += 2) {
-                            short sample = (short)((frame[k] & 255) | (frame[k + 1] << 8));
-                            peak = Math.max(peak, Math.abs((int) sample));
+                        capture.connect(shellPCM, 3000);
+                        capture.setSoTimeout(3000);
+                        capture.setTcpNoDelay(true);
+                        capture.getOutputStream().write("AIRSIMEM01\n".getBytes(StandardCharsets.US_ASCII));
+                        if (!VoWLANPCMProtocol.acceptReady(capture.getInputStream())) {
+                            throw new IOException("receive-only bridge unavailable");
                         }
-                        // Silence is not proof that carrier early audio is actually audible.
-                        if (!audible && peak > 64) {
-                            audible = true;
-                            RemoteAudioSessionRegistry.setEarlyMedia(earlyOwner, lease.telecom(), true);
+                        if (!peerReady) {
+                            peer.getOutputStream().write(VoWLANPCMProtocol.READY.getBytes(StandardCharsets.US_ASCII));
+                            peer.getOutputStream().flush();
+                            peerReady = true;
                         }
-                        if (audible && EarlyMediaSessions.live(lease)) {
-                            peer.getOutputStream().write(frame); peer.getOutputStream().flush();
+                        capture.setSoTimeout(500);
+                        Thread monitor = new Thread(() -> {
+                            try {
+                                while (!peer.isClosed() && !capture.isClosed() && EarlyMediaSessions.live(lease)) Thread.sleep(100);
+                            } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                            finally {
+                                closeQuietly(capture);
+                                if (!EarlyMediaSessions.live(lease)) closeQuietly(peer);
+                            }
+                        }, "early-media-lease");
+                        monitor.setDaemon(true);
+                        monitor.start();
+                        long started = System.nanoTime();
+                        long bytes = 0;
+                        byte[] frame = new byte[320];
+                        int filled = 0;
+                        try {
+                            BridgeLog.info("early_media_capture_started");
+                            while (EarlyMediaSessions.live(lease) && !peer.isClosed()) {
+                                int count = 0;
+                                try {
+                                    count = capture.getInputStream().read(frame, filled, frame.length - filled);
+                                    if (count < 0) throw new EOFException("early media capture closed");
+                                } catch (java.net.SocketTimeoutException timeout) {
+                                    failure = "no_frames";
+                                }
+                                bytes += count;
+                                filled += count;
+                                if (filled == frame.length) {
+                                    int peak = 0;
+                                    for (int k = 0; k + 1 < frame.length; k += 2) {
+                                        short sample = (short)((frame[k] & 255) | (frame[k + 1] << 8));
+                                        peak = Math.max(peak, Math.abs((int) sample));
+                                    }
+                                    if (!audible && peak > 64) {
+                                        audible = true;
+                                        RemoteAudioSessionRegistry.setEarlyMedia(earlyOwner, lease.telecom(), true);
+                                        BridgeLog.info("early_media_first_audio capture_bytes=" + bytes + " peak=" + peak);
+                                    }
+                                    if (audible && EarlyMediaSessions.live(lease)) {
+                                        peer.getOutputStream().write(frame);
+                                        peer.getOutputStream().flush();
+                                    }
+                                    filled = 0;
+                                }
+                                // A healthy capture may contain pauses. Recover only before its first sound.
+                                if (!audible && System.nanoTime() - started >= 3_000_000_000L) {
+                                    failure = bytes == 0 ? "no_frames" : "silent_capture";
+                                    break;
+                                }
+                            }
+                        } finally {
+                            Arrays.fill(frame, (byte) 0);
+                            closeQuietly(capture);
+                            monitor.interrupt();
                         }
-                    }
-                } finally { Arrays.fill(frame, (byte) 0); closeQuietly(capture); monitor.interrupt(); }
-            } finally { sockets.remove(capture); }
+                    } finally { sockets.remove(capture); }
+                } catch (IOException error) {
+                    failure = "capture_io";
+                    if (audible) throw error; // Do not restart established playback during a pause.
+                }
+                if (!EarlyMediaSessions.live(lease) || peer.isClosed() || audible) return;
+                if (!EarlyMediaSessions.retryCapture(lease)) {
+                    BridgeLog.info("early_media_capture_exhausted reason=" + failure);
+                    throw new IOException("carrier early audio unavailable after bounded capture recovery");
+                }
+                BridgeLog.info("early_media_capture_retry reason=" + failure);
+                Thread.sleep(250);
+            }
         } finally {
             RemoteAudioSessionRegistry.setEarlyMedia(earlyOwner, lease.telecom(), false);
             gate.release(owner);

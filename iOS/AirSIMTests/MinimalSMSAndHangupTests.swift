@@ -352,15 +352,60 @@ final class PhoneRegionLookupTests: XCTestCase {
     func testCStyleKeepsUnknownSIMUnknown() {
         XCTAssertEqual(PhoneRegionLookup.infoLine(number: "13800138000", slotIndex: 1), "SIM 2 · 北京市")
         XCTAssertEqual(PhoneRegionLookup.infoLine(number: "13800138000", slotIndex: nil), "北京市")
-        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "10086", slotIndex: 0), "SIM 1")
-        XCTAssertNil(PhoneRegionLookup.infoLine(number: "10086", slotIndex: nil))
+        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "10086", slotIndex: 0), "SIM 1 · 中国移动客服")
+        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "10086", slotIndex: nil), "中国移动客服")
+    }
+
+    func testAndroidRegionSurvivesRecordCopiesAndHistoryMerge() throws {
+        let date = Date()
+        var old = CallRecord(id: "region-call", index: 0, direction: "incoming", state: "incoming", number: "13800138000", startedAt: date, updatedAt: date, endedAt: nil, missed: false)
+        old.numberRegion = "浙江 杭州"
+        let data = try JSONEncoder().encode(old)
+        let decoded = try JSONDecoder().decode(CallRecord.self, from: data)
+        XCTAssertEqual(decoded.numberRegion, "浙江 杭州")
+        var refreshed = old
+        refreshed.numberRegion = nil
+        XCTAssertEqual(refreshed.preservingHistoryEvidence(from: old).numberRegion, "浙江 杭州")
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("number_region"))
+    }
+
+    func testAndroidRegionWinsAndMalformedValuesFallback() {
+        XCTAssertEqual(PhoneRegionLookup.resolvedRegion(number: "13800138000", androidRegion: "浙江 杭州"), "浙江 杭州")
+        XCTAssertEqual(PhoneRegionLookup.resolvedRegion(number: "13800138000", androidRegion: "  "), "北京市")
+        XCTAssertEqual(PhoneRegionLookup.resolvedRegion(number: "13800138000", androidRegion: "bad\nlabel"), "北京市")
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "13800138000", callerName: "张三", slotIndex: 1, numberRegion: "浙江 杭州"), "张三 · SIM 2 · 浙江 杭州")
+    }
+
+    func testSystemIncomingSIMKeepsContactAndRegion() throws {
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "13800138000", callerName: "张三", slotIndex: 1), "张三 · SIM 2 · 北京市")
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "10086", callerName: nil, slotIndex: 0), "10086 · SIM 1 · 中国移动客服")
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "10000", callerName: "我的客服", slotIndex: 1), "我的客服 · SIM 2 · 中国电信客服")
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "13800138000", callerName: nil, slotIndex: -1), "13800138000 · 北京市")
+        let push = try IncomingVoIPCall(userInfo: ["event": "incoming_call", "call_id": "sim-fixture",
+            "call_uuid": UUID().uuidString, "slot_index": 1])
+        XCTAssertEqual(push.slotIndex, 1)
+        XCTAssertEqual(IncomingVoIPCall.simSlot(from: 1), 1)
+        XCTAssertEqual(IncomingVoIPCall.simSlot(from: "0"), 0)
+        XCTAssertNil(IncomingVoIPCall.simSlot(from: -1))
+        XCTAssertNil(IncomingVoIPCall.simSlot(from: true))
+        XCTAssertNil(IncomingVoIPCall.simSlot(from: 1.5))
+    }
+
+    func testSystemIncomingTitleUsesOfflineRegionAndKnownServiceNumbers() {
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "13800138000", callerName: "测试联系人"), "测试联系人 · 北京市")
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "13800138000", callerName: "+8613800138000"), "13800138000 · 北京市")
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "10086", callerName: nil), "中国移动客服 · 10086")
+        XCTAssertEqual(PhoneRegionLookup.systemIncomingTitle(number: "10010", callerName: "+8610010"), "中国联通客服 · 10010")
+        XCTAssertNil(PhoneRegionLookup.systemIncomingTitle(number: "10000", callerName: "我的客服"))
+        XCTAssertNil(PhoneRegionLookup.systemIncomingTitle(number: "95588", callerName: nil))
+        XCTAssertNil(PhoneRegionLookup.systemIncomingTitle(number: nil, callerName: nil))
     }
 }
 
 final class PhoneRegion178RegressionTests: XCTestCase {
     func testMissingMobilePrefixAndServiceCategories() {
-        XCTAssertEqual(PhoneRegionLookup.region(for: "17800150000"), "北京市")
-        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "17800150000", slotIndex: nil), "北京市")
+        XCTAssertEqual(PhoneRegionLookup.region(for: "17800159951"), "北京市")
+        XCTAssertEqual(PhoneRegionLookup.infoLine(number: "17800159951", slotIndex: nil), "北京市")
         XCTAssertEqual(PhoneRegionLookup.infoLine(number: "+86 95588", slotIndex: 0), "SIM 1 · 国内 95 服务号码")
         XCTAssertEqual(PhoneRegionLookup.serviceDescription(for: "008696110"), "国内 96 服务号码")
         for value in ["911", "999", "912345", "+9595588", "009695588", "955881234567", "95abc"] {
@@ -571,5 +616,112 @@ final class VoWLANOnly184ContractTests: XCTestCase {
         XCTAssertTrue(store.markMissedCallsSeen(loaded))
         XCTAssertTrue(store.unseenMissedCallIDs(in: loaded).isEmpty)
         XCTAssertEqual(store.loadCallHistory().filter(\.missed).count, 2)
+    }
+}
+
+
+final class SMSCarrierBrandTests: XCTestCase {
+    func testCarrierAssetsAreBundled() {
+        for brand in SMSCarrierBrand.allCases { XCTAssertNotNil(UIImage(named: brand.rawValue), brand.rawValue) }
+    }
+
+    func testMinshengAndCMBOfficialSMSPorts() {
+        XCTAssertEqual(SMSCarrierBrand.match("95555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1065795555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106941995555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106807695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("10694395555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106913595555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106903695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106918195555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069170795555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069329095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069411095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068338795555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068078595555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068775395555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068486095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068039095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106946895555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069208795555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069220695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106934095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106934795555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069210395555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069232695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069101695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106904095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106903395555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106929395555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068116095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106575595555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069118895555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068015195555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106910095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1068455695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106935295555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069109695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069057295555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069449695555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069249395555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069352995555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106930095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106920095555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069100995555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("1069001995555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("106900795555"), .cmb)
+        XCTAssertEqual(SMSCarrierBrand.match("95568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("106980095568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("10680195568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("10685095568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("106857695568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("106835195568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("1068071895568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("1069120695568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("106935595568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("1069161795568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("10691895568"), .minsheng)
+        XCTAssertEqual(SMSCarrierBrand.match("106901195568"), .minsheng)
+        for sender in ["955550", "955680", "10612395555", "10612395568", "+1 95568"] {
+            XCTAssertNil(SMSCarrierBrand.match(sender), sender)
+        }
+    }
+
+    func testBankAndCourierNumbersAreExact() {
+        XCTAssertEqual(SMSCarrierBrand.match("95588"), .icbc)
+        XCTAssertEqual(SMSCarrierBrand.match("95533"), .ccb)
+        XCTAssertEqual(SMSCarrierBrand.match("95599"), .abc)
+        XCTAssertEqual(SMSCarrierBrand.match("95566"), .boc)
+        XCTAssertEqual(SMSCarrierBrand.match("95559"), .bocom)
+        XCTAssertEqual(SMSCarrierBrand.match("95338"), .sf)
+        XCTAssertEqual(SMSCarrierBrand.match("950616"), .jd)
+        XCTAssertEqual(SMSCarrierBrand.match("95311"), .zto)
+        XCTAssertEqual(SMSCarrierBrand.match("95554"), .yto)
+        XCTAssertEqual(SMSCarrierBrand.match("10690955998"), .abc)
+        XCTAssertEqual(SMSCarrierBrand.match("106980095533"), .ccb)
+        for sender in ["955880", "10612395588", "953380001", "快递95338", "+1 95533", "13800138000"] {
+            XCTAssertNil(SMSCarrierBrand.match(sender), sender)
+        }
+    }
+
+    func testExactCarrierNumbersAndCountryPrefixes() {
+        XCTAssertEqual(SMSCarrierBrand.match("10086"), .mobile)
+        XCTAssertEqual(SMSCarrierBrand.match("+86 10010"), .unicom)
+        XCTAssertEqual(SMSCarrierBrand.match("0086 10000"), .telecom)
+        for sender in ["1008611", "10610086", "+1 10086", "移动10086", "13800138000", "", "10086+", "8610086"] {
+            XCTAssertNil(SMSCarrierBrand.match(sender), sender)
+        }
+    }
+}
+
+
+final class DeliveryTimelineTests: XCTestCase {
+    func testMissingStagesStayUnknownAndClockSkewIsNotLatency() {
+        var snapshot = AirSIMHealthStore.Snapshot()
+        snapshot.lastCallDelivery = ["iphone_received": Date(timeIntervalSince1970: 100), "android_received_at": Date(timeIntervalSince1970: 102)]
+        let report = AirSIMHealthStore.deliveryReport(snapshot: snapshot)
+        XCTAssertTrue(report.contains("安卓上传：暂无时间记录"))
+        XCTAssertTrue(report.contains("设备时钟存在偏差"))
+        XCTAssertFalse(report.contains("-2.00 秒"))
     }
 }

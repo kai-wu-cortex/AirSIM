@@ -2,7 +2,9 @@ package com.airsim.phonecontrol;
 
 public final class PCMHealthEvidenceTests {
     public static void main(String[] args) {
+        recoveryRequiresFreshDuplexFlowAndRetainsExitCause();
         startupFailureSurvivesCloseAndRetryUntilReady();
+        listenerReadinessTracksSuccessfulBind();
         PCMHealthEvidence health = new PCMHealthEvidence();
         health.observe("{\"event\":\"client_ready\",\"result\":\"audio_initialized\"}");
         health.observe("{\"event\":\"pcm_stats\",\"downlink_bytes\":320,\"downlink_peak\":0,\"uplink_bytes\":640,\"uplink_peak\":900,\"number\":\"private\",\"secret\":\"secret-value\"}");
@@ -26,6 +28,42 @@ public final class PCMHealthEvidenceTests {
         check(!health.snapshot().contains("private"), "unknown log was persisted");
         System.out.println("PCM health evidence tests passed");
     }
+    private static void recoveryRequiresFreshDuplexFlowAndRetainsExitCause() {
+        PCMHealthEvidence h = new PCMHealthEvidence();
+        h.observe("{\"event\":\"bridge_listening\"}");
+        h.observe("{\"event\":\"client_ready\"}");
+        h.observe("{\"event\":\"pcm_stats\",\"downlink_bytes\":320,\"uplink_bytes\":320}");
+        check(h.snapshot().contains("pcm_stage=media_flow"), "silent frames still prove byte flow");
+        h.processExited(137);
+        check(!h.isListening() && h.snapshot().contains("pcm_initialized=false"), "dead process retained readiness");
+        check(h.snapshot().contains("pcm_error_code=exit_137"), "exit code missing");
+        h.recoveryScheduled(1000); h.reset();
+        h.observe("{\"event\":\"bridge_listening\"}", 1010);
+        h.observe("{\"event\":\"client_ready\"}", 1020);
+        check(h.snapshot().contains("pcm_recovery=pending"), "ACK prematurely marked recovery complete");
+        h.observe("{\"event\":\"pcm_stats\",\"downlink_bytes\":320,\"uplink_bytes\":0}", 1030);
+        check(h.snapshot().contains("pcm_recovery=pending"), "one direction incorrectly verified duplex");
+        h.observe("{\"event\":\"pcm_stats\",\"downlink_bytes\":640,\"uplink_bytes\":320}", 1040);
+        check(h.snapshot().contains("pcm_recovery=verified") && h.snapshot().contains("pcm_recovery_ms=40"), "fresh duplex not verified");
+        check(h.snapshot().contains("pcm_last_failure=process_exit"), "recovery erased the failure cause");
+        try {
+            String txt = AudioWatchdogSnapshot.parse("muted=true volume=0 mode=2 speaker=false pcm=true " + h.snapshot()).diagnostic();
+            check(txt.contains("pcm_recovery=verified") && txt.contains("pcm_stage=media_flow"), "diagnostic export lost stages");
+        } catch (java.io.IOException e) { throw new AssertionError(e); }
+    }
+
+    private static void listenerReadinessTracksSuccessfulBind() {
+        PCMHealthEvidence health = new PCMHealthEvidence();
+        check(!health.isListening(), "spawned process has not yet bound its port");
+        health.observe("{\"event\":\"listener_restarting\",\"error_class\":\"java.net.BindException\"}");
+        check(!health.isListening(), "a bind retry is not a listener");
+        health.observe("{\"event\":\"bridge_listening\"}");
+        health.observe("{\"event\":\"client_closed\"}");
+        check(health.isListening(), "closing one call does not stop the listener");
+        health.observe("{\"event\":\"listener_restarting\"}");
+        check(!health.isListening(), "failed listener must be marked unavailable");
+    }
+
     private static void startupFailureSurvivesCloseAndRetryUntilReady() {
         PCMHealthEvidence health = new PCMHealthEvidence();
         health.observe("{\"event\":\"session_error\",\"error_phase\":\"create_capture\","

@@ -43,6 +43,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         /// 当前用于拨号和媒体路由的 Android Agent。字段保持可选，以兼容旧版 Relay
         /// 推送的 ContentState，并避免升级时让已存在的 Live Activity 解码失败。
         let agentDeviceName: String?
+        let agentBatteryPercent: Int?
         let agentPhoneNumber: String?
         let agentKind: String?
         let pairedAgentCount: Int?
@@ -53,6 +54,8 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         let agents: [AgentSummary]?
         /// 0-based 当前页；每页最多 5 台。旧版没有该字段时按第 1 页处理。
         let agentPage: Int?
+        let deviceStatusFromRelay: Bool?
+        let androidDataNetwork: String?
 
         struct AgentSummary: Codable, Hashable, Identifiable {
             let id: String
@@ -86,6 +89,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             downloadBytesPerSecond: Double? = nil,
             uploadBytesPerSecond: Double? = nil,
             agentDeviceName: String? = nil,
+            agentBatteryPercent: Int? = nil,
             agentPhoneNumber: String? = nil,
             agentKind: String? = nil,
             pairedAgentCount: Int? = nil,
@@ -93,7 +97,9 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             bluetoothOnline: Bool? = nil,
             cloudOnline: Bool? = nil,
             agents: [AgentSummary]? = nil,
-            agentPage: Int? = nil
+            agentPage: Int? = nil,
+            deviceStatusFromRelay: Bool? = nil,
+            androidDataNetwork: String? = nil
         ) {
             self.callID = callID
             self.number = number
@@ -108,6 +114,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             self.downloadBytesPerSecond = downloadBytesPerSecond
             self.uploadBytesPerSecond = uploadBytesPerSecond
             self.agentDeviceName = agentDeviceName
+            self.agentBatteryPercent = agentBatteryPercent
             self.agentPhoneNumber = agentPhoneNumber
             self.agentKind = agentKind
             self.pairedAgentCount = pairedAgentCount
@@ -116,6 +123,8 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             self.cloudOnline = cloudOnline
             self.agents = agents
             self.agentPage = agentPage
+            self.deviceStatusFromRelay = deviceStatusFromRelay
+            self.androidDataNetwork = androidDataNetwork
         }
 
         enum Phase: String, Codable, Hashable {
@@ -140,12 +149,39 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
     }
 
     let moduleName: String
+    let isDeviceStatusPushActivity: Bool?
+
+    init(moduleName: String, isDeviceStatusPushActivity: Bool? = nil) {
+        self.moduleName = moduleName
+        self.isDeviceStatusPushActivity = isDeviceStatusPushActivity
+    }
 }
 
 extension AirSIMCallActivityAttributes.ContentState {
+    var androidDataNetworkLabel: String? {
+        androidDataNetworkShortLabel.map { "安卓 \($0)" }
+    }
+
+    var androidDataNetworkShortLabel: String? {
+        switch androidDataNetwork {
+        case "wifi": return "Wi‑Fi"
+        case "5g": return "5G"
+        case "4g": return "4G"
+        case "cellular": return "蜂窝网络"
+        default: return nil
+        }
+    }
+
     /// ActivityKit 的 stale 只表示主 App 暂时没有提交新内容，不能证明 Agent 离线。
     /// 模块离线由主 App 的真实 HTTP 探测失败显式写入 `.offline`。
-    func liveActivityDisplayState(isStale: Bool) -> Self {
+    func liveActivityDisplayState(isStale: Bool, showsStatusExpiry: Bool = false) -> Self {
+        if isStale && (showsStatusExpiry || deviceStatusFromRelay == true)
+            && (phase == .standby || phase == .cloudStandby) {
+            return Self(callID: "", number: "", displayName: "", phase: .offline,
+                        startedAt: startedAt, agentDeviceName: agentDeviceName,
+                        pairedAgentCount: pairedAgentCount, deviceStatusFromRelay: true,
+                        androidDataNetwork: androidDataNetwork)
+        }
         // CallKit exclusively owns in-call UI. Even an activity created by an older
         // build must never render a call phase, timer or hangup button.
         guard phase == .incoming || phase == .active || phase == .held else { return self }
@@ -211,6 +247,14 @@ enum LiveActivityVisibilityPreference {
         defaults: UserDefaults = .standard
     ) -> String {
         isEnabled(defaults: defaults) ? storedToken : ""
+    }
+}
+
+enum LiveActivityRemoteStatusPreference {
+    static let key = "airsim.live-activity-remote-status"
+
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: key) && LiveActivityVisibilityPreference.isEnabled()
     }
 }
 

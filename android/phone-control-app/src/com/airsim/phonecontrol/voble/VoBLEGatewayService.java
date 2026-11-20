@@ -127,7 +127,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
     };
 
     public static void start(Context context) {
-        if (!hasPermissions(context)) return;
+        if (RuntimeMode.vowlanPushOnly(context) || !hasPermissions(context)) return;
         Intent intent = new Intent(context, VoBLEGatewayService.class);
         try {
             if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent);
@@ -168,6 +168,10 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
 
     @Override public void onCreate() {
         super.onCreate();
+        if (RuntimeMode.vowlanPushOnly(this)) {
+            stopSelf();
+            return;
+        }
         instance = this;
         createNotificationChannel();
         Notification notification = new Notification.Builder(this, CHANNEL_ID)
@@ -213,7 +217,7 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
         if (gatt != null && gatt.hasBluetoothPermissions() && !gatt.start()) {
             BridgeLog.info("voble_gatt_start_deferred");
         }
-        return START_STICKY;
+        return RuntimeMode.vowlanPushOnly(this) ? START_NOT_STICKY : START_STICKY;
     }
 
     @Override public void onAdvertisingReady() {
@@ -502,11 +506,11 @@ public final class VoBLEGatewayService extends Service implements VoBLEGattServe
             InetSocketAddress endpoint;
             if (RuntimeMode.isStandalone(this)) {
                 endpoint = VoBLEPCMBackendResolver.resolve(
-                        VoBLEPCMBackendResolver.Runtime.STANDALONE, "");
+                        VoBLEPCMBackendResolver.Runtime.STANDALONE, "", getPackageName());
             } else {
                 String host = URI.create(AppConfig.endpoint(this)).getHost();
                 endpoint = VoBLEPCMBackendResolver.resolve(
-                        VoBLEPCMBackendResolver.Runtime.AVF, host);
+                        VoBLEPCMBackendResolver.Runtime.AVF, host, getPackageName());
             }
             VoBLEPairingManager.SessionKeys keys = pairingManager.storedSessionKeys(
                     peerIdentity, envelope.sessionId(), envelope.callId(), envelope.generation());

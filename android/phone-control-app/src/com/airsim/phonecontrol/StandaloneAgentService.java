@@ -42,6 +42,7 @@ public final class StandaloneAgentService extends Service {
     private volatile boolean running;
     private StandaloneAgentStore store;
     private StandaloneRelayClient relay;
+    private AndroidDataNetwork dataNetwork;
     private int syncedRegistrationHash;
     private final RelayRegistrationRecovery registrationRecovery = new RelayRegistrationRecovery();
     private final CloudCallRetryPolicy callEventRetry = new CloudCallRetryPolicy();
@@ -59,6 +60,11 @@ public final class StandaloneAgentService extends Service {
     public static void start(Context context) {
         try { context.startForegroundService(new Intent(context, StandaloneAgentService.class)); }
         catch (RuntimeException error) { BridgeLog.error("standalone_agent_start_failed", error); }
+    }
+
+    static String activeDataNetwork() {
+        StandaloneAgentService active = instance;
+        return active == null ? null : active.dataNetwork.snapshot();
     }
 
     /** Explicit user action; call off the UI thread. Never enables cloud or bypasses the gate. */
@@ -94,6 +100,8 @@ public final class StandaloneAgentService extends Service {
         BridgeLog.info("standalone_manual_heartbeat_accepted");
     }
 
+    static void discardCallEvents() { CALL_EVENTS.clear(); }
+
     static void enqueueCallEvent(Context context, String json) {
         if (!CALL_EVENTS.add(json)) return;
         start(context);
@@ -103,8 +111,10 @@ public final class StandaloneAgentService extends Service {
 
     @Override public void onCreate() {
         super.onCreate();
+        RemoteCallScreenGuard.get(this);
         store = new StandaloneAgentStore(this);
         relay = new StandaloneRelayClient();
+        dataNetwork = new AndroidDataNetwork(this);
         startForeground(BridgeNotification.WATCHDOG_ID,
                 BridgeNotification.status(this, "内置 Agent 正在启动"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
@@ -116,7 +126,7 @@ public final class StandaloneAgentService extends Service {
         SIMSlotObserver.start(this, () -> StandaloneAgentGateway.get(this).simSlotsChanged());
         VoWLANGatewayService.start(this);
         worker.execute(this::loop);
-        worker.execute(this::commandLoop);
+        if (!RuntimeMode.vowlanPushOnly(this)) worker.execute(this::commandLoop);
         worker.execute(this::smsLoop);
         BridgeLog.info("standalone_agent_created");
     }
@@ -168,7 +178,8 @@ public final class StandaloneAgentService extends Service {
                     }
                 }
                 flushCallEvents();
-                if (commandConfiguration.isCurrent(snapshot) && CommandPollingPolicy.shouldPoll(commandChannelConnected, lastCommandPoll, now,
+                if (!RuntimeMode.vowlanPushOnly(this) && commandConfiguration.isCurrent(snapshot)
+                        && CommandPollingPolicy.shouldPoll(commandChannelConnected, lastCommandPoll, now,
                         commandRetry.remainingMillis(android.os.SystemClock.elapsedRealtime()))) {
                     lastCommandPoll = now;
                     try { pollCommands(snapshot); }
@@ -216,6 +227,7 @@ public final class StandaloneAgentService extends Service {
     private void sendHeartbeat(JSONObject registration, RelayEgressGate.Generation generation) throws Exception {
         JSONObject heartbeat = identity(registration)
                 .put("battery", AndroidBatteryStatus.snapshot(this))
+                .put("android_data_network", dataNetwork.snapshot())
                 .put("event", "agent_heartbeat").put("agent_version", "standalone-0.1.0")
                 .put("agent_id", registration.optString("android_agent_id", AndroidAgentIdentity.agentID(this)))
                 .put("agent_kind", "standalone")
@@ -493,6 +505,7 @@ public final class StandaloneAgentService extends Service {
     @Override public void onDestroy() {
         running = false;
         if (instance == this) instance = null;
+        dataNetwork.close();
         eventWorker.shutdownNow();
         getSharedPreferences("standalone_agent", MODE_PRIVATE).unregisterOnSharedPreferenceChangeListener(commandPreferences);
         commandConfiguration.stop();

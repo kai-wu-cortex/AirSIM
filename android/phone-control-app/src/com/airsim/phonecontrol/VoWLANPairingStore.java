@@ -23,6 +23,7 @@ public final class VoWLANPairingStore {
     private static final String LEGACY_SECRET = "secret_v1";
     private static final String RECORDS = "records_v2";
     private static final String LEGACY_MIGRATED = "legacy_migrated_v2";
+    private static final String LAST_REVOCATION = "last_revocation";
     private static final int MAX_RECORDS = 16;
 
     private VoWLANPairingStore() {}
@@ -97,10 +98,21 @@ public final class VoWLANPairingStore {
     /** Returns the record whose secret signed this request, or null. */
     public static Record match(
             Context context, String signature, String canonical, long timestamp, long now) {
+        return match(context, signature, canonical, timestamp, now, false);
+    }
+
+    static Record match(Context context, String signature, String canonical,
+                        long timestamp, long now, boolean watchSMS) {
         for (Record record : records(context)) {
             byte[] secret = record.secretCopy();
             try {
-                if (VoWLANAuth.verify(secret, signature, canonical, timestamp, now)) return record;
+                if (!watchSMS && VoWLANAuth.verify(secret, signature, canonical, timestamp, now)) return record;
+                if (watchSMS) {
+                    byte[] scoped = VoWLANAuth.mac(secret, "AirSIM.watch.sms.v1");
+                    try {
+                        if (VoWLANAuth.verify(scoped, signature, canonical, timestamp, now)) return record;
+                    } finally { Arrays.fill(scoped, (byte) 0); }
+                }
             } finally {
                 Arrays.fill(secret, (byte) 0);
             }
@@ -108,22 +120,24 @@ public final class VoWLANPairingStore {
         return null;
     }
 
-    static Record matchWatch(Context context, String signature, String canonical, long timestamp, long now) {
-        for (Record record : records(context)) {
-            byte[] root = record.secretCopy();
-            byte[] watch = VoWLANAuth.watchCallKey(root);
-            try {
-                if (VoWLANAuth.verify(watch, signature, canonical, timestamp, now)) return record;
-            } finally {
-                Arrays.fill(root, (byte) 0);
-                Arrays.fill(watch, (byte) 0);
-            }
-        }
-        return null;
-    }
-
     public static boolean configured(Context context) {
         return !records(context).isEmpty();
+    }
+
+    static synchronized boolean wasRevoked(Context context, String operation) {
+        return operation.equals(context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .getString(LAST_REVOCATION, ""));
+    }
+
+    static synchronized void revoke(Context context, String id, String operation) {
+        List<Record> values = records(context);
+        values.removeIf(record -> record.id().equals(id));
+        if (!context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+                .putString(RECORDS, encodeRecords(values))
+                .remove(LEGACY_SECRET)
+                .putString(LAST_REVOCATION, operation).commit()) {
+            throw new IllegalStateException("pairing_revoke_storage_failed");
+        }
     }
 
     public static void clear(Context context) {
@@ -159,6 +173,11 @@ public final class VoWLANPairingStore {
     }
 
     private static void write(Context context, List<Record> values) {
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+                .putString(RECORDS, encodeRecords(values)).apply();
+    }
+
+    private static String encodeRecords(List<Record> values) {
         JSONArray array = new JSONArray();
         for (Record record : values) {
             try {
@@ -172,8 +191,7 @@ public final class VoWLANPairingStore {
                 // Skip an unencodable record rather than losing all pairings.
             }
         }
-        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
-                .putString(RECORDS, array.toString()).apply();
+        return array.toString();
     }
 
     private static byte[] legacySecret(Context context) {

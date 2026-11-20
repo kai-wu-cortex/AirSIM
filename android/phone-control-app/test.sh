@@ -344,6 +344,7 @@ mkdir -p "$SMS_OUT"
 PCM_OUT="$OUT/direct-pcm"
 mkdir -p "$PCM_OUT"
 "$JAVAC" --release 17 -cp "$OUT:$ANDROID_JAR" -d "$PCM_OUT" \
+  "$ROOT"/../phone-audio-bridge/src/com/airsim/bridge/BridgeProtocol.java \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/VoWLANPairingStore.java \
   "$ROOT"/test/pcm/com/airsim/phonecontrol/RemoteAudioSessionRegistry.java \
   "$ROOT"/src/com/airsim/phonecontrol/EarlyMediaLeaseRules.java \

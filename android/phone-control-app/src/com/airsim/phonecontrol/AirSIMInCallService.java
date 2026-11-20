@@ -7,6 +7,7 @@ import android.telecom.DisconnectCause;
 import android.telecom.InCallService;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,6 +20,10 @@ public final class AirSIMInCallService extends InCallService {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private final ExecutorService network = Executors.newSingleThreadExecutor();
     private final Map<Call, Call.Callback> callbacks = new ConcurrentHashMap<>();
+    private final Map<Call, Long> ringingSince = new ConcurrentHashMap<>();
+    private final Map<Call, CallEndTime> callEndTimes = new ConcurrentHashMap<>();
+
+    private record CallEndTime(long wallMillis, long elapsedMillis) {}
 	private final Map<Call, String> callStates = new ConcurrentHashMap<>();
     // Exact native calls that have had an authenticated VoWLAN media owner.
     // A socket closing is not proof the carrier has stopped playing/recording audio.
@@ -33,6 +38,7 @@ public final class AirSIMInCallService extends InCallService {
 		instance = this;
 		if (localAudio == null) localAudio = new LocalCallAudioController(this);
         String callId = CallRepository.add(call);
+        RemoteCallScreenGuard.get(this).added(callId, "incoming".equals(direction(call)));
         BridgeLog.info("telecom_call_added call_id=" + DebugRedactor.safeIdentifier(callId)
                 + " direction=" + direction(call) + " state=" + TelecomStateMapper.toWireState(call.getState()));
         Call.Callback callback = new Call.Callback() {
@@ -43,7 +49,8 @@ public final class AirSIMInCallService extends InCallService {
         call.registerCallback(callback);
         AgentWatchdogService.start(this);
         emit(call, call.getState());
-        if ("incoming".equals(direction(call)) && call.getState() == Call.STATE_RINGING) {
+        if (call.getState() == Call.STATE_RINGING
+                && BridgeNotification.wakesForCalls(this, AppConfig.mode(this))) {
             showFullScreenIncoming(callId);
         }
     }
@@ -65,7 +72,9 @@ public final class AirSIMInCallService extends InCallService {
                 + " disconnect_code=" + (disconnect == null ? "none" : disconnect.getCode()));
         boolean missed = "incoming".equals(direction(call))
                 && (details == null || details.getConnectTimeMillis() == 0);
-        emit(callId, direction(call), "ended", number(call), slotIndex(call), missed);
+        emit(call, callId, direction(call), "ended", number(call), missed);
+        ringingSince.remove(call);
+        callEndTimes.remove(call);
 		deduplicator.remove(callId);
 		callStates.remove(call);
         isolatedCallIDs.remove(callId);
@@ -73,11 +82,14 @@ public final class AirSIMInCallService extends InCallService {
         Call.Callback callback = callbacks.remove(call);
         if (callback != null) call.unregisterCallback(callback);
         CallRepository.remove(call);
+        RemoteCallScreenGuard.get(this).removed(callId);
         BridgeNotification.clearCall(this, callId);
         super.onCallRemoved(call);
     }
 
     private void emit(Call call, int state) {
+        if (state == Call.STATE_RINGING) ringingSince.putIfAbsent(call, SystemClock.elapsedRealtime());
+        if (state == Call.STATE_DISCONNECTED) captureCallEnd(call);
         String wireState = TelecomStateMapper.toWireState(state);
 		callStates.put(call, wireState);
 		updateLocalAudioPolicy();
@@ -98,7 +110,7 @@ public final class AirSIMInCallService extends InCallService {
 			boolean missed = "incoming".equals(callDirection)
                     && (wireState.equals("ended") || wireState.equals("ending"))
                     && (details == null || details.getConnectTimeMillis() == 0);
-			emit(callId, callDirection, wireState, callNumber, slotIndex(call), missed);
+			emit(call, callId, callDirection, wireState, callNumber, missed);
 		}
     }
 
@@ -128,8 +140,9 @@ public final class AirSIMInCallService extends InCallService {
         // authenticated iPhone owns the media, Android must mute its local output
         // in both remote_silent and local_and_push. The mode controls presentation
         // and is persisted/forwarded separately.
-        boolean shouldSilence = relayingAudio && ownsRemoteCall;
-        if (shouldSilence && RemoteAudioSessionRegistry.ownsVoWLANCall(liveCalls))
+        boolean controlOwned = RemoteAudioSessionRegistry.reservesVoWLANCall(liveCalls);
+        boolean shouldSilence = controlOwned || (relayingAudio && ownsRemoteCall);
+        if (shouldSilence && (controlOwned || RemoteAudioSessionRegistry.ownsVoWLANCall(liveCalls)))
             isolatedCallIDs.add(liveCalls.get(0));
         // Preserve isolation through PCM loss, DISCONNECTING and DISCONNECTED until
         // Telecom removes this exact call. Never extend a global mute to another call.
@@ -141,6 +154,10 @@ public final class AirSIMInCallService extends InCallService {
         BridgeLog.info("local_audio_policy mode=" + AppConfig.mode(this)
                 + " silence=" + shouldSilence);
         localAudio.update(shouldSilence, streamPolicy);
+        if (callStates.size() == 1) {
+            String displayCall = CallRepository.id(callStates.keySet().iterator().next());
+            RemoteCallScreenGuard.get(this).ownership(displayCall, shouldSilence);
+        }
         // Multiple native calls cannot safely share a global mute-repair decision.
         localAudio.updateWatchdog(shouldSilence,
                 liveCalls.toString() + transports, transports);
@@ -170,25 +187,64 @@ public final class AirSIMInCallService extends InCallService {
         return details == null ? -1 : DefaultCallAccount.slotIndex(this, details.getAccountHandle());
     }
 
-    private void emit(String callId, String direction, String state, String number, int slotIndex) {
-        emit(callId, direction, state, number, slotIndex, false);
+    private CallEndTime captureCallEnd(Call call) {
+        return callEndTimes.computeIfAbsent(call,
+                ignored -> new CallEndTime(System.currentTimeMillis(), SystemClock.elapsedRealtime()));
     }
 
-    private void emit(String callId, String direction, String state, String number, int slotIndex,
-                      boolean missed) {
+    private void emit(Call call, String callId, String direction, String state, String number, boolean missed) {
+        Call.Details details = call.getDetails();
+        long connectedAt = details == null ? 0 : details.getConnectTimeMillis();
+        long ringingDuration = -1;
+        long connectedDuration = -1;
+        String disconnectReason = "";
+        if ("ended".equals(state)) {
+            DisconnectCause cause = details == null ? null : details.getDisconnectCause();
+            if (cause != null) disconnectReason = disconnectReason(cause.getCode());
+            CallEndTime ended = captureCallEnd(call);
+            Long ringingStarted = ringingSince.get(call);
+            if (missed && ringingStarted != null) {
+                ringingDuration = ended.elapsedMillis() - ringingStarted;
+            }
+            if (connectedAt > 0 && ended.wallMillis() >= connectedAt) {
+                connectedDuration = ended.wallMillis() - connectedAt;
+            }
+        }
         com.airsim.phonecontrol.voble.VoBLEGatewayService.publishCallState(
                 this, callId, direction, state, number);
         String eventId = Long.toString(System.currentTimeMillis()) + "-" + events.incrementAndGet();
         String json = WireJson.callEvent(eventId, callId, direction, state, number, AppConfig.mode(this),
-                slotIndex, missed);
+                slotIndex(call), missed, connectedAt, ringingDuration, connectedDuration, disconnectReason);
+        Long since = ringingSince.get(call);
+        long received = since == null ? System.currentTimeMillis()
+                : System.currentTimeMillis() - Math.max(0, SystemClock.elapsedRealtime() - since);
         network.execute(() -> {
             try {
-                new AgentClient(this).sendEvent(json);
+                org.json.JSONObject enriched = new org.json.JSONObject(json);
+                enriched.put("android_received_at", java.time.Instant.ofEpochMilli(received).toString());
+                String region = AndroidNumberRegion.lookup(this, number);
+                if (!region.isEmpty()) enriched.put("number_region", region);
+                enriched.put("android_uploaded_at", java.time.Instant.now().toString());
+                new AgentClient(this).sendEvent(enriched.toString());
                 BridgeLog.info("call_event_sent state=" + state + " call_id=" + DebugRedactor.safeIdentifier(callId));
             } catch (Exception error) {
                 BridgeLog.error("call_event_failed state=" + state, error);
             }
         });
+    }
+
+    private static String disconnectReason(int code) {
+        return switch (code) {
+            case DisconnectCause.LOCAL -> "local";
+            case DisconnectCause.REMOTE -> "remote";
+            case DisconnectCause.ERROR -> "error";
+            case DisconnectCause.MISSED -> "missed";
+            case DisconnectCause.REJECTED -> "rejected";
+            case DisconnectCause.BUSY -> "busy";
+            case DisconnectCause.CANCELED -> "canceled";
+            case DisconnectCause.RESTRICTED -> "restricted";
+            default -> "";
+        };
     }
 
     private static String direction(Call call) {
@@ -210,7 +266,9 @@ public final class AirSIMInCallService extends InCallService {
             localAudio.update(false);
         }
         if (instance == this) instance = null;
-        network.shutdownNow();
+        // Telecom may unbind immediately after sending the final state.
+        if (RuntimeMode.isStandalone(this)) network.shutdown();
+        else network.shutdownNow();
         super.onDestroy();
     }
 }

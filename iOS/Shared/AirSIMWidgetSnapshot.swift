@@ -17,10 +17,20 @@ struct AndroidBatteryReading: Codable, Equatable, Sendable {
         observedAtMS = (try? values?.decode(Double.self, forKey: .observedAtMS)) ?? 0
     }
     var observedAt: Date { Date(timeIntervalSince1970: observedAtMS / 1000) }
+    func isDisplayable(at now: Date) -> Bool {
+        (0...100).contains(percent) && observedAtMS.isFinite && observedAtMS > 0
+            && now.timeIntervalSince(observedAt) >= -60
+    }
     func isFresh(at now: Date) -> Bool {
-        let age = now.timeIntervalSince(observedAt)
-        return (0...100).contains(percent) && observedAtMS.isFinite && observedAtMS > 0
-            && age >= -60 && age < AirSIMWidgetSnapshot.freshness
+        isDisplayable(at: now) && now.timeIntervalSince(observedAt) < AirSIMWidgetSnapshot.freshness
+    }
+    func displayLabel(at now: Date) -> String? {
+        guard isDisplayable(at: now) else { return nil }
+        return "\(isFresh(at: now) ? "" : "上次 ")\(percent)%"
+    }
+    static func latest(at now: Date, _ samples: Self?...) -> Self? {
+        samples.compactMap { $0 }.filter { $0.isDisplayable(at: now) }
+            .max { $0.observedAtMS < $1.observedAtMS }
     }
     var symbol: String {
         if charging { return "battery.100percent.bolt" }
@@ -117,6 +127,12 @@ struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
             if refreshFailed == true { return refreshFailureReason ?? "刷新失败，请重试" }
             guard isFresh(at: date) else { return "状态待刷新" }
             return recentlyReachable ? "最近在线" : "未连接"
+        }
+        func connectionLabel(at date: Date) -> String {
+            let status = status(at: date)
+            guard recentlyReachable, observedAt != nil, !transport.isEmpty else { return status }
+            let current = isFresh(at: date) && refreshFailed != true
+            return "\(status) · \(current ? "" : "上次 ")\(transport)"
         }
     }
     struct RecentCall: Codable, Equatable, Identifiable, Sendable {
@@ -388,9 +404,10 @@ enum WidgetDirectRefresh {
             var result = device
             if reading.date > (device.observedAt ?? .distantPast) {
                 result = .init(id: device.id, name: device.name, transport: "VoWLAN", recentlyReachable: true,
-                    observedAt: reading.date, battery: reading.battery, unreadMessages: device.unreadMessages,
+                    observedAt: reading.date, unreadMessages: device.unreadMessages,
                     unseenMissedCalls: device.unseenMissedCalls, activeState: reading.activeState)
             }
+            result.battery = AndroidBatteryReading.latest(at: Date(), device.battery, reading.battery)
             result.lastRefreshAttempt = reading.lastAttempt
             result.refreshPending = reading.pending
             result.refreshFailureReason = reading.failureReason
@@ -487,7 +504,9 @@ enum WidgetDirectRefresh {
             let previous = observations
             observations.removeAll { readings[$0.agentID] != nil || !allowed.contains($0.agentID) }
             observations += readings.compactMap { id, reading in
-                allowed.contains(id) ? Observation(agentID: id, date: reading.1, battery: reading.0.health.battery,
+                allowed.contains(id) ? Observation(agentID: id, date: reading.1,
+                    battery: AndroidBatteryReading.latest(at: reading.1, reading.0.health.battery,
+                        previous.first(where: { $0.agentID == id })?.battery),
                     calls: reading.0.calls ?? previous.first(where: { $0.agentID == id })?.calls,
                     messages: reading.0.messages ?? previous.first(where: { $0.agentID == id })?.messages,
                     activeState: reading.0.activeState, lastAttempt: Date(timeIntervalSince1970: started),

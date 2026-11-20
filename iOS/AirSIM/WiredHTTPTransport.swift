@@ -608,7 +608,11 @@ enum WiredHTTPResponseParser {
     }
 }
 
-private enum WiredHTTPError: LocalizedError {
+protocol NetworkDiagnosticFailure: Error {
+    var networkDiagnosticReason: String { get }
+}
+
+private enum WiredHTTPError: LocalizedError, NetworkDiagnosticFailure {
     case invalidRequest
     case wiredPathUnavailable
     case connectionFailed(String)
@@ -620,6 +624,22 @@ private enum WiredHTTPError: LocalizedError {
     case invalidResponse
     case incompleteResponse
     case unreadableUpload
+
+    var networkDiagnosticReason: String {
+        switch self {
+        case .timedOut: return "连接超时"
+        case .wiredPathUnavailable: return "没有可用网络路径"
+        case .connectionFailed: return "连接建立失败"
+        case .connectionClosed: return "连接被关闭"
+        case .sendFailed: return "请求发送失败"
+        case .receiveFailed: return "响应接收失败"
+        case .incompleteResponse: return "设备响应不完整"
+        case .invalidResponse: return "设备响应格式异常"
+        case .responseTooLarge: return "设备响应超过大小限制"
+        case .invalidRequest: return "请求格式异常"
+        case .unreadableUpload: return "无法读取上传文件"
+        }
+    }
 
     var isInterfaceFailure: Bool {
         switch self {

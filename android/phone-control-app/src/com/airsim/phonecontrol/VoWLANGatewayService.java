@@ -114,8 +114,7 @@ public final class VoWLANGatewayService extends Service {
                 // Idle network callbacks often arrive before their final interface addresses.
                 // Coalesce them before rebuilding listeners; active sessions retain existing handling.
                 if (networkRecovery.isSettling(networkNow)
-                        && !(control != null && control.ownsCall())
-                        && !(pcm != null && pcm.hasActiveSession())) {
+                        && !hasVoWLANCall()) {
                     waitForNetworkCycle(networkRecovery.nextDelay(networkNow, 1_000));
                     continue;
                 }
@@ -126,6 +125,16 @@ public final class VoWLANGatewayService extends Service {
                 }
                 Inet4Address hotspot = findAddress(true);
                 List<Inet4Address> extraAddresses = additionalAddresses();
+                List<String> localHosts = new ArrayList<>();
+                for (Inet4Address address : extraAddresses) {
+                    if (!address.isLoopbackAddress() && !VoWLANNetworkPolicy.isOverlayIPv4(address.getHostAddress()))
+                        localHosts.add(address.getHostAddress());
+                }
+                String primaryHost = VoWLANListenerPlan.primary(activeHotspot,
+                        hotspot == null ? null : hotspot.getHostAddress(), localHosts);
+                hotspot = primaryHost == null ? null : (Inet4Address) InetAddress.getByName(primaryHost);
+                final String chosenPrimary = primaryHost;
+                extraAddresses.removeIf(address -> address.getHostAddress().equals(chosenPrimary));
                 Inet4Address avf = RuntimeMode.isStandalone(this)
                         ? (Inet4Address) InetAddress.getByName("127.0.0.1") : findAddress(false);
                 if (!activeHotspot.isEmpty() && (hotspot == null || !hotspot.getHostAddress().equals(activeHotspot))
@@ -155,7 +164,7 @@ public final class VoWLANGatewayService extends Service {
                         } catch (Exception error) {
                             BridgeLog.error("vowlan_agent_probe_failed", error);
                         }
-                        pcmReady = portOpen(avf, 7580);
+                        pcmReady = portOpen(avf, pcmBackendPort(avf));
                     }
                 }
                 diagnosticState(hotspot, avf, paired, agentReady, pcmReady, dialerRoleHeld);
@@ -165,7 +174,9 @@ public final class VoWLANGatewayService extends Service {
                     // Never close the active VPN call because Wi-Fi disappeared.
                     // Start overlay/loopback listeners first so the Bonjour record can
                     // include the Tailscale endpoint in the same advertisement.
-                    syncAdditionalGateways(extraAddresses, avf);
+                    if (syncAdditionalGateways(extraAddresses, avf, primaryHost)) {
+                        invalidateAdvertisementForNetworkChange();
+                    }
                     if (hotspot != null) ensureStarted(hotspot, avf);
                     else stopPrimaryGateway();
                     update(hotspot != null ? "VoWLAN 就绪 · " + hotspot.getHostAddress()
@@ -255,12 +266,20 @@ public final class VoWLANGatewayService extends Service {
         String host = hotspot.getHostAddress();
         if (host.equals(activeHotspot) && control != null && control.localPort() > 0
                 && pcm != null && pcm.localPort() > 0) { retryAdvertisement(); return; }
+        ExtraGateway promoted = extraGateways.remove(host);
         stopPrimaryGateway();
+        if (promoted != null) {
+            // Promote the existing listener without closing accepted control/PCM sessions.
+            control = promoted.control(); pcm = promoted.pcm(); activeHotspot = host;
+            retryAdvertisement();
+            BridgeLog.info("vowlan_primary_promoted sockets=preserved host=" + host);
+            return;
+        }
         VoWLANControlGateway nextControl = new VoWLANControlGateway(this);
         VoWLANPCMRelay nextPCM = new VoWLANPCMRelay(this);
         nextControl.start(hotspot, NetworkSettings.controlPort(this));
         try {
-            nextPCM.start(hotspot, NetworkSettings.pcmPort(this), new InetSocketAddress(avf, 7580));
+            nextPCM.start(hotspot, NetworkSettings.pcmPort(this), new InetSocketAddress(avf, pcmBackendPort(avf)));
         } catch (Exception error) {
             nextControl.close();
             throw error;
@@ -313,6 +332,21 @@ public final class VoWLANGatewayService extends Service {
             info.setAttribute("alt_control_port", Integer.toString(altControl));
             info.setAttribute("alt_pcm_port", Integer.toString(altPcm));
         }
+        // Older clients still use host/alt_host. New clients can select an
+        // already-bound address on their own Wi-Fi subnet without a failed probe.
+        int routeIndex = 0;
+        List<String> extraHosts;
+        synchronized (this) { extraHosts = new ArrayList<>(extraGateways.keySet()); }
+        java.util.Collections.sort(extraHosts);
+        for (String host : extraHosts) {
+            if (routeIndex >= 4 || host.equals("127.0.0.1") || VoWLANNetworkPolicy.isOverlayIPv4(host)) continue;
+            DirectGatewayRoutes.Ports ports = DIRECT_ROUTES.forHost(host);
+            if (ports == null) continue;
+            String prefix = "route_" + routeIndex++;
+            info.setAttribute(prefix + "_host", host);
+            info.setAttribute(prefix + "_control", Integer.toString(ports.controlPort()));
+            info.setAttribute(prefix + "_pcm", Integer.toString(ports.pcmPort()));
+        }
         info.setAttribute("caps", "control,pcm");
         advertisement = new NsdManager.RegistrationListener() {
             @Override public void onServiceRegistered(NsdServiceInfo ignored) {
@@ -358,12 +392,15 @@ public final class VoWLANGatewayService extends Service {
         activeHotspot = "";
     }
 
-    private synchronized void syncAdditionalGateways(List<Inet4Address> addresses, Inet4Address avf) throws Exception {
-        if (!running) return;
+    private synchronized boolean syncAdditionalGateways(List<Inet4Address> addresses, Inet4Address avf,
+                                                          String nextPrimary) throws Exception {
+        if (!running) return false;
+        boolean changed = false;
         List<String> wanted = new ArrayList<>();
         for (Inet4Address address : addresses) wanted.add(address.getHostAddress());
         for (String host : new ArrayList<>(extraGateways.keySet())) {
-            if (wanted.contains(host)) continue;
+            if (VoWLANListenerPlan.retainAdditional(host, wanted, nextPrimary)) continue;
+            changed = true;
             ExtraGateway removed = extraGateways.remove(host);
             DirectCallOwnership.disconnectHost(host);
             DIRECT_ROUTES.remove(host);
@@ -378,7 +415,7 @@ public final class VoWLANGatewayService extends Service {
             try {
                 nextControl.start(address, NetworkSettings.controlPort(this));
                 nextPCM.start(address, NetworkSettings.pcmPort(this),
-                        new InetSocketAddress(avf, 7580));
+                        new InetSocketAddress(avf, pcmBackendPort(avf)));
             } catch (Exception error) {
                 try { nextControl.close(); } catch (Exception ignored) {}
                 try { nextPCM.close(); } catch (Exception ignored) {}
@@ -386,7 +423,16 @@ public final class VoWLANGatewayService extends Service {
             }
             extraGateways.put(host, new ExtraGateway(nextControl, nextPCM));
             DIRECT_ROUTES.put(host, nextControl.localPort(), nextPCM.localPort());
+            changed = true;
+            BridgeLog.info("vowlan_additional_ready host=" + host + " control_port=" + nextControl.localPort()
+                    + " pcm_port=" + nextPCM.localPort());
         }
+        return changed;
+    }
+
+    private int pcmBackendPort(Inet4Address address) {
+        return address.isLoopbackAddress() ? PhoneAudioBridgeProcessPolicy.standalonePort(getPackageName())
+                : PhoneAudioBridgeProcessPolicy.DEFAULT_PORT;
     }
 
     private synchronized void stopGateways() {
@@ -416,7 +462,10 @@ public final class VoWLANGatewayService extends Service {
             while (values.hasMoreElements()) {
                 InetAddress value = values.nextElement();
                 if (value instanceof Inet4Address ipv4
-                        && VoWLANNetworkPolicy.isOverlayInterface(item.getName(), ipv4.getHostAddress())) addresses.add(ipv4);
+                        && (VoWLANNetworkPolicy.isOverlayInterface(item.getName(), ipv4.getHostAddress())
+                        || VoWLANListenerPlan.isLocalInterface(item.getName(), ipv4.getHostAddress()))) {
+                    if (!addresses.contains(ipv4)) addresses.add(ipv4);
+                }
             }
         }
         return addresses;

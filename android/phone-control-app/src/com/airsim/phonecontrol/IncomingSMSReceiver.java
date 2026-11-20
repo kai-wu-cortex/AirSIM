@@ -33,6 +33,7 @@ public final class IncomingSMSReceiver extends BroadcastReceiver {
 
     @Override public void onReceive(Context context, Intent intent) {
         if (!Telephony.Sms.Intents.SMS_RECEIVED_ACTION.equals(intent.getAction())) return;
+        String receivedAt = Instant.now().toString();
         PendingResult pending = goAsync();
         Context application = context.getApplicationContext();
         WORKER.execute(() -> {
@@ -54,6 +55,7 @@ public final class IncomingSMSReceiver extends BroadcastReceiver {
                         id, sender == null ? "" : sender, content.toString(),
                         Instant.ofEpochMilli(eventTimestamp).toString(),
                         simSlot(application, intent)));
+                event.put("android_received_at", receivedAt);
                 if (RuntimeMode.isStandalone(application)) {
                     StandaloneAgentGateway.get(application).sendSMSEvent(event.toString());
                 } else {

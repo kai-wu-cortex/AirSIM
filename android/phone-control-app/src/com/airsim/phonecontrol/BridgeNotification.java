@@ -89,11 +89,17 @@ public final class BridgeNotification {
                 .build();
     }
 
+    static boolean wakesForCalls(Context context, String mode) {
+        return !AppConfig.MODE_REMOTE_SILENT.equals(mode)
+                || !RuntimeMode.isStandalone(context) || !VoWLANPairingStore.configured(context);
+    }
+
     public static void showCall(Context context, String callId, String direction,
                                 String mode, String state, String number) {
         if (callId == null || callId.isEmpty() || "ended".equals(state) || "unknown".equals(state)) return;
         boolean incoming = "incoming".equals(direction) && "incoming".equals(state);
-        if (incoming) createCallChannel(context);
+        boolean wakesForIncoming = incoming && wakesForCalls(context, mode);
+        if (wakesForIncoming) createCallChannel(context);
         else createChannel(context);
         Intent screenIntent = new Intent(context, CallScreenActivity.class)
                 .setData(Uri.parse("airsim-call://screen/" + Uri.encode(callId)))
@@ -108,7 +114,7 @@ public final class BridgeNotification {
                     ? "未知号码 · 可直接接听或拒接"
                     : "可直接在 Android 接听或拒接")
                 : "通话进行中 · 点按查看";
-        Notification.Builder builder = new Notification.Builder(context, incoming ? CALL_CHANNEL : CHANNEL)
+        Notification.Builder builder = new Notification.Builder(context, wakesForIncoming ? CALL_CHANNEL : CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_phone_call)
                 .setContentTitle(incoming
                         ? (displayNumber.isEmpty() ? "AirSIM 来电" : displayNumber)
@@ -122,10 +128,9 @@ public final class BridgeNotification {
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true);
+        if (wakesForIncoming) builder.setPriority(Notification.PRIORITY_HIGH).setFullScreenIntent(screen, true);
         if (incoming) {
-            builder.setPriority(Notification.PRIORITY_HIGH)
-                    .setFullScreenIntent(screen, true)
-                    .addAction(android.R.drawable.sym_action_call, "接听",
+            builder.addAction(android.R.drawable.sym_action_call, "接听",
                             CallNotificationActionReceiver.pendingIntent(context, callId, "answer"))
                     .addAction(android.R.drawable.ic_menu_close_clear_cancel, "拒接",
                             CallNotificationActionReceiver.pendingIntent(context, callId, "reject"));

@@ -194,9 +194,9 @@ public final class MainActivity extends Activity {
 				checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED,
 				Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
 						== PackageManager.PERMISSION_GRANTED,
-				Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+				RuntimeMode.vowlanPushOnly(this) || Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
 						== PackageManager.PERMISSION_GRANTED,
-				Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
+				RuntimeMode.vowlanPushOnly(this) || Build.VERSION.SDK_INT < 31 || checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)
 						== PackageManager.PERMISSION_GRANTED);
 		if (missingPermissions.length > 0) {
             requestPermissions(missingPermissions, 101);
@@ -235,9 +235,8 @@ public final class MainActivity extends Activity {
 	}
 
 	private boolean hasVoBLEPermissions() {
-		return Build.VERSION.SDK_INT < 31
-				|| (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-				&& checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED);
+        return !RuntimeMode.vowlanPushOnly(this)
+                && com.airsim.phonecontrol.voble.VoBLEGatewayService.hasPermissions(this);
 	}
 
 	private void startSMSInboxBaselineIfAuthorized() {
@@ -391,14 +390,16 @@ public final class MainActivity extends Activity {
         connectionCard.addView(label(connectionDetail, 13, MUTED, Gravity.START), matchWithTop(5));
         root.addView(connectionCard, matchWithTop(12));
 
-        LinearLayout bluetoothCard = card(SURFACE, 18);
-        bluetoothCard.setOrientation(LinearLayout.VERTICAL);
-        bluetoothCard.setPadding(dp(16), dp(14), dp(16), dp(14));
-        bluetoothCard.addView(overline("蓝牙通话（诊断已脱敏）"));
-        bluetoothCard.addView(label(
-                com.airsim.phonecontrol.voble.VoBLEGatewayService.diagnosticsSummary(),
-                14, MUTED, Gravity.START), matchWithTop(5));
-        root.addView(bluetoothCard, matchWithTop(10));
+        if (!RuntimeMode.vowlanPushOnly(this)) {
+            LinearLayout bluetoothCard = card(SURFACE, 18);
+            bluetoothCard.setOrientation(LinearLayout.VERTICAL);
+            bluetoothCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+            bluetoothCard.addView(overline("蓝牙通话（诊断已脱敏）"));
+            bluetoothCard.addView(label(
+                    com.airsim.phonecontrol.voble.VoBLEGatewayService.diagnosticsSummary(),
+                    14, MUTED, Gravity.START), matchWithTop(5));
+            root.addView(bluetoothCard, matchWithTop(10));
+        }
 
         LinearLayout firstHealthRow = row();
         HealthTile agentTile = healthTile(
@@ -459,7 +460,9 @@ public final class MainActivity extends Activity {
     private View callsPage() {
         LinearLayout root = pageRoot();
         root.addView(pageTitle("通话控制", null));
-        root.addView(description("三星 Telecom 本机控制；iPhone 通话优先使用 VoWLAN，局域网不可用时由云端中继。"), matchWithTop(8));
+        root.addView(description(RuntimeMode.vowlanPushOnly(this)
+                ? "Android Telecom 本机控制。iPhone 通话走 VoWLAN，Relay 用于推送。"
+                : "三星 Telecom 本机控制；iPhone 通话优先使用 VoWLAN，局域网不可用时由云端中继。"), matchWithTop(8));
 
         LinearLayout dialCard = card(SURFACE, 24);
         dialCard.setOrientation(LinearLayout.VERTICAL);
@@ -625,7 +628,8 @@ public final class MainActivity extends Activity {
                 .anyMatch(account -> account.key().equals(accountKey));
         callAccountCard.addView(label(DefaultCallAccount.selectedLabel(this)
                 + (available ? "" : " · 当前不可用"), 14, available ? TEXT : WARNING, Gravity.START));
-        callAccountCard.addView(description("用于 AirSIM 蓝牙、VoWLAN 与云端拨号，不改变系统通话卡或短信卡。"
+        callAccountCard.addView(description((RuntimeMode.vowlanPushOnly(this) ? "用于 AirSIM VoWLAN 拨号。"
+                : "用于 AirSIM 蓝牙、VoWLAN 与云端拨号。") + "不改变系统通话卡或短信卡。"
                 + "指定卡关闭或移除时会停止拨号，请重新选择。"), matchWithTop(6));
         if (!accounts.error().isEmpty()) {
             callAccountCard.addView(description(accounts.error()), matchWithTop(6));
@@ -643,20 +647,22 @@ public final class MainActivity extends Activity {
         }
         root.addView(callAccountCard, matchWithTop(10));
 
-        root.addView(sectionTitle("VoBLE 蓝牙认证"), matchWithTop(22));
-        LinearLayout voBLECard = card(SURFACE, 22);
-        voBLECard.setOrientation(LinearLayout.VERTICAL);
-        voBLECard.setPadding(dp(16), dp(16), dp(16), dp(16));
-        boolean voBLEPaired = com.airsim.phonecontrol.voble.VoBLEGatewayService
-                .hasStoredCredential(this);
-        voBLECard.addView(label(voBLEPaired ? "已保存 iPhone 认证凭据" : "尚未保存认证凭据",
-                14, voBLEPaired ? PRIMARY : MUTED, Gravity.START));
-        voBLECard.addView(description("管理六位安全码认证、旧凭据恢复与双端取消配对。"),
-                matchWithTop(6));
-        TextView configureVoBLE = secondaryButton("打开 VoBLE 认证配置");
-        configureVoBLE.setOnClickListener(ignored -> openVoBLEAuthenticationPage());
-        voBLECard.addView(configureVoBLE, matchWithTop(10));
-        root.addView(voBLECard, matchWithTop(10));
+        if (!RuntimeMode.vowlanPushOnly(this)) {
+            root.addView(sectionTitle("VoBLE 蓝牙认证"), matchWithTop(22));
+            LinearLayout voBLECard = card(SURFACE, 22);
+            voBLECard.setOrientation(LinearLayout.VERTICAL);
+            voBLECard.setPadding(dp(16), dp(16), dp(16), dp(16));
+            boolean voBLEPaired = com.airsim.phonecontrol.voble.VoBLEGatewayService
+                    .hasStoredCredential(this);
+            voBLECard.addView(label(voBLEPaired ? "已保存 iPhone 认证凭据" : "尚未保存认证凭据",
+                    14, voBLEPaired ? PRIMARY : MUTED, Gravity.START));
+            voBLECard.addView(description("管理六位安全码认证、旧凭据恢复与双端取消配对。"),
+                    matchWithTop(6));
+            TextView configureVoBLE = secondaryButton("打开 VoBLE 认证配置");
+            configureVoBLE.setOnClickListener(ignored -> openVoBLEAuthenticationPage());
+            voBLECard.addView(configureVoBLE, matchWithTop(10));
+            root.addView(voBLECard, matchWithTop(10));
+        }
 
 		root.addView(sectionTitle("短信收件箱兜底"), matchWithTop(22));
 		LinearLayout smsCard = card(SURFACE, 22);
@@ -1208,7 +1214,9 @@ public final class MainActivity extends Activity {
         HorizontalScrollView scroll = new HorizontalScrollView(this);
         scroll.setHorizontalScrollBarEnabled(false);
         LinearLayout filterRow = row();
-        String[] filters = {"全部", "Agent", "SMS", "VoBLE", "VoWLAN", "PCM", "Telecom"};
+        String[] filters = RuntimeMode.vowlanPushOnly(this)
+                ? new String[] {"全部", "Agent", "SMS", "VoWLAN", "PCM", "Telecom"}
+                : new String[] {"全部", "Agent", "SMS", "VoBLE", "VoWLAN", "PCM", "Telecom"};
         for (String filter : filters) {
             boolean selected = filter.equals(activeDebugFilter);
             TextView chip = label(filter, 13, selected ? BG : TEXT, Gravity.CENTER);
@@ -1750,7 +1758,9 @@ public final class MainActivity extends Activity {
             case VOWLAN -> {
                 boolean paired = VoWLANPairingStore.configured(this);
                 String address = localVoWLANAddress();
-                String pcmBackend = RuntimeMode.isStandalone(this) ? "本机 PCM 端口 7580" : "AVF PCM 端口 7580";
+                String pcmBackend = RuntimeMode.isStandalone(this)
+                        ? "本机 PCM 端口 " + PhoneAudioBridgeProcessPolicy.standalonePort(getPackageName())
+                        : "AVF PCM 端口 " + PhoneAudioBridgeProcessPolicy.DEFAULT_PORT;
                 String reason = !paired ? "尚未与 iPhone 配对"
                         : address.isEmpty() ? "没有可用的同网 Wi-Fi 或三星热点地址"
                         : currentVoWLAN.contains("avf=missing") ? "AVF 虚拟网卡未出现"
@@ -1779,7 +1789,9 @@ public final class MainActivity extends Activity {
             }
             case PCM -> {
                 String shizuku = ShizukuBridgeManager.get(this).status();
-                String pcmBackend = RuntimeMode.isStandalone(this) ? "本机 PCM 端口 7580" : "AVF PCM 端口 7580";
+                String pcmBackend = RuntimeMode.isStandalone(this)
+                        ? "本机 PCM 端口 " + PhoneAudioBridgeProcessPolicy.standalonePort(getPackageName())
+                        : "AVF PCM 端口 " + PhoneAudioBridgeProcessPolicy.DEFAULT_PORT;
                 String reason = !shizukuReady() ? "Shizuku 未连接或未授权，PCM 用户服务不可用"
                         : currentVoWLAN.contains("pcm_ready=false") ? pcmBackend + "未响应"
                         : !pcmBridgeRunning() ? "PCM 音频桥进程尚未运行"

@@ -8,6 +8,7 @@ public final class CloudCallManagerTests {
     public static void main(String[] args) throws Exception {
         missedCallHistoryKeepsConnectionAndSIMFacts();
         RelayEgressGate.shared.enableAfterRestore();
+        pushOnlyDeliversLifecycleWithoutCloudMedia();
         endedBeforeEventDrainStillReleasesOutgoing();
         callCanCompleteBeforeSessionCreation();
         lateOutgoingCannotBindUnownedSession("ended");
@@ -23,10 +24,53 @@ public final class CloudCallManagerTests {
         System.out.println("CloudCallManagerTests passed");
     }
 
+    private static void pushOnlyDeliversLifecycleWithoutCloudMedia() throws Exception {
+        var context = new android.content.Context() {
+            @Override public String getPackageName() { return "com.airsim.phonecontrol.earlytest"; }
+        };
+        var constructor = StandaloneCloudMediaManager.class.getDeclaredConstructor(android.content.Context.class);
+        constructor.setAccessible(true);
+        var manager = constructor.newInstance(context);
+        var tasks = new QueuedExecutor();
+        set(manager, "sessions", tasks);
+        var relay = new StandaloneRelayClient();
+        var registration = registration().put("relay_url", "https://example.invalid");
+        var gatewayConstructor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
+        gatewayConstructor.setAccessible(true);
+        var gateway = gatewayConstructor.newInstance(context);
+        var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING);
+        String id = CallRepository.add(call);
+        try {
+            manager.handleCallEvent(registration, event(id, "incoming", "incoming").put("slot_index", 1), relay);
+            check(relay.incoming.size() == 1, "push-only must send the ringing push");
+            var push = relay.incoming.get(0);
+            check(!push.has("call_secret") && !push.has("media_transport"), "push-only offered cloud media");
+            check(push.optInt("slot_index", -1) == 1, "push-only lost SIM metadata");
+            check(id.equals(manager.androidCallIDFor(push)), "VoWLAN cannot resolve pushed call identity");
+            call.setStateForTest(android.telecom.Call.STATE_ACTIVE);
+            manager.handleCallEvent(registration, event(id, "incoming", "active"), relay);
+            call.setStateForTest(android.telecom.Call.STATE_DISCONNECTED);
+            manager.handleCallEvent(registration, event(id, "incoming", "ended").put("missed", false), relay);
+            check(relay.states.isEmpty(), "push-only used a route that requires a cloud media record");
+            check(relay.owners.stream().map(value -> value.optString("phase")).toList().equals(java.util.List.of("active", "ended")),
+                    "push-only lost answered or ended state");
+            check(!relay.owners.get(1).getBoolean("missed"),
+                    "push-only lost explicit missed status");
+            check(tasks.tasks == 0 && field(manager, "active") == null, "push-only created a media session");
+            var command = new JSONObject().put("command_id", "11111111-1111-4111-8111-111111111111").put("type", "dial");
+            check("relay_push_only".equals(gateway.executeCloudCommand(command).optString("error")),
+                    "push-only accepted a cloud command");
+        } finally {
+            CallRepository.remove(call);
+            manager.close();
+        }
+    }
+
     private static void missedCallHistoryKeepsConnectionAndSIMFacts() throws Exception {
         var ctor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class);
         ctor.setAccessible(true);
-        var gateway = ctor.newInstance(new android.content.Context());
+        var context = new android.content.Context();
+        var gateway = ctor.newInstance(context);
         var apply = StandaloneAgentGateway.class.getDeclaredMethod("applyCallEvent", JSONObject.class);
         apply.setAccessible(true);
         var history = StandaloneAgentGateway.class.getDeclaredField("callHistory"); history.setAccessible(true);
@@ -35,14 +79,33 @@ public final class CloudCallManagerTests {
             var event = new JSONObject().put("call_id", "history-" + index).put("direction", direction)
                     .put("state", index == 2 ? "dialing" : "incoming").put("slot_index", index % 2);
             apply.invoke(gateway, event);
-            if (index == 1) apply.invoke(gateway, new JSONObject(event.toString()).put("state", "active"));
-            apply.invoke(gateway, new JSONObject(event.toString()).put("state", "ended"));
+            var ended = new JSONObject(event.toString()).put("state", "ended");
+            if (index == 0) ended.put("ringing_duration_ms", 12_345L);
+            if (index == 1) {
+                ended.put("telecom_connected_at_ms", 1_700_000_000_000L);
+                ended.put("connected_duration_ms", 64_321L);
+                ended.put("disconnect_reason", "remote");
+            }
+            apply.invoke(gateway, ended);
         }
-        var records = (org.json.JSONArray) history.get(gateway);
+        var reopened = ctor.newInstance(context);
+        var records = (org.json.JSONArray) history.get(reopened);
+        check(records.length() == 3, "unacknowledged calls were lost on restart");
+        check("remote".equals(records.getJSONObject(1).optString("disconnect_reason")), "disconnect reason was not restored");
         check(records.getJSONObject(0).optBoolean("missed"), "unanswered incoming missing from history");
         check(!records.getJSONObject(1).optBoolean("missed") && records.getJSONObject(1).has("connected_at"), "answered call marked missed");
         check(!records.getJSONObject(2).optBoolean("missed"), "outgoing call marked missed");
+        check(records.getJSONObject(0).optLong("ringing_duration_ms", -1) == 12_345L, "missed call lost its real ringing duration");
+        check(records.getJSONObject(1).optLong("connected_duration_ms", -1) == 64_321L, "answered call lost its real connected duration");
+        check("2023-11-14T22:13:20Z".equals(records.getJSONObject(1).optString("connected_at")), "terminal event lost its Android connection time");
+        check(!records.getJSONObject(2).has("connected_duration_ms"), "unanswered outgoing call invented a connected duration");
         check(records.getJSONObject(0).optInt("slot_index", -1) == 0 && records.getJSONObject(1).optInt("slot_index", -1) == 1, "history lost SIM slots");
+        String ack = new JSONObject().put("ids", new org.json.JSONArray().put("history-1")).toString();
+        check(reopened.forward("POST", "/api/calls/history/ack", ack).status() == 200, "history ack failed");
+        check(reopened.forward("POST", "/api/calls/history/ack", ack).status() == 200, "repeat history ack failed");
+        var remaining = (org.json.JSONArray) history.get(ctor.newInstance(context));
+        check(remaining.length() == 2 && "history-2".equals(remaining.getJSONObject(1).optString("android_id")),
+                "acknowledgement did not persist or removed another record");
     }
 
     private static void oldMediaCannotRestartAfterPureLocalExit() throws Exception {

@@ -2,9 +2,14 @@ package com.airsim.phonecontrol;
 
 import java.io.File;
 
-final class PhoneAudioBridgeProcessPolicy {
+public final class PhoneAudioBridgeProcessPolicy {
     private static final String MAIN_CLASS = "com.airsim.bridge.PhoneAudioBridge";
-    private static final String LISTEN_PORT = "7580";
+    public static final int DEFAULT_PORT = 7580;
+    private static final int EARLY_TEST_PORT = 7581;
+
+    public static int standalonePort(String packageName) {
+        return "com.airsim.phonecontrol.earlytest".equals(packageName) ? EARLY_TEST_PORT : DEFAULT_PORT;
+    }
 
     private PhoneAudioBridgeProcessPolicy() {}
 
@@ -21,7 +26,8 @@ final class PhoneAudioBridgeProcessPolicy {
             if (MAIN_CLASS.equals(argument)) hasMainClass = true;
             if ("--listen-port".equals(argument)
                     && index + 1 < arguments.length
-                    && LISTEN_PORT.equals(arguments[index + 1])) {
+                    && (Integer.toString(DEFAULT_PORT).equals(arguments[index + 1])
+                        || Integer.toString(standalonePort(packageName)).equals(arguments[index + 1]))) {
                 hasListenPort = true;
             }
             if ("--listen-host".equals(argument)

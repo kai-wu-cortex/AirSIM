@@ -10,7 +10,8 @@ final class CloudSMSEvent {
     static JSONObject body(JSONObject identity, JSONObject source, String timestamp, E2ESMSCrypto.Keys keys)
             throws Exception {
         String deliveryID = source.optString("delivery_id");
-        JSONObject body = identity.put("event", "incoming_sms").put("delivery_id", deliveryID);
+        JSONObject body = identity.put("event", "incoming_sms").put("delivery_id", deliveryID)
+                .put("android_received_at", source.optString("android_received_at")).put("android_uploaded_at", java.time.Instant.now().toString());
         if (keys == null) {
             return body.put("sender", source.optString("sender")).put("content", source.optString("content"))
                     .put("sim_slot", source.optString("sim_slot")).put("timestamp", timestamp);

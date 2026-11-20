@@ -3,6 +3,23 @@ package com.airsim.phonecontrol;
 /** Tracks whether a remote PCM owner has actually completed its handshake. */
 public final class RemoteAudioSessionRegistry {
     private static boolean vowlan;
+    private static final java.util.Set<String> isolatedVoWLANCalls = new java.util.HashSet<>();
+
+    /** Authenticated control owns isolation even before the first media frame. */
+    static synchronized void reserveVoWLANCall(String callID) {
+        if (callID == null || callID.isEmpty()) return;
+        isolatedVoWLANCalls.add(callID);
+        AirSIMInCallService.refreshAudioPolicy();
+    }
+
+    static synchronized void nativeCallEnded(String callID) {
+        isolatedVoWLANCalls.remove(callID);
+        AirSIMInCallService.refreshAudioPolicy();
+    }
+
+    static synchronized boolean reservesVoWLANCall(java.util.List<String> liveCalls) {
+        return liveCalls.size() == 1 && isolatedVoWLANCalls.contains(liveCalls.get(0));
+    }
     private static boolean voble;
     private static RemoteCallAudioScope early = new RemoteCallAudioScope();
     private static final java.util.Set<Object> cloud = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
@@ -79,5 +96,5 @@ public final class RemoteAudioSessionRegistry {
     }
     static synchronized boolean ownsEarlyCall(String callID) { return early.ownsCall(callID); }
 
-    static synchronized void resetForTests() { vowlan = false; voble = false; cloud.clear(); early = new RemoteCallAudioScope(); }
+    static synchronized void resetForTests() { isolatedVoWLANCalls.clear(); vowlan = false; voble = false; cloud.clear(); early = new RemoteCallAudioScope(); }
 }

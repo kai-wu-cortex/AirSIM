@@ -53,6 +53,16 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
         return transact(PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE, false, false);
     }
 
+    String restoreRemoteScreenOff(long since, long observedAt) throws RemoteException {
+        Parcel data = Parcel.obtain(), reply = Parcel.obtain();
+        try {
+            data.writeInterfaceToken(PrivilegedBridgeProtocol.DESCRIPTOR); data.writeLong(since); data.writeLong(observedAt);
+            if (!binder.transact(PrivilegedBridgeProtocol.TRANSACTION_RESTORE_REMOTE_SCREEN_OFF, data, reply, 0))
+                throw new RemoteException("screen guard transaction unavailable");
+            reply.readException(); return reply.readString();
+        } finally { reply.recycle(); data.recycle(); }
+    }
+
     String recentSms(long afterId, long cutoffMillis, int limit) throws RemoteException {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();

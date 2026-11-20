@@ -3,6 +3,20 @@ import XCTest
 
 @MainActor
 final class DeviceCallActionRouterTests: XCTestCase {
+    override func setUpWithError() throws {
+        let keys = ["airsim.paired-android-devices.v1", "airsim.forgotten-android-devices.v1",
+                    AndroidAgentBindingPreference.key]
+        let defaults = UserDefaults.standard
+        let previous = keys.map { defaults.object(forKey: $0) }
+        keys.forEach { defaults.removeObject(forKey: $0) }
+        addTeardownBlock {
+            for (key, value) in zip(keys, previous) {
+                if let value { UserDefaults.standard.set(value, forKey: key) }
+                else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+        }
+    }
+
     // The same safety assertions run over the transport enabled in this build.
     private var fixtureMode: AirSIMConnectionMode { DedicatedCallPolicy.vowlanOnly ? .vowlan : .bluetooth }
     private var fixtureTransport: CallTransport { DedicatedCallPolicy.vowlanOnly ? .vowlan : .bluetooth }
@@ -57,31 +71,6 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertEqual(backend.commands, ["dial:fixture", "end:shared"])
     }
 
-    func testMirrorEndIsIdempotentAndCannotEndNewPhoneCall() async throws {
-        let backend = DeviceBackendProbe(id: "A")
-        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
-        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
-            deviceBackend: { _, _ in backend }, callKitController: controller)
-        defer { model.stop() }
-        let coordinator = WatchCallCoordinator(); coordinator.configure(model: model)
-        let a = try await model.deviceCallRouter.dial(agentID: "A", number: "fixture", mode: .vowlan)
-        let identity: [String: Any] = ["call_id": "shared", "call_uuid": a.systemUUID.uuidString]
-        var reply: [String: Any] = [:]
-        await coordinator.endPhoneMirror(identity) { reply = $0 }
-        XCTAssertEqual(reply["ok"] as? Bool, true)
-        XCTAssertNil(model.deviceCalls.active)
-        backend.replyCallID = "second-call"
-        let b = try await model.deviceCallRouter.dial(agentID: "A", number: "second", mode: .vowlan)
-        await coordinator.endPhoneMirror(identity) { reply = $0 }
-        XCTAssertEqual(reply["ok"] as? Bool, true, "An ended phone mirror needs no native Watch CallKit transaction")
-        XCTAssertEqual(model.deviceCalls.active, b.key)
-        let wrong = ["call_id": "wrong", "call_uuid": b.systemUUID.uuidString]
-        await coordinator.endPhoneMirror(wrong) { reply = $0 }
-        XCTAssertEqual(reply["ok"] as? Bool, false)
-        XCTAssertEqual(model.deviceCalls.active, b.key)
-        XCTAssertEqual(backend.commands, ["dial:fixture", "end:shared", "dial:second"])
-    }
-
     func testDedicatedBuildConstrainsRequestsToVoWLANWithoutBLEFallback() async throws {
         try XCTSkipUnless(DedicatedCallPolicy.vowlanOnly, "Only applies to the dedicated build")
         let backend = DeviceBackendProbe(id: "A")
@@ -102,6 +91,23 @@ final class DeviceCallActionRouterTests: XCTestCase {
             XCTFail("An offline WLAN must not fall back to Bluetooth")
         } catch { XCTAssertEqual(error as? DeviceCallRoutingError, .unavailable) }
         XCTAssertTrue(ble.commands.isEmpty)
+    }
+
+    func testPairingSlotRequiresForgettingCurrentDevice() throws {
+        let suite = "AirSIM.single-pairing.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let first = PairedAndroidDeviceRecord(id: "A", deviceName: "First", agentKind: nil)
+        let second = PairedAndroidDeviceRecord(id: "B", deviceName: "Second", agentKind: nil)
+        PairedAndroidDeviceStore.remember(first, defaults: defaults)
+        PairedAndroidDeviceStore.remember(second, defaults: defaults)
+        XCTAssertEqual(PairedAndroidDeviceStore.records(defaults: defaults).map(\.id), ["A"])
+        XCTAssertFalse(PairedAndroidDeviceStore.permits("B", defaults: defaults))
+        PairedAndroidDeviceStore.forget("A", defaults: defaults)
+        XCTAssertTrue(PairedAndroidDeviceStore.records(defaults: defaults).isEmpty)
+        XCTAssertFalse(PairedAndroidDeviceStore.permits("A", defaults: defaults))
+        PairedAndroidDeviceStore.remember(second, defaults: defaults)
+        XCTAssertEqual(PairedAndroidDeviceStore.records(defaults: defaults).map(\.id), ["B"])
     }
 
     func testVoWLANIncomingUsesTelecomUUIDAndIgnoresBluetoothRing() throws {
@@ -875,6 +881,62 @@ private final class DeviceBackendProbe: DeviceCallBackend {
 
 @MainActor
 final class WatchCompanionSMSProtocolTests: XCTestCase {
+    func testWatchMergesDeliveryCopiesAndKeepsDistinctRepeatedMessages() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        func row(_ id: String, _ key: String?, agent: String = "A", unread: Bool = true) -> WatchSMSRow {
+            .init(id: id, agentID: agent, sender: id.hasPrefix("lan:") ? "+8613800138000" : "13800138000",
+                  preview: "same body", timestamp: now, sim: "SIM 2", outgoing: false, unread: unread, deliveryKey: key)
+        }
+        let merged = WatchSMSPolicy.merged(direct: [row("lan:1", "one"), row("lan:2", "two")],
+            companion: [row("phone-copy", "one", unread: false), row("phone-third", "three"), row("other", "one", agent: "B")],
+            agentID: "A")
+        XCTAssertEqual(merged.map(\.id), ["lan:1", "lan:2", "phone-third"])
+        XCTAssertFalse(try XCTUnwrap(merged.first).unread)
+        XCTAssertEqual(WatchSMSConversationPolicy.groups(merged).count, 1)
+
+        let legacy = row("old-no-delivery", nil, unread: false)
+        let encoded = try JSONEncoder().encode(legacy)
+        XCTAssertNil(try JSONDecoder().decode(WatchSMSRow.self, from: encoded).deliveryKey)
+        XCTAssertEqual(WatchSMSPolicy.merged(direct: [row("lan:1", "one")], companion: [legacy], agentID: "A").count, 1)
+    }
+
+    func testWatchSendStatusNeverTreatsMissingResultAsFailed() throws {
+        for json in ["{}", "{\"unknown\":true}", "{\"pending\":true}", "{\"uncertain\":true}"] {
+            let result = try JSONDecoder().decode(WatchDirectSend.self, from: Data(json.utf8))
+            guard case .uncertain = result.outcome else { XCTFail(json); continue }
+        }
+        let response = try JSONDecoder().decode(WatchDirectSend.self, from: Data("{\"sent\":true}".utf8))
+        guard case .sent = response.outcome else { XCTFail("Expected confirmed send"); return }
+    }
+
+    func testWatchReadBatchMatchesDeliveryOnlyWithinPairedAndroid() throws {
+        try withFixture { model, coordinator in
+            let selected = SMSMessage(sender: "fixture", content: "A", code: nil, timestamp: Date(),
+                deliveryID: "same", sourceAgentID: "A", simSlot: "SIM 1")
+            let other = SMSMessage(sender: "fixture", content: "B", code: nil, timestamp: Date(),
+                deliveryID: "same", sourceAgentID: "B", simSlot: "SIM 2")
+            model.messages = [selected, other]
+            let key = WatchSMSPolicy.readKey(messageID: "", deliveryKey: WatchSMSPolicy.digest("same"))
+            let pending = WatchSMSPolicy.readKey(messageID: "", deliveryKey: WatchSMSPolicy.digest("not-yet-stored"))
+            let reply = request(coordinator, ["action": "watch_sms_read_batch", "agent_id": "A", "read_keys": [key, pending]])
+            XCTAssertEqual(reply["accepted"] as? [String], [key])
+            XCTAssertFalse(model.unreadMessageIDs.contains(selected.id))
+            XCTAssertTrue(model.unreadMessageIDs.contains(other.id))
+        }
+    }
+
+    func testWatchSMSCredentialIsScopedAndRouteIsLocal() {
+        let key = Data((0..<32).map(UInt8.init))
+        let scoped = WatchSMSDirectRoute.scopedSecret(key)
+        XCTAssertEqual(scoped.map { String(format: "%02x", $0) }.joined(),
+                       "09fdf13070df78b9a6967d2fdbf79501681a1074c2c7aa7cee1858db0be9c6e7")
+        XCTAssertNotEqual(scoped, key)
+        for (host, allowed) in [("192.168.1.2", true), ("172.31.0.3", true),
+                                ("172.32.0.3", false), ("example.com", false)] {
+            XCTAssertEqual(WatchSMSDirectRoute(agentID: "agent", host: host, port: 8765,
+                secret: scoped, clockOffset: 0).allowsLocalAccess, allowed)
+        }
+    }
     private func withFixture(_ body: (AppModel, WatchCallCoordinator) throws -> Void) throws {
         let defaults = UserDefaults.standard
         let keys = ["airsim.paired-android-devices.v1", "airsim.forgotten-android-devices.v1", AndroidAgentBindingPreference.key]
@@ -967,14 +1029,15 @@ final class WatchCompanionSMSProtocolTests: XCTestCase {
             XCTAssertTrue(model.unreadMessageIDs.contains(b.id), "Read cannot clear another device")
         }
     }
-    func testMultipleDevicesRequireSelectionAndUnknownReadDoesNotMutate() throws {
+    func testPairedDeviceIsSelectedAutomaticallyAndUnknownReadDoesNotMutate() throws {
         try withFixture { model, coordinator in
             let record = SMSMessage(sender: "fixture", content: "body", code: nil, timestamp: Date(), deliveryID: "one", sourceAgentID: "A")
             model.messages = [record]
             let response = request(coordinator, ["action": "watch_sms_list"])
             let page = try JSONDecoder().decode(WatchSMSPage.self, from: XCTUnwrap(response["sms_data"] as? Data))
-            XCTAssertNil(page.selectedAgentID); XCTAssertTrue(page.rows.isEmpty)
-            XCTAssertEqual(page.devices.count, 2)
+            XCTAssertEqual(page.selectedAgentID, "A")
+            XCTAssertEqual(page.rows.count, 1)
+            XCTAssertEqual(page.devices.map(\.id), ["A"])
             let read = request(coordinator, ["action": "watch_sms_read", "agent_id": "A", "message_id": "unknown"])
             XCTAssertEqual(read["ok"] as? Bool, false)
             XCTAssertTrue(model.unreadMessageIDs.contains(record.id))
@@ -992,184 +1055,6 @@ final class WatchCompanionSMSProtocolTests: XCTestCase {
             XCTAssertLessThanOrEqual(data.count, WatchSMSPolicy.payloadBudget)
             let detail = try JSONDecoder().decode(WatchSMSDetail.self, from: data)
             XCTAssertTrue(detail.truncated); XCTAssertTrue(body.hasPrefix(detail.body))
-        }
-    }
-}
-
-
-@MainActor
-final class WatchCompanionCallRaceTests: XCTestCase {
-    func testWatchDTMFRequiresConnectedExactCallAndNeverTargetsDefault() async throws {
-        let started = expectation(description: "Watch answer pending")
-        let wire = WatchAnswerHTTPFixture(id: "native-A", onAnswer: { started.fulfill() })
-        let credential = try VoWLANCredential(secret: Data(repeating: 0x42, count: 32))
-        let endpoint = try VoWLANEndpoint(host: "192.168.77.1", controlPort: 8787, pcmPort: 8790)
-        let api = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential), transport: wire)
-        let backend = WLANDeviceCallBackend(api: api, epoch: 1, agentID: "A")
-        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
-        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
-            deviceBackend: { _, _ in backend }, callKitController: controller)
-        defer { model.stop() }
-        let coordinator = WatchCallCoordinator(); coordinator.configure(model: model)
-        let route = try XCTUnwrap(model.deviceCallRouter.registerIncoming(.init(agentID: "A", callID: "native-A",
-            state: .ringing, transport: .vowlan, transportEpoch: 1, backendCallID: "native-A"), mode: .vowlan))
-        let presentation = "local:\(Data("A".utf8).base64EncodedString()):\(route.key.generation):\(route.systemUUID.uuidString)"
-        let identity: [String: Any] = ["call_id": presentation, "call_uuid": route.systemUUID.uuidString, "agent_id": "A"]
-        let answering = Task { await coordinator.answerLocallyFromWatch(identity) { _ in } }
-        await fulfillment(of: [started], timeout: 3)
-        var early: [String: Any] = [:]
-        await coordinator.sendWatchDTMF(identity.merging(["digit": "1"]) { _, new in new }) { early = $0 }
-        XCTAssertEqual(early["ok"] as? Bool, false, "Carrier answer confirmation is required")
-        await wire.releaseAnswer(); await answering.value
-        for digit in ["1", "*", "#"] {
-            var reply: [String: Any] = [:]
-            await coordinator.sendWatchDTMF(identity.merging(["digit": digit]) { _, new in new }) { reply = $0 }
-            XCTAssertEqual(reply["ok"] as? Bool, true)
-        }
-        for digit in ["12", "A", "１", ""] {
-            var reply: [String: Any] = [:]
-            await coordinator.sendWatchDTMF(identity.merging(["digit": digit]) { _, new in new }) { reply = $0 }
-            XCTAssertEqual(reply["ok"] as? Bool, false)
-        }
-        let wrong = identity.merging(["digit": "9", "call_uuid": UUID().uuidString]) { _, new in new }
-        var stale: [String: Any] = [:]
-        await coordinator.sendWatchDTMF(wrong) { stale = $0 }
-        XCTAssertEqual(stale["ok"] as? Bool, false)
-        let ownerEnd = identity.merging(["event": "watch_call_owner", "phase": "ended"]) { _, new in new }
-        let consumed = await coordinator.consumeWatchOwnership(ownerEnd)
-        XCTAssertTrue(consumed)
-        XCTAssertNil(model.deviceCalls.active, "Durable Watch owner-end must retire the phone call even if live end RPC was lost")
-        XCTAssertTrue(model.callLifecycleSnapshot.state.isTerminal)
-        var duplicate: [String: Any] = [:]
-        await coordinator.endLocalWatchCall(identity) { duplicate = $0 }
-        XCTAssertEqual(duplicate["ok"] as? Bool, true, "A confirmed terminal call acknowledges a late backup without another hangup")
-        await coordinator.sendWatchDTMF(identity.merging(["digit": "0"]) { _, new in new }) { stale = $0 }
-        XCTAssertEqual(stale["ok"] as? Bool, false)
-        let sent = await wire.dtmfTargets
-        XCTAssertEqual(sent.map(\.0), ["1", "*", "#"])
-        XCTAssertEqual(sent.map(\.1), ["native-A", "native-A", "native-A"])
-        let ends = await wire.endedTargets
-        XCTAssertEqual(ends, ["native-A"], "Live and durable end delivery must not repeat the backend hangup")
-        coordinator.recordAndroidEnd(uuid: route.systemUUID, agentID: "A", callIDs: ["native-A"])
-        let restarted = WatchCallCoordinator()
-        var receipt: [String: Any] = [:]
-        await restarted.checkWatchEnd(identity) { receipt = $0 }
-        XCTAssertEqual(receipt["confirmed"] as? Bool, true, "Verified end survives restarting the companion")
-        await restarted.checkWatchEnd(identity.merging(["call_id": "other"]) { _, value in value }) { receipt = $0 }
-        XCTAssertNil(receipt["confirmed"], "A persisted receipt cannot confirm a different call")
-
-    }
-
-    func testWatchHandoffFailureDoesNotSendHangup() async throws {
-        let started = expectation(description: "Android answer pending")
-        let wire = WatchAnswerHTTPFixture(id: "native-A", onAnswer: { started.fulfill() })
-        let credential = try VoWLANCredential(secret: Data(repeating: 0x42, count: 32))
-        let endpoint = try VoWLANEndpoint(host: "192.168.77.1", controlPort: 8787, pcmPort: 8790)
-        let api = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential), transport: wire)
-        let backend = WLANDeviceCallBackend(api: api, epoch: 1, agentID: "A")
-        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
-        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
-            deviceBackend: { _, _ in backend }, callKitController: controller)
-        defer { model.stop() }
-        let coordinator = WatchCallCoordinator(); coordinator.configure(model: model)
-        let route = try XCTUnwrap(model.deviceCallRouter.registerIncoming(.init(agentID: "A", callID: "native-A",
-            state: .ringing, transport: .vowlan, transportEpoch: 1, backendCallID: "native-A"), mode: .vowlan))
-        let identity: [String: Any] = ["call_id": "native-A", "call_uuid": route.systemUUID.uuidString, "agent_id": "A"]
-        let task = Task { await coordinator.answerLocallyFromWatch(identity) { _ in } }
-        await fulfillment(of: [started], timeout: 3)
-        _ = await coordinator.consumeWatchOwnership(identity.merging(["event": "watch_call_owner", "phase": "handoff_failed"]) { _, new in new })
-        await wire.releaseAnswer(); await task.value
-        let commands = await wire.endedTargets
-        XCTAssertTrue(commands.isEmpty)
-        XCTAssertEqual(model.deviceCalls.active, route.key)
-        XCTAssertFalse(coordinator.ownsMedia(callID: "native-A"))
-    }
-
-    func testAnswerThenImmediateHangupAndLateReplyCannotClearNextWatchCall() async throws {
-        let startedA = expectation(description: "A answer suspended"), startedB = expectation(description: "B answer suspended")
-        let wireA = WatchAnswerHTTPFixture(id: "native-A", onAnswer: { startedA.fulfill() })
-        let wireB = WatchAnswerHTTPFixture(id: "native-B", onAnswer: { startedB.fulfill() })
-        let credential = try VoWLANCredential(secret: Data(repeating: 0x42, count: 32))
-        let endpoint = try VoWLANEndpoint(host: "192.168.77.1", controlPort: 8787, pcmPort: 8790)
-        let apiA = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential), transport: wireA)
-        let apiB = AirSIMAPI(route: .vowlan(endpoint: endpoint, credential: credential), transport: wireB)
-        let backendA = WLANDeviceCallBackend(api: apiA, epoch: 1, agentID: "A")
-        let backendB = WLANDeviceCallBackend(api: apiB, epoch: 1, agentID: "B")
-        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
-        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
-            deviceBackend: { id, _ in id == "A" ? backendA : backendB }, callKitController: controller)
-        defer { model.stop() }
-        let coordinator = WatchCallCoordinator(); coordinator.configure(model: model)
-        func incoming(_ agent: String, _ id: String) throws -> (LockedDeviceCallRoute, [String: Any]) {
-            let route = try XCTUnwrap(model.deviceCallRouter.registerIncoming(.init(agentID: agent, callID: id,
-                state: .ringing, transport: .vowlan, transportEpoch: 1, backendCallID: id), mode: .vowlan))
-            let presentation = "local:\(Data(agent.utf8).base64EncodedString()):\(route.key.generation):\(route.systemUUID.uuidString)"
-            return (route, ["call_id": presentation, "call_uuid": route.systemUUID.uuidString, "agent_id": agent])
-        }
-        let (a, messageA) = try incoming("A", "native-A")
-        var answerA: [String: Any] = [:]
-        let taskA = Task { await coordinator.answerLocallyFromWatch(messageA) { answerA = $0 } }
-        await fulfillment(of: [startedA], timeout: 3)
-        var endA: [String: Any] = [:]
-        await coordinator.rejectLocalWatchCall(messageA) { endA = $0 }
-        XCTAssertEqual(endA["ok"] as? Bool, true, "Hangup during answer must target the claimed call")
-        XCTAssertTrue(model.deviceCalls.latestEvent(for: a.key)?.state.isTerminal == true)
-        let (b, messageB) = try incoming("B", "native-B")
-        var answerB: [String: Any] = [:]
-        let taskB = Task { await coordinator.answerLocallyFromWatch(messageB) { answerB = $0 } }
-        await fulfillment(of: [startedB], timeout: 3)
-        var sms: [String: Any] = [:]
-        coordinator.handleWatchSMS(["action": "watch_sms_list"]) { sms = $0 }
-        XCTAssertEqual(sms["ok"] as? Bool, false, "Call setup takes priority over inbox work")
-        await wireA.releaseAnswer(); await taskA.value
-        XCTAssertEqual(answerA["ok"] as? Bool, false)
-        XCTAssertEqual(model.deviceCallContext.media.owner, b.key, "Old answer cannot release new media owner")
-        let oldOwnerEnd = messageA.merging(["event": "watch_call_owner", "phase": "ended"]) { _, new in new }
-        _ = await coordinator.consumeWatchOwnership(oldOwnerEnd)
-        XCTAssertEqual(model.deviceCallContext.media.owner, b.key, "Delayed old owner-end cannot terminate the new Watch call")
-        var endB: [String: Any] = [:]
-        await coordinator.endLocalWatchCall(messageB) { endB = $0 }
-        XCTAssertEqual(endB["ok"] as? Bool, true, "Old answer failure must not clear the new Watch claim")
-        await wireB.releaseAnswer(); await taskB.value
-        XCTAssertEqual(answerB["ok"] as? Bool, false)
-        let targetsA = await wireA.endedTargets, targetsB = await wireB.endedTargets
-        XCTAssertEqual(targetsA, ["native-A"]); XCTAssertEqual(targetsB, ["native-B"])
-        var confirmed: [String: Any] = [:]
-        await coordinator.checkWatchEnd(messageB) { confirmed = $0 }
-        XCTAssertEqual(confirmed["confirmed"] as? Bool, true)
-    }
-}
-private actor WatchAnswerHTTPFixture: AirSIMHTTPTransport {
-    let id: String
-    let onAnswer: @Sendable () -> Void
-    private var pending: CheckedContinuation<Void, Never>?
-    private var ended = false
-    private var connected = false
-    private(set) var dtmfTargets: [(String, String)] = []
-    private(set) var endedTargets: [String] = []
-    init(id: String, onAnswer: @escaping @Sendable () -> Void) { self.id = id; self.onAnswer = onAnswer }
-    func releaseAnswer() { connected = true; pending?.resume(); pending = nil }
-    func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
-        switch request.url?.path {
-        case "/api/calls/answer":
-            await withCheckedContinuation { continuation in pending = continuation; onAnswer() }
-            return WiredHTTPResponse(statusCode: 200, body: Data("{}".utf8))
-        case "/api/calls/hangup", "/api/calls/reject":
-            let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String]
-            endedTargets.append(body?["call_id"] ?? "UNSCOPED"); ended = true
-            return WiredHTTPResponse(statusCode: 200, body: Data("{\"ok\":true}".utf8))
-        case "/api/calls/dtmf":
-            let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String: String]
-            dtmfTargets.append((body?["digit"] ?? "", body?["call_id"] ?? "UNSCOPED"))
-            return WiredHTTPResponse(statusCode: 200, body: Data("{}".utf8))
-        case "/api/calls/status":
-            let record = CallRecord(id: id, index: 1, direction: "incoming", state: ended ? "ended" : connected ? "active" : "incoming", number: nil,
-                startedAt: Date(), updatedAt: Date(), endedAt: ended ? Date() : nil, missed: false)
-            let status = CallStatus(active: ended ? nil : record, history: ended ? [record] : [], polling: true,
-                eventDriven: true, pollIntervalSeconds: 2, lastPollError: "", revision: 1)
-            let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-            return WiredHTTPResponse(statusCode: 200, body: try encoder.encode(status))
-        default: return WiredHTTPResponse(statusCode: 200, body: Data("{}".utf8))
         }
     }
 }

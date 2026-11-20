@@ -24,7 +24,7 @@ record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speake
             if (minimum < -1 || minimum > 1000) throw new IllegalArgumentException();
             String evidence = java.util.List.of("pcm_event", "pcm_initialized", "pcm_capture", "pcm_route",
                     "pcm_down_bytes", "pcm_down_peak", "pcm_up_bytes", "pcm_up_peak", "output_policy",
-                    "pcm_failure", "pcm_error_phase", "pcm_error_code", "pcm_error_class", "pcm_failure_count").stream()
+                    "pcm_failure", "pcm_error_phase", "pcm_error_code", "pcm_error_class", "pcm_failure_count", "pcm_last_failure", "pcm_last_error_phase", "pcm_last_error_class", "pcm_stage", "pcm_recovery", "pcm_recovery_attempts", "pcm_recovery_ms", "pcm_restart_attempts", "pcm_restart_cooldown_ms").stream()
                 .filter(key -> fields.getOrDefault(key, "").matches("[a-zA-Z0-9_.$]{1,64}"))
                 .map(key -> key + "=" + fields.get(key)).collect(java.util.stream.Collectors.joining(" "));
             return new AudioWatchdogSnapshot(bool(fields, "muted"), volume, mode,

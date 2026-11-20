@@ -87,6 +87,11 @@ public final class RootBridgeMain {
         try {
             data.writeInterfaceToken(PrivilegedBridgeProtocol.DESCRIPTOR);
             switch (op) {
+                case "restore_remote_screen_off" -> {
+                    code = PrivilegedBridgeProtocol.TRANSACTION_RESTORE_REMOTE_SCREEN_OFF;
+                    data.writeLong(request.optLong("since", -1));
+                    data.writeLong(request.optLong("observed_at", -1));
+                }
                 case "start_bridge" -> code = PrivilegedBridgeProtocol.TRANSACTION_START_BRIDGE;
                 case "status" -> code = PrivilegedBridgeProtocol.TRANSACTION_STATUS;
                 case "muted" -> {

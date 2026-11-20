@@ -127,9 +127,12 @@ enum AirSIMHealthStore {
         var resolved: Bool = false
     }
     struct Snapshot: Codable {
+        var lastCallDelivery: [String: Date]?
+        var lastSMSDelivery: [String: Date]?
         var lastAlert: Date?
         var lastVoIP: Date?
         var deviceNames: [String: String]?
+        var quietSMS: [String: Date]?
         var failures: [Failure] = []
     }
     private static func query(_ account: String) -> [String: Any]? {
@@ -195,8 +198,58 @@ enum AirSIMHealthStore {
     static func registerDevices(_ devices: [String: String]) {
         update { $0.deviceNames = devices.mapValues { String($0.prefix(80)) } }
     }
-    static func received(voip: Bool = false) {
-        update { if voip { $0.lastVoIP = Date() } else { $0.lastAlert = Date() } }
+    static func received(voip: Bool = false, userInfo: [AnyHashable: Any]? = nil) {
+        let now = Date()
+        var stages = ["iphone_received": now]
+        if let userInfo {
+            let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            for key in ["android_received_at", "android_uploaded_at", "relay_received_at", "issued_at"] {
+                if let value = userInfo[key] as? String,
+                   let date = fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value) { stages[key] = date }
+            }
+        }
+        update {
+            if voip { $0.lastVoIP = now; $0.lastCallDelivery = stages }
+            else { $0.lastAlert = now; if userInfo?["event"] as? String == "incoming_sms" { $0.lastSMSDelivery = stages } }
+        }
+    }
+    static func deliveryReport(snapshot: Snapshot? = nil) -> String {
+        let value = snapshot ?? load()
+        func describe(_ stages: [String: Date]?) -> String {
+            guard let stages, let received = stages["iphone_received"] else { return "尚无带时间记录的推送" }
+            let formatter = DateFormatter(); formatter.dateFormat = "MM-dd HH:mm:ss.SSS"
+            let labels = [("android_received_at", "安卓收到"), ("android_uploaded_at", "安卓上传"), ("relay_received_at", "中转收到"), ("iphone_received", "iPhone 收到")]
+            var lines = labels.map { key, title in title + "：" + (stages[key].map { formatter.string(from: $0) } ?? "暂无时间记录") }
+            if let start = stages["android_received_at"] ?? stages["issued_at"] {
+                let interval = received.timeIntervalSince(start)
+                if interval >= 0 { lines.append(String(format: "跨设备时间差：%.2f 秒（受设备时钟偏差影响）", interval)) }
+                else { lines.append("设备时钟存在偏差，暂不计算耗时") }
+            }
+            return lines.joined(separator: "\n")
+        }
+        return "最近来电\n" + describe(value.lastCallDelivery) + "\n\n最近短信\n" + describe(value.lastSMSDelivery)
+    }
+    static func smsNotificationKey(agentID: String?, deliveryID: String?) -> String {
+        let agent = agentID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let delivery = deliveryID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return SHA256.hash(data: Data("\(agent)\u{0}\(delivery)".utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+    static func quietSMSNotifications(_ keys: Set<String>) {
+        let now = Date()
+        update { snapshot in
+            var recent = (snapshot.quietSMS ?? [:]).filter { now.timeIntervalSince($0.value) < 48 * 3600 }
+            for key in keys { recent[key] = now }
+            snapshot.quietSMS = Dictionary(uniqueKeysWithValues: recent.sorted { $0.value > $1.value }
+                .prefix(200).map { ($0.key, $0.value) })
+        }
+    }
+    static func shouldSilenceSMSNotification(_ info: [AnyHashable: Any]) -> Bool {
+        guard info["event"] as? String == "incoming_sms",
+              let deliveryID = info["delivery_id"] as? String, !deliveryID.isEmpty,
+              let date = load().quietSMS?[smsNotificationKey(agentID: info["agent_id"] as? String, deliveryID: deliveryID)]
+        else { return false }
+        return Date().timeIntervalSince(date) < 48 * 3600
     }
     static func sms(_ info: [AnyHashable: Any], outcome: E2ESMSPush.Outcome,
                     store: any E2EKeyStoring) {

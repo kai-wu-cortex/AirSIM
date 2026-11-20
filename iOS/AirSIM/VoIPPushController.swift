@@ -30,6 +30,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
     let generation: UInt64
     let number: String?
     let callerName: String?
+    let slotIndex: Int?
     let expiresAt: Date?
     /// Dashboard 虚拟来电仅使用本机 TTS，不触发模块 AT 或公网 PCM。
     let isVirtual: Bool
@@ -61,6 +62,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
         generation = Self.positiveUInt64(from: userInfo["generation"]) ?? 1
         number = Self.nonEmpty(userInfo["number"] as? String)
         callerName = Self.nonEmpty(userInfo["caller_name"] as? String)
+        slotIndex = Self.simSlot(from: userInfo["slot_index"])
         self.expiresAt = expiresAt
         isVirtual = userInfo["virtual_call"] as? Bool == true
         isOutgoing = false
@@ -108,6 +110,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
         self.generation = max(1, generation)
         self.number = number
         callerName = nil
+        slotIndex = nil
         expiresAt = Date().addingTimeInterval(5 * 60 * 60)
         isVirtual = false
         isOutgoing = true
@@ -129,6 +132,7 @@ struct IncomingVoIPCall: Equatable, Sendable {
         self.generation = max(1, generation)
         self.number = number
         callerName = nil
+        slotIndex = nil
         expiresAt = Date().addingTimeInterval(5 * 60 * 60)
         isVirtual = false
         isOutgoing = false
@@ -150,6 +154,15 @@ struct IncomingVoIPCall: Equatable, Sendable {
         }
         guard let text = value as? String else { return nil }
         return ISO8601DateFormatter().date(from: text)
+    }
+
+    static func simSlot(from value: Any?) -> Int? {
+        let text: String
+        if let value = value as? String { text = value }
+        else if let value = value as? NSNumber, String(cString: value.objCType) != "c" { text = value.stringValue }
+        else { return nil }
+        guard let slot = Int(text), (0...7).contains(slot) else { return nil }
+        return slot
     }
 
     private static func nonEmpty(_ value: String?) -> String? {
@@ -420,6 +433,12 @@ struct CloudSelfTestReport: Equatable, Sendable {
         ],
         completedAt: nil
     )
+
+    static func initial(pushOnly: Bool) -> Self {
+        var report = initial
+        if pushOnly { report.steps.removeAll { $0.id == .commandRouting } }
+        return report
+    }
 
     var allPassed: Bool {
         completedAt != nil && steps.allSatisfy { $0.state == .passed }
@@ -959,8 +978,6 @@ final class VoIPPushController: NSObject {
     private enum Keys {
         static let token = "airsim.voip-push-token"
         static let alertToken = "airsim.alert-push-token"
-        static let watchVoIPToken = "airsim.watch-voip-push-token"
-        static let watchBundleID = "airsim.watch-bundle-id"
         static let liveActivityPushToStartToken = "airsim.live-activity-push-to-start-token"
         static let deviceID = "airsim.push-device-id"
         static let relayURL = "airsim.push-relay-url"
@@ -1084,6 +1101,7 @@ final class VoIPPushController: NSObject {
             Task { await activity.end(nil, dismissalPolicy: .immediate) }
             return
         }
+        guard activity.attributes.isDeviceStatusPushActivity != true else { return }
         guard CloudSignalingPreference.isEnabled() else { return }
         guard observedActivityIDs.insert(activity.id).inserted else { return }
         Task { @MainActor [weak self] in
@@ -1139,6 +1157,29 @@ final class VoIPPushController: NSObject {
         _ = try? await RelayEgressGate.shared.send(request)
     }
 
+    func registerDeviceStatusActivity(token: Data, activityID: String, background: Bool) async {
+        let devices = PairedAndroidDeviceStore.records()
+        guard CloudSignalingPreference.isEnabled(),
+              LiveActivityRemoteStatusPreference.isEnabled,
+              devices.count == 1, let agentID = devices.first?.id,
+              let registration = currentRegistration(allowLocalMode: true),
+              let url = RelayEndpoint.url(base: registration.relayURL,
+                path: "v1/live-activities/device-status") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 6
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "device_id": registration.deviceID,
+            "device_secret": registration.deviceSecret,
+            "agent_id": agentID,
+            "activity_id": activityID,
+            "update_token": VoIPPushToken.hex(token),
+            "background": background,
+        ])
+        _ = try? await RelayEgressGate.shared.send(request)
+    }
+
     func storeAlertToken(_ token: Data) {
         let value = VoIPPushToken.hex(token)
         guard UserDefaults.standard.string(forKey: Keys.alertToken) != value else { return }
@@ -1150,18 +1191,6 @@ final class VoIPPushController: NSObject {
     func clearAlertToken() {
         UserDefaults.standard.removeObject(forKey: Keys.alertToken)
         resetRegistrationBackoff()
-    }
-
-    func storeWatchVoIPRegistration(token: String, bundleID: String) {
-        let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        let bundleID = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty, !bundleID.isEmpty else { return }
-        guard UserDefaults.standard.string(forKey: Keys.watchVoIPToken) != token
-            || UserDefaults.standard.string(forKey: Keys.watchBundleID) != bundleID else { return }
-        UserDefaults.standard.set(token, forKey: Keys.watchVoIPToken)
-        UserDefaults.standard.set(bundleID, forKey: Keys.watchBundleID)
-        resetRegistrationBackoff()
-        Task { await syncRegistration() }
     }
 
     func updateRelayURL(_ value: String) {
@@ -1198,6 +1227,14 @@ final class VoIPPushController: NSObject {
             nextRelayRegistrationAttempt = .distantPast
         }
         Task { await syncRegistration() }
+    }
+
+    func discardPairedDeviceRegistrationRoutes() {
+        pendingRegistrationAPIs.removeAll()
+        registrationRetryTask?.cancel()
+        registrationRetryTask = nil
+        registrationPending = false
+        resetRegistrationBackoff()
     }
 
     func syncRegistration(with requestedAPI: AirSIMAPI? = nil) async {
@@ -1339,7 +1376,8 @@ final class VoIPPushController: NSObject {
     func runCloudSelfTest(
         onUpdate: @MainActor @escaping (CloudSelfTestReport) -> Void = { _ in }
     ) async -> CloudSelfTestReport {
-        var report = CloudSelfTestReport.initial
+        let pushOnly = DedicatedCallPolicy.vowlanOnly
+        var report = CloudSelfTestReport.initial(pushOnly: pushOnly)
 
         guard !RelayEgressGate.shared.isBlocked,
               !UserDefaults.standard.bool(forKey: RelayEgressGate.persistenceKey) else {
@@ -1411,8 +1449,10 @@ final class VoIPPushController: NSObject {
             let name = agent.deviceName?.isEmpty == false ? agent.deviceName! : agent.agentID
             let online = agent.cloudOnline ? "在线" : "心跳过期"
             let kind = agent.agentKind?.isEmpty == false ? agent.agentKind! : "unknown"
+            let summary = "  - \(name) · \(kind) · \(online)"
+            if pushOnly { return summary }
             let routing = agent.commandRoutingVersion.map { "routing=v\($0)" } ?? "routing=missing"
-            return "  - \(name) · \(kind) · \(online) · \(routing)"
+            return summary + " · " + routing
         }.joined(separator: "\n")
         report.update(.agentDirectory, state: .passed,
             detail: "已登记 \(status.agents.count) 台\n\(directory)\nactive=\(status.activeAgentID ?? "none")")
@@ -1422,10 +1462,10 @@ final class VoIPPushController: NSObject {
         onUpdate(report)
         guard status.cloudOnline else {
             let known = status.agents.map {
-                "  - \($0.deviceName ?? $0.agentID) · \($0.cloudOnline ? "在线" : "超过90秒")"
+                "  - \($0.deviceName ?? $0.agentID) · \($0.cloudOnline ? "在线" : "超过150秒")"
             }.joined(separator: "\n")
             report.fail(.agentHeartbeat,
-                detail: "90秒内无有效心跳\nRelay记录：\n\(known)\nactive=\(status.activeAgentID ?? "none")")
+                detail: "150秒内无有效心跳\nRelay记录：\n\(known)\nactive=\(status.activeAgentID ?? "none")")
             onUpdate(report)
             return report
         }
@@ -1434,6 +1474,12 @@ final class VoIPPushController: NSObject {
         report.update(.agentHeartbeat, state: .passed,
             detail: "Agent \(version) 在线\(cellular) · active=\(status.activeAgentID ?? "none")")
         onUpdate(report)
+
+        if pushOnly {
+            report.completedAt = Date()
+            onUpdate(report)
+            return report
+        }
 
         report.update(.commandRouting, state: .running, detail: "检查 Agent 的 command_routing_version")
         onUpdate(report)
@@ -1856,6 +1902,9 @@ final class VoIPPushController: NSObject {
         operation: (AgentPushRegistration, _ offerE2E: Bool) async throws -> T
     ) async throws -> T {
         try await pairingGate.withPairing {
+            guard PairedAndroidDeviceStore.records().isEmpty else {
+                throw SamsungPairingClientError.existingDevice
+            }
             guard let registration = self.pairingRegistration(localOnly: localOnly) else {
                 throw SamsungPairingClientError.registrationUnavailable
             }
@@ -1906,8 +1955,8 @@ final class VoIPPushController: NSObject {
             deviceSecret: secret,
             token: token,
             alertToken: defaults.string(forKey: Keys.alertToken) ?? "",
-            watchVoIPToken: defaults.string(forKey: Keys.watchVoIPToken) ?? "",
-            watchBundleID: defaults.string(forKey: Keys.watchBundleID) ?? "com.example.airsim.watchkitapp",
+            watchVoIPToken: "",
+            watchBundleID: "",
             liveActivityPushToStartToken: LiveActivityVisibilityPreference.registrationToken(
                 defaults.string(forKey: Keys.liveActivityPushToStartToken) ?? "",
                 defaults: defaults
@@ -1996,28 +2045,20 @@ extension VoIPPushController: PKPushRegistryDelegate {
             completion()
             return
         }
-        AirSIMHealthStore.received(voip: true)
+        let receivedAt = Date()
+        AirSIMHealthStore.received(voip: true, userInfo: payload.dictionaryPayload)
         let userInfo = payload.dictionaryPayload
         Task { @MainActor in
             PushDiagnostics.record("收到 PushKit 来电", fields: [
-                "app_state": String(UIApplication.shared.applicationState.rawValue)])
+                "app_state": String(UIApplication.shared.applicationState.rawValue),
+                "received_at": ISO8601DateFormatter().string(from: receivedAt),
+                "main_actor_delay_ms": String(Int(max(0, Date().timeIntervalSince(receivedAt)) * 1_000))])
             do {
                 let call = try IncomingVoIPCall(userInfo: userInfo)
                 CallKitController.shared.reportRequiredVoIPPush(call) { error in
-                    PushDiagnostics.record("PushKit 系统来电上报完成", error: error)
+                    PushDiagnostics.record("PushKit 系统来电上报完成", error: error, fields: [
+                        "receive_to_report_ms": String(Int(max(0, Date().timeIntervalSince(receivedAt)) * 1_000))])
                     completion()
-                }
-                guard CallKitController.shared.currentSystemCallUUID == call.uuid else { return }
-                WatchCallCoordinator.shared.publishIncoming(call)
-                if call.callerName == nil, let number = call.number {
-                    Task {
-                        let resolvedName = await Task.detached(priority: .userInitiated) {
-                            try? ContactFetcher().displayName(for: number)
-                        }.value
-                        if let resolvedName, resolvedName != number {
-                            WatchCallCoordinator.shared.publishIncoming(call, callerName: resolvedName)
-                        }
-                    }
                 }
             } catch {
                 PushDiagnostics.record("PushKit 来电解析失败", error: error)

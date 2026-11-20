@@ -126,7 +126,7 @@ struct AirSIMDeviceWidgetView: View {
                 brand(size: 24)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(d.name).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Text(d.status(at: date)).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
+                    Text(d.connectionLabel(at: date)).font(.caption2).foregroundStyle(secondaryText).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 statusDot(d)
@@ -448,19 +448,29 @@ struct AirSIMDeviceWidgetView: View {
     @ViewBuilder private var lockScreen: some View {
         switch family {
         case .accessoryInline:
-            Label(device.map { "\($0.name) · \($0.status(at: date))" } ?? "AirSIM · 打开 App 配对", systemImage: "phone.fill")
+            let summary = device.map { item in
+                [item.battery?.displayLabel(at: date), item.name, item.status(at: date)]
+                    .compactMap { $0 }.joined(separator: " · ")
+            }
+            Label(summary ?? "AirSIM · 打开 App 配对", systemImage: "phone.fill")
         case .accessoryCircular:
             VStack(spacing: 2) {
                 Image(systemName: "phone.fill").font(.title3)
                 Text(device?.name ?? "AirSIM").font(.caption2.bold()).lineLimit(1)
-                Text(device.map { $0.isFresh(at: date) ? "最近更新" : "待刷新" } ?? "待配对").font(.caption2).lineLimit(1)
+                Text(device.map { $0.battery?.displayLabel(at: date) ?? $0.status(at: date) } ?? "待配对")
+                    .font(.caption2).lineLimit(1).minimumScaleFactor(0.75)
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         default:
             HStack(spacing: 8) {
                 Image(systemName: "phone.fill").font(.title2)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(device?.name ?? "AirSIM").font(.headline).lineLimit(1)
-                    if let d = device { updated(d).font(.caption); Text(d.status(at: date)).font(.caption) }
+                    if let d = device {
+                        updated(d).font(.caption)
+                        Text([d.battery?.displayLabel(at: date), d.status(at: date)]
+                            .compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption).lineLimit(1).minimumScaleFactor(0.75)
+                    }
                     else { Text("打开 App 配对").font(.caption) }
                 }
             }.frame(maxHeight: .infinity)
@@ -485,8 +495,7 @@ struct AirSIMDeviceWidgetView: View {
     private func status(_ d: AirSIMWidgetSnapshot.Device) -> some View {
         HStack(spacing: 5) {
             statusDot(d)
-            Text(d.isFresh(at: date) && d.recentlyReachable && d.refreshFailed != true && !d.transport.isEmpty
-                 ? "\(d.status(at: date)) · \(d.transport)" : d.status(at: date))
+            Text(d.connectionLabel(at: date))
                 .lineLimit(2)
         }.font(.caption).foregroundStyle(secondaryText)
     }
@@ -502,14 +511,19 @@ struct AirSIMDeviceWidgetView: View {
         }.foregroundStyle(secondaryText).lineLimit(1).minimumScaleFactor(0.8)
     }
     private func battery(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        let reading = d.battery.flatMap { $0.isFresh(at: date) ? $0 : nil }
+        let reading = d.battery.flatMap { $0.isDisplayable(at: date) ? $0 : nil }
+        let fresh = reading?.isFresh(at: date) == true
+        let iconColor = reading.flatMap { sample in
+            fresh ? (sample.charging ? Color.green : sample.percent <= 20 ? Color.red : primaryText) : nil
+        } ?? secondaryText
         return HStack(spacing: 5) {
             Image(systemName: reading?.symbol ?? "battery.0percent")
-                .foregroundStyle(reading.map { $0.charging ? Color.green : $0.percent <= 20 ? Color.red : primaryText } ?? secondaryText)
-            Text(reading.map { "\($0.percent)%" } ?? "—")
+                .foregroundStyle(iconColor)
+            Text(reading?.displayLabel(at: date) ?? "—")
+                .foregroundStyle(fresh ? primaryText : secondaryText)
         }
             .font(.subheadline.weight(.semibold))
-            .accessibilityLabel(reading.map { "安卓电量 \($0.percent)%，\($0.charging ? "正在充电" : "未充电")，采样于 \($0.observedAt.formatted(date: .omitted, time: .shortened))" } ?? "安卓电量待刷新")
+            .accessibilityLabel(reading.map { "\(fresh ? "" : "上次")安卓电量 \($0.percent)%，采样于 \($0.observedAt.formatted(date: .omitted, time: .shortened))" } ?? "安卓电量待刷新")
     }
     private func transportSymbol(_ d: AirSIMWidgetSnapshot.Device) -> String {
         d.transport == "云端" ? "cloud" : d.transport == "VoBLE" ? "antenna.radiowaves.left.and.right" : "wifi"

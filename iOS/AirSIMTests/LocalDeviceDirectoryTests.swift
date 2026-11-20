@@ -8,6 +8,25 @@ import WatchConnectivity
 @MainActor
 final class LocalDeviceDirectoryTests: XCTestCase {
 
+    func testOfflineSMSReportsDirectConnectionFailureInsteadOfDisabledCloud() async {
+        let previousMode = ConnectionModePreference.selected()
+        let previousBinding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.vowlan)
+        AndroidAgentBindingPreference.set("offline-sms-fixture")
+        defer {
+            ConnectionModePreference.set(previousMode)
+            AndroidAgentBindingPreference.set(previousBinding)
+        }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+                             localDirectory: LocalDeviceDirectory(credentials: MemoryWLANCredentials()),
+                             callKitController: CallKitController(observesSystemCallbacks: false))
+        defer { model.stop() }
+        let sent = await model.sendSMS(to: "123", content: "offline fixture")
+        XCTAssertFalse(sent)
+        XCTAssertTrue(model.errorMessage?.contains("短信未发送") == true)
+        XCTAssertFalse(model.errorMessage?.contains("云端模式") == true)
+    }
+
     func testPushAnswerCannotTargetAnotherCallOnSameAndroid() async throws {
         let mode = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
         ConnectionModePreference.set(.vowlan); AndroidAgentBindingPreference.set("A")
@@ -517,6 +536,36 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(aBoundary.acks, [["same-wire-id"]])
         XCTAssertEqual(bBoundary.acks, [["same-wire-id"]])
     }
+    func testConcurrentSMSRefreshUsesSingleProviderCycle() async throws {
+        let a = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        let b = try AuthenticatedHealthPeer(agentID: "B", secret: bSecret)
+        defer { a.stop(); b.stop() }
+        let ae = try await a.start(), be = try await b.start()
+        let aBoundary = SMSProducerBoundary(), bBoundary = SMSProducerBoundary()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { route in
+            AirSIMAPI(route: route, transport: route.baseURL.port == Int(ae.controlPort) ? aBoundary : bBoundary)
+        }, healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: "A", endpoint: ae, credential: VoWLANCredential(secret: aSecret))
+        try await directory.verifyPairing(agentID: "B", endpoint: be, credential: VoWLANCredential(secret: bSecret))
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.vowlan); AndroidAgentBindingPreference.set("B")
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let store = LocalHistoryStore(directoryURL: path)
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, historyStore: store)
+        defer { model.stop() }
+        async let first: Void = model.refreshMessages(silently: true)
+        async let second: Void = model.refreshMessages(silently: true)
+        _ = await (first, second)
+        XCTAssertEqual(bBoundary.refreshCount, 1)
+        XCTAssertEqual(model.messages.count, 1)
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(store.loadMessages())) as? [[String:Any]])
+        XCTAssertEqual(Set(rows.compactMap { $0["source_agent_id"] as? String }), ["B"])
+        XCTAssertTrue(aBoundary.acks.isEmpty)
+        XCTAssertEqual(bBoundary.acks, [["same-wire-id"]])
+    }
     func testUnboundLegacyPairingMigratesOnlyWithFreshIdentityProof() async throws {
         let peer = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
         defer { peer.stop() }
@@ -580,45 +629,6 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         directory.start(); defer { directory.stop() }
         try await Task.sleep(for: .milliseconds(400))
         XCTAssertEqual(Array(cursor.afterValues.prefix(3)), [AgentEventCursor.initial, 8, 2])
-    }
-
-    func testWatchDialOwnsSourceAndBlocksSecondPhoneDial() async throws {
-        let a = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
-        let b = try AuthenticatedHealthPeer(agentID: "B", secret: bSecret)
-        defer { a.stop(); b.stop() }
-        a.setCallState(nil); b.setCallState(nil)
-        let ae = try await a.start(), be = try await b.start()
-        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
-            healthTransport: AuthenticatedHealthPeer.transport)
-        try await directory.verifyPairing(agentID: "A", endpoint: ae, credential: VoWLANCredential(secret: aSecret))
-        try await directory.verifyPairing(agentID: "B", endpoint: be, credential: VoWLANCredential(secret: bSecret))
-        let old = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
-        ConnectionModePreference.set(.vowlan)
-        defer { ConnectionModePreference.set(old); AndroidAgentBindingPreference.set(binding) }
-        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()), localDirectory: directory)
-        model.bindAndroidAgent("A")
-        let replied = expectation(description: "Watch dial reply")
-        var reply: [String: Any] = [:]
-        WatchCallCoordinator.shared.session(WCSession.default, didReceiveMessage: ["action": "dial",
-            "number": "123", "request_id": UUID().uuidString]) { value in reply = value; replied.fulfill() }
-        await fulfillment(of: [replied], timeout: 5)
-        XCTAssertEqual(reply["ok"] as? Bool, true)
-        guard reply["ok"] as? Bool == true else { model.stop(); return }
-        XCTAssertEqual(model.deviceCalls.active?.agentID, "A")
-        XCTAssertEqual(model.deviceCallContext.media.owner?.agentID, "A")
-        model.bindAndroidAgent("B")
-        do { try await model.callKitStart(number: "123"); XCTFail("second phone dial must be rejected") }
-        catch { XCTAssertEqual(error as? DeviceCallRoutingError, .busy) }
-        XCTAssertFalse(b.commands.contains { $0.path == "/api/calls/dial" })
-        let ended = expectation(description: "Watch end reply")
-        WatchCallCoordinator.shared.session(WCSession.default, didReceiveMessage: ["action": "watch_local_end",
-            "call_id": reply["call_id"] ?? "", "call_uuid": reply["call_uuid"] ?? ""]) { value in
-                XCTAssertEqual(value["ok"] as? Bool, true); ended.fulfill()
-            }
-        await fulfillment(of: [ended], timeout: 3)
-        XCTAssertNil(model.deviceCalls.active)
-        XCTAssertTrue(a.commands.contains { $0.path == "/api/calls/hangup" && $0.callID == "backend-A" })
-        model.stop()
     }
 
     func testTwoPeerHistoryKeepsLegacyAndAcknowledgesEachProducer() async throws {
@@ -1107,8 +1117,15 @@ private struct HistoryAckGateTransport: AirSIMHTTPTransport {
 private final class SMSProducerBoundary: AirSIMHTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var captured: [[String]] = []
+    private var refreshes = 0
+    var refreshCount: Int { lock.withLock { refreshes } }
     var acks: [[String]] { lock.withLock { captured } }
     func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
+        if request.url?.path == "/api/sms/refresh" {
+            lock.withLock { refreshes += 1 }
+            try await Task.sleep(for: .milliseconds(100))
+            return .init(statusCode: 200, body: Data("{}".utf8))
+        }
         if request.url?.path == "/api/sms" {
             return .init(statusCode: 200, body: Data(
                 #"[{"sender":"fixture","content":"same","timestamp":"2026-10-18T00:00:00Z","delivery_id":"same-wire-id","source_agent_id":"untrusted"}]"#.utf8))
@@ -1281,4 +1298,167 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
         return WiredHTTPResponse(statusCode: (response as! HTTPURLResponse).statusCode, body: data)
     }
     func stop() { listener.cancel(); lock.withLock { connections.forEach { $0.cancel() }; connections.removeAll() } }
+}
+
+
+@MainActor
+final class NetworkConnection300Tests: XCTestCase {
+    private let secret = Data(repeating: 0x41, count: 32)
+    private let defaultsKeys = ["airsim.paired-android-devices.v1", "airsim.forgotten-android-devices.v1", AndroidAgentBindingPreference.key]
+    private var saved = [String: Any]()
+    override func setUp() {
+        super.setUp()
+        for key in defaultsKeys {
+            saved[key] = UserDefaults.standard.object(forKey: key)
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+    override func tearDown() {
+        for key in defaultsKeys {
+            if let value = saved[key] { UserDefaults.standard.set(value, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        saved.removeAll()
+        super.tearDown()
+    }
+    func testTimeoutsSeparateLANAndVPN() {
+        XCTAssertEqual(NetworkConnectionPolicy.healthTimeout(isLocalSubnet: true, usesTLS: false), 2.5)
+        XCTAssertEqual(NetworkConnectionPolicy.healthTimeout(isLocalSubnet: false, usesTLS: false), 8)
+        XCTAssertEqual(NetworkConnectionPolicy.healthTimeout(isLocalSubnet: true, usesTLS: true), 8)
+    }
+    func testRetryJitterIsBoundedAndBackoffHasCap() {
+        XCTAssertLessThan(NetworkConnectionPolicy.retryDelay(attempt: 1, randomUnit: 0), 0.5)
+        XCTAssertNotEqual(NetworkConnectionPolicy.retryDelay(attempt: 3, randomUnit: 0), NetworkConnectionPolicy.retryDelay(attempt: 3, randomUnit: 1))
+        XCTAssertLessThanOrEqual(NetworkConnectionPolicy.retryDelay(attempt: 100, randomUnit: 1), 10)
+    }
+    func testAuthenticationNeverGetsTransientFailureGrace() {
+        XCTAssertTrue(NetworkConnectionPolicy.retainsVerification(authenticationFailure: false, healthFailures: 1, recoveryAge: 3))
+        XCTAssertFalse(NetworkConnectionPolicy.retainsVerification(authenticationFailure: true, healthFailures: 0, recoveryAge: 0))
+        XCTAssertFalse(NetworkConnectionPolicy.retainsVerification(authenticationFailure: false, healthFailures: 2, recoveryAge: 1))
+        XCTAssertFalse(NetworkConnectionPolicy.retainsVerification(authenticationFailure: false, healthFailures: 1, recoveryAge: 10))
+        XCTAssertTrue(NetworkConnectionPolicy.retainsVerification(authenticationFailure: false, healthFailures: 0, recoveryAge: 60, healthVerified: true))
+        XCTAssertFalse(NetworkConnectionPolicy.retainsVerification(authenticationFailure: true, healthFailures: 0, recoveryAge: 0, healthVerified: true))
+        XCTAssertTrue(NetworkConnectionPolicy.isAuthenticationFailure(APIError.http(401, nil)))
+        XCTAssertFalse(NetworkConnectionPolicy.isAuthenticationFailure(APIError.http(503, nil)))
+    }
+    func testForegroundSnapshotSupersedesHeldOldRequest() async throws {
+        let id = "foreground300-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: secret)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let boundary = DelayedNetworkLossTransport(held: expectation(description: "old request held"))
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: boundary) }, healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: secret))
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [boundary.held], timeout: 2)
+        let epoch = directory.transportEpoch(for: id)
+        let recovered = expectation(description: "immediate foreground snapshot")
+        var completed = false
+        directory.onResynchronized = { _, _ in if !completed { completed = true; recovered.fulfill() } }
+        directory.refreshAfterForeground()
+        await fulfillment(of: [recovered], timeout: 2)
+        await boundary.gate.release()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotNil(directory.api(for: id))
+        XCTAssertEqual(directory.transportEpoch(for: id), epoch)
+        XCTAssertTrue(directory.networkReport().contains("已连接"))
+    }
+    func testRecoveredNetworkRequiresNewProofAndKeepsEpoch() async throws {
+        let id = "network300-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: secret)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let boundary = DelayedNetworkLossTransport(held: expectation(description: "old network held"))
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: boundary) }, healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: secret))
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [boundary.held], timeout: 2)
+        let epoch = directory.transportEpoch(for: id)
+        let recovered = expectation(description: "network reauthenticated and resynchronized")
+        var completed = false
+        directory.onResynchronized = { _, _ in if !completed { completed = true; recovered.fulfill() } }
+        directory.refreshAfterNetworkRecovery()
+        XCTAssertNil(directory.api(for: id))
+        await fulfillment(of: [recovered], timeout: 2)
+        await boundary.gate.release()
+        XCTAssertNotNil(directory.api(for: id))
+        XCTAssertEqual(directory.transportEpoch(for: id), epoch)
+        XCTAssertGreaterThanOrEqual(peer.requests, 2)
+    }
+    func testCallEventsPrecedeSupplementalResyncCallback() async throws {
+        let id = "order300-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: secret)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) }, healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: secret))
+        var phases = [String]()
+        let synchronized = expectation(description: "snapshot handled")
+        var completed = false
+        directory.onCallEvent = { _ in phases.append("call") }
+        directory.onResynchronized = { _, _ in
+            phases.append("supplemental")
+            if !completed { completed = true; synchronized.fulfill() }
+        }
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [synchronized], timeout: 2)
+        XCTAssertEqual(Array(phases.prefix(2)), ["call", "supplemental"])
+        XCTAssertTrue(directory.networkReport().contains("最近认证"))
+    }
+    func testTransientEventFailureReprovesWithoutDiscardingPeer() async throws {
+        let id = "grace300-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: secret)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let boundary = DelayedNetworkLossTransport(held: expectation(description: "event connection held"))
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: boundary) }, healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: secret))
+        let recovered = expectation(description: "recovery snapshot")
+        var completed = false
+        directory.onResynchronized = { _, _ in if !completed { completed = true; recovered.fulfill() } }
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [boundary.held], timeout: 2)
+        await boundary.gate.release()
+        await fulfillment(of: [recovered], timeout: 3)
+        XCTAssertNotNil(directory.api(for: id))
+        XCTAssertGreaterThanOrEqual(peer.requests, 2, "An event failure must trigger a fresh signed health check")
+        XCTAssertFalse(directory.networkReport().contains("暂无恢复记录"))
+    }
+    func testMissingProofDuringRecoveryDisablesRouteImmediately() async throws {
+        let id = "bad-proof300-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: secret)
+        defer { peer.stop() }
+        let endpoint = try await peer.start()
+        let boundary = DelayedNetworkLossTransport(held: expectation(description: "event connection held"))
+        let health = NetworkHealthProofSwitch()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: boundary) }, healthTransport: { try await health.send($0) })
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: secret))
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [boundary.held], timeout: 2)
+        health.rejectProof()
+        await boundary.gate.release()
+        for _ in 0..<100 {
+            if directory.api(for: id) == nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(directory.api(for: id))
+        XCTAssertTrue(directory.networkReport().contains("设备认证未通过"))
+    }
+
+}
+
+
+private final class NetworkHealthProofSwitch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reject = false
+    func rejectProof() { lock.withLock { reject = true } }
+    func send(_ request: URLRequest) async throws -> WiredHTTPResponse {
+        if lock.withLock({ reject }) { return WiredHTTPResponse(statusCode: 200, body: Data("{}".utf8)) }
+        return try await AuthenticatedHealthPeer.transport(request)
+    }
 }

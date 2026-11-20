@@ -16,12 +16,28 @@ parser.add_argument('--source', type=Path, required=True)
 parser.add_argument('--license', type=Path, required=True)
 parser.add_argument('--revision', required=True)
 parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parents[1] / 'AirSIM/PhoneRegionResources')
+parser.add_argument('--base', type=Path, help='Existing ASREG001 table to preserve prefixes absent upstream')
 parser.add_argument('--mobile-source', type=Path)
 parser.add_argument('--mobile-readme', type=Path)
 parser.add_argument('--mobile-revision')
 args = parser.parse_args()
 text = args.source.read_text(encoding='utf-8-sig')
 pairs = {}
+base_metadata = None
+if args.base:
+    existing = args.base.read_bytes()
+    assert existing[:8] == b'ASREG001'
+    count, region_count = struct.unpack_from('<II', existing, 8)
+    offset, labels = 16, []
+    for _ in range(region_count):
+        length = struct.unpack_from('<H', existing, offset)[0]; offset += 2
+        labels.append(existing[offset:offset+length].decode('utf-8')); offset += length
+    assert len(existing) == offset + count * 10
+    for index in range(count):
+        prefix, region = struct.unpack_from('<QH', existing, offset + index * 10)
+        pairs[prefix] = labels[region]
+    base_metadata = {'sha256': hashlib.sha256(existing).hexdigest(), 'preserved_records': count}
+
 for line in text.splitlines():
     if line and not line.startswith('#'):
         prefix, region = line.split('|', 1)
@@ -40,7 +56,7 @@ if args.mobile_source:
         province, city, *_ = mobile[label_offset:mobile.index(b'\0', label_offset)].decode('utf-8').split('|')
         # Retain the original Google regions when it already covers this prefix.
         e164 = '86' + str(prefix)
-        if any(int(e164[:length]) in pairs for length in range(4, len(e164) + 1)):
+        if int(e164) in pairs:
             continue
         name = (province + '市') if province in ['北京', '上海', '天津', '重庆'] else province + ' ' + city
         pairs[int(e164)] = name
@@ -70,7 +86,7 @@ notice = ('Phone region data derived from Google libphonenumber.\n'
           + '\n'.join(line for line in text.splitlines() if line.startswith('#')) + '\n')
 (args.output / 'PhoneRegion-NOTICE.txt').write_text(notice, encoding='utf-8')
 (args.output / 'PhoneRegion-source.json').write_text(json.dumps({
-    'revision': args.revision, 'mobile_supplement': mobile_metadata,
+    'revision': args.revision, 'mobile_supplement': mobile_metadata, 'base_table': base_metadata,
     'source_sha256': hashlib.sha256(args.source.read_bytes()).hexdigest(),
     'records': len(pairs), 'regions': len(regions),
     'format': 'ASREG001, little-endian UInt64 prefix/UInt16 region index'

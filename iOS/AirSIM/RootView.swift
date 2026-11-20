@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Intents
 
 enum SystemCommunicationDestination: Equatable {
     case call(String)
@@ -12,7 +13,7 @@ enum SystemCommunicationURL {
         if let action = AirSIMLiveActivityActionURL.parse(url) {
             return .liveActivity(action.action, callID: action.callID)
         }
-        guard let scheme = url.scheme?.lowercased(), scheme == "tel" || scheme == "im" else {
+        guard let scheme = url.scheme?.lowercased(), ["tel", "im", "sms"].contains(scheme) else {
             return nil
         }
         let prefixLength = scheme.count + 1
@@ -22,8 +23,41 @@ enum SystemCommunicationURL {
         target = String(target.split(separator: "?", maxSplits: 1).first ?? "")
         target = target.removingPercentEncoding ?? target
         target = target.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !target.isEmpty else { return nil }
-        return scheme == "tel" ? .call(target) : .message(target)
+        guard let number = phoneNumber(target) else { return nil }
+        return scheme == "tel" ? .call(number) : .message(number)
+    }
+
+    static func destination(for intent: INIntent) -> SystemCommunicationDestination? {
+        let contacts: [INPerson]?
+        let isMessage: Bool
+        switch intent {
+        case let call as INStartCallIntent:
+            contacts = call.contacts
+            isMessage = false
+        case let call as INStartAudioCallIntent:
+            contacts = call.contacts
+            isMessage = false
+        case let message as INSendMessageIntent:
+            contacts = message.recipients
+            isMessage = true
+        default:
+            return nil
+        }
+        guard let contacts, contacts.count == 1,
+              let handle = contacts.first?.personHandle,
+              handle.type == .phoneNumber,
+              let number = phoneNumber(handle.value) else { return nil }
+        return isMessage ? .message(number) : .call(number)
+    }
+
+    private static func phoneNumber(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let allowed = CharacterSet(charactersIn: "+0123456789*#-(). ")
+            .union(.whitespacesAndNewlines)
+        guard value.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        let number = String(value.filter { "+0123456789*#".contains($0) })
+        guard number.contains(where: { $0.isNumber }) else { return nil }
+        return number
     }
 }
 
@@ -71,14 +105,29 @@ struct RootView: View {
     @State private var messageListState = SMSConversationListState()
     @State private var conversationSender: String?
     @State private var showingConversation = false
+    @State private var collapsedCallID: String?
     @AppStorage("airsim.first-connection-complete") private var firstConnectionComplete = false
+
+#if DEBUG && targetEnvironment(simulator)
+    @State private var transitionPreviewVisible = false
+#endif
 
     private var presentedCall: CallRecord? {
 #if DEBUG && targetEnvironment(simulator)
         if ProcessInfo.processInfo.environment["AIRSIM_UI_FIXTURE"] == "sms-navigation",
-           let preview = SMSNavigationFixture.previewCall { return preview }
+           let preview = SMSNavigationFixture.previewCall {
+            if ProcessInfo.processInfo.environment["AIRSIM_UI_CALL_TRANSITION"] == "1" {
+                return transitionPreviewVisible ? preview : nil
+            }
+            return preview
+        }
 #endif
         return model.inAppPresentedCall
+    }
+
+    private var callIsExpanded: Bool {
+        guard let call = presentedCall else { return false }
+        return collapsedCallID != call.id
     }
 
     var body: some View {
@@ -134,17 +183,29 @@ struct RootView: View {
                 // Keep navigation state, but remove the underlying native tab
                 // chrome from rendering, hit testing and VoiceOver during calls.
                 // Duo promotes that chrome outside the SwiftUI content stack.
-                .opacity(presentedCall == nil ? 1 : 0)
-                .allowsHitTesting(presentedCall == nil)
-                .accessibilityHidden(presentedCall != nil)
+                .opacity(callIsExpanded ? 0 : 1)
+                .animation(nil, value: callIsExpanded)
+                .allowsHitTesting(!callIsExpanded)
+                .accessibilityHidden(callIsExpanded)
                 .phoneTabBarMinimizeOnScroll()
                 .phoneTabSelectionFeedback(selectedTabRawValue)
                 .tint(settings.theme.accent)
 
             if let call = presentedCall {
-                ActiveCallView(call: call)
+                ActiveCallView(call: call, isPresented: callIsExpanded,
+                               onMinimize: { collapsedCallID = call.id })
+                    .id(call.id)
+                    .opacity(callIsExpanded ? 1 : 0)
+                    .allowsHitTesting(callIsExpanded)
+                    .accessibilityHidden(!callIsExpanded)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .zIndex(1)
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
+                    // Remove immediately on hangup: fading a departing call over the
+                    // restored dial pad leaves translucent numbers and controls.
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(reduceMotion ? nil : .easeOut(duration: 0.16)),
+                        removal: .identity
+                    ))
             }
         }
         .background(PhoneBackdrop())
@@ -152,9 +213,38 @@ struct RootView: View {
         .onChange(of: model.callLifecycleSnapshot.state.representsCall) { inCall in
             if inCall { callbackSIMRequest = nil }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.inAppPresentedCall?.id)
-        .preferredColorScheme(settings.appearance.colorScheme)
+        // Only call entry fades. Keep tab chrome and model/audio changes
+        // outside the animation transaction; never delay call termination.
+        .preferredColorScheme(callIsExpanded ? .dark : settings.appearance.colorScheme)
+        .onChange(of: presentedCall?.id) { _ in collapsedCallID = nil }
+#if DEBUG && targetEnvironment(simulator)
+        .overlay(alignment: .topLeading) {
+            if ProcessInfo.processInfo.environment["AIRSIM_UI_CALL_TRANSITION"] == "1" {
+                Button("切换测试通话") { transitionPreviewVisible.toggle() }
+                    .accessibilityIdentifier("ui.callTransition")
+                    .padding(8).background(.regularMaterial)
+            }
+        }
+#endif
         .safeAreaInset(edge: .top, spacing: 0) {
+            if let call = presentedCall, !callIsExpanded {
+                Button { collapsedCallID = nil } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "phone.fill")
+                        Text(model.contacts.displayName(for: call.number)).lineLimit(1)
+                        Spacer(minLength: 8)
+                        if ["active", "held"].contains(call.state), let start = model.callConnectedAt {
+                            Text(start, style: .timer).monospacedDigit().fixedSize()
+                        } else { Text(["active", "held"].contains(call.state) ? "通话中" : "正在连接") }
+                        Image(systemName: "chevron.up")
+                    }
+                    .font(.subheadline.weight(.semibold)).padding(.horizontal, 16).padding(.vertical, 12)
+                    .foregroundStyle(.white).background(.green.gradient, in: Capsule())
+                }
+                .buttonStyle(.plain).padding(.horizontal, 12).padding(.vertical, 6)
+                .accessibilityLabel("返回通话")
+                .accessibilityIdentifier("call.restore")
+            }
             if let reminder = model.otherDeviceCallReminders.first {
                 Button {
                     _ = model.openOtherDeviceCallNotification(reminder.userInfo)
@@ -180,6 +270,9 @@ struct RootView: View {
                 .environmentObject(model)
         }
         .onOpenURL(perform: handleSystemCommunicationURL)
+        .onContinueUserActivity("INStartCallIntent", perform: handleSystemCommunicationActivity)
+        .onContinueUserActivity("INStartAudioCallIntent", perform: handleSystemCommunicationActivity)
+        .onContinueUserActivity("INSendMessageIntent", perform: handleSystemCommunicationActivity)
         .fullScreenCover(item: $appUpdatePresentation, onDismiss: presentAppUpdateIfIdle) { presentation in
             AppUpdateSheet(presentation: presentation, updates: appUpdates)
         }
@@ -315,6 +408,7 @@ struct RootView: View {
     private func composeMessage(_ number: String) {
         showingConversation = false
         pendingSMSRecipient = number
+        messageListState.showingComposer = true
         selectedTab = .messages
     }
 
@@ -348,9 +442,22 @@ struct RootView: View {
             }
             return
         }
-        switch SystemCommunicationURL.destination(for: url) {
+        presentSystemCommunication(SystemCommunicationURL.destination(for: url))
+    }
+
+    private func handleSystemCommunicationActivity(_ activity: NSUserActivity) {
+        guard let intent = activity.interaction?.intent else { return }
+        presentSystemCommunication(SystemCommunicationURL.destination(for: intent))
+    }
+
+    private func presentSystemCommunication(_ destination: SystemCommunicationDestination?) {
+        switch destination {
         case let .call(number):
-            dial(number)
+            callbackSIMRequest = nil
+            messageListState.showingComposer = false
+            showingConversation = false
+            model.numberInput = number
+            selectedTab = .dial
         case let .message(recipient):
             composeMessage(recipient)
         case let .liveActivity(action, callID):
@@ -365,26 +472,11 @@ struct RootView: View {
 
 /// 浅色模式使用系统电话式纯白底；深色模式才绘制深蓝黑底部环境光。
 struct PhoneBackdrop: View {
-    @Environment(\.colorScheme) private var colorScheme
+    var grouped = true
 
     var body: some View {
-        ZStack {
-            if colorScheme == .dark {
-                Color(red: 0.008, green: 0.016, blue: 0.035)
-                LinearGradient(
-                    colors: [
-                        Color.clear,
-                        Color(red: 0.018, green: 0.075, blue: 0.16).opacity(0.72),
-                        Color(red: 0.025, green: 0.20, blue: 0.48).opacity(0.62),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            } else {
-                Color(uiColor: .systemGroupedBackground)
-            }
-        }
-        .ignoresSafeArea()
+        Color(uiColor: grouped ? .systemGroupedBackground : .systemBackground)
+            .ignoresSafeArea()
     }
 }
 

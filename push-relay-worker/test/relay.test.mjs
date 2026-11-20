@@ -233,6 +233,81 @@ const registration = {
   relay_url: "https://push.airsim.example",
 };
 
+test("background device status updates only its own activity and never advertises VoWLAN", async () => {
+  const env = testEnvironment();
+  env.STATUS = new MemoryStatusNamespace();
+  await worker.fetch(post("/v1/devices/register", {
+    ...registration, live_activity_presentation: "agent_status",
+  }), env);
+  const identity = { device_id: registration.device_id, device_secret: registration.device_secret };
+  const subscription = {
+    ...identity, agent_id: "paired-android", activity_id: "status-activity",
+    update_token: "e".repeat(64), background: true,
+  };
+  const subscribe = (value) => worker.fetch(post("/v1/live-activities/device-status", value), env);
+  assert.equal((await subscribe(subscription)).status, 404);
+  env.DEVICE_STATUS_ACTIVITY_DEVICE_ID = identity.device_id;
+  assert.equal((await subscribe({ ...subscription, device_secret: "wrong-secret" })).status, 401);
+  assert.equal((await subscribe(subscription)).status, 200);
+
+  const pushes = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    pushes.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return new Response("", { status: 200 });
+  };
+  const pending = [];
+  const ctx = { waitUntil: (promise) => pending.push(promise) };
+  const heartbeat = async (agentID = subscription.agent_id, network = "wifi") => {
+    const response = await worker.fetch(post("/v1/events/heartbeat", {
+      ...identity, agent_id: agentID, agent_kind: "standalone", at_ok: true,
+      event: "agent_heartbeat", cellular_state: "registered", device_name: "Test Android",
+      phone_number: "5550100", signal_dbm: -85,
+      android_data_network: network,
+      battery: { percent: 64, charging: false, observed_at_ms: Date.now() },
+    }), env, ctx);
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { received: true });
+    await Promise.all(pending.splice(0));
+  };
+  try {
+    await heartbeat("different-android");
+    assert.equal(pushes.length, 0);
+    await heartbeat();
+    await heartbeat();
+    assert.equal(pushes.length, 1);
+    const [push] = pushes;
+    assert.ok(push.url.endsWith("/" + subscription.update_token));
+    assert.equal(push.headers["apns-push-type"], "liveactivity");
+    assert.equal(push.headers["apns-topic"], "com.example.airsim.push-type.liveactivity");
+    assert.equal(push.body.aps.event, "update");
+    assert.equal(push.body.aps["stale-date"] - push.body.aps.timestamp, 300);
+    assert.deepEqual(push.body.aps["content-state"], {
+      callID: "", number: "", displayName: "", phase: "standby",
+      startedAt: push.body.aps.timestamp - 978307200,
+      agentDeviceName: "Test Android", agentBatteryPercent: 64, signalDBM: -85,
+      androidDataNetwork: "wifi",
+      pairedAgentCount: 1, deviceStatusFromRelay: true,
+    });
+    for (const network of ["5g", "4g", "cellular", "unsupported"]) {
+      await env.STATUS.storage.delete(`rate:status-activity:${identity.device_id}`);
+      await heartbeat(subscription.agent_id, network);
+      assert.equal(pushes.at(-1).body.aps["content-state"].androidDataNetwork,
+        network === "unsupported" ? undefined : network);
+    }
+    const beforePause = pushes.length;
+    await env.STATUS.storage.delete(`rate:status-activity:${identity.device_id}`);
+    assert.equal((await subscribe({ ...subscription, background: false })).status, 200);
+    await heartbeat();
+    assert.equal(pushes.length, beforePause);
+    assert.equal((await subscribe(subscription)).status, 200);
+    globalThis.fetch = async () => { throw new Error("APNs unavailable"); };
+    await heartbeat();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("health and registration persist without returning credentials", async () => {
   const env = testEnvironment();
   const health = await worker.fetch(new Request("https://push.airsim.example/healthz"), env);
@@ -969,7 +1044,81 @@ test("dashboard virtual call requires auth, validates fields, and rate limits a 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APNs topics", async () => {
+test("push-only incoming call delivers iPhone and missed alerts without a media record", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const captured = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    captured.push({ topic: options.headers["apns-topic"], payload: JSON.parse(options.body) });
+    return new Response("", { status: 200 });
+  };
+  try {
+    const now = new Date();
+    const callUUID = "94fa966c-f90b-4e88-9b79-c1a1762ef131";
+    const identity = {
+      device_id: registration.device_id, device_secret: registration.device_secret,
+      agent_id: "android-push-only", call_id: callUUID, call_uuid: callUUID, generation: 1,
+      number: "10010", slot_index: 1,
+    };
+    const incoming = await worker.fetch(post("/v2/events/call", {
+      ...identity, event: "incoming_call", issued_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + 45_000).toISOString(),
+    }), env);
+    assert.equal(incoming.status, 202);
+    const phone = captured.find(item => item.topic === registration.bundle_id + ".voip");
+    assert.equal(phone?.payload.call_uuid, callUUID);
+    assert.equal(phone.payload.call_secret, undefined);
+    assert.equal(phone.payload.media_url, undefined);
+    assert.equal(captured.some(item => item.topic === registration.watch_bundle_id + ".voip"), false);
+
+    const ended = await worker.fetch(post("/v1/events/call-owner", {
+      ...identity, event: "call_owner", owner: "android", phase: "ended",
+      direction: "incoming", missed: true, timestamp: now.toISOString(),
+    }), env);
+    assert.equal(ended.status, 202);
+    const missed = captured.find(item => item.payload.aps?.category === "AIRSIM_MISSED_CALL");
+    assert.equal(missed?.payload.agent_id, identity.agent_id);
+    assert.equal(missed?.payload.slot_index, 1);
+    const pushCount = captured.length;
+    const retried = await worker.fetch(post("/v2/events/call", {
+      ...identity, event: "incoming_call", issued_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + 45_000).toISOString(),
+    }), env);
+    assert.deepEqual(await retried.json(), { stale: true });
+    assert.equal(captured.length, pushCount);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("the incoming mirror sounds once when the iPhone VoIP push is rejected", async () => {
+  const env = testEnvironment();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const captured = [];
+  let rejectVoIP = true;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    const isVoIP = options.headers["apns-push-type"] === "voip";
+    if (!isVoIP) captured.push(JSON.parse(options.body));
+    return new Response("", { status: isVoIP && rejectVoIP ? 410 : 200 });
+  };
+  try {
+    const now = new Date();
+    const call = {
+      device_id: registration.device_id, device_secret: registration.device_secret,
+      agent_id: "android-fallback", event: "incoming_call", call_id: "test-fallback-ring",
+      call_uuid: "94fa966c-f90b-4e88-9b79-c1a1762ef131", number: "10010",
+      issued_at: now.toISOString(), expires_at: new Date(now.getTime() + 45_000).toISOString(),
+    };
+    assert.equal((await worker.fetch(post("/v2/events/call", call), env)).status, 202);
+    rejectVoIP = false;
+    assert.equal((await worker.fetch(post("/v2/events/call", call), env)).status, 202);
+    const mirrors = captured.filter(payload => payload.event === "incoming_call_mirror");
+    assert.equal(mirrors.length, 1);
+    assert.equal(mirrors[0].aps.sound, "default");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("relay sends iPhone VoIP, Watch VoIP, and SMS on distinct APNs topics", async () => {
   const env = testEnvironment();
   await worker.fetch(post("/v1/devices/register", registration), env);
   const captured = [];
@@ -985,7 +1134,7 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
       device_secret: registration.device_secret, call_id: "call-1",
       call_uuid: "d9b59660-05bb-4ea8-9aeb-4505b35c93f9",
       call_secret: "watch-call-secret-0123456789abcdef",
-      number: "10010", issued_at: now.toISOString(),
+      number: "10010", slot_index: 1, issued_at: now.toISOString(),
       expires_at: new Date(now.getTime() + 45_000).toISOString(),
     }), env);
     assert.equal(call.status, 202);
@@ -998,7 +1147,11 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(captured.length, 5);
+  assert.equal(captured.length, 4);
+  assert.equal(captured[0].payload.slot_index, 1);
+  assert.ok(Number.isFinite(Date.parse(captured[0].payload.relay_received_at)));
+  const smsPush = captured.find(row => row.payload.event === "incoming_sms");
+  assert.ok(Number.isFinite(Date.parse(smsPush.payload.relay_received_at)));
   assert.equal(captured[0].options.headers["apns-push-type"], "voip");
   assert.equal(captured[0].options.headers["apns-topic"], "com.example.airsim.voip");
   assert.equal(captured[0].options.headers["apns-collapse-id"], "d9b59660-05bb-4ea8-9aeb-4505b35c93f9");
@@ -1009,22 +1162,18 @@ test("relay sends iPhone VoIP, Watch VoIP, mirror alert, and SMS on distinct APN
   assert.equal(captured[1].options.headers["apns-collapse-id"], "d9b59660-05bb-4ea8-9aeb-4505b35c93f9");
   assert.equal(captured[1].payload.event, "incoming_call");
   assert.equal(captured[1].payload.call_secret, "watch-call-secret-0123456789abcdef");
-  assert.equal(captured[2].options.headers["apns-push-type"], "alert");
-  assert.equal(captured[2].options.headers["apns-topic"], "com.example.airsim");
-  assert.equal(captured[2].payload.event, "incoming_call_mirror");
-  assert.equal(captured[2].payload.aps.alert.title, "AirSIM 来电");
-  assert.equal(captured[2].payload.aps.alert.body, "10010");
-  assert.equal(captured[3].options.headers["apns-push-type"], "liveactivity");
-  assert.equal(captured[3].options.headers["apns-topic"], "com.example.airsim.push-type.liveactivity");
-  assert.equal(captured[3].payload.aps.event, "start");
-  assert.equal(captured[3].payload.aps["input-push-token"], 1);
-  assert.equal(captured[3].payload.aps["attributes-type"], "AirSIMCallActivityAttributes");
-  assert.equal(captured[3].payload.aps["content-state"].callID, "call-1");
-  assert.equal(captured[4].options.headers["apns-push-type"], "alert");
-  assert.equal(captured[4].options.headers["apns-topic"], "com.example.airsim");
-  assert.equal(captured[4].payload.aps.alert.body, "余额提醒");
-  assert.equal(captured[4].payload.aps.alert.subtitle, "接收于 SIM 2");
-  assert.equal(captured[4].payload.sim_slot, "SIM 2");
+  assert.equal(captured.some(item => item.payload.event === "incoming_call_mirror"), false);
+  assert.equal(captured[2].options.headers["apns-push-type"], "liveactivity");
+  assert.equal(captured[2].options.headers["apns-topic"], "com.example.airsim.push-type.liveactivity");
+  assert.equal(captured[2].payload.aps.event, "start");
+  assert.equal(captured[2].payload.aps["input-push-token"], 1);
+  assert.equal(captured[2].payload.aps["attributes-type"], "AirSIMCallActivityAttributes");
+  assert.equal(captured[2].payload.aps["content-state"].callID, "call-1");
+  assert.equal(captured[3].options.headers["apns-push-type"], "alert");
+  assert.equal(captured[3].options.headers["apns-topic"], "com.example.airsim");
+  assert.equal(captured[3].payload.aps.alert.body, "余额提醒");
+  assert.equal(captured[3].payload.aps.alert.subtitle, "接收于 SIM 2");
+  assert.equal(captured[3].payload.sim_slot, "SIM 2");
 
   const storedCall = JSON.parse(await env.DEVICES.get("call:d9b59660-05bb-4ea8-9aeb-4505b35c93f9"));
   assert.equal(storedCall.device_id, registration.device_id);
@@ -1107,7 +1256,7 @@ test("incoming call retries deduplicate VoIP and Watch alert by call UUID", asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(captured.length, 4);
+  assert.equal(captured.length, 3);
 });
 
 test("registered ActivityKit update token is preferred over push-to-start and owner updates it", async () => {
@@ -1267,10 +1416,9 @@ test("legacy Agent call remains available on iPhone while Watch media is skipped
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(captured.length, 3);
+  assert.equal(captured.length, 2);
   assert.equal(captured[0].options.headers["apns-topic"], "com.example.airsim.voip");
-  assert.equal(captured[1].options.headers["apns-push-type"], "alert");
-  assert.equal(captured[2].options.headers["apns-push-type"], "liveactivity");
+  assert.equal(captured[1].options.headers["apns-push-type"], "liveactivity");
 });
 
 test("call websocket authenticates the per-call secret before reaching its durable object", async () => {

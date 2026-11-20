@@ -2,8 +2,8 @@ import ActivityKit
 import UIKit
 
 enum LiveActivityCreationPolicy {
-    static func pushType(localModeEnabled: Bool) -> PushType? {
-        localModeEnabled ? nil : .token
+    static func pushType(localModeEnabled: Bool, remoteStatusEnabled: Bool = false) -> PushType? {
+        localModeEnabled && !remoteStatusEnabled ? nil : .token
     }
 
     static func shouldCreate(
@@ -66,6 +66,7 @@ enum LiveActivityAgentOrder {
 
 struct LiveActivityAgentSnapshot: Equatable {
     let deviceName: String?
+    let batteryPercent: Int?
     let phoneNumber: String?
     let agentKind: String?
     let pairedAgentCount: Int
@@ -80,13 +81,15 @@ struct LiveActivityAgentSnapshot: Equatable {
         pairedAgentCount: Int,
         agents: [AndroidAgentPresentation] = [],
         currentID: String? = nil,
-        page: Int = 0
+        page: Int = 0,
+        batteryPercent: Int? = nil
     ) {
         let current = agent
             ?? agents.first(where: { $0.id == currentID })
             ?? agents.first(where: \.isCurrent)
             ?? agents.first
         deviceName = current?.deviceName
+        self.batteryPercent = batteryPercent
         phoneNumber = current?.phoneNumber
         agentKind = current?.agentKind
         self.pairedAgentCount = pairedAgentCount
@@ -163,6 +166,7 @@ enum LiveActivityStateBuilder {
             downloadBytesPerSecond: nil,
             uploadBytesPerSecond: nil,
             agentDeviceName: agent?.deviceName,
+            agentBatteryPercent: agent?.batteryPercent,
             agentPhoneNumber: agent?.phoneNumber,
             agentKind: agent?.agentKind,
             pairedAgentCount: agent?.pairedAgentCount,
@@ -170,7 +174,8 @@ enum LiveActivityStateBuilder {
             bluetoothOnline: agent?.bluetoothOnline,
             cloudOnline: agent?.cloudOnline,
             agents: agent?.agents,
-            agentPage: agent?.page
+            agentPage: agent?.page,
+            androidDataNetwork: radio?.androidDataNetwork
         )
     }
 }
@@ -197,6 +202,11 @@ protocol LiveActivityStore: AnyObject {
 final class SystemLiveActivityStore: LiveActivityStore {
     var onActivityAdded: (() -> Void)?
     private var handles: [String: Activity<AirSIMCallActivityAttributes>] = [:]
+    private var statusTokenTask: Task<Void, Never>?
+    private var statusRegistrationTask: Task<Void, Never>?
+    private var statusActivityID: String?
+    private var statusBackgrounded = false
+    private var statusRegistrationRevision = 0
     private var observation: Task<Void, Never>?
     var available: Bool {
         UIDevice.current.userInterfaceIdiom == .phone && ActivityAuthorizationInfo().areActivitiesEnabled
@@ -212,10 +222,15 @@ final class SystemLiveActivityStore: LiveActivityStore {
         }
     }
 
-    deinit { observation?.cancel() }
+    deinit {
+        observation?.cancel()
+        statusTokenTask?.cancel()
+        statusRegistrationTask?.cancel()
+    }
 
     func entries() -> [LiveActivityEntry] {
         for activity in Activity<AirSIMCallActivityAttributes>.activities { handles[activity.id] = activity }
+        handles = handles.filter { $0.value.activityState != .dismissed }
         return handles.values.map {
             .init(id: $0.id, state: $0.content.state,
                   isRunning: $0.activityState == .active || $0.activityState == .stale)
@@ -223,24 +238,92 @@ final class SystemLiveActivityStore: LiveActivityStore {
     }
 
     func create(_ state: AirSIMCallActivityAttributes.ContentState) throws -> String {
-        let activity = try Activity.request(attributes: AirSIMCallActivityAttributes(moduleName: "AirSIM"),
+        let activity = try Activity.request(attributes: AirSIMCallActivityAttributes(
+            moduleName: "AirSIM", isDeviceStatusPushActivity: statusUpdatesEnabled ? true : nil),
             content: ActivityContent(state: state, staleDate: nil),
-            pushType: LiveActivityCreationPolicy.pushType(localModeEnabled: !CloudModePreference.isEnabled()))
+            pushType: LiveActivityCreationPolicy.pushType(localModeEnabled: !CloudModePreference.isEnabled(),
+                remoteStatusEnabled: statusUpdatesEnabled))
         handles[activity.id] = activity
         VoIPPushController.shared.observeLiveActivity(activity)
+        observeStatusToken(activity)
         return activity.id
     }
 
     func update(_ id: String, state: AirSIMCallActivityAttributes.ContentState) async {
         guard let activity = handles[id] else { return }
         VoIPPushController.shared.observeLiveActivity(activity)
-        await activity.update(ActivityContent(state: state, staleDate: nil))
+        observeStatusToken(activity)
+        if statusUpdatesEnabled, statusBackgrounded, state.pairedAgentCount == 1,
+           activity.content.state.deviceStatusFromRelay == true { return }
+        let staleDate = statusUpdatesEnabled && statusBackgrounded ? Date().addingTimeInterval(150) : nil
+        await activity.update(ActivityContent(state: state, staleDate: staleDate))
     }
 
     func end(_ id: String) async {
         guard let activity = handles[id] else { return }
+        if statusActivityID == id {
+            statusActivityID = nil
+            statusTokenTask?.cancel()
+        }
         await activity.end(nil, dismissalPolicy: .immediate)
         handles.removeValue(forKey: id)
+    }
+
+    private var statusUpdatesEnabled: Bool {
+        DedicatedCallPolicy.vowlanOnly && CloudSignalingPreference.isEnabled()
+            && LiveActivityRemoteStatusPreference.isEnabled
+    }
+
+    func setStatusBackgrounded(_ backgrounded: Bool) {
+        guard statusBackgrounded != backgrounded else { return }
+        statusBackgrounded = backgrounded
+        guard statusUpdatesEnabled, let statusActivityID,
+              let activity = handles[statusActivityID] else { return }
+        observeStatusToken(activity)
+        registerStatusToken(activity)
+    }
+
+    func refreshStatusPresentation(_ id: String) async {
+        guard statusUpdatesEnabled, let activity = handles[id] else { return }
+        observeStatusToken(activity)
+        let current = activity.content
+        guard current.state.deviceStatusFromRelay != true else { return }
+        let staleDate = statusBackgrounded ? current.staleDate ?? Date().addingTimeInterval(150) : nil
+        guard current.staleDate != staleDate else { return }
+        await activity.update(ActivityContent(state: current.state, staleDate: staleDate))
+    }
+
+    private func observeStatusToken(_ activity: Activity<AirSIMCallActivityAttributes>) {
+        guard statusUpdatesEnabled, activity.attributes.isDeviceStatusPushActivity == true,
+              statusActivityID != activity.id else { return }
+        statusActivityID = activity.id
+        statusTokenTask?.cancel()
+        statusTokenTask = Task { @MainActor [weak self] in
+            for await token in activity.pushTokenUpdates {
+                guard let self, !Task.isCancelled else { return }
+                self.registerStatusToken(activity, token: token)
+            }
+        }
+        registerStatusToken(activity)
+    }
+
+    private func registerStatusToken(_ activity: Activity<AirSIMCallActivityAttributes>, token: Data? = nil) {
+        guard let token = token ?? activity.pushToken, statusUpdatesEnabled else { return }
+        let background = statusBackgrounded
+        statusRegistrationRevision &+= 1
+        let revision = statusRegistrationRevision
+        let previous = statusRegistrationTask
+        let application = UIApplication.shared
+        let runtime = background ? application.beginBackgroundTask(withName: "AirSIMDeviceStatus") : .invalid
+        statusRegistrationTask = Task { @MainActor [weak self] in
+            defer { if runtime != .invalid { application.endBackgroundTask(runtime) } }
+            await previous?.value
+            guard let self, statusRegistrationRevision == revision,
+                  statusActivityID == activity.id, statusUpdatesEnabled else { return }
+            await VoIPPushController.shared.registerDeviceStatusActivity(
+                token: token, activityID: activity.id, background: background
+            )
+        }
     }
 }
 
@@ -261,11 +344,12 @@ final class LiveActivityController {
     private var syncing = false
     private let idleStartedAt = Date()
     private var enabled = true
+    private var suppressedForSystemCall = false
 
     init(store: (any LiveActivityStore)? = nil) {
         self.store = store ?? SystemLiveActivityStore()
         self.store.onActivityAdded = { [weak self] in
-            guard let self, self.desired != nil || !self.enabled else { return }
+            guard let self, self.desired != nil || !self.enabled || self.suppressedForSystemCall else { return }
             self.needsSync = true
             Task { await self.drain() }
         }
@@ -295,7 +379,7 @@ final class LiveActivityController {
         uploadBytesPerSecond: Double? = nil,
         force: Bool = false
     ) async {
-        guard enabled else { return }
+        guard enabled, !suppressedForSystemCall, call == nil else { return }
         desired = Request(state: LiveActivityStateBuilder.make(
             call: call, callerName: callerName, moduleOnline: moduleOnline, cloudOnline: cloudOnline,
             transport: transport, radio: radio, agent: agent, idleStartedAt: idleStartedAt,
@@ -304,6 +388,15 @@ final class LiveActivityController {
         revision &+= 1
         needsSync = true
         await drain()
+    }
+
+    func setSuppressedForSystemCall(_ suppressed: Bool) {
+        guard suppressedForSystemCall != suppressed else { return }
+        suppressedForSystemCall = suppressed
+        desired = nil
+        revision &+= 1
+        needsSync = true
+        Task { [weak self] in await self?.drain() }
     }
 
     func markOffline(agent: LiveActivityAgentSnapshot? = nil, appIsActive: Bool) async {
@@ -324,6 +417,10 @@ final class LiveActivityController {
         await drain()
     }
 
+    func setStatusBackgrounded(_ backgrounded: Bool) {
+        (store as? SystemLiveActivityStore)?.setStatusBackgrounded(backgrounded)
+    }
+
     private func drain() async {
         guard !syncing else { return }
         syncing = true
@@ -332,7 +429,7 @@ final class LiveActivityController {
             needsSync = false
             let currentRevision = revision
             let entries = store.entries()
-            guard enabled, let request = desired else {
+            guard enabled, !suppressedForSystemCall, let request = desired else {
                 selectedID = nil
                 for entry in entries {
                     guard revision == currentRevision else { break }
@@ -343,9 +440,18 @@ final class LiveActivityController {
             let running = entries.filter(\.isRunning).sorted { $0.id < $1.id }
             let selected = running.first { $0.id == selectedID } ?? running.first
             selectedID = selected?.id
-            // End both duplicates and lingering ended cards immediately. Never
-            // update only the first entry and leave the rest on the lock screen.
-            for entry in entries where entry.id != selectedID {
+            if selected == nil, request.appIsActive, store.available {
+                do { selectedID = try store.create(request.state) }
+                catch {
+#if DEBUG
+                    print("[AirSIM LiveActivity] create_failed error=\(error)")
+#endif
+                }
+            }
+            // A system-ended activity may still be visible on the lock screen.
+            // Keep one until a replacement exists or the user disables the card.
+            let retainedID = selectedID ?? entries.min { $0.id < $1.id }?.id
+            for entry in entries where entry.id != retainedID {
                 guard revision == currentRevision else { break }
                 await store.end(entry.id)
             }
@@ -355,13 +461,8 @@ final class LiveActivityController {
                 // a remote update or a recovered handle may have changed it.
                 if request.force || selected.state != request.state {
                     await store.update(selected.id, state: request.state)
-                }
-            } else if request.appIsActive, store.available {
-                do { selectedID = try store.create(request.state) }
-                catch {
-#if DEBUG
-                    print("[AirSIM LiveActivity] create_failed error=\(error)")
-#endif
+                } else {
+                    await (store as? SystemLiveActivityStore)?.refreshStatusPresentation(selected.id)
                 }
             }
         }

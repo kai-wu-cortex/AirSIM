@@ -522,6 +522,22 @@ final class ShizukuBridgeManager {
         if (deliver) mainHandler.post(() -> callback.onResult(success, detail));
     }
 
+    private final ExecutorService screenWorker = Executors.newSingleThreadExecutor();
+    void restoreRemoteScreenOff(long since, java.util.function.BooleanSupplier current,
+                               java.util.function.Consumer<String> completed) {
+        long observedAt = android.os.SystemClock.uptimeMillis();
+        screenWorker.execute(() -> {
+            String result = "screen_guard=unavailable";
+            try {
+                if (!current.getAsBoolean()) result = "screen_guard=cancelled";
+                else if (rootTransport != null) result = rootTransport.restoreRemoteScreenOff(since, observedAt);
+                else if (privilegedClient != null) result = privilegedClient.restoreRemoteScreenOff(since, observedAt);
+            } catch (Exception error) { result = "screen_guard=failed_" + error.getClass().getSimpleName(); }
+            String value = result == null ? "screen_guard=unavailable" : result;
+            mainHandler.post(() -> completed.accept(value));
+        });
+    }
+
     void setLocalOutputMuted(boolean muted) {
         setLocalOutputMuted(muted, PrivilegedBridgeProtocol.TRANSPORT_VOWLAN);
     }

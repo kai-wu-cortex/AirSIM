@@ -22,6 +22,10 @@ public final class RuntimeMode {
         }
     }
 
+    public static boolean vowlanPushOnly(Context context) {
+        return "com.airsim.phonecontrol.earlytest".equals(context.getPackageName());
+    }
+
     public static String agentLabel(Context context) {
         return isStandalone(context) ? "内置 Agent" : "Linux Agent";
     }

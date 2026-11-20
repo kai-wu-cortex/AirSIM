@@ -1,4 +1,6 @@
 import AVFoundation
+import CallKit
+import UIKit
 import Network
 
 /// Keep the codec's 8 kHz rate out of VoiceProcessingIO's hardware bus.
@@ -141,6 +143,95 @@ final class PCMHandshakeSequence {
     }
 }
 
+/// Transport progress and playback evidence are independent of signal amplitude.
+struct PCMBridgeHealth {
+    enum Phase: String { case connecting, handshaking, waiting, verifying, flowing, playbackFailed, failed }
+    struct Assessment {
+        let phase: Phase
+        let text: String
+        let warning: String?
+        let repairPlayback: Bool
+    }
+    private(set) var handshakeAt: TimeInterval?
+    private(set) var downlinkAt: TimeInterval?
+    private(set) var uplinkAt: TimeInterval?
+    private(set) var renderedAt: TimeInterval?
+    private(set) var recoveryAt: TimeInterval?
+    private(set) var recoveryAttempts = 0
+    private(set) var reconnects = 0
+    private(set) var lastFailurePhase: String?
+    private(set) var lastRecoveryDuration: TimeInterval?
+    private var phase: Phase = .connecting
+    private var transportRecoveryAt: TimeInterval?
+    mutating func networkReady() { phase = .handshaking }
+    mutating func handshake(now: TimeInterval) {
+        phase = .waiting; handshakeAt = now
+        downlinkAt = nil; uplinkAt = nil; renderedAt = nil
+    }
+    mutating func reconnect(now: TimeInterval = 0) {
+        if transportRecoveryAt == nil { transportRecoveryAt = now }
+        reconnects += 1; phase = .connecting; handshakeAt = nil
+        downlinkAt = nil; uplinkAt = nil; renderedAt = nil
+        lastFailurePhase = "transport"
+    }
+    mutating func failed() { phase = .failed; handshakeAt = nil; lastFailurePhase = "transport" }
+    mutating func downlink(now: TimeInterval) { downlinkAt = now }
+    mutating func uplink(now: TimeInterval) { uplinkAt = now }
+    mutating func rendered(now: TimeInterval) { renderedAt = now }
+    mutating func repairing(now: TimeInterval) {
+        recoveryAt = now; recoveryAttempts += 1; lastFailurePhase = "playback"
+    }
+    mutating func assess(now: TimeInterval, engineRunning: Bool, playerPlaying: Bool,
+                         receiveOnly: Bool) -> Assessment {
+        func result(_ phase: Phase, _ text: String, warning: Bool = false, repair: Bool = false) -> Assessment {
+            Assessment(phase: phase, text: text, warning: warning ? text : nil, repairPlayback: repair)
+        }
+        guard let handshakeAt else {
+            if phase == .failed { return result(.failed, "音频连接失败，自动重连窗口已耗尽", warning: true) }
+            return result(phase, phase == .handshaking ? "网络已连接，正在认证音频握手" : "正在连接或重连音频桥")
+        }
+        guard let downlinkAt, downlinkAt >= handshakeAt, now - downlinkAt < 6 else {
+            // Missing data alone is not proof of a broken bridge, and never restarts it.
+            return result(.waiting, "音频已握手，等待下行数据验证（暂不判断故障）")
+        }
+        let boundary = max(handshakeAt, recoveryAt ?? handshakeAt)
+        let playbackStalled = now - max(renderedAt ?? boundary, boundary) >= 6
+        if !engineRunning || !playerPlaying || playbackStalled {
+            lastFailurePhase = "playback"
+            return result(.playbackFailed, "音频数据正在到达，但本机播放未正常推进", warning: true, repair: true)
+        }
+        let played = renderedAt.map { $0 > boundary && now - $0 < 6 } ?? false
+        let sent = receiveOnly || (uplinkAt.map { $0 > boundary && now - $0 < 6 } ?? false)
+        guard downlinkAt > boundary, played, sent else {
+            return result(.verifying, !played ? "已收到下行数据，等待播放回调验证" : "下行与播放已验证，等待上行数据")
+        }
+        if let began = transportRecoveryAt ?? recoveryAt {
+            lastRecoveryDuration = max(0, now - began)
+            self.recoveryAt = nil; transportRecoveryAt = nil
+        }
+        return result(.flowing, receiveOnly ? "下行数据与播放回调已验证" : "上下行数据与播放回调已验证")
+    }
+}
+
+struct PCMReconnectBudget {
+    private(set) var attempts = 0
+    mutating func reset() { attempts = 0 }
+    mutating func nextDelay() -> TimeInterval? {
+        guard attempts < 20 else { return nil }
+        let delay = min(3, 0.25 * pow(2, Double(min(attempts, 4))))
+        attempts += 1; return delay
+    }
+}
+
+struct PlaybackRecoveryBudget {
+    private(set) var attempts = 0
+    private var lastAttempt: TimeInterval = -.infinity
+    mutating func claim(now: TimeInterval) -> Bool {
+        guard attempts < 3, now - lastAttempt >= 10 else { return false }
+        attempts += 1; lastAttempt = now; return true
+    }
+}
+
 enum SpeakerRoutePolicy {
     static let retryDelays: [TimeInterval] = [0, 0.15, 0.35, 0.7, 1.2]
     static let routeVerificationDelay: TimeInterval = 0.08
@@ -168,13 +259,55 @@ enum SpeakerRoutePolicy {
     }
 }
 
+enum CallHeadphoneIcon {
+    static func symbol(for name: String,
+                       isAvailable: (String) -> Bool = { UIImage(systemName: $0) != nil }) -> String {
+        let key = name.lowercased().filter { $0.isLetter || $0.isNumber }
+        let candidates: [String]
+        if key.contains("airpodsmax") { candidates = ["airpodsmax", "headphones"] }
+        else if key.contains("airpodspro") { candidates = ["airpodspro", "headphones"] }
+        else if let range = key.range(of: "airpods") {
+            let suffix = String(key[range.upperBound...])
+            func generation(_ digit: String, _ chinese: String, _ ordinal: String) -> Bool {
+                suffix.hasPrefix(digit) || suffix.contains("gen" + digit)
+                    || suffix.contains("generation" + digit) || suffix.contains(digit + ordinal + "generation")
+                    || suffix.contains("第" + digit + "代") || suffix.contains("第" + chinese + "代")
+            }
+            if generation("5", "五", "th") {
+                // AirPods 4 and 5 use the same short-stem silhouette.
+                candidates = ["airpods.gen4", "airpods.gen3", "airpods", "headphones"]
+            } else if generation("4", "四", "th") {
+                candidates = ["airpods.gen4", "airpods.gen3", "airpods", "headphones"]
+            } else if generation("3", "三", "rd") {
+                candidates = ["airpods.gen3", "airpods", "headphones"]
+            } else if generation("1", "一", "st") || generation("2", "二", "nd") {
+                candidates = ["airpods", "headphones"]
+            } else { candidates = ["headphones"] }
+        } else { candidates = ["headphones"] }
+        return candidates.first(where: isAvailable) ?? "headphones"
+    }
+}
+
+struct CallAudioRouteChoice: Identifiable {
+    let id: String
+    let title: String
+    let icon: String
+    let selected: Bool
+}
+
 /// 管理 iPhone/iPad 内置麦克风、扬声器与 VoWLAN 网络 PCM 之间的双向通话音频。
 @MainActor
 final class AudioSessionController: ObservableObject {
     @Published private(set) var audioHealthText = "当前没有通话音频会话"
     @Published private(set) var audioHealthWarning: String?
     private var lastDownlinkUptime: TimeInterval?
+    private var playbackRecoveryBudget = PlaybackRecoveryBudget()
+    private var playbackRecoveryOwner: UUID?
     private var audioHealthTask: Task<Void, Never>?
+    private var bridgeHealth = PCMBridgeHealth()
+    private var observedUplinkBytes: UInt64 = 0
+    private var observedDownlinkBytes: UInt64 = 0
+    private var lastHealthPhase: PCMBridgeHealth.Phase?
     @Published private(set) var active = false
     @Published private(set) var routeDescription = ""
     @Published private(set) var transportReady = false
@@ -182,8 +315,26 @@ final class AudioSessionController: ObservableObject {
     @Published private(set) var diagnosticDescription = ""
     @Published private(set) var moduleDiagnosticDescription = ""
     @Published private(set) var speakerEnabled = false
+    @Published private(set) var callOutputName = "iPhone"
+    @Published private(set) var callOutputIcon = "iphone"
+    @Published private(set) var hasExternalCallRoutes = false
+    private var systemRouteSelectionActive = false
+    private var bluetoothSuppressedForReceiver = false
+    private var knownExternalCallPorts: [AVAudioSessionPortDescription] = []
+    private var preferredCallCategoryOptions: AVAudioSession.CategoryOptions {
+        requestedCallRouteID == "receiver" ? [] : [.allowBluetoothHFP]
+    }
+    private var callRouteSelectionTask: Task<Void, Never>?
+    private(set) var requestedCallRouteID: String?
+    private var callRouteSelectionGeneration: UInt64 = 0
+    private let applyRouteForTesting: ((String) throws -> Void)?
+    private let readRouteForTesting: (() -> String?)?
+    @Published private(set) var changingCallRoute = false
+    @Published private(set) var callRouteChoices: [CallAudioRouteChoice] = []
     @Published private(set) var speakerRoutePending = false
     @Published var errorMessage: String?
+
+    let levelMeter = CallAudioLevelMeter()
 
     private var engine: AVAudioEngine?
     private(set) var sessionOwner: UUID?
@@ -199,8 +350,10 @@ final class AudioSessionController: ObservableObject {
     private let makeEngine: () -> AVAudioEngine
     private var currentCallTone: CallTone?
     private var endedToneTask: Task<Void, Never>?
+    private var incomingRingtoneTask: Task<Void, Never>?
+    private var incomingRingtoneWindow: (callID: String, deadline: ContinuousClock.Instant)?
     var hasCallTone: Bool { currentCallTone != nil }
-    private var muted = false
+    private(set) var muted = false
     private var requestedSpeakerOverride = false
     private var speakerRouteRetryTask: Task<Void, Never>?
     private var sessionActivationManagedByCallKit = false
@@ -214,17 +367,22 @@ final class AudioSessionController: ObservableObject {
 
     private func recordStartup(_ phase: String) {
         let elapsed = Int(max(0, ProcessInfo.processInfo.systemUptime - startupUptime) * 1_000)
+        let carrierRingback = phase == "first_downlink" && receiveOnly
         Task { await AgentVerboseTraceRecorder.shared.recordAudioStartup(
-            phase: phase, elapsedMilliseconds: elapsed
+            phase: phase, elapsedMilliseconds: elapsed, carrierRingback: carrierRingback
         ) }
     }
 
     init(toneOutput: (any CallToneOutput)? = nil,
          makeEngine: @escaping () -> AVAudioEngine = { AVAudioEngine() },
+         applyCallRoute: ((String) throws -> Void)? = nil,
+         readCallRoute: (() -> String?)? = nil,
          overrideSpeakerRoute: @escaping (Bool) throws -> Void = {
              try AVAudioSession.sharedInstance().overrideOutputAudioPort($0 ? .speaker : .none)
          }) {
         self.toneOutput = toneOutput ?? SystemCallToneOutput()
+        self.applyRouteForTesting = applyCallRoute
+        self.readRouteForTesting = readCallRoute
         self.overrideSpeakerRoute = overrideSpeakerRoute
         self.makeEngine = makeEngine
         // CallKit、蓝牙或系统控制中心都可能改变输出路由，按钮状态必须跟随真实会话。
@@ -235,7 +393,84 @@ final class AudioSessionController: ObservableObject {
         ) { [weak self] notification in
             Task { @MainActor [weak self] in self?.handleRouteChange(notification) }
         }
+#if DEBUG
+        if ProcessInfo.processInfo.environment["AIRSIM_UI_FIXTURE"] == "sms-navigation",
+           ProcessInfo.processInfo.environment["AIRSIM_UI_AUDIO_ROUTES"] == "external" {
+            hasExternalCallRoutes = true
+            callOutputName = "AirPods 5"
+            callOutputIcon = "airpods.gen4"
+            callRouteChoices = [
+                .init(id: "speaker", title: "扬声器", icon: "speaker.wave.2.fill", selected: false),
+                .init(id: "receiver", title: "iPhone", icon: "iphone", selected: false),
+                .init(id: "fixture-headset", title: "AirPods 5", icon: "airpods.gen4", selected: true)
+            ]
+        }
+#endif
+
+#if DEBUG
+        if ProcessInfo.processInfo.environment["AIRSIM_AUDIO_ROUTE_SELFTEST"] == "1", !Self.physicalRouteSelfTestStarted {
+            Self.physicalRouteSelfTestStarted = true
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                await self?.physicalRouteSelfTest()
+            }
+        }
+#endif
+
     }
+
+#if DEBUG
+    private static var physicalRouteSelfTestStarted = false
+    private func physicalRouteSelfTest() async {
+        let session = AVAudioSession.sharedInstance()
+        guard !CXCallObserver().calls.contains(where: { !$0.hasEnded }), !active,
+              session.recordPermission == .granted else { return }
+        let category = session.category, mode = session.mode, options = session.categoryOptions
+        let preferredUID = session.preferredInput?.uid
+        let diagnosticEngine = AVAudioEngine()
+        var diagnosticTapInstalled = false
+        let wasSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        defer {
+            diagnosticEngine.stop()
+            if diagnosticTapInstalled { diagnosticEngine.inputNode.removeTap(onBus: 0) }
+            prepareForSystemRouteSelection()
+            if !CXCallObserver().calls.contains(where: { !$0.hasEnded }) {
+                try? session.overrideOutputAudioPort(.none)
+                try? session.setPreferredInput(session.availableInputs?.first { $0.uid == preferredUID })
+                if wasSpeaker && category == .playAndRecord { try? session.overrideOutputAudioPort(.speaker) }
+                try? session.setActive(false, options: [.notifyOthersOnDeactivation])
+                try? session.setCategory(category, mode: mode, options: options)
+            }
+        }
+        do {
+            try configureCallAudioSession()
+            try session.setActive(true)
+            let input = diagnosticEngine.inputNode
+            try input.setVoiceProcessingEnabled(true)
+            // Drain locally only; no audio is stored, played or transmitted.
+            input.installTap(onBus: 0, bufferSize: 480, format: nil) { _, _ in }
+            diagnosticTapInstalled = true
+            diagnosticEngine.prepare()
+            try diagnosticEngine.start()
+            try await Task.sleep(for: .milliseconds(300))
+            let ids = ["receiver", "speaker"] + (session.availableInputs ?? []).filter { $0.portType != .builtInMic }.map(\.uid)
+            for id in ids {
+                guard !CXCallObserver().calls.contains(where: { !$0.hasEnded }) else { return }
+                selectCallRoute(id)
+                await callRouteSelectionTask?.value
+                await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "audio-route",
+                    phase: "hardware_selftest", title: "本机音频输出自测（不拨号）", fields: [
+                        "target": ["receiver", "speaker"].contains(id) ? id : "headset",
+                        "matched": String(currentCallRouteID() == id),
+                        "output_types": session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","),
+                        "input_types": session.currentRoute.inputs.map { $0.portType.rawValue }.joined(separator: ","),
+                        "engine_running": String(diagnosticEngine.isRunning)])
+            }
+        } catch {
+            await AgentVerboseTraceRecorder.shared.recordFailure(category: "audio-route", phase: "hardware_selftest", error: error)
+        }
+    }
+#endif
 
     deinit {
         if let routeChangeObserver {
@@ -276,6 +511,7 @@ final class AudioSessionController: ObservableObject {
         guard !Task.isCancelled, isCurrent() else { return false }
         guard !active else { return true }
         lastDownlinkUptime = nil
+        bridgeHealth = PCMBridgeHealth(); observedUplinkBytes = 0; observedDownlinkBytes = 0; lastHealthPhase = nil
         audioHealthText = "正在建立音频连接"; audioHealthWarning = nil
         startupUptime = ProcessInfo.processInfo.systemUptime
         recordedFirstDownlink = false
@@ -293,6 +529,8 @@ final class AudioSessionController: ObservableObject {
             return false
         }
 
+        levelMeter.beginSession(owner, uplinkMuted: muted || receiveOnly)
+        let levelMeter = self.levelMeter
         var startupPhase = "configure_session"
         do {
             let session = AVAudioSession.sharedInstance()
@@ -301,7 +539,7 @@ final class AudioSessionController: ObservableObject {
                 // Playback-only sessions cannot route to the built-in receiver.
                 // Keep capture disabled below, but allow both call outputs.
                 if !sessionAlreadyActive {
-                    try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+                    try session.setCategory(.playAndRecord, mode: .default, options: preferredCallCategoryOptions)
                 }
             } else { try configureCallAudioSession() }
             if !sessionAlreadyActive {
@@ -310,7 +548,7 @@ final class AudioSessionController: ObservableObject {
             // 每次通话默认使用听筒；仅在用户主动开启扬声器后覆盖输出路由。
             // Route changes can be rejected while CallKit activates audio.
             // A pending output preference must never abort carrier playback.
-            try? overrideSpeakerRoute(requestedSpeakerOverride)
+            if !systemRouteSelectionActive { try? overrideSpeakerRoute(requestedSpeakerOverride) }
             refreshRouteDescription()
 
             let engine = makeEngine()
@@ -372,7 +610,10 @@ final class AudioSessionController: ObservableObject {
             try CallAudioGraph.installCapture(input, format: nil) {
                 buffer, _ in
                 let pcm = encoder.encode(buffer)
-                if !pcm.isEmpty { transport.sendPCM(pcm) }
+                if !pcm.isEmpty {
+                    levelMeter.record(pcm, direction: .uplink, owner: owner)
+                    transport.sendPCM(pcm)
+                }
             }
 
                 captureInstalled = true
@@ -412,6 +653,7 @@ final class AudioSessionController: ObservableObject {
             moduleDiagnosticDescription = ""
             errorMessage = nil
             retryRequestedSpeakerRoute()
+            startAudioHealthMonitor()
             transport.start()
             return true
         } catch {
@@ -435,10 +677,11 @@ final class AudioSessionController: ObservableObject {
     func setMuted(_ muted: Bool) {
         self.muted = muted
         encoder?.setMuted(muted)
+        levelMeter.setUplinkMuted(muted)
     }
 
     /// 根据模块通话状态播放来电铃声或呼出等待音，接通后立即让位给网络 PCM。
-    func updateCallTone(for call: CallRecord?) {
+    func updateCallTone(for call: CallRecord?, allowIncomingRingtone: Bool = true) {
         guard !active else {
             // Keep the existing waiting tone until the early stream actually
             // delivers PCM. A lease/ACK alone is not an audible announcement.
@@ -454,14 +697,36 @@ final class AudioSessionController: ObservableObject {
             return
         }
 
-        if call.direction == "incoming", ["incoming", "waiting"].contains(call.state) {
+        if allowIncomingRingtone, call.direction == "incoming", !call.isTerminal,
+           ["incoming", "waiting"].contains(call.state) {
+            // If VoWLAN loses the terminal event, repeated polls for this call
+            // must not keep the app's fallback ringtone alive indefinitely.
+            let clock = ContinuousClock()
+            if incomingRingtoneWindow?.callID != call.id {
+                incomingRingtoneWindow = (call.id, clock.now.advanced(by: .seconds(60)))
+            }
+            guard let window = incomingRingtoneWindow, clock.now < window.deadline else {
+                stopIncomingRingtone()
+                return
+            }
             let ringtone = UserDefaults.standard.string(forKey: "airsim.ringtone") ?? "Hero"
             playCallTone(.incoming(ringtone), looping: true)
+            if currentCallTone != nil, incomingRingtoneTask == nil {
+                incomingRingtoneTask = Task { @MainActor [weak self] in
+                    do { try await clock.sleep(until: window.deadline) } catch { return }
+                    self?.stopIncomingRingtone()
+                }
+            }
         } else if call.direction != "incoming", ["dialing", "alerting"].contains(call.state) {
             playCallTone(.outgoingWaiting, looping: true)
         } else {
             stopCallTone()
         }
+    }
+
+    func stopIncomingRingtone() {
+        guard case .incoming? = currentCallTone else { return }
+        stopCallTone()
     }
 
     /// The caller already verified the nonce-bound response proof. Renewal may
@@ -494,6 +759,7 @@ final class AudioSessionController: ObservableObject {
 
     func stopCallTone(deactivateSession: Bool = true) {
         endedToneTask?.cancel(); endedToneTask = nil
+        incomingRingtoneTask?.cancel(); incomingRingtoneTask = nil
         let hadTone = currentCallTone != nil
         currentCallTone = nil
         // 空闲轮询会反复调用本方法；没有铃声时绝不能停用后台待机正在使用的会话。
@@ -503,6 +769,9 @@ final class AudioSessionController: ObservableObject {
 
     /// 切换当前通话的输出路由；关闭扬声器时交还给系统选择听筒或已连接的蓝牙设备。
     func setSpeakerEnabled(_ enabled: Bool) {
+        cancelCallRouteSelection(clearIntent: true)
+        restoreBluetoothAvailability()
+        systemRouteSelectionActive = false
         requestedSpeakerOverride = enabled
         speakerRoutePending = !SpeakerRoutePolicy.routeMatches(
             requestedSpeaker: enabled,
@@ -519,7 +788,138 @@ final class AudioSessionController: ObservableObject {
         ))
     }
 
+    private func cancelCallRouteSelection(clearIntent: Bool) {
+        callRouteSelectionGeneration &+= 1
+        callRouteSelectionTask?.cancel(); callRouteSelectionTask = nil
+        changingCallRoute = false
+        if clearIntent { requestedCallRouteID = nil }
+    }
+
+    func selectCallRoute(_ id: String) {
+        cancelCallRouteSelection(clearIntent: false)
+        speakerRouteRetryTask?.cancel(); speakerRouteRetryTask = nil
+        speakerRoutePending = false
+        systemRouteSelectionActive = true
+        requestedCallRouteID = id
+        changingCallRoute = true
+        errorMessage = nil
+        let generation = callRouteSelectionGeneration
+        Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "audio-route",
+            phase: "requested", title: "请求切换通话输出", fields: ["target": id == "speaker" || id == "receiver" ? id : "headset"]) }
+        callRouteSelectionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == callRouteSelectionGeneration {
+                    callRouteSelectionTask = nil; changingCallRoute = false
+                }
+            }
+            var lastError: Error?
+            for delay in [0.0, 0.15, 0.35, 0.7, 1.2] {
+                if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+                guard !Task.isCancelled, generation == callRouteSelectionGeneration else { return }
+                do {
+                    if let applyRouteForTesting { try applyRouteForTesting(id) }
+                    else { try await applyCallRoute(id) }
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !Task.isCancelled, generation == callRouteSelectionGeneration else { return }
+                    refreshRouteDescription()
+                    let actual: String?
+                    if let readRouteForTesting { actual = readRouteForTesting() }
+                    else { actual = currentCallRouteID() }
+                    if actual == id {
+                        requestedSpeakerOverride = id == "speaker"
+                        Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "audio-route",
+                            phase: "verified", title: "通话输出切换已确认",
+                            fields: ["target": id == "speaker" || id == "receiver" ? id : "headset"]) }
+                        return
+                    }
+                } catch { lastError = error }
+            }
+            guard generation == callRouteSelectionGeneration else { return }
+            requestedCallRouteID = nil
+            restoreBluetoothAvailability()
+            if !["receiver", "speaker"].contains(id),
+               AVAudioSession.sharedInstance().availableInputs?.contains(where: { $0.uid == id }) != true {
+                knownExternalCallPorts.removeAll { $0.uid == id }
+                refreshRouteDescription()
+            }
+            errorMessage = "音频输出未切换，请重新选择。" + (lastError.map { "（\($0.localizedDescription)）" } ?? "")
+            Task { await AgentVerboseTraceRecorder.shared.recordFailure(category: "audio-route", phase: "unconfirmed",
+                error: lastError ?? NSError(domain: "AirSIM.AudioRoute", code: 2)) }
+        }
+    }
+
+    func waitForCallRouteSelection() async {
+        await callRouteSelectionTask?.value
+    }
+
+    private func applyCallRoute(_ id: String) async throws {
+        let session = AVAudioSession.sharedInstance()
+        guard session.category == .playAndRecord else {
+            throw NSError(domain: "AirSIM.AudioRoute", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "通话音频会话尚未就绪"])
+        }
+        if id == "receiver" {
+            bluetoothSuppressedForReceiver = true
+            if session.categoryOptions.contains(.allowBluetoothHFP) || session.categoryOptions.contains(.allowBluetoothA2DP) {
+                try session.setCategory(.playAndRecord, mode: session.mode,
+                    options: session.categoryOptions.subtracting([.allowBluetoothHFP, .allowBluetoothA2DP]))
+            }
+        } else {
+            restoreBluetoothAvailability()
+            if !session.categoryOptions.contains(.allowBluetoothHFP) {
+                try session.setCategory(.playAndRecord, mode: session.mode,
+                    options: session.categoryOptions.union(.allowBluetoothHFP))
+            }
+        }
+        if id == "speaker" {
+            try session.setPreferredInput(nil)
+            try session.overrideOutputAudioPort(.speaker)
+        } else {
+            guard let port = session.availableInputs?.first(where: {
+                id == "receiver" ? $0.portType == .builtInMic : $0.uid == id
+            }) else { throw NSError(domain: "AirSIM.AudioRoute", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "设备已断开，请重新选择音频输出"]) }
+            // Releasing the override AFTER choosing Bluetooth can restore the previous
+            // input again. Clear it first, then establish the requested input/output pair.
+            try session.overrideOutputAudioPort(.none)
+            try session.setPreferredInput(port)
+        }
+    }
+
+    private func restoreBluetoothAvailability() {
+        guard bluetoothSuppressedForReceiver else { return }
+        bluetoothSuppressedForReceiver = false
+        let session = AVAudioSession.sharedInstance()
+        guard session.category == .playAndRecord else { return }
+        let wasSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        try? session.setCategory(.playAndRecord, mode: session.mode,
+            options: session.categoryOptions.union(.allowBluetoothHFP))
+        if wasSpeaker { try? session.overrideOutputAudioPort(.speaker) }
+    }
+
+    private func currentCallRouteID() -> String? {
+        let session = AVAudioSession.sharedInstance()
+        if session.currentRoute.outputs.contains(where: { $0.portType == .builtInSpeaker }) { return "speaker" }
+        if session.currentRoute.outputs.contains(where: { $0.portType == .builtInReceiver }) { return "receiver" }
+        let external = session.currentRoute.outputs.contains { ![.builtInReceiver, .builtInSpeaker].contains($0.portType) }
+        return external ? session.currentRoute.inputs.first(where: { $0.portType != .builtInMic })?.uid : nil
+    }
+
+    func prepareForSystemRouteSelection() {
+        cancelCallRouteSelection(clearIntent: true)
+        restoreBluetoothAvailability()
+        systemRouteSelectionActive = true
+        speakerRouteRetryTask?.cancel(); speakerRouteRetryTask = nil
+        speakerRoutePending = false
+        // Observing a route change must never itself clear the user's preferred input.
+    }
+
     func resetSpeakerPreferenceForNewCall() {
+        cancelCallRouteSelection(clearIntent: true)
+        restoreBluetoothAvailability()
+        knownExternalCallPorts = []
+        systemRouteSelectionActive = false
         speakerRouteRetryTask?.cancel()
         speakerRouteRetryTask = nil
         requestedSpeakerOverride = false
@@ -530,6 +930,8 @@ final class AudioSessionController: ObservableObject {
     /// CallKit 的 didActivate 与 AVAudioEngine 真正启动之间存在短暂窗口。
     /// 在窗口内切换会得到 OSStatus -50，因此把用户选择保留并做有界重试。
     func retryRequestedSpeakerRoute() {
+        if let id = requestedCallRouteID { selectCallRoute(id); return }
+        guard !systemRouteSelectionActive else { return }
         let requested = requestedSpeakerOverride
         speakerRouteRetryTask?.cancel()
         speakerRouteRetryTask = Task { @MainActor [weak self] in
@@ -587,10 +989,12 @@ final class AudioSessionController: ObservableObject {
         moduleDiagnosticDescription = details.joined(separator: "；")
     }
 
-    func deactivate(preservingSharedSession: Bool = false) {
+    func deactivate(preservingSharedSession: Bool = false, preservingCallPreferences: Bool = false) {
         audioHealthTask?.cancel(); audioHealthTask = nil
+        levelMeter.endSession()
         lastDownlinkUptime = nil; audioHealthWarning = nil
         audioHealthText = "当前没有通话音频会话"
+        bridgeHealth = PCMBridgeHealth(); lastHealthPhase = nil
         earlyPlaybackRecoveryTask?.cancel()
         earlyPlaybackRecoveryTask = nil
         if let engineConfigurationObserver {
@@ -602,8 +1006,14 @@ final class AudioSessionController: ObservableObject {
         sessionOwner = nil
         let callKitManagedSession = sessionActivationManagedByCallKit
         sessionActivationManagedByCallKit = false
-        muted = false
-        requestedSpeakerOverride = false
+        cancelCallRouteSelection(clearIntent: !preservingCallPreferences)
+        if !preservingCallPreferences {
+            restoreBluetoothAvailability()
+            knownExternalCallPorts = []
+            muted = false
+            requestedSpeakerOverride = false
+            systemRouteSelectionActive = false
+        }
         speakerRouteRetryTask?.cancel()
         speakerRouteRetryTask = nil
         speakerRoutePending = false
@@ -628,7 +1038,7 @@ final class AudioSessionController: ObservableObject {
             do {
                 let session = AVAudioSession.sharedInstance()
                 // 清除本次通话的外放覆盖，避免影响下一次通话或其他 App。
-                try session.overrideOutputAudioPort(.none)
+                if !preservingCallPreferences { try session.overrideOutputAudioPort(.none) }
                 if !callKitManagedSession, !CallKitController.shared.audioSessionIsActive {
                     try session.setActive(false, options: .notifyOthersOnDeactivation)
                 }
@@ -652,10 +1062,10 @@ final class AudioSessionController: ObservableObject {
             let routesLikeCall = tone == .outgoingWaiting
             if routesLikeCall, !sessionActivationManagedByCallKit {
                 let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+                try session.setCategory(.playAndRecord, mode: .default, options: preferredCallCategoryOptions)
                 try session.setActive(true)
                 // Play the waiting tone even if the route is not ready yet.
-                try? overrideSpeakerRoute(requestedSpeakerOverride)
+                if !systemRouteSelectionActive { try? overrideSpeakerRoute(requestedSpeakerOverride) }
             }
             try toneOutput.play(SynthesizedCallTone.wavData(for: tone), looping: looping, volume: tone.volume,
                                 configureSession: !sessionActivationManagedByCallKit && !routesLikeCall)
@@ -674,7 +1084,7 @@ final class AudioSessionController: ObservableObject {
         try session.setCategory(
             .playAndRecord,
             mode: .voiceChat,
-            options: [.allowBluetoothHFP]
+            options: preferredCallCategoryOptions
         )
         try session.setPreferredSampleRate(48_000)
         try session.setPreferredIOBufferDuration(0.02)
@@ -683,34 +1093,61 @@ final class AudioSessionController: ObservableObject {
     private func startAudioHealthMonitor() {
         audioHealthTask?.cancel()
         let owner = sessionOwner
-        let started = ProcessInfo.processInfo.systemUptime
+        if playbackRecoveryOwner != owner {
+            playbackRecoveryBudget = PlaybackRecoveryBudget(); playbackRecoveryOwner = owner
+        }
         audioHealthTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, let self, self.active, self.sessionOwner == owner else { return }
                 let now = ProcessInfo.processInfo.systemUptime
-                let gap = now - (self.lastDownlinkUptime ?? started)
-                if gap >= 6 {
-                    self.audioHealthText = self.lastDownlinkUptime == nil ? "音频已连接，但尚未收到下行数据" : "下行音频数据已中断超过 6 秒"
-                    self.audioHealthWarning = self.audioHealthText
-                } else if self.lastDownlinkUptime != nil {
-                    if self.engine?.isRunning == true && self.player?.isPlaying == true {
-                        self.audioHealthText = "正在接收音频数据，播放引擎运行中"; self.audioHealthWarning = nil
-                    } else {
-                        self.audioHealthText = "收到音频数据，但本机播放引擎未运行"; self.audioHealthWarning = self.audioHealthText
+                guard !self.sessionActivationManagedByCallKit || CallKitController.shared.audioSessionIsActive else {
+                    self.audioHealthText = "等待系统重新激活通话音频"; self.audioHealthWarning = nil
+                    continue
+                }
+                let assessment = self.bridgeHealth.assess(now: now,
+                    engineRunning: self.engine?.isRunning == true,
+                    playerPlaying: self.player?.isPlaying == true, receiveOnly: self.receiveOnly)
+                self.audioHealthText = assessment.text; self.audioHealthWarning = assessment.warning
+                if self.lastHealthPhase != assessment.phase {
+                    self.lastHealthPhase = assessment.phase
+                    let fields = ["state": assessment.phase.rawValue,
+                        "reconnects": String(self.bridgeHealth.reconnects),
+                        "playback_recovery_attempts": String(self.bridgeHealth.recoveryAttempts),
+                        "last_failure_phase": self.bridgeHealth.lastFailurePhase ?? "none",
+                        "recovery_ms": String(Int((self.bridgeHealth.lastRecoveryDuration ?? 0) * 1000))]
+                    let recovered = assessment.phase == .flowing && (self.bridgeHealth.recoveryAttempts > 0 || self.bridgeHealth.reconnects > 0)
+                    Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "audio",
+                        phase: recovered ? "bridge_recovery_verified" : "bridge_health", title: "音频桥状态", fields: fields,
+                        isFailure: assessment.phase == .playbackFailed || assessment.phase == .failed) }
+                }
+                if assessment.repairPlayback {
+                    if self.playbackRecoveryBudget.claim(now: now) {
+                        self.recordStartup("local_playback_recovery_attempt")
+                        self.recoverLocalPlayback()
+                    } else if self.playbackRecoveryBudget.attempts >= 3 {
+                        self.audioHealthWarning = "自动播放修复已达上限，尚未恢复，请检查音频输出或重新呼叫"
+                        self.audioHealthText = self.audioHealthWarning!
                     }
-                } else { self.audioHealthText = "音频已连接，等待下行数据" }
+                }
             }
         }
     }
     func recoverLocalPlayback() {
         guard active, let engine, let player else { return }
+        guard !sessionActivationManagedByCallKit || CallKitController.shared.audioSessionIsActive else { return }
+        bridgeHealth.repairing(now: ProcessInfo.processInfo.systemUptime)
         do {
+            // A running player can still have a stalled schedule. Reset only its queue.
+            if engine.isRunning && player.isPlaying {
+                playbackGeneration &+= 1; player.stop(); playbackQueue.reset()
+            }
             if !engine.isRunning { try engine.start() }
             if !player.isPlaying { player.play() }
-            audioHealthText = "已恢复本机播放引擎，等待音频数据"
+            audioHealthText = "已执行播放修复，正在验证新数据与播放回调"
             audioHealthWarning = nil
         } catch {
+            Task { await AgentVerboseTraceRecorder.shared.recordFailure(category: "audio", phase: "playback_recovery", error: error) }
             audioHealthWarning = "本机播放恢复失败：\(error.localizedDescription)"
             audioHealthText = audioHealthWarning ?? "恢复失败"
         }
@@ -718,7 +1155,16 @@ final class AudioSessionController: ObservableObject {
 
     private func handleTransportEvent(_ event: NetworkPCMTransport.Event) {
         switch event {
+        case .networkReady:
+            bridgeHealth.networkReady()
+        case let .reconnecting(attempt, delay):
+            transportReady = false; bridgeHealth.reconnect(now: ProcessInfo.processInfo.systemUptime)
+            audioHealthText = "音频重连中（第\(attempt)次），等待重新握手与数据验证"
+            audioHealthWarning = nil
+            Task { await AgentVerboseTraceRecorder.shared.recordEvent(source: "APP", category: "audio",
+                phase: "transport_recovery", title: "音频连接恢复", fields: ["attempt": String(attempt), "delay_ms": String(Int(delay * 1000))]) }
         case .connected:
+            bridgeHealth.handshake(now: ProcessInfo.processInfo.systemUptime)
             startAudioHealthMonitor()
             recordStartup("pcm_ready")
             transportReady = true
@@ -726,6 +1172,10 @@ final class AudioSessionController: ObservableObject {
             refreshRouteDescription()
             errorMessage = nil
         case let .statistics(statistics):
+            let now = ProcessInfo.processInfo.systemUptime
+            if statistics.uplinkBytes > observedUplinkBytes { bridgeHealth.uplink(now: now) }
+            if statistics.downlinkBytes > observedDownlinkBytes { bridgeHealth.downlink(now: now) }
+            observedUplinkBytes = statistics.uplinkBytes; observedDownlinkBytes = statistics.downlinkBytes
             let fields = ["engine_running": String(engine?.isRunning == true),
                 "player_playing": String(player?.isPlaying == true),
                 "uplink_bytes": String(statistics.uplinkBytes), "uplink_peak": String(statistics.uplinkPeak),
@@ -750,6 +1200,8 @@ final class AudioSessionController: ObservableObject {
             // 连接状态单独显示，避免把“尚未握手”误读成模块已经拒绝握手。
             diagnosticDescription = "\(DeviceContext.displayName) PCM：\(message)"
         case let .failed(message):
+            bridgeHealth.failed()
+            Task { await AgentVerboseTraceRecorder.shared.recordFailure(category: "audio", phase: "transport_recovery_exhausted", error: NSError(domain: "AirSIM.PCM", code: 1, userInfo: [NSLocalizedDescriptionKey: message])) }
             recordStartup("failed")
             transportReady = false
             routeDescription = "网络语音未连接"
@@ -766,6 +1218,46 @@ final class AudioSessionController: ObservableObject {
         let output = session.currentRoute.outputs.map { "\($0.portName)[\($0.portType.rawValue)]" }.joined(separator: ", ")
         let inputs = session.availableInputs?.map(\.portName).joined(separator: ", ") ?? "无"
         let routedToSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        let freshExternal = (session.availableInputs ?? []).filter { $0.portType != .builtInMic }
+        if session.categoryOptions.contains(.allowBluetoothHFP) {
+            if !freshExternal.isEmpty || !changingCallRoute { knownExternalCallPorts = freshExternal }
+        } else {
+            knownExternalCallPorts = freshExternal + knownExternalCallPorts.filter { port in
+                port.portType == .bluetoothHFP && !freshExternal.contains { $0.uid == port.uid }
+            }
+        }
+        let externalInputs = !knownExternalCallPorts.isEmpty
+        let externalOutputs = session.currentRoute.outputs.contains { ![.builtInReceiver, .builtInSpeaker].contains($0.portType) }
+        hasExternalCallRoutes = externalInputs || externalOutputs
+        if let port = session.currentRoute.outputs.first {
+            switch port.portType {
+            case .builtInSpeaker: callOutputName = "扬声器"
+            case .builtInReceiver: callOutputName = "iPhone"
+            default: callOutputName = port.portName
+            }
+        } else { callOutputName = "iPhone" }
+        if let port = session.currentRoute.outputs.first {
+            if port.portType == .builtInReceiver { callOutputIcon = "iphone" }
+            else if port.portType == .builtInSpeaker { callOutputIcon = "speaker.wave.2.fill" }
+            else { callOutputIcon = CallHeadphoneIcon.symbol(for: port.portName) }
+        } else { callOutputIcon = "iphone" }
+        let external = knownExternalCallPorts
+        let outputIDs = Set(session.currentRoute.outputs.map(\.uid))
+        let inputIDs = Set(session.currentRoute.inputs.map(\.uid))
+        let selectedExternalID = external.first(where: { outputIDs.contains($0.uid) })?.uid
+            ?? (externalOutputs ? external.first(where: { inputIDs.contains($0.uid) })?.uid : nil)
+            ?? (externalOutputs ? external.first(where: { port in
+                external.filter { $0.portName == port.portName }.count == 1 &&
+                session.currentRoute.outputs.contains { $0.portName == port.portName }
+            })?.uid : nil)
+        callRouteChoices = [
+            .init(id: "speaker", title: "扬声器", icon: "speaker.wave.2.fill", selected: routedToSpeaker),
+            .init(id: "receiver", title: "iPhone", icon: "iphone", selected: !externalOutputs && !routedToSpeaker)
+        ] + external.map { port in
+            .init(id: port.uid, title: port.portName,
+                  icon: CallHeadphoneIcon.symbol(for: port.portName),
+                  selected: externalOutputs && port.uid == selectedExternalID && !routedToSpeaker)
+        }
         if speakerEnabled != routedToSpeaker {
             speakerEnabled = routedToSpeaker
         }
@@ -780,7 +1272,29 @@ final class AudioSessionController: ObservableObject {
 
     private func handleRouteChange(_ notification: Notification) {
         refreshRouteDescription()
+        let reason = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? NSNumber)
+            .flatMap { AVAudioSession.RouteChangeReason(rawValue: $0.uintValue) }
+        // Own route requests can switch Bluetooth profiles and emit device-change
+        // events. Do not turn those notifications into a new selection or clear input.
+        if changingCallRoute || (!active && requestedCallRouteID != nil) { return }
+        if bluetoothSuppressedForReceiver, requestedCallRouteID == "receiver",
+           currentCallRouteID() == "receiver" { return }
+        if reason == .newDeviceAvailable || reason == .oldDeviceUnavailable {
+            prepareForSystemRouteSelection()
+        } else if reason == .override || reason == .routeConfigurationChange,
+                  requestedCallRouteID != nil, currentCallRouteID() != requestedCallRouteID {
+            // A later choice in CallKit / Control Center takes precedence.
+            prepareForSystemRouteSelection()
+        }
         guard speakerRouteRetryTask == nil else { return }
+        if reason == .override && speakerEnabled != requestedSpeakerOverride {
+            systemRouteSelectionActive = true
+        }
+        if systemRouteSelectionActive {
+            requestedSpeakerOverride = speakerEnabled
+            speakerRoutePending = false
+            return
+        }
         requestedSpeakerOverride = SpeakerRoutePolicy.requestedSpeakerAfterSystemRouteChange(
             requestedSpeaker: requestedSpeakerOverride,
             observedRouteIsSpeaker: speakerEnabled
@@ -789,7 +1303,13 @@ final class AudioSessionController: ObservableObject {
     }
 
     private func schedulePlayback(_ pcm: Data) {
-        if !pcm.isEmpty { lastDownlinkUptime = ProcessInfo.processInfo.systemUptime }
+        if let owner = sessionOwner, active {
+            levelMeter.record(pcm, direction: .downlink, owner: owner)
+        }
+        if !pcm.isEmpty {
+            lastDownlinkUptime = ProcessInfo.processInfo.systemUptime
+            bridgeHealth.downlink(now: ProcessInfo.processInfo.systemUptime)
+        }
         recoverEarlyPlaybackIfNeeded()
         if receiveOnly, engine?.isRunning == false { return }
         guard active, let player, !pcm.isEmpty else { return }
@@ -833,6 +1353,7 @@ final class AudioSessionController: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, self.playbackGeneration == generation else { return }
                 self.playbackQueue.complete(frames: frames)
+                self.bridgeHealth.rendered(now: ProcessInfo.processInfo.systemUptime)
             }
         }
         if !player.isPlaying { player.play() }
@@ -1070,6 +1591,8 @@ private enum SynthesizedCallTone {
 final class NetworkPCMTransport: @unchecked Sendable {
     enum Event: Sendable {
         case connected
+        case networkReady
+        case reconnecting(attempt: Int, delay: TimeInterval)
         case statistics(NetworkPCMStatistics)
         case status(String)
         case failed(String)
@@ -1087,6 +1610,7 @@ final class NetworkPCMTransport: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.jieden.airsim.network-pcm")
     private let onPCM: @Sendable (Data) -> Void
     private let onEvent: @Sendable (Event) -> Void
+    private let uptime: @Sendable () -> UInt64
     private var connection: NWConnection?
     private var generation = 0
     private var stopped = false
@@ -1100,6 +1624,10 @@ final class NetworkPCMTransport: @unchecked Sendable {
     private var nextStatisticsEmission: UInt64 = 0
     private var fallbackAttempted = false
     private var lastFailureMessage = ""
+    private var reconnectBudget = PCMReconnectBudget()
+    private var connectedAt: UInt64?
+    private var connectionUpBaseline: UInt64 = 0
+    private var connectionDownBaseline: UInt64 = 0
 
     private static let acknowledgement = Data("AIRSIMREADY".utf8)
     // 模块首次加载语音驱动、ACDB 校准和 D4 route session 最坏需要约 35 秒。
@@ -1114,6 +1642,7 @@ final class NetworkPCMTransport: @unchecked Sendable {
         usesTLS: Bool,
         isOverlayHost: Bool,
         receiveOnly: Bool = false,
+        uptime: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
         onPCM: @escaping @Sendable (Data) -> Void,
         onEvent: @escaping @Sendable (Event) -> Void
     ) {
@@ -1125,6 +1654,7 @@ final class NetworkPCMTransport: @unchecked Sendable {
         self.usesTLS = usesTLS
         self.isOverlayHost = isOverlayHost
         self.receiveOnly = receiveOnly
+        self.uptime = uptime
         self.onPCM = onPCM
         self.onEvent = onEvent
     }
@@ -1138,8 +1668,9 @@ final class NetworkPCMTransport: @unchecked Sendable {
             downlinkPeak = 0
             nextStatisticsEmission = 0
             fallbackAttempted = false
+            reconnectBudget.reset()
             lastFailureMessage = ""
-            deadline = DispatchTime.now().uptimeNanoseconds
+            deadline = uptime()
                 + Self.coldStartRetryWindowNanoseconds
             startAttempt()
         }
@@ -1193,6 +1724,9 @@ final class NetworkPCMTransport: @unchecked Sendable {
         let connection = NWConnection(host: host, port: port, using: parameters)
         self.connection = connection
         readyForPCM = false
+        connectedAt = nil
+        connectionUpBaseline = uplinkBytes; connectionDownBaseline = downlinkBytes
+        pcmAccumulator.reset()
         onEvent(.status(usesTLS ? "正在通过自建 TLS 网关连接音频" : isOverlayHost ? "正在通过 VPN 直连 PCM" : (requiresWiFi ? "正在通过 VoWLAN 连接 PCM" : "正在回退到普通 TCP 连接 PCM")))
         connection.pathUpdateHandler = { [weak self, weak connection] path in
             guard let self, connection != nil else { return }
@@ -1209,6 +1743,7 @@ final class NetworkPCMTransport: @unchecked Sendable {
                 guard !self.stopped, self.generation == attempt else { return }
                 switch state {
                 case .ready:
+                    self.onEvent(.networkReady)
                     self.sendHandshake(connection, attempt: attempt)
                 case let .waiting(error):
                     // NWConnection 在模块 helper 冷启动时会短暂报告 POSIX 61；
@@ -1272,9 +1807,7 @@ final class NetworkPCMTransport: @unchecked Sendable {
                 }
                 data.removeFirst(Self.acknowledgement.count)
                 self.readyForPCM = true
-                // 每次成功握手都重新开启恢复窗口，避免长通话在首次 45 秒窗口后断线即永久静音。
-                self.deadline = DispatchTime.now().uptimeNanoseconds
-                    + Self.coldStartRetryWindowNanoseconds
+                self.connectedAt = self.uptime()
                 self.onEvent(.connected)
                 self.emitStatisticsIfNeeded(force: true)
                 if !data.isEmpty { self.consumeDownlink(data) }
@@ -1315,7 +1848,7 @@ final class NetworkPCMTransport: @unchecked Sendable {
     }
 
     private func emitStatisticsIfNeeded(force: Bool = false) {
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = uptime()
         guard force || now >= nextStatisticsEmission else { return }
         nextStatisticsEmission = now + 1_000_000_000
         onEvent(.statistics(NetworkPCMStatistics(
@@ -1343,26 +1876,34 @@ final class NetworkPCMTransport: @unchecked Sendable {
 
     private func retryOrFail(_ message: String, attempt: Int, allowFallback: Bool = false) {
         guard generation == attempt else { return }
+        guard !stopped else { return }
+        let now = uptime()
+        // A healthy established call gets a new recovery window even after hours.
+        // ACK-only flapping cannot reset the retry budget.
+        if let connectedAt, now >= connectedAt + 5_000_000_000,
+           downlinkBytes > connectionDownBaseline,
+           receiveOnly || uplinkBytes > connectionUpBaseline {
+            deadline = now + Self.coldStartRetryWindowNanoseconds
+            reconnectBudget.reset()
+        }
         lastFailureMessage = message
         readyForPCM = false
-        connection?.cancel()
-        connection = nil
-        if allowFallback && !fallbackAttempted {
-            // 本地 Wi-Fi 路径失败时放宽接口筛选，但不改变目标地址；
-            // 远程/overlay 地址已经走系统路由，不需要这一步。
-            fallbackAttempted = true
-            onEvent(.status("Wi-Fi 路径连接失败，正在重试 PCM"))
-            queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.startAttempt() }
+        generation += 1 // invalidate old receive/send/timeout callbacks immediately
+        let scheduledGeneration = generation
+        connection?.cancel(); connection = nil; pcmAccumulator.reset()
+        if allowFallback { fallbackAttempted = true }
+        guard now < deadline, let delay = reconnectBudget.nextDelay() else {
+            onEvent(.failed("音频桥重连未恢复，请检查安卓连接与音频桥诊断"))
             return
         }
-        if !stopped, DispatchTime.now().uptimeNanoseconds < deadline {
-            // 连接拒绝通常只表示模块语音桥还在启动；保留重试，但不显示 NWError。
-            onEvent(.status(transientStatus(for: message)))
-            queue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                self?.startAttempt()
+        onEvent(.reconnecting(attempt: reconnectBudget.attempts, delay: delay))
+        onEvent(.status(transientStatus(for: message)))
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, !self.stopped, self.generation == scheduledGeneration else { return }
+            guard self.uptime() < self.deadline else {
+                self.onEvent(.failed("音频桥重连超时，请检查安卓连接与音频桥诊断")); return
             }
-        } else if !stopped {
-            onEvent(.failed("等待 Android 语音桥就绪超时，请保持 Android 在线后重试通话"))
+            self.startAttempt()
         }
     }
 
@@ -1487,5 +2028,91 @@ enum VoiceAudioError: LocalizedError {
         case .invalidPlaybackFormat: return "无法创建 8 kHz 通话播放格式"
         case .tonePlaybackFailed: return "系统拒绝启动提示音播放器"
         }
+    }
+}
+
+/// Measures existing PCM buffers. The view samples levels without publishing
+/// per-frame changes through AppModel or retaining any speech samples.
+final class CallAudioLevelMeter: @unchecked Sendable {
+    enum Direction { case uplink, downlink }
+    struct Snapshot {
+        let uplink: Double
+        let downlink: Double
+        let uplinkMuted: Bool
+    }
+    private struct Reading {
+        var amplitude: Double = 0
+        var uptime: TimeInterval = 0
+    }
+    private let lock = NSLock()
+    private var owner: UUID?
+    private var uplink = Reading()
+    private var downlink = Reading()
+    private var uplinkMuted = false
+
+    func beginSession(_ owner: UUID, uplinkMuted: Bool) {
+        lock.withLock {
+            self.owner = owner
+            self.uplinkMuted = uplinkMuted
+            uplink = Reading()
+            downlink = Reading()
+        }
+    }
+
+    func endSession() {
+        lock.withLock {
+            owner = nil
+            uplink = Reading()
+            downlink = Reading()
+            uplinkMuted = false
+        }
+    }
+
+    func setUplinkMuted(_ muted: Bool) {
+        lock.withLock {
+            uplinkMuted = muted
+            if muted { uplink = Reading() }
+        }
+    }
+
+    func record(_ pcm: Data, direction: Direction, owner: UUID,
+                uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        let count = pcm.count / 2
+        guard count > 0 else { return }
+        let energy = pcm.withUnsafeBytes { bytes -> Double in
+            var sum = 0.0
+            for index in 0..<count {
+                let bits = UInt16(bytes[index * 2]) | UInt16(bytes[index * 2 + 1]) << 8
+                let sample = Double(Int16(bitPattern: bits)) / 32_768
+                sum += sample * sample
+            }
+            return sqrt(sum / Double(count))
+        }
+        lock.withLock {
+            guard self.owner == owner else { return }
+            if direction == .uplink && uplinkMuted { return }
+            let previous = direction == .uplink ? uplink : downlink
+            let elapsed = max(0, uptime - previous.uptime)
+            let reading = Reading(amplitude: max(energy, previous.amplitude * exp(-elapsed / 0.12)),
+                                  uptime: uptime)
+            if direction == .uplink { uplink = reading }
+            else { downlink = reading }
+        }
+    }
+
+    func snapshot(uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Snapshot {
+        lock.withLock {
+            guard owner != nil else { return .init(uplink: 0, downlink: 0, uplinkMuted: false) }
+            return .init(uplink: uplinkMuted ? 0 : level(uplink, at: uptime),
+                         downlink: level(downlink, at: uptime), uplinkMuted: uplinkMuted)
+        }
+    }
+
+    private func level(_ reading: Reading, at uptime: TimeInterval) -> Double {
+        let age = max(0, uptime - reading.uptime)
+        guard age < 0.45, reading.amplitude > 0 else { return 0 }
+        let amplitude = reading.amplitude * exp(-age / 0.12)
+        let decibels = 20 * log10(amplitude)
+        return max(0, min(1, (decibels + 60) / 60))
     }
 }

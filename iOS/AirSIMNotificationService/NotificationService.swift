@@ -7,7 +7,7 @@ import UserNotifications
 final class NotificationService: UNNotificationServiceExtension {
     override func didReceive(_ request: UNNotificationRequest,
                              withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void) {
-        AirSIMHealthStore.received()
+        AirSIMHealthStore.received(userInfo: request.content.userInfo)
         guard let content = request.content.mutableCopy() as? UNMutableNotificationContent else {
             contentHandler(request.content)
             return
@@ -34,6 +34,7 @@ final class NotificationService: UNNotificationServiceExtension {
             }
             return
         }
+        if AirSIMHealthStore.shouldSilenceSMSNotification(content.userInfo) { content.sound = nil }
         let outcome = E2ESMSPush.open(request.content.userInfo, store: KeychainE2EKeyStore.shared)
         if let notification = E2ESMSPush.notification(for: outcome) {
             content.title = notification.title

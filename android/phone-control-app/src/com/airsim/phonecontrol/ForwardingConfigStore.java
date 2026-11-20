@@ -12,6 +12,11 @@ final class ForwardingConfigStore {
 
     private ForwardingConfigStore() {}
 
+    static synchronized boolean clear(Context context) {
+        return context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+                .edit().remove(CONFIG).commit();
+    }
+
     static synchronized void saveFromRegistration(Context context, JSONObject registration) {
         if (registration == null || !registration.has("notification_forwarding")) return;
         try {

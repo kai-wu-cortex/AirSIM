@@ -15,6 +15,7 @@ public class Context {
     public Object getContentResolver() { return null; }
     public String getPackageName() { return "com.airsim.test"; }
     public ComponentName startService(Intent intent) { return null; }
+    public boolean stopService(Intent intent) { return false; }
     public ComponentName startForegroundService(Intent intent) { return null; }
     public <T> T getSystemService(Class<T> type) { return type.cast(services.get(type)); }
     public <T> void setSystemService(Class<T> type, T service) { services.put(type, service); }

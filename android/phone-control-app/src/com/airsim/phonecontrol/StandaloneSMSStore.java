@@ -15,6 +15,8 @@ final class StandaloneSMSStore {
     private static final String RECORDS = "records";
     private static final String REVISION = "revision";
     private static final String RECENT_IDS = "recent_delivery_ids";
+    private static final String WATCH_HISTORY = "watch_history";
+    private static final int WATCH_LIMIT = 60;
     private static final int MAX_RECORDS = 512;
     private static final Object LOCK = new Object();
     private final SharedPreferences preferences;
@@ -39,7 +41,7 @@ final class StandaloneSMSStore {
                 recent.remember(records.getJSONObject(0).optString("delivery_id"));
                 records.remove(0);
             }
-            persist(records, recent, true);
+            persist(records, recent, true, appendWatchMessage(publicMessage(record)));
             return true;
         }
     }
@@ -54,6 +56,47 @@ final class StandaloneSMSStore {
             }
             return visible;
         }
+    }
+
+    JSONArray watchMessages() throws Exception {
+        synchronized (LOCK) {
+            var messages = new java.util.LinkedHashMap<String, JSONObject>();
+            JSONArray existing = records();
+            for (int i = 0; i < existing.length(); i++) {
+                JSONObject row = publicMessage(existing.getJSONObject(i));
+                messages.put(row.getString("delivery_id"), row);
+            }
+            JSONArray history = watchHistory();
+            for (int i = 0; i < history.length(); i++) {
+                JSONObject row = history.getJSONObject(i);
+                messages.put(row.getString("delivery_id"), row);
+            }
+            var sorted = new java.util.ArrayList<>(messages.values());
+            sorted.sort(java.util.Comparator.comparing((JSONObject row) -> row.optString("timestamp")).reversed());
+            return new JSONArray(sorted.subList(0, Math.min(WATCH_LIMIT, sorted.size())));
+        }
+    }
+
+    void rememberWatchSent(String number, String body, String sim, String operationID) throws Exception {
+        synchronized (LOCK) {
+            JSONObject row = new JSONObject().put("delivery_id", operationID.isEmpty() ? java.util.UUID.randomUUID().toString() : operationID)
+                    .put("sender", number).put("content", body).put("sim_slot", sim)
+                    .put("timestamp", java.time.Instant.now().toString()).put("direction", "outgoing");
+            if (!preferences.edit().putString(WATCH_HISTORY, appendWatchMessage(row).toString()).commit()) {
+                throw new IllegalStateException("无法保存手表短信记录");
+            }
+        }
+    }
+
+    private JSONArray watchHistory() throws Exception {
+        return new JSONArray(preferences.getString(WATCH_HISTORY, "[]"));
+    }
+
+    private JSONArray appendWatchMessage(JSONObject row) throws Exception {
+        JSONArray history = watchHistory();
+        history.put(row);
+        while (history.length() > WATCH_LIMIT) history.remove(0);
+        return history;
     }
 
     JSONArray cloudPending() throws Exception {
@@ -117,7 +160,7 @@ final class StandaloneSMSStore {
                     || (!record.optBoolean("cloud_sent") && !record.optBoolean("cloud_rejected"))) updated.put(record);
             else recent.remember(record.optString("delivery_id"));
         }
-        if (changed) persist(updated, recent, "local_ack".equals(flag));
+        if (changed) persist(updated, recent, "local_ack".equals(flag), null);
     }
 
     private JSONArray records() throws Exception {
@@ -136,15 +179,17 @@ final class StandaloneSMSStore {
                 .put("sender", record.optString("sender"))
                 .put("content", record.optString("content"))
                 .put("sim_slot", record.optString("sim_slot"))
+                .put("android_received_at", record.optString("android_received_at"))
                 .put("timestamp", record.optString("timestamp"));
     }
 
-    private void persist(JSONArray records, SMSRecentDeliveryIDs recent, boolean advanceRevision) {
+    private void persist(JSONArray records, SMSRecentDeliveryIDs recent, boolean advanceRevision, JSONArray watchHistory) {
         JSONArray tombstones = new JSONArray();
         for (String id : recent.snapshot()) tombstones.put(id);
         SharedPreferences.Editor editor = preferences.edit().putString(RECORDS, records.toString())
                 .putString(RECENT_IDS, tombstones.toString());
         if (advanceRevision) editor.putLong(REVISION, revision() + 1);
+        if (watchHistory != null) editor.putString(WATCH_HISTORY, watchHistory.toString());
         if (!editor.commit()) throw new IllegalStateException("无法保存接收短信");
     }
 }

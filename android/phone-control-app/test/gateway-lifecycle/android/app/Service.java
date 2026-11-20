@@ -11,6 +11,8 @@ public class Service extends android.content.Context {
         if (!receivers.remove(receiver)) throw new IllegalArgumentException("receiver not registered");
     }
     public static final int START_STICKY = 1;
+    public static final int START_NOT_STICKY = 2;
+    public void stopSelf() {}
     public void onCreate() {}
     public void onDestroy() {}
     public int onStartCommand(android.content.Intent intent, int flags, int id) { return 0; }

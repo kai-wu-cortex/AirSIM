@@ -54,9 +54,11 @@ final class OtherDeviceCallReminderController: ObservableObject {
             try? await center.add(UNNotificationRequest(identifier: reminder.id, content: content, trigger: nil))
         }
         self.remove = remove ?? { id in
-            let center = UNUserNotificationCenter.current()
-            center.removePendingNotificationRequests(withIdentifiers: [id])
-            center.removeDeliveredNotifications(withIdentifiers: [id])
+            Task.detached {
+                let center = UNUserNotificationCenter.current()
+                center.removePendingNotificationRequests(withIdentifiers: [id])
+                center.removeDeliveredNotifications(withIdentifiers: [id])
+            }
         }
     }
     func consume(_ effects: [DeviceCallEffect]) {

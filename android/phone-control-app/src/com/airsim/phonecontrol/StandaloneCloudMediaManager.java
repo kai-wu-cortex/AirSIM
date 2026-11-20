@@ -34,6 +34,7 @@ final class StandaloneCloudMediaManager implements Closeable {
     }
 
     private final android.content.Context context;
+    private final boolean pushOnly;
     private final ExecutorService sessions = Executors.newCachedThreadPool();
     private final Object lock = new Object();
     private CloudSession active;
@@ -46,13 +47,14 @@ final class StandaloneCloudMediaManager implements Closeable {
 
     private StandaloneCloudMediaManager(android.content.Context context) {
         this.context = context.getApplicationContext();
+        pushOnly = RuntimeMode.vowlanPushOnly(context);
     }
 
     void startOutgoing(JSONObject call, CallRepository.OutgoingCallObservation observation) {
         var generation = RelayEgressGate.shared.generation();
         boolean started = false;
         try {
-            if (call == null || !generation.isCurrent()) return;
+            if (pushOnly || call == null || !generation.isCurrent()) return;
             Descriptor descriptor = Descriptor.from(call);
             descriptor.outgoingObservation = observation;
             bindOutgoing(descriptor);
@@ -120,17 +122,23 @@ final class StandaloneCloudMediaManager implements Closeable {
                     + " call_uuid=" + DebugRedactor.safeIdentifier(descriptor.callUUID) + " retry=" + retry);
             JSONObject payload = identity(registration).put("event", "incoming_call")
                     .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
-                    .put("generation", descriptor.generation).put("call_secret", descriptor.secret)
+                    .put("generation", descriptor.generation)
                     .put("number", event.optString("number", "")).put("caller_name", "")
                     .put("slot_index", event.optInt("slot_index", -1))
+                    .put("android_received_at", event.optString("android_received_at"))
+                    .put("android_uploaded_at", Instant.now().toString())
                     .put("issued_at", Instant.now().toString())
-                    .put("expires_at", Instant.now().plusSeconds(90).toString())
-                    .put("media_transport", "legacy_pcm");
+                    .put("expires_at", Instant.now().plusSeconds(90).toString());
+            if (!pushOnly) {
+                payload.put("call_secret", descriptor.secret).put("media_transport", "legacy_pcm");
+            }
             // Keep ringing latency bounded; a failed call event stays queued for
             // the priority retry path instead of blocking the agent loop for 15s.
             postRelay(registration, relay, "/v2/events/call", payload, 5_000);
             // A call can end while HTTP is outstanding; never start its media afterward.
-            if (CallRepository.state(androidID) == android.telecom.Call.STATE_RINGING) start(descriptor, generation);
+            if (!pushOnly && CallRepository.state(androidID) == android.telecom.Call.STATE_RINGING) {
+                start(descriptor, generation);
+            }
         } else if (descriptor != null && descriptor.androidID.isEmpty()) {
             bindOutgoing(descriptor);
             synchronized (lock) {
@@ -154,33 +162,33 @@ final class StandaloneCloudMediaManager implements Closeable {
         }
         if (descriptor != null) {
             String phase = phase(state);
-            if (!phase.isEmpty()) {
+            // The v2 state endpoint requires a media record. Push-only calls
+            // report answered/ended through the scoped notification endpoint.
+            if (!pushOnly && !phase.isEmpty()) {
                 JSONObject lifecycle = identity(registration).put("event", "call_state")
                         .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
                         .put("generation", descriptor.generation).put("phase", phase)
                         .put("source", "agent").put("timestamp", Instant.now().toString())
                         .put("trace_id", "standalone-" + descriptor.callUUID + "-" + phase);
                 postCallState(registration, relay, lifecycle);
-                if ("active".equals(phase) || "ended".equals(phase)) {
-                    JSONObject owner = identity(registration).put("event", "call_owner")
-                            .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
-                            .put("generation", descriptor.generation).put("owner", "android")
-                            .put("phase", phase)
-                            .put("direction", direction)
-                            .put("number", event.optString("number", ""))
-                            .put("slot_index", event.optInt("slot_index", -1))
-                            .put("timestamp", Instant.now().toString());
-                    // Only an explicit native terminal fact can authorize a missed alert.
-                    if ("ended".equals(phase) && event.has("missed"))
-                        owner.put("missed", event.optBoolean("missed", false));
-                    // Best effort: an older Relay may not know owner=android yet, and
-                    // this notification must never block the authoritative call path.
-                    try {
-                        relay.postJSON(registration, "/v1/events/call-owner", owner, 12_000);
-                    } catch (Exception error) {
-                        BridgeLog.info("standalone_call_owner_push_failed type="
-                                + error.getClass().getSimpleName());
-                    }
+            }
+            if ("active".equals(phase) || "ended".equals(phase)) {
+                JSONObject owner = identity(registration).put("event", "call_owner")
+                        .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
+                        .put("generation", descriptor.generation).put("owner", "android")
+                        .put("phase", phase).put("direction", direction)
+                        .put("number", event.optString("number", ""))
+                        .put("slot_index", event.optInt("slot_index", -1))
+                        .put("timestamp", Instant.now().toString());
+                // Only an explicit native terminal fact can authorize a missed alert.
+                if ("ended".equals(phase) && event.has("missed"))
+                    owner.put("missed", event.optBoolean("missed", false));
+                try {
+                    relay.postJSON(registration, "/v1/events/call-owner", owner, 12_000);
+                } catch (Exception error) {
+                    if (pushOnly) throw error;
+                    BridgeLog.info("standalone_call_owner_push_failed type="
+                            + error.getClass().getSimpleName());
                 }
             }
             if ("ended".equals(state)) closeActive(descriptor);
@@ -400,7 +408,8 @@ final class StandaloneCloudMediaManager implements Closeable {
             while (running && webSocket == owner && mediaStarted && System.currentTimeMillis() < deadline) {
                 Socket connection = new Socket();
                 try {
-                    connection.connect(new InetSocketAddress("127.0.0.1", 7580), 2_000);
+                    connection.connect(new InetSocketAddress("127.0.0.1",
+                            PhoneAudioBridgeProcessPolicy.standalonePort(context.getPackageName())), 2_000);
                     connection.setTcpNoDelay(true);
                     connection.setSoTimeout(5_000);
                     OutputStream output = connection.getOutputStream();

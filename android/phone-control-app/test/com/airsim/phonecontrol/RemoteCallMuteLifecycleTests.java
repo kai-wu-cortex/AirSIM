@@ -6,6 +6,8 @@ import android.telecom.Call;
 public final class RemoteCallMuteLifecycleTests {
     private static int passed;
     public static void main(String[] args) throws Exception {
+        controlOwnershipSilencesBeforeMedia();
+        unrelatedControlCannotSilenceOrdinaryCall();
         earlyMediaScopesAndHandoff();
         dialingWaitsForAnswerBeforeReducingSamsungOutput();
         ordinaryCallsStayAudible();
@@ -28,6 +30,40 @@ public final class RemoteCallMuteLifecycleTests {
         vobleKeepsDownlinkCaptureAlive();
         transportSwitchRestoresPreviousPolicySnapshot();
         System.out.println("RemoteCallMuteLifecycleTests passed: " + passed + " scenarios");
+    }
+
+    private static void controlOwnershipSilencesBeforeMedia() {
+        try (Fixture f = new Fixture(Call.STATE_DIALING)) {
+            RemoteAudioSessionRegistry.reserveVoWLANCall(f.id);
+            check(f.audio.muted && f.audio.microphoneMuted, "authenticated remote dial must isolate output and microphone before PCM exists");
+            Object owner = new Object();
+            RemoteAudioSessionRegistry.setEarlyMedia(owner, f.id, true);
+            RemoteAudioSessionRegistry.setEarlyMedia(owner, f.id, false);
+            check(f.audio.muted && f.audio.microphoneMuted, "silent or lost early capture must not restore Android output or microphone");
+            f.call.setStateForTest(Call.STATE_ACTIVE);
+            check(f.audio.muted && f.audio.microphoneMuted, "answer transition must preserve isolation before duplex handshake");
+            f.call.setStateForTest(Call.STATE_DISCONNECTING);
+            check(f.audio.muted, "disconnecting must preserve isolation");
+            f.call.setStateForTest(Call.STATE_DISCONNECTED);
+            check(f.audio.muted, "native disconnected callback must preserve isolation until removal");
+            f.removeNative();
+            check(!f.audio.muted && !f.audio.microphoneMuted && f.audio.volume == 6, "native removal must restore original output and microphone");
+        }
+        passed++;
+    }
+
+    private static void unrelatedControlCannotSilenceOrdinaryCall() {
+        try (Fixture f = new Fixture(Call.STATE_DIALING)) {
+            RemoteAudioSessionRegistry.reserveVoWLANCall("another-call");
+            check(!f.audio.muted, "unrelated remote control must not mute a local call");
+        }
+        try (Fixture f = new Fixture(Call.STATE_RINGING)) {
+            RemoteAudioSessionRegistry.reserveVoWLANCall(f.id);
+            check(f.audio.muted, "remote answer must isolate output before Telecom becomes active");
+            f.call.setStateForTest(Call.STATE_ACTIVE);
+            check(f.audio.muted, "incoming call handoff must preserve isolation");
+        }
+        passed++;
     }
 
     private static void earlyMediaScopesAndHandoff() {
@@ -248,7 +284,7 @@ public final class RemoteCallMuteLifecycleTests {
                 lease = DirectCallOwnership.begin("fixture-host");
                 DirectCallOwnership.record("fixture-host", f.id, lease);
                 RemoteAudioSessionRegistry.setVoWLAN(true);
-                check(!f.audio.muted, "VoWLAN control without PCM readiness must not mute");
+                check(f.audio.muted, "authenticated VoWLAN control must isolate output before PCM readiness");
                 DirectCallOwnership.pcmReady(lease);
                 AirSIMInCallService.refreshAudioPolicy();
             }

@@ -14,6 +14,12 @@ public final class WireJson {
 
     public static String callEvent(String eventId, String callId, String direction, String state,
                                    String number, String mode, int slotIndex, boolean missed) {
+        return callEvent(eventId, callId, direction, state, number, mode, slotIndex, missed, 0, -1, -1, "");
+    }
+
+    public static String callEvent(String eventId, String callId, String direction, String state,
+                                   String number, String mode, int slotIndex, boolean missed,
+                                   long connectedAt, long ringingDuration, long connectedDuration, String disconnectReason) {
         return "{" +
                 field("event_id", eventId) + "," +
                 field("call_id", callId) + "," +
@@ -23,7 +29,11 @@ public final class WireJson {
                 field("mode", mode) + "," +
                 "\"slot_index\":" + slotIndex + "," +
                 "\"slot_id\":" + slotIndex + "," +
-                "\"missed\":" + missed + "}";
+                "\"missed\":" + missed +
+                (connectedAt > 0 ? ",\"telecom_connected_at_ms\":" + connectedAt : "") +
+                (ringingDuration >= 0 ? ",\"ringing_duration_ms\":" + ringingDuration : "") +
+                (connectedDuration >= 0 ? ",\"connected_duration_ms\":" + connectedDuration : "") +
+                (disconnectReason.isEmpty() ? "" : "," + field("disconnect_reason", disconnectReason)) + "}";
     }
 
     public static String commandResult(String id, boolean success, String error) {

@@ -23,5 +23,7 @@ test "$(shasum -a 256 "$JSON_JAR" | awk '{print $1}')" = 3cf6cd6892e32e2b4c1c39e
   "$ROOT"/src/com/airsim/phonecontrol/CloudCallRetryPolicy.java \
   "$ROOT"/test/com/airsim/phonecontrol/CloudCallManagerTests.java \
   "$ROOT"/test/com/airsim/phonecontrol/CloudOutgoingObservationTests.java
+# Use the Android build's variant policy before the generic JVM fixture.
+cp "$BUILT/com/airsim/phonecontrol/RuntimeMode.class" "$OUT/com/airsim/phonecontrol/"
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$JSON_JAR:$BASE:$BUILT:$ANDROID_JAR" com.airsim.phonecontrol.CloudCallManagerTests
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$JSON_JAR:$BASE:$BUILT:$ANDROID_JAR" com.airsim.phonecontrol.CloudOutgoingObservationTests

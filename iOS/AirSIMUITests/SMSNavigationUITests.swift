@@ -1,6 +1,84 @@
 import XCTest
 
 final class SMSNavigationUITests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        XCUIDevice.shared.orientation = .portrait
+    }
+
+    @MainActor func testDeviceStatusMovesToSettingsAndOfflinePairingRemainsVisible() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_DEVICE"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["拨号"].waitForExistence(timeout: 10))
+        app.buttons["拨号"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["dialpad.number"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["OnePlus PLR110"].exists)
+        app.buttons["1"].tap()
+        app.buttons["2 ABC"].tap()
+        app.buttons["3 DEF"].tap()
+        XCTAssertTrue(app.buttons["dialpad.addContact"].exists)
+        let dial = XCTAttachment(screenshot: app.screenshot())
+        dial.name = "252-clean-dial-pad"; dial.lifetime = .keepAlways; add(dial)
+        app.buttons["设置"].tap()
+        XCTAssertTrue(app.staticTexts["OnePlus PLR110"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["VoWLAN 离线"].exists)
+        let firstNumber = app.descendants(matching: .any)["settings.simNumber.ui-sim-1"]
+        let secondNumber = app.descendants(matching: .any)["settings.simNumber.ui-sim-2"]
+        let numberShot = XCTAttachment(screenshot: app.screenshot())
+        numberShot.name = "253-settings-sim-rows"; numberShot.lifetime = .keepAlways; add(numberShot)
+        XCTAssertTrue(firstNumber.exists, app.debugDescription)
+        XCTAssertTrue(secondNumber.exists)
+        XCTAssertFalse(app.staticTexts["+8613800138000"].exists, "Cached SIM handles must not persist phone numbers")
+        XCTAssertTrue(app.staticTexts["上次读取的 SIM 信息"].exists)
+        let settings = XCTAttachment(screenshot: app.screenshot())
+        settings.name = "252-device-status-settings"; settings.lifetime = .keepAlways; add(settings)
+    }
+
+    @MainActor func testDiagnosticsHaveSingleSettingsEntryAndRetainAllChecks() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launch()
+        defer { app.terminate() }
+
+        let settings = app.buttons["设置"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 10))
+        settings.tap()
+        let connection = app.buttons["连接与设备"]
+        XCTAssertTrue(connection.waitForExistence(timeout: 5))
+        connection.tap()
+        XCTAssertTrue(app.switches["cloudSignaling"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["连接模式"].exists)
+        XCTAssertFalse(app.buttons["连接与推送诊断"].exists)
+        XCTAssertFalse(app.buttons["diagnostics.entry"].exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        let help = app.buttons["帮助与诊断"]
+        if !help.isHittable { app.swipeUp() }
+        XCTAssertTrue(help.waitForExistence(timeout: 5)); help.tap()
+        let diagnostics = app.buttons["diagnostics.entry"]
+        XCTAssertTrue(diagnostics.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "diagnostics.entry").count, 1)
+        XCTAssertFalse(app.buttons["连接与推送诊断"].exists)
+        diagnostics.tap()
+        XCTAssertTrue(app.navigationBars["诊断与修复"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["一键检查"].exists)
+        XCTAssertTrue(app.buttons["修复连接与短信同步"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "280-unified-diagnostics"; screenshot.lifetime = .keepAlways; add(screenshot)
+        let fullCheck = app.buttons["运行完整自检"]
+        for _ in 0..<6 { if fullCheck.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(fullCheck.exists)
+        let logs = app.buttons["链路事件与日志导出"]
+        for _ in 0..<8 { if logs.isHittable { break }; app.swipeUp() }
+        XCTAssertTrue(logs.exists)
+    }
+
     @MainActor func testGroupedRecentsDetailsAndSettingsReturn() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -17,10 +95,325 @@ final class SMSNavigationUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["未接来电"].exists)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "173-recents-timeline"; shot.lifetime = .keepAlways; add(shot)
         app.buttons["设置"].tap()
-        app.buttons["外观与偏好"].tap()
+        let appearance = app.buttons["外观与偏好"]
+        for _ in 0..<3 where !appearance.isHittable { app.swipeUp() }
+        appearance.tap()
         XCTAssertTrue(app.navigationBars["外观与偏好"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "主题")).firstMatch.waitForExistence(timeout: 5))
         let settingsShot = XCTAttachment(screenshot: app.screenshot()); settingsShot.name = "173-theme-settings"; settingsShot.lifetime = .keepAlways; add(settingsShot)
+    }
+
+    @MainActor func testMissedCallStaysUnviewedUntilDetailAndShowsAndroidDurations() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_RECENTS"] = "1"
+        app.launchEnvironment["AIRSIM_UI_VERIFIED_DURATIONS"] = "1"
+        app.launch()
+        defer { app.terminate() }
+
+        app.buttons["最近"].tap()
+        let unviewed = app.staticTexts["未查看"]
+        XCTAssertTrue(unviewed.waitForExistence(timeout: 5))
+        let group = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "2 次通话")).firstMatch
+        group.tap()
+        let detail = app.navigationBars["通话详情"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["响铃 12 秒"].exists)
+        XCTAssertTrue(app.staticTexts["最近一通"].exists)
+        let history = app.staticTexts["全部记录 · 2 次通话"]
+        if !history.isHittable { app.swipeUp() }
+        history.tap()
+        XCTAssertTrue(app.staticTexts["通话 1 分 3 秒"].exists)
+        detail.buttons.firstMatch.tap()
+        app.segmentedControls.buttons["未接来电"].tap()
+        let missed = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "1 次通话")).firstMatch
+        XCTAssertTrue(missed.waitForExistence(timeout: 5))
+        XCTAssertFalse(unviewed.exists)
+    }
+
+    @available(iOS 16.4, *)
+    @MainActor func testExternalDialURLPrefillsWithoutStartingCall() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.open(try XCTUnwrap(URL(string: "tel:+86%20138-0013-8000")))
+        defer { app.terminate() }
+        let number = app.staticTexts["dialpad.number"]
+        XCTAssertTrue(number.waitForExistence(timeout: 10))
+        XCTAssertEqual(number.label, "+8613800138000")
+        XCTAssertTrue(app.buttons["dialpad.delete"].exists)
+        XCTAssertFalse(app.alerts.firstMatch.exists)
+    }
+
+    @available(iOS 16.4, *)
+    @MainActor func testExternalMessageURLPrefillsRecipientOnColdLaunch() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.open(try XCTUnwrap(URL(string: "im:+86%20138-0013-8000")))
+        defer { app.terminate() }
+        let recipient = app.textFields["输入号码或姓名"]
+        XCTAssertTrue(recipient.waitForExistence(timeout: 10))
+        XCTAssertEqual(recipient.value as? String, "+8613800138000")
+        XCTAssertTrue(app.buttons["发送"].exists)
+    }
+
+    @MainActor func testDialPadShowsEditingActionsOnlyWithDigits() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-airsim.appearance", "dark"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_DEVICE"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["拨号"].waitForExistence(timeout: 10))
+        app.buttons["拨号"].tap()
+        XCTAssertFalse(app.buttons["dialpad.delete"].exists)
+        XCTAssertFalse(app.buttons["dialpad.addContact"].exists)
+        XCTAssertFalse(app.buttons["dial-pad-sim-slot"].exists)
+        let keyFrame = app.buttons["1"].frame
+        let empty = XCTAttachment(screenshot: app.screenshot())
+        empty.name = "255-dial-empty"; empty.lifetime = .keepAlways; add(empty)
+        app.buttons["1"].tap()
+        XCTAssertTrue(app.buttons["dial-pad-sim-slot"].isHittable)
+        app.buttons["dial-pad-sim-slot"].tap()
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "SIM 2")).firstMatch.waitForExistence(timeout: 5))
+        app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "SIM 2")).firstMatch.tap()
+        XCTAssertTrue(app.buttons["dialpad.delete"].isHittable)
+        XCTAssertTrue(app.buttons["dialpad.addContact"].isHittable)
+        XCTAssertEqual(app.buttons["1"].frame, keyFrame)
+        let entered = XCTAttachment(screenshot: app.screenshot())
+        entered.name = "255-dial-entered"; entered.lifetime = .keepAlways; add(entered)
+        app.buttons["dialpad.delete"].tap()
+        XCTAssertFalse(app.buttons["dialpad.delete"].exists)
+        XCTAssertFalse(app.buttons["dialpad.addContact"].exists)
+        XCTAssertFalse(app.buttons["dial-pad-sim-slot"].exists)
+        XCTAssertEqual(app.buttons["1"].frame, keyFrame)
+    }
+
+    @MainActor func testCallSurfaceRepeatedlyEntersAndExitsWithoutLeavingControlsBlocked() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-airsim.appearance", "light"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launchEnvironment["AIRSIM_UI_CALL_TRANSITION"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["拨号"].waitForExistence(timeout: 10))
+        app.buttons["拨号"].tap()
+        let toggle = app.buttons["ui.callTransition"]
+        for _ in 0..<3 {
+            toggle.tap()
+            XCTAssertTrue(app.buttons["挂断"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["挂断"].isHittable)
+            XCTAssertFalse(app.buttons["拨号"].isHittable)
+            toggle.tap()
+            XCTAssertTrue(app.buttons["拨号"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["拨号"].isHittable)
+            XCTAssertTrue(app.buttons["1"].isHittable)
+            XCTAssertFalse(app.buttons["挂断"].exists, "Ended call controls must be removed from the restored dial pad")
+        }
+        toggle.tap()
+        XCTAssertTrue(app.buttons["挂断"].waitForExistence(timeout: 5))
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(XCUIApplication(bundleIdentifier: "com.apple.springboard").wait(for: .runningForeground, timeout: 5))
+        app.activate()
+        XCTAssertTrue(app.buttons["挂断"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["挂断"].isHittable)
+        toggle.tap()
+        XCTAssertTrue(app.buttons["拨号"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["拨号"].isHittable)
+    }
+
+    @MainActor func testInAppCallKeepsControlsWithoutCustomWaveform() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launchEnvironment["AIRSIM_UI_DEVICE"] = "1"
+        app.launchEnvironment["AIRSIM_UI_DESIGN"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["挂断"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.descendants(matching: .any)["callAudioLevels"].exists)
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allow = springboard.alerts.buttons["允许"]
+        if allow.waitForExistence(timeout: 2) { allow.tap() }
+        XCTAssertTrue(app.buttons["挂断"].isHittable)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "249-in-app-call-controls"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    @MainActor func testNativeCallKeypadKeepsIdentityAndReturnsToControls() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launchEnvironment["AIRSIM_UI_DEVICE"] = "1"
+        app.launchEnvironment["AIRSIM_UI_DESIGN"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        dismissMicrophonePrompt()
+        XCTAssertTrue(app.buttons["拨号键盘"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["张先生"].exists)
+        XCTAssertTrue(app.staticTexts["SIM 2 · 中国移动 · 北京市"].exists)
+        XCTAssertFalse(app.buttons["FaceTime通话"].exists)
+        app.buttons["拨号键盘"].tap()
+        let hide = app.buttons["call.hideKeypad"]
+        XCTAssertTrue(hide.waitForExistence(timeout: 5))
+        for key in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"] {
+            XCTAssertTrue(app.buttons["发送 DTMF \(key)"].isHittable)
+        }
+        XCTAssertTrue(hide.isHittable)
+        XCTAssertEqual(app.buttons["发送 DTMF 1"].frame.width, min(88, app.frame.width * 0.2), accuracy: 1)
+        XCTAssertTrue(app.buttons["挂断"].isHittable)
+        XCTAssertTrue(app.staticTexts["张先生"].exists)
+        XCTAssertTrue(app.staticTexts["SIM 2 · 中国移动 · 北京市"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "268-native-inline-call-keypad"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        hide.tap()
+        XCTAssertTrue(app.buttons["拨号键盘"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["静音"].isHittable)
+        XCTAssertTrue(app.buttons["call.audioRoute"].isHittable)
+        XCTAssertFalse(app.buttons["发送 DTMF #"].exists)
+    }
+
+    @MainActor func testReference10086CallKeypadGeometry() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launchEnvironment["AIRSIM_UI_DEVICE"] = "1"
+        app.launchEnvironment["AIRSIM_UI_REGION"] = "1"
+        app.launchEnvironment["AIRSIM_UI_REGION_NUMBER"] = "10086"
+        app.launch()
+        defer { app.terminate() }
+        dismissMicrophonePrompt()
+        XCTAssertTrue(app.buttons["拨号键盘"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["10086"].exists)
+        let controls = XCTAttachment(screenshot: app.screenshot())
+        controls.name = "268-reference-10086-controls"; controls.lifetime = .keepAlways; add(controls)
+        app.buttons["拨号键盘"].tap()
+        XCTAssertTrue(app.buttons["call.hideKeypad"].waitForExistence(timeout: 5))
+        let first = app.buttons["发送 DTMF 1"].frame
+        let secondRow = app.buttons["发送 DTMF 4"].frame
+        let next = app.buttons["发送 DTMF 2"].frame
+        let diameter = min(88, app.frame.width * 0.2)
+        XCTAssertEqual(first.width, diameter, accuracy: 1)
+        XCTAssertEqual(first.height, diameter, accuracy: 1)
+        XCTAssertEqual(secondRow.minY - first.minY, diameter + 19, accuracy: 1)
+        XCTAssertEqual(next.midX - first.midX, (app.frame.width - 44) / 3, accuracy: 1)
+        XCTAssertTrue(app.buttons["挂断"].isHittable)
+        XCTAssertTrue(app.buttons["call.hideKeypad"].isHittable)
+        XCTAssertLessThan(app.buttons["发送 DTMF #"].frame.maxY, app.buttons["挂断"].frame.minY)
+        let keypad = XCTAttachment(screenshot: app.screenshot())
+        keypad.name = "268-reference-10086-keypad"; keypad.lifetime = .keepAlways; add(keypad)
+        app.buttons["call.hideKeypad"].tap()
+        XCTAssertTrue(app.buttons["拨号键盘"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor func testCallMinimizeRestoresKeypadAndPreservesNavigation() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launchEnvironment["AIRSIM_UI_CALL_TRANSITION"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        app.buttons["ui.callTransition"].tap()
+        XCTAssertTrue(app.buttons["call.minimize"].waitForExistence(timeout: 10))
+        let route = app.buttons["call.audioRoute"].frame
+        let minimize = app.buttons["call.minimize"].frame
+        let mute = app.buttons["静音"].frame
+        XCTAssertEqual(minimize.midX, (route.midX + mute.midX) / 2, accuracy: 1)
+        XCTAssertEqual(minimize.minY, mute.minY, accuracy: 1)
+        let controls = XCTAttachment(screenshot: app.screenshot())
+        controls.name = "269-call-controls-with-center-minimize"; controls.lifetime = .keepAlways; add(controls)
+        app.buttons["拨号键盘"].tap()
+        XCTAssertTrue(app.buttons["call.hideKeypad"].waitForExistence(timeout: 5))
+        app.buttons["call.minimize"].tap()
+        XCTAssertTrue(app.buttons["call.restore"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["设置"].isHittable)
+        app.buttons["设置"].tap()
+        XCTAssertFalse(app.buttons["call.hideKeypad"].isHittable)
+        let collapsed = XCTAttachment(screenshot: app.screenshot())
+        collapsed.name = "269-collapsed-call-settings"; collapsed.lifetime = .keepAlways; add(collapsed)
+        app.buttons["call.restore"].tap()
+        XCTAssertTrue(app.buttons["call.hideKeypad"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["发送 DTMF #"].isHittable)
+        app.buttons["call.minimize"].tap()
+        app.buttons["ui.callTransition"].tap()
+        XCTAssertFalse(app.buttons["call.restore"].exists)
+        XCTAssertTrue(app.buttons["设置"].isHittable)
+        app.buttons["ui.callTransition"].tap()
+        XCTAssertTrue(app.buttons["call.minimize"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["call.restore"].exists)
+        XCTAssertFalse(app.buttons["call.hideKeypad"].exists)
+    }
+
+    @MainActor func testCallAudioOutputChoicesDoNotInterruptCallPage() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["call.audioRoute"].waitForExistence(timeout: 10))
+        app.buttons["call.audioRoute"].tap()
+        XCTAssertTrue(app.buttons["挂断"].isHittable)
+        XCTAssertTrue(app.buttons["拨号键盘"].isHittable)
+        XCTAssertFalse(app.buttons["取消"].exists, "Built-in routes toggle directly without a menu")
+    }
+
+    @MainActor func testCompactCallRouteMenuShowsCurrentRouteWithoutMediaPanel() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launchEnvironment["AIRSIM_UI_AUDIO_ROUTES"] = "external"
+        app.launch()
+        defer { app.terminate() }
+        let output = app.buttons["call.systemAudioRoute"]
+        XCTAssertTrue(output.waitForExistence(timeout: 10))
+        output.tap()
+        XCTAssertTrue(app.buttons["AirPods 5"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["AirPods 5"].isSelected)
+        XCTAssertTrue(app.buttons["iPhone"].exists)
+        XCTAssertTrue(app.buttons["扬声器"].exists)
+        XCTAssertFalse(app.staticTexts["未在播放"].exists)
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "Compact call route menu"; shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    @MainActor func testRepairPageReportsWithoutDeletingData() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launch()
+        defer { app.terminate() }
+        app.buttons["设置"].tap()
+        app.swipeUp()
+        XCTAssertTrue(app.buttons["帮助与诊断"].waitForExistence(timeout: 10))
+        app.buttons["帮助与诊断"].tap()
+        app.buttons["诊断与修复"].tap()
+        XCTAssertTrue(app.buttons["一键检查"].waitForExistence(timeout: 5))
+        app.buttons["一键检查"].tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "已配对安卓：")).firstMatch.waitForExistence(timeout: 5))
     }
 
     @MainActor func testVerificationCodeHighlightWithoutBackendCode() throws {
@@ -58,7 +451,7 @@ final class SMSNavigationUITests: XCTestCase {
         app.buttons["复制验证码"].firstMatch.tap()
         app.terminate()
         app.launchEnvironment["AIRSIM_UI_CALL"] = "incoming"
-        app.launchEnvironment["AIRSIM_UI_REGION_NUMBER"] = "17800150000"
+        app.launchEnvironment["AIRSIM_UI_REGION_NUMBER"] = "17800159951"
         app.launch()
         XCTAssertTrue(app.staticTexts["北京市"].waitForExistence(timeout: 10))
         app.terminate()
@@ -117,12 +510,15 @@ final class SMSNavigationUITests: XCTestCase {
         app.buttons["复制验证码"].tap()
         app.terminate(); app.launch()
         app.buttons["最近"].tap()
+        app.buttons["recents.actions"].tap()
         let markRead = app.buttons["recents.markAllSeen"]
         XCTAssertTrue(markRead.waitForExistence(timeout: 5))
         XCTAssertEqual(markRead.label, "将全部未接来电标为已读")
         let recentShot = XCTAttachment(screenshot: app.screenshot()); recentShot.name = "180-explicit-mark-read"; recentShot.lifetime = .keepAlways; add(recentShot)
         markRead.tap()
+        app.buttons["recents.actions"].tap()
         XCTAssertFalse(markRead.isEnabled)
+        app.tap()
         app.segmentedControls.buttons["未接来电"].tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "1 次通话")).firstMatch.waitForExistence(timeout: 5))
     }
@@ -188,7 +584,9 @@ final class SMSNavigationUITests: XCTestCase {
         defer { app.terminate() }
         XCTAssertTrue(app.buttons["设置"].waitForExistence(timeout: 10))
         app.buttons["设置"].tap()
-        app.buttons["外观与偏好"].tap()
+        let appearance = app.buttons["外观与偏好"]
+        for _ in 0..<3 where !appearance.isHittable { app.swipeUp() }
+        appearance.tap()
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "主题")).firstMatch.tap()
         app.buttons["墨绿"].tap()
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "跟随系统")).firstMatch.tap()
@@ -331,8 +729,8 @@ final class SMSNavigationUITests: XCTestCase {
         XCTAssertEqual(number.label, "123")
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait, .landscapeRight] {
             XCUIDevice.shared.orientation = orientation
-            XCTAssertTrue(app.buttons["dialpad.clear"].waitForExistence(timeout: 5))
-            XCTAssertTrue(app.buttons["dialpad.clear"].isHittable)
+            XCTAssertTrue(app.buttons["dialpad.delete"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["dialpad.delete"].isHittable)
             XCTAssertTrue(app.buttons["9 WXYZ"].isHittable)
             XCTAssertEqual(number.label, "123")
             let shot = XCTAttachment(screenshot: app.screenshot())
@@ -343,7 +741,7 @@ final class SMSNavigationUITests: XCTestCase {
         app.buttons["4 GHI"].tap()
         let appended = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "1234"), object: number)
         XCTAssertEqual(XCTWaiter.wait(for: [appended], timeout: 5), .completed)
-        app.buttons["dialpad.clear"].tap()
+        app.buttons["dialpad.delete"].press(forDuration: 1)
         let cleared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "输入号码"), object: number)
         XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
     }
@@ -360,7 +758,7 @@ final class SMSNavigationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["拨号"].waitForExistence(timeout: 10))
         app.buttons["拨号"].tap()
         app.buttons["1"].tap()
-        let clear = app.buttons["dialpad.clear"]
+        let clear = app.buttons["dialpad.delete"]
         for _ in 0..<3 where !clear.isHittable { app.scrollViews.firstMatch.swipeUp() }
         XCTAssertTrue(clear.isHittable)
         XCTAssertTrue(app.buttons["#"].isHittable)
@@ -434,11 +832,11 @@ final class SMSNavigationUITests: XCTestCase {
             shot.lifetime = .keepAlways
             add(shot)
             if phase == "active" {
-                app.buttons["键盘"].tap()
-                XCTAssertTrue(app.navigationBars["通话键盘"].waitForExistence(timeout: 5))
+                app.buttons["拨号键盘"].tap()
+                XCTAssertTrue(app.buttons["call.hideKeypad"].waitForExistence(timeout: 5))
                 app.swipeUp()
                 XCTAssertTrue(app.buttons["发送 DTMF #"].isHittable)
-                app.buttons["取消"].tap()
+                app.buttons["call.hideKeypad"].tap()
                 XCTAssertTrue(action.waitForExistence(timeout: 5))
             }
             app.terminate()

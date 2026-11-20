@@ -2,6 +2,18 @@ import Foundation
 import Network
 import CryptoKit
 
+enum RemoteDirectHost {
+    static func isValid(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard host.count <= 253, labels.count > 1,
+              let first = labels.last?.first, first.isASCII && first.isLetter else { return false }
+        return labels.allSatisfy { label in
+            !label.isEmpty && label.count <= 63 && label.first != "-" && label.last != "-"
+                && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+        }
+    }
+}
+
 struct SamsungManualPairingAddress: Equatable, Sendable {
     let host: String
     let port: UInt16
@@ -525,10 +537,12 @@ enum SamsungPairingHTTPResponse {
 }
 
 enum SamsungPairingClientError: LocalizedError, Equatable {
+    case existingDevice
     case invalidCode, expired, rejected, responseTooLarge, connectionClosed, registrationUnavailable, pairingBusy, invalidAddress
     case manualUnsupported, directGatewayUnavailable, timedOut, networkNotAllowed
     var errorDescription: String? {
         switch self {
+        case .existingDevice: return "请先在设置中删除已配对的安卓设备，再配对新设备。"
         case .invalidCode: return "请输入三星屏幕上的 6 位验证码"
         case .expired: return "三星配对窗口已过期，请重新开始"
         case .rejected: return "三星拒绝了配对，请核对验证码后重试"

@@ -9,6 +9,15 @@ import java.util.*;
 final class EarlyMediaSessions {
     record Lease(String peer, String agent, String backend, String telecom, String session, long deadline, long expires) {}
     private static final Map<String, Lease> leases = new HashMap<>();
+    private static final Map<String, Integer> captureRetries = new HashMap<>();
+    static synchronized boolean captureAvailable(Lease lease) {
+        return captureRetries.getOrDefault(lease.session, 0) <= 3;
+    }
+    static synchronized boolean retryCapture(Lease lease) {
+        int failures = captureRetries.getOrDefault(lease.session, 0) + 1;
+        captureRetries.put(lease.session, failures);
+        return failures <= 3;
+    }
     private EarlyMediaSessions() {}
     static boolean eligible(String id) {
         return CallRepository.isOutgoingDialing(id) && CallRepository.callIDs().size() == 1;
@@ -23,6 +32,8 @@ final class EarlyMediaSessions {
         if (!eligible(id)) return null;
         long now = System.currentTimeMillis() / 1000L;
         leases.entrySet().removeIf(e -> e.getValue().expires < now - 120);
+        captureRetries.keySet().removeIf(session -> leases.values().stream()
+                .noneMatch(lease -> lease.session.equals(session)));
         String key = peer + "\n" + backend;
         Lease old = leases.get(key);
         if (old != null && (!old.telecom.equals(id) || now >= old.deadline)) return null;

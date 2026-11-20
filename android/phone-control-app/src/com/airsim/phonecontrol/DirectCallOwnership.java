@@ -34,10 +34,18 @@ public final class DirectCallOwnership {
             if (!abandoned && expected.pcmReady) RemoteCallAudioScope.SHARED.bind(expected, expected.callID);
         }
         if (abandoned) CallRepository.disconnect(callID);
+        else {
+            synchronized (DirectCallOwnership.class) {
+                if (!expected.closed && callID.equals(expected.callID)) {
+                    RemoteAudioSessionRegistry.reserveVoWLANCall(callID);
+                }
+            }
+        }
     }
     /** Terminal events retire only their exact call, never a replacement lease. */
     public static void callEnded(String callID) {
         if (callID == null || callID.isEmpty()) return;
+        RemoteAudioSessionRegistry.nativeCallEnded(callID);
         java.util.List<Lease> ended;
         synchronized (DirectCallOwnership.class) {
             ended = new java.util.ArrayList<>();

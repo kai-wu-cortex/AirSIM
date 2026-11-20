@@ -117,7 +117,11 @@ final class LocalHistoryStore {
     }
 
     private static func attentionCallKey(_ call: CallRecord) -> String {
-        let identity = "\(call.sourceAgentID ?? "")\u{0}\(call.androidID ?? call.sourceCallID ?? call.id)"
+        attentionCallKey(agentID: call.sourceAgentID ?? "", callID: call.androidID ?? call.sourceCallID ?? call.id)
+    }
+
+    private static func attentionCallKey(agentID: String, callID: String) -> String {
+        let identity = "\(agentID)\u{0}\(callID)"
         return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -166,6 +170,11 @@ final class LocalHistoryStore {
         guard var state = readAttentionState() else { return false }
         state.read(records)
         return writeAttentionState(state)
+    }
+
+    func hasSeenMissedCall(agentID: String, callID: String) -> Bool {
+        Self.messageLock.lock(); defer { Self.messageLock.unlock() }
+        return readAttentionState()?.seenCalls.contains(Self.attentionCallKey(agentID: agentID, callID: callID)) == true
     }
 
     @discardableResult

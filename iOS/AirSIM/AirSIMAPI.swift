@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct LocalCallControlBody: Encodable {
@@ -113,6 +114,11 @@ struct AirSIMAPI: Sendable {
         catch APIError.http(404, _) { throw APIError.unsupportedFeature("请更新安卓 AirSIM：当前网关缺少云端与局域网通话身份映射接口") }
         catch APIError.http(409, _) { throw DeviceCallRoutingError.stale }
     }
+    func numberRegions(_ numbers: [String]) async throws -> [String: String] {
+        struct Response: Decodable { let regions: [String: String] }
+        let response: Response = try await postDecoded("api/calls/regions", ["numbers": Array(numbers.prefix(100))])
+        return response.regions
+    }
     func callStatus() async throws -> CallStatus { try await get("api/calls/status") }
     func waitForAgentEvent(after revision: UInt64, timeout: TimeInterval = 15) async throws -> AgentEventStatus {
         let boundedTimeout = min(30, max(1, timeout))
@@ -164,6 +170,9 @@ struct AirSIMAPI: Sendable {
     func simIdentity() async throws -> SIMIdentity { try await get("api/sim/identity") }
     func registerVoIPPush(_ registration: AgentPushRegistration) async throws {
         try await post("api/push/register", registration)
+    }
+    func revokePairing(operation: UUID) async throws {
+        try await post("api/pairing/revoke", ["operation": operation.uuidString.lowercased()])
     }
     func pushStatus() async throws -> AgentPushStatus { try await get("api/push/status") }
     func setPushCloudEnabled(_ enabled: Bool) async throws {
@@ -466,7 +475,8 @@ struct AirSIMAPI: Sendable {
                 method: method,
                 path: path,
                 bodyBytes: uploadFileURL == nil ? (request.httpBody?.count ?? 0) : uploadBytes,
-                category: route.credential == nil ? "http" : "vowlan"
+                category: route.credential == nil ? "http" : "vowlan",
+                pollRoute: route.traceDescription
             )
             : nil
         if let trace {
@@ -512,7 +522,11 @@ struct AirSIMAPI: Sendable {
                 await AgentVerboseTraceRecorder.shared.finish(
                     trace,
                     statusCode: response.statusCode,
-                    responseBytes: response.body.count
+                    responseBytes: response.body.count,
+                    fingerprint: trace.pollEndpoint.map { _ in
+                        "\(route.baseURL.absoluteString)|\(response.statusCode)|"
+                            + Data(SHA256.hash(data: response.body)).base64EncodedString()
+                    }
                 )
             }
             return response

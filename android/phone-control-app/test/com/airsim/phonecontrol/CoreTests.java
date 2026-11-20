@@ -481,16 +481,8 @@ public final class CoreTests {
 		assertTrue(!VoWLANAuth.verify(vowlanSecret,
 				"xyJYZyGVDVSARzo3dd9vM_luQBhKeneDd6vk2VWmIkE",
 				vowlanCanonical, 1789090000L, 1789090040L));
-        byte[] watchKey = VoWLANAuth.watchCallKey(vowlanSecret);
-        assertTrue(!java.util.Arrays.equals(watchKey, vowlanSecret));
-        assertTrue(!VoWLANAuth.sign(watchKey, vowlanCanonical).equals(VoWLANAuth.sign(vowlanSecret, vowlanCanonical)));
-        assertTrue(VoWLANControlPolicy.watchAllowed("GET", "/api/calls/status?call_id=one", "one"));
-        assertTrue(VoWLANControlPolicy.watchAllowed("POST", "/api/calls/answer", "one"));
-        assertTrue(VoWLANControlPolicy.watchAllowed("POST", "/api/calls/hangup", "one"));
-        assertTrue(!VoWLANControlPolicy.watchAllowed("POST", "/api/calls/answer", ""));
-        assertTrue(!VoWLANControlPolicy.watchAllowed("POST", "/api/calls/dial", "one"));
-        assertTrue(!VoWLANControlPolicy.watchAllowed("POST", "/api/sms/send", "one"));
-        assertTrue(!VoWLANControlPolicy.watchAllowed("GET", "/api/calls/status", "one"));
+        assertTrue(VoWLANControlPolicy.allowed("POST", "/api/pairing/revoke"));
+        assertTrue(!VoWLANControlPolicy.allowed("GET", "/api/pairing/revoke"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/api/health"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/v1/health"));
 		assertTrue(VoWLANControlPolicy.allowed("GET", "/api/calls/status"));
@@ -996,14 +988,24 @@ public final class CoreTests {
 
 	private static void assertVoBLEPCMResolutionHandshakeAndMediaCrypto() throws Exception {
 		var standalone = com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
-				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.STANDALONE, "");
+				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.STANDALONE, "", "com.airsim.phonecontrol.standalone");
 		assertEquals("127.0.0.1", standalone.getAddress().getHostAddress());
 		assertEquals(7580, standalone.getPort());
+        var testStandalone = com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
+                com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.STANDALONE, "", "com.airsim.phonecontrol.earlytest");
+        assertEquals("127.0.0.1", testStandalone.getAddress().getHostAddress());
+        assertEquals(7581, testStandalone.getPort());
+        assertTrue(PhoneAudioBridgeProcessPolicy.isStaleBridge(11_419, 27_671,
+                String.join("\0", "/system/bin/app_process", "/system/bin",
+                        "com.airsim.bridge.PhoneAudioBridge", "--listen-host", "127.0.0.1",
+                        "--listen-port", "7581", ""),
+                "CLASSPATH=/data/app/~~x/com.airsim.phonecontrol.earlytest-y/base.apk\0",
+                "com.airsim.phonecontrol.earlytest"));
 		var avf = com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
-				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "10.185.5.25");
+				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "10.185.5.25", "com.airsim.phonecontrol.standalone");
 		assertEquals("10.185.5.25", avf.getAddress().getHostAddress());
 		var movedAVF = com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
-				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "10.185.5.31");
+				com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "10.185.5.31", "com.airsim.phonecontrol.standalone");
 		assertEquals("10.185.5.31", movedAVF.getAddress().getHostAddress());
 		assertEquals("10.185.5.25", avf.getAddress().getHostAddress());
 		var unsafeDiagnostics = new java.util.LinkedHashMap<String, String>();
@@ -1020,7 +1022,7 @@ public final class CoreTests {
 				.contains("PCM 运行中"));
 		try {
 			com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.resolve(
-					com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "");
+					com.airsim.phonecontrol.voble.VoBLEPCMBackendResolver.Runtime.AVF, "", "com.airsim.phonecontrol.standalone");
 			throw new AssertionError("missing AVF address must fail closed");
 		} catch (IllegalArgumentException expected) {}
 

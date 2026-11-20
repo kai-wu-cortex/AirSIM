@@ -37,7 +37,7 @@
 		A10000000000000000000015 /* WiredHTTPTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000011 /* WiredHTTPTransport.swift */; };
 		A10000000000000000000016 /* AirSIMLiveActivityExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = B10000000000000000000017 /* AirSIMLiveActivityExtension.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A10000000000000000000017 /* LocalHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000018 /* LocalHistoryStore.swift */; };
-		A10000000000000000000018 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* AppIcon.icon */; };
+		A10000000000000000000018 /* AirSIMPhoneIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* AirSIMPhoneIcon.icon */; };
 		A1000000000000000000001A /* VoIPPushController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001B /* VoIPPushController.swift */; };
 		A1000000000000000000001B /* WatchCallCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001D /* WatchCallCoordinator.swift */; };
 		A1000000000000000000001C /* WatchCallPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001E /* WatchCallPayload.swift */; };
@@ -46,7 +46,7 @@
 		A1000000000000000000001F /* WatchCallSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000020 /* WatchCallSession.swift */; };
 		A10000000000000000000020 /* WatchCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* WatchCallView.swift */; };
 		A10000000000000000000021 /* AirSIMWatchApp.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* AirSIMWatchApp.app */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-		A10000000000000000000023 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* AppIcon.icon */; };
+		A10000000000000000000023 /* AirSIMPhoneIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* AirSIMPhoneIcon.icon */; };
 		A10000000000000000000024 /* IPhoneCloudCallSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000024 /* IPhoneCloudCallSession.swift */; };
 		A10000000000000000000025 /* VirtualCallTTSController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000025 /* VirtualCallTTSController.swift */; };
 		A10000000000000000000029 /* AgentVerboseTrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000029 /* AgentVerboseTrace.swift */; };
@@ -108,6 +108,8 @@
 		AE1100000000000000000002 /* RelayEgressGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE1100000000000000000002 /* RelayEgressGateTests.swift */; };
 		AE2000000000000000000001 /* AirSIMUITests/SMSNavigationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE2000000000000000000001 /* AirSIMUITests/SMSNavigationUITests.swift */; };
 		AE2000000000000000000004 /* AirSIMUITests/Fixtures/SMSNavigationFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE2000000000000000000004 /* AirSIMUITests/Fixtures/SMSNavigationFixture.swift */; };
+AF2960000000000000000001 = {isa = PBXBuildFile; fileRef = BF2960000000000000000001; };
+AF2960000000000000000002 = {isa = PBXBuildFile; fileRef = BF2960000000000000000002; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -200,7 +202,7 @@
 		B10000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000000000000000000017 /* AirSIMLiveActivityExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AirSIMLiveActivityExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B10000000000000000000018 /* LocalHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHistoryStore.swift; sourceTree = "<group>"; };
-		B10000000000000000000019 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		B10000000000000000000019 /* AirSIMPhoneIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AirSIMPhoneIcon.icon; sourceTree = "<group>"; };
 		B1000000000000000000001B /* VoIPPushController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoIPPushController.swift; sourceTree = "<group>"; };
 		B1000000000000000000001C /* AirSIM.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AirSIM.entitlements; sourceTree = "<group>"; };
 		B1000000000000000000001D /* WatchCallCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchCallCoordinator.swift; sourceTree = "<group>"; };
@@ -269,6 +271,8 @@
 		BE2000000000000000000001 /* AirSIMUITests/SMSNavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMUITests/SMSNavigationUITests.swift; sourceTree = "<group>"; };
 		BE2000000000000000000002 /* AirSIMUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = AirSIMUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BE2000000000000000000004 /* AirSIMUITests/Fixtures/SMSNavigationFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirSIMUITests/Fixtures/SMSNavigationFixture.swift; sourceTree = SOURCE_ROOT; };
+BF2960000000000000000001 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "AirSIM/Assets.xcassets"; sourceTree = SOURCE_ROOT; };
+BF2960000000000000000002 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "AirSIMWatchApp/SMSCarrierAssets.xcassets"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -387,7 +391,7 @@
 				B5C0A1000000000000000002 /* SMSConversationTimelineView.swift */,
 				B1000000000000000000000A /* AirSIMSetupView.swift */,
 				B10000000000000000000018 /* LocalHistoryStore.swift */,
-				B10000000000000000000019 /* AppIcon.icon */,
+				B10000000000000000000019 /* AirSIMPhoneIcon.icon */,
 				B1000000000000000000000B /* Info.plist */,
 				B1000000000000000000001C /* AirSIM.entitlements */,
 				3DE5EDD1309B7EF4007942F0 /* PhoneRegionResources */,
@@ -631,7 +635,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000018 /* AppIcon.icon in Resources */,
+                AF2960000000000000000001,
+				A10000000000000000000018 /* AirSIMPhoneIcon.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -646,7 +651,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000023 /* AppIcon.icon in Resources */,
+                AF2960000000000000000002,
+				A10000000000000000000023 /* AirSIMPhoneIcon.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -868,7 +874,7 @@
 				AIRSIM_PUSH_ENTITLEMENTS = AirSIM/AirSIM.entitlements;
 				AIRSIM_PUSH_RELAY_URL = "";
 				APS_ENVIRONMENT = development;
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AirSIMPhoneIcon;
 				CODE_SIGN_ENTITLEMENTS = "$(AIRSIM_PUSH_ENTITLEMENTS)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 206;
@@ -894,7 +900,7 @@
 				AIRSIM_PUSH_ENTITLEMENTS = AirSIM/AirSIM.entitlements;
 				AIRSIM_PUSH_RELAY_URL = "";
 				APS_ENVIRONMENT = production;
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AirSIMPhoneIcon;
 				CODE_SIGN_ENTITLEMENTS = "$(AIRSIM_PUSH_ENTITLEMENTS)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 206;
@@ -971,7 +977,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APS_ENVIRONMENT = development;
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AirSIMPhoneIcon;
 				CODE_SIGN_ENTITLEMENTS = AirSIMWatchApp/AirSIMWatchApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 206;
@@ -980,7 +986,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AirSIMWatchApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AirSIM;
-				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_CFBundleIconName = AirSIMPhoneIcon;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.example.airsim;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1003,7 +1009,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APS_ENVIRONMENT = production;
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AirSIMPhoneIcon;
 				CODE_SIGN_ENTITLEMENTS = AirSIMWatchApp/AirSIMWatchApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 206;
@@ -1011,7 +1017,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AirSIMWatchApp/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AirSIM;
-				INFOPLIST_KEY_CFBundleIconName = AppIcon;
+				INFOPLIST_KEY_CFBundleIconName = AirSIMPhoneIcon;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.example.airsim;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

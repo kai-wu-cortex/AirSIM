@@ -19,20 +19,20 @@ public final class VoWLANAuth {
     }
 
     public static String sign(byte[] secret, String canonical) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(mac(secret, canonical));
+    }
+
+    static byte[] mac(byte[] secret, String canonical) {
         if (secret == null || secret.length < 32) throw new IllegalArgumentException("VoWLAN secret too short");
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(secret, "HmacSHA256"));
-            return Base64.getUrlEncoder().withoutPadding().encodeToString(
-                    mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8)));
+            return mac.doFinal(canonical.getBytes(StandardCharsets.UTF_8));
         } catch (Exception error) {
             throw new IllegalStateException("VoWLAN HMAC unavailable", error);
         }
     }
 
-    static byte[] watchCallKey(byte[] secret) {
-        return Base64.getUrlDecoder().decode(sign(secret, "AirSIM/watch-call-only/v1"));
-    }
 
     public static boolean verify(
             byte[] secret, String suppliedSignature, String canonical,

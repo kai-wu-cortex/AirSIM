@@ -1,6 +1,6 @@
 Phone region data derived from Google libphonenumber.
-Source revision: 5ea78f46ccc1a258012344801ce04eb6eb4c55da
-Source: https://github.com/google/libphonenumber/blob/5ea78f46ccc1a258012344801ce04eb6eb4c55da/resources/geocoding/zh/86.txt
+Source revision: 9e272cf77d79c24bb3ca18f2d25db2424d380629
+Source: https://github.com/google/libphonenumber/blob/9e272cf77d79c24bb3ca18f2d25db2424d380629/resources/geocoding/zh/86.txt
 Copyright (C) 2011 The Libphonenumber Authors
 Licensed under the Apache License, Version 2.0; see PhoneRegion-LICENSE.txt.
 Changes: text prefixes converted into a sorted binary lookup table; missing mobile prefixes supplemented as recorded in PhoneRegion-source.json.

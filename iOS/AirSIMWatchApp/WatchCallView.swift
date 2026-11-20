@@ -1,236 +1,12 @@
 import SwiftUI
 
 struct WatchCallView: View {
-    @EnvironmentObject private var session: WatchCallSession
-    @State private var dialNumber = ""
-
-    @State private var showConnectionStatus = false
-    @State private var showingSMS = false
-    @Environment(\.scenePhase) private var scenePhase
-
-    private let dialRows = [
-        ["1", "2", "3"], ["4", "5", "6"],
-        ["7", "8", "9"], ["*", "0", "#"],
-    ]
-
-    var body: some View {
-        NavigationStack {
-        Group {
-            if session.call.phase == .idle || session.call.phase == .ended {
-                dialer
-            } else {
-                ScrollView {
-                    currentCall
-                        .padding(.horizontal, 8)
-                }
-            }
-        }
-        .task {
-            session.requestLatestState()
-            if session.isUIFixture, ProcessInfo.processInfo.arguments.contains("--watch-ui-sms") { showingSMS = true }
-        }
-        .toolbar {
-            if session.call.phase == .idle || session.call.phase == .ended {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showConnectionStatus = true } label: { Image(systemName: "info.circle") }
-                        .accessibilityLabel("查看连接状态")
-                }
-            }
-        }
-        }
-        .sheet(isPresented: $showingSMS) { WatchSMSInboxView().environmentObject(session) }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { session.requestLatestState() }
-        }
-        .onChange(of: session.call.phase) { _, phase in
-            if phase == .incoming || phase == .connecting || phase == .active { showingSMS = false }
-        }
-    }
-
-    private var dialer: some View {
-        GeometryReader { geometry in
-            let keyHeight = max(22, (geometry.size.height - 48) / 4)
-            let keyWidth = max(32, (geometry.size.width - 20) / 4)
-            VStack(spacing: 3) {
-                numberDisplay
-                    .frame(height: 36)
-                HStack(spacing: 4) {
-                    VStack(spacing: 3) {
-                        ForEach(0..<4) { row in
-                            HStack(spacing: 4) {
-                                ForEach(0..<3) { column in
-                                    digitButton(dialRows[row][column], width: keyWidth, height: keyHeight)
-                                }
-                            }
-                        }
-                    }
-                    VStack(spacing: 3) {
-                        deleteButton(width: keyWidth, height: 2 * keyHeight + 3)
-                        callButton(width: keyWidth, height: 2 * keyHeight + 3)
-                    }
-                }
-            }
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background(Color.black)
-        .alert("连接状态", isPresented: $showConnectionStatus) {
-            Button("好", role: .cancel) {}
-        } message: {
-            Text("\(session.pushStatus)\n\(session.microphoneStatus)\n\(session.connectionTiming)\n\(session.hangupFeedback?.text ?? "无待处理挂断提示")\n拨号需要配对 iPhone 可通信，并且手表可通过 VoWLAN 访问安卓。Relay 仅用于推送。通话音频在手表收发；连接蓝牙设备时，输出由 watchOS 选择。")
-        }
-        .alert("拨号失败", isPresented: Binding(
-            get: { session.errorMessage != nil },
-            set: { if !$0 { session.errorMessage = nil } }
-        )) {
-            Button("好", role: .cancel) { session.errorMessage = nil }
-        } message: {
-            Text(session.errorMessage ?? "")
-        }
-    }
-
-    private var feedbackColor: Color {
-        guard let feedback = session.hangupFeedback else { return .secondary }
-        let complete = feedback.verifying ? feedback.confirmedAt != nil : feedback.acknowledgedAt != nil
-        return complete ? .green : .orange
-    }
-
-    private var numberDisplay: some View {
-        HStack(spacing: 5) {
-            Button { append("+") } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 36, height: 36)
-                    .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
-            }
-            .buttonStyle(.plain)
-            .disabled(session.isDialing)
-            .accessibilityLabel("输入加号")
-
-            Text(dialNumber.isEmpty ? (session.hangupFeedback?.text ?? "输入号码") : dialNumber)
-                .font(dialNumber.isEmpty && session.hangupFeedback != nil ? .caption2 : .system(size: 23, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(dialNumber.isEmpty ? (session.hangupFeedback == nil ? Color.secondary : feedbackColor) : Color.primary)
-                .lineLimit(dialNumber.isEmpty && session.hangupFeedback != nil ? 2 : 1)
-                .truncationMode(.head)
-                .minimumScaleFactor(0.7)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .accessibilityLabel(dialNumber.isEmpty ? (session.hangupFeedback?.text ?? "尚未输入电话号码") : "电话号码，\(dialNumber)")
-
-            Button { showingSMS = true } label: {
-                Image(systemName: "message.fill")
-                    .foregroundStyle(session.hangupFeedback == nil ? Color.secondary : feedbackColor)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 36, height: 36)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("查看短信")
-        }
-    }
-
-    private func append(_ character: String) {
-        guard !session.isDialing, dialNumber.count < 82 else { return }
-        dialNumber.append(character)
-    }
-
-    private func digitButton(_ digit: String, width: CGFloat, height: CGFloat) -> some View {
-        Button { append(digit) } label: {
-            Text(digit)
-                .font(.system(size: min(25, height * 0.75), weight: .medium, design: .rounded))
-                .frame(width: width, height: height)
-                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
-        }
-        .buttonStyle(.plain)
-        .disabled(session.isDialing)
-        .accessibilityLabel("数字 \(digit)")
-    }
-
-    private func deleteButton(width: CGFloat, height: CGFloat) -> some View {
-        Button {
-            if !dialNumber.isEmpty { dialNumber.removeLast() }
-        } label: {
-            Image(systemName: "delete.left")
-                .font(.system(size: 19, weight: .medium))
-                .frame(width: width, height: height)
-                .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
-        }
-        .buttonStyle(.plain)
-        .disabled(session.isDialing || dialNumber.isEmpty)
-        .accessibilityLabel("删除最后一位")
-    }
-
-    private func callButton(width: CGFloat, height: CGFloat) -> some View {
-        Button {
-            if session.isDialing { session.cancelDial() }
-            else { session.dial(dialNumber) }
-        } label: {
-            Image(systemName: session.isDialing ? "xmark" : "phone.fill")
-                .font(.system(size: 20, weight: .semibold))
-                .frame(width: width, height: height)
-                .background(session.isDialing ? .red : .green, in: RoundedRectangle(cornerRadius: 14))
-        }
-        .buttonStyle(.plain)
-        .disabled(!session.isDialing && dialNumber.isEmpty)
-        .accessibilityLabel(session.isDialing ? "取消拨号" : "拨号")
-    }
-
-    private var currentCall: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: session.call.phase == .incoming ? "phone.arrow.down.left.fill" : "antenna.radiowaves.left.and.right")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(session.call.phase == .incoming ? .green : .blue)
-                    .symbolEffect(.pulse, isActive: session.call.phase == .incoming)
-                Text(session.displayName).font(.headline).lineLimit(1).minimumScaleFactor(0.8)
-            }
-            Text(session.secondaryText).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            // Primary call actions must fit on 40 mm without scrolling.
-            controls
-            Text(session.companionReachable ? "iPhone 可通信" : "iPhone 当前不可通信")
-                .font(.caption2).foregroundStyle(.secondary)
-            if session.call.phase == .connecting {
-                Text("等待安卓确认接通 · " + session.audioStatus)
-                    .font(.caption2).foregroundStyle(.secondary)
-            }
-            if let error = session.errorMessage {
-                Text(error).font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
-            } else if session.call.phase == .active {
-                Text(session.audioStatus).font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            }
-        }
-        .padding(.top, 6)
-    }
-
-    @ViewBuilder
-    private var controls: some View {
-        switch session.call.phase {
-        case .incoming:
-            HStack(spacing: 18) {
-                actionButton("phone.down.fill", color: .red, action: session.reject)
-                actionButton("phone.fill", color: .green, action: session.answer)
-            }
-        case .active, .connecting:
-            actionButton("phone.down.fill", color: .red, action: session.end)
-        case .ended, .idle: EmptyView()
-        }
-    }
-
-    private func actionButton(_ symbol: String, color: Color, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.title3.weight(.semibold))
-                .frame(width: 50, height: 42)
-        }
-        .buttonStyle(.borderedProminent)
-        .tint(color)
-        .disabled(session.isSendingAction)
-    }
+    var body: some View { WatchSMSInboxView() }
 }
 
 private struct WatchSMSInboxView: View {
     @EnvironmentObject private var session: WatchCallSession
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         NavigationStack {
             Group {
@@ -254,7 +30,7 @@ private struct WatchSMSInboxView: View {
                     if page.selectedAgentID == nil {
                         Text("请先选择一台已配对安卓")
                     } else if page.rows.isEmpty {
-                        Text("iPhone 尚无此设备的已同步短信")
+                        Text("此设备暂无可显示的短信")
                     }
                     ForEach(WatchSMSConversationPolicy.groups(page.rows)) { conversation in
                         NavigationLink {
@@ -263,6 +39,10 @@ private struct WatchSMSInboxView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     if conversation.rows.contains(where: { session.isSMSUnread($0) }) { Circle().fill(.blue).frame(width: 5, height: 5) }
+                                    if let brand = SMSCarrierBrand.match(conversation.latest.sender) {
+                                        Image(brand.rawValue).resizable().scaledToFit().padding(4)
+                                            .frame(width: 26, height: 26).background(.white, in: Circle())
+                                    }
                                     Text(conversation.latest.sender.isEmpty ? "未知联系人" : conversation.latest.sender).font(.headline).lineLimit(1)
                                 }
                                 Text((conversation.latest.outgoing ? "我：" : "") + conversation.latest.preview).font(.caption).lineLimit(2)
@@ -270,27 +50,34 @@ private struct WatchSMSInboxView: View {
                             }
                         }
                     }
-                    Text("来自 iPhone 已同步记录 · 显示最近 \(page.rows.count) 条，共 \(page.total) 条。刷新不会强制唤醒安卓。")
+                    let source = session.smsUsingDirect
+                        ? (session.smsShowingCompanionHistory ? "安卓直连 · iPhone 历史" : "安卓直连")
+                        : (session.smsShowingCachedHistory ? "上次同步" : "iPhone 已同步")
+                    Text("\(source) · 最近 \(page.rows.count) 条")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    Text("最后同步：\(page.generatedAt.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 if let error = session.smsError { Text(error).font(.caption).foregroundStyle(.orange) }
-                Button(session.smsBusy ? "正在读取…" : "刷新短信") {
-                    Task { await session.refreshSMS(agentID: session.smsPage?.selectedAgentID) }
-                }.disabled(session.smsBusy)
                 if session.smsBusy { ProgressView() }
             }
             }
             }
             .navigationTitle("短信")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
-            .task(id: session.companionReachable) {
-                await session.refreshSMS(agentID: session.smsPage?.selectedAgentID)
+            .task(id: [scenePhase == .active, session.companionReachable]) {
+                guard scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    await session.refreshSMS()
+                    do { try await Task.sleep(for: .seconds(30)) }
+                    catch { return }
+                }
             }
         }
     }
 }
 private struct WatchSMSConversationView: View {
     @EnvironmentObject private var session: WatchCallSession
+    @Environment(\.scenePhase) private var scenePhase
     let conversation: WatchSMSConversation
     @State private var page: WatchSMSPage?
     @State private var failure: String?
@@ -319,7 +106,6 @@ private struct WatchSMSConversationView: View {
                     }.id(row.id)
                 }
                 if let failure { Text(failure).font(.caption2).foregroundStyle(.orange) }
-                Button("刷新会话") { refresh += 1 }
             }
             .task(id: rows.last?.id) { if let id = rows.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
         }
@@ -346,8 +132,8 @@ private struct WatchSMSConversationView: View {
                 replying = true
             }
         }
-        .task(id: refresh) {
-            guard !conversation.peer.isEmpty else { return }
+        .task(id: scenePhase == .active ? refresh : nil) {
+            guard scenePhase == .active, !conversation.peer.isEmpty else { return }
             failure = nil
             do { page = try await session.loadConversation(conversation) }
             catch { if !Task.isCancelled { failure = "刷新未完成，显示已同步消息；\(error.localizedDescription)" } }
@@ -367,6 +153,9 @@ private struct WatchSMSReplyView: View {
     @State private var loading = true
     @State private var sending = false
     @State private var uncertain = false
+    @State private var checking = false
+    @State private var dismissPending = false
+    @Environment(\.scenePhase) private var scenePhase
     @State private var confirm = false
     @State private var feedback: String?
     @State private var reload = 0
@@ -423,6 +212,10 @@ private struct WatchSMSReplyView: View {
                 if let feedback {
                     Text(feedback).font(.caption).foregroundStyle(.orange)
                 }
+                if uncertain {
+                    Button("查询发送结果") { Task { await checkResult() } }.disabled(checking)
+                    Button("结束查询", role: .destructive) { dismissPending = true }.disabled(checking)
+                }
                 Button { confirm = true } label: {
                     if sending { ProgressView("正在发送…") }
                     else { Label("发送短信", systemImage: "paperplane.fill") }
@@ -439,9 +232,26 @@ private struct WatchSMSReplyView: View {
                 Button("通过 \(slot?.label ?? "SIM") 发送") { Task { await send() } }
                 Button("取消", role: .cancel) {}
             } message: { Text("发送给 \(options?.recipient ?? "")") }
+            .confirmationDialog("结束查询？", isPresented: $dismissPending, titleVisibility: .visible) {
+                Button("已核对，结束查询", role: .destructive) {
+                    session.dismissPendingReply(for: conversation)
+                    uncertain = false
+                    draft = ""
+                    feedback = nil
+                }
+            } message: { Text("安卓仍可能已发出上一条短信。请核对后再发送。") }
+            .onAppear { uncertain = session.hasPendingReply(for: conversation) }
+            .task(id: uncertain && scenePhase == .active) {
+                guard uncertain, scenePhase == .active else { return }
+                while !Task.isCancelled, uncertain {
+                    await checkResult()
+                    do { try await Task.sleep(for: .seconds(10)) }
+                    catch { return }
+                }
+            }
             .task(id: reload) {
                 loading = true
-                feedback = nil
+                if !session.hasPendingReply(for: conversation) { feedback = nil }
                 do {
                     let result = try await session.replyOptions(for: conversation)
                     guard !Task.isCancelled else { return }
@@ -454,6 +264,23 @@ private struct WatchSMSReplyView: View {
             }
         }
         .interactiveDismissDisabled(sending)
+    }
+
+    private func checkResult() async {
+        guard !checking else { return }
+        checking = true
+        defer { checking = false }
+        switch await session.checkReply(for: conversation) {
+        case .sent:
+            draft = ""
+            onSent()
+            dismiss()
+        case let .failed(error):
+            uncertain = false
+            feedback = error
+        case .uncertain:
+            feedback = "发送结果待确认。重新连接后可以再次查询。"
+        }
     }
 
     private func send() async {
@@ -469,7 +296,7 @@ private struct WatchSMSReplyView: View {
             feedback = error
         case .uncertain:
             uncertain = true
-            feedback = "发送结果未确认。请先在 iPhone 查看记录，避免重复发送。"
+            feedback = "发送结果待确认，可查询原发送记录。"
         }
     }
 }
@@ -491,7 +318,7 @@ private struct WatchSMSDetailView: View {
                     .font(.caption2).foregroundStyle(.secondary)
                 if let detail {
                     Text(detail.body).font(.body).frame(maxWidth: .infinity, alignment: .leading)
-                    if detail.truncated { Text("短信过长，完整内容请在 iPhone 查看").font(.caption).foregroundStyle(.orange) }
+                    if detail.truncated { Text("当前仅显示部分内容").font(.caption).foregroundStyle(.orange) }
                     if readSyncFailed { Text("已阅读，已读状态尚未确认同步").font(.caption2).foregroundStyle(.orange) }
                 } else if let error {
                     Text(error).font(.caption).foregroundStyle(.orange)

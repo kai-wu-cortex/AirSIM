@@ -1,18 +1,51 @@
 import Combine
 import Foundation
 
+enum NetworkConnectionPolicy {
+    static func healthTimeout(isLocalSubnet: Bool, usesTLS: Bool) -> TimeInterval {
+        isLocalSubnet && !usesTLS ? 2.5 : 8
+    }
+    static func healthTimeout(_ endpoint: VoWLANEndpoint) -> TimeInterval {
+        healthTimeout(isLocalSubnet: LocalWiFiSubnet.contains(endpoint.host), usesTLS: endpoint.usesTLS)
+    }
+    static func retryDelay(attempt: Int, randomUnit: Double) -> TimeInterval {
+        let base = min(8, 0.4 * pow(2, Double(min(5, max(0, attempt - 1)))))
+        return base * (0.85 + 0.3 * min(1, max(0, randomUnit)))
+    }
+    static func isAuthenticationFailure(_ error: Error) -> Bool {
+        if case VoWLANControllerError.authenticationFailed = error { return true }
+        if case let APIError.http(status, _) = error { return status == 401 || status == 403 }
+        return false
+    }
+    static func retainsVerification(authenticationFailure: Bool, healthFailures: Int, recoveryAge: TimeInterval, healthVerified: Bool = false) -> Bool {
+        !authenticationFailure && (healthVerified || (healthFailures < 2 && recoveryAge < 10))
+    }
+    static func failureSummary(_ error: Error) -> String {
+        if isAuthenticationFailure(error) { return "设备认证未通过" }
+        if case let APIError.http(status, _) = error { return "设备响应异常（HTTP \(status)）" }
+        if let diagnostic = error as? any NetworkDiagnosticFailure { return diagnostic.networkDiagnosticReason }
+        switch (error as? URLError)?.code {
+        case .timedOut: return "连接超时"
+        case .notConnectedToInternet: return "网络尚未连接"
+        case .networkConnectionLost: return "连接中断"
+        case .cannotConnectToHost: return "暂时无法连接安卓"
+        default: return "连接异常，正在重新验证"
+        }
+    }
+}
+
 enum VoWLANAuthenticatedHealth {
     static func fetch(agentID: String, endpoint: VoWLANEndpoint, credential: VoWLANCredential,
                       transport: LocalDeviceDirectory.HealthTransport) async throws -> VoWLANHealthIdentity {
         let signature = try VoWLANRequestSigner(credential: credential).sign(method: "GET", path: "/v1/health", body: Data())
         var request = URLRequest(url: endpoint.controlBaseURL.appendingPathComponent("v1/health"))
-        // Tailscale/VPN round trips can exceed the old 4s budget even when the
-        // gateway is healthy; the encrypted route proof already bound this peer.
-        request.timeoutInterval = 8
+        // Fail fast on this Wi-Fi subnet; allow VPN/TLS paths their longer wake budget.
+        request.timeoutInterval = NetworkConnectionPolicy.healthTimeout(endpoint)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         VoWLANController.apply(signature, to: &request)
         let response = try await transport(request)
-        guard response.statusCode == 200,
+        guard response.statusCode == 200 else { throw APIError.http(response.statusCode, nil) }
+        guard
               let identity = try? JSONDecoder().decode(VoWLANHealthIdentity.self, from: response.body),
               identity.ok, identity.agentID == agentID,
               VoWLANHealthProof.verify(identity.identityProof, nonce: signature.nonce,
@@ -50,6 +83,13 @@ final class LocalDeviceDirectory: ObservableObject {
         let epoch: UInt64
         var metadata: VoWLANHealthIdentity
         var verified = true
+        var phase = "已连接"
+        var recoveryStarted: Date?
+        var lastVerified = Date()
+        var lastRecoveryDuration: TimeInterval?
+        var lastFailure: String?
+        var healthFailures = 0
+        var lastDiagnosticPublication = Date.distantPast
         var lastObservation = Date()
         var revision: UInt64 = AgentEventCursor.initial
         var poll: Task<Void, Never>?
@@ -70,6 +110,7 @@ final class LocalDeviceDirectory: ObservableObject {
     var onCallEvent: ((DeviceCallEvent) -> Void)?
     var onHistory: (([CallRecord], String) -> Bool)?
     var onVerified: ((AirSIMAPI) -> Void)?
+    var onResynchronized: ((String, AirSIMAPI) -> Void)?
     init(credentials: any LocalDeviceCredentialStoring = KeychainLocalDeviceCredentials(),
          legacyBinding: @escaping () -> String? = { AndroidAgentBindingPreference.selected() },
          bluetoothReady: @escaping (String) -> Bool = { _ in false },
@@ -199,7 +240,8 @@ final class LocalDeviceDirectory: ObservableObject {
             old.poll?.cancel(); old.poll = nil
             old.revision = AgentEventCursor.initial
             old.metadata = identity; old.verified = true
-            old.lastObservation = Date()
+            old.lastObservation = Date(); old.lastVerified = Date()
+            old.phase = "正在恢复"; old.healthFailures = 0
         } else {
             peers[agentID]?.poll?.cancel()
             epoch &+= 1
@@ -262,6 +304,7 @@ final class LocalDeviceDirectory: ObservableObject {
             peer.poll?.cancel()
             peer.poll = nil
             peer.verified = false
+            peer.phase = "正在恢复"; peer.recoveryStarted = peer.recoveryStarted ?? Date()
             peer.revision = AgentEventCursor.initial
             subscribe(agentID: id)
         }
@@ -279,31 +322,46 @@ final class LocalDeviceDirectory: ObservableObject {
         peer.poll = Task { [weak self, weak peer] in
             guard let peer else { return }
             var legacy = false
-            var backoff = 2
+            var retryAttempt = 0
+            var needsSnapshot = true
             var ended = Set<String>()
             var acknowledged = Set<String>()
             while !Task.isCancelled {
+                var healthAttempted = false
+                var healthSucceeded = false
                 do {
                     if !peer.verified {
                         guard let self else { return }
+                        healthAttempted = true
                         let identity = try await self.authenticatedHealth(agentID: agentID,
                             endpoint: peer.endpoint, credential: peer.credential)
                         guard self.peers[agentID] === peer, !Task.isCancelled else { return }
+                        healthSucceeded = true
                         peer.metadata = identity; peer.verified = true
-                        peer.lastObservation = Date()
+                        peer.lastObservation = Date(); peer.lastVerified = Date(); peer.healthFailures = 0
                         peer.revision = AgentEventCursor.initial
                         self.objectWillChange.send()
                         self.onVerified?(peer.api)
                     }
                     let status: CallStatus
-                    do {
-                        status = legacy ? try await peer.api.callStatus()
-                            : try await peer.api.waitForCallEvent(after: peer.revision, timeout: 25)
-                    } catch APIError.http(404, _) { legacy = true; continue }
+                    if needsSnapshot || legacy {
+                        status = try await peer.api.callStatus()
+                    } else {
+                        do { status = try await peer.api.waitForCallEvent(after: peer.revision, timeout: 25) }
+                        catch APIError.http(404, _) { legacy = true; needsSnapshot = true; continue }
+                    }
                     guard let self, self.peers[agentID] === peer, !Task.isCancelled else { return }
-                    backoff = 2
+                    retryAttempt = 0
+                    let previousPhase = peer.phase
                     peer.lastObservation = Date()
+                    peer.phase = "已连接"; peer.healthFailures = 0
+                    if let started = peer.recoveryStarted { peer.lastRecoveryDuration = Date().timeIntervalSince(started) }
+                    peer.recoveryStarted = nil
                     peer.revision = AgentEventCursor.advanced(from: peer.revision, to: status.revision ?? 0)
+                    if needsSnapshot || previousPhase != peer.phase || Date().timeIntervalSince(peer.lastDiagnosticPublication) >= 5 {
+                        peer.lastDiagnosticPublication = Date()
+                        self.objectWillChange.send()
+                    }
                     let history = (status.history ?? []).filter { $0.isTerminal && !acknowledged.contains($0.id) }
                     if let call = status.active {
                         self.onCallEvent?(Self.event(agentID: agentID, call: call, epoch: peer.epoch))
@@ -314,6 +372,10 @@ final class LocalDeviceDirectory: ObservableObject {
                     if ended.count > 256 { ended.removeAll() }
                     // Current call events must not wait for supplemental ACK I/O.
                     let shouldAcknowledge = !history.isEmpty && self.onHistory?(history, agentID) == true
+                    if needsSnapshot {
+                        needsSnapshot = false
+                        self.onResynchronized?(agentID, peer.api)
+                    }
                     if shouldAcknowledge {
                         do {
                             try await peer.api.acknowledgeCallHistory(ids: history.map(\.id))
@@ -329,14 +391,53 @@ final class LocalDeviceDirectory: ObservableObject {
                     if error is CancellationError || (error as? URLError)?.code == .cancelled {
                         try? await Task.sleep(for: .milliseconds(150)); continue
                     }
-                    if peer.verified { peer.verified = false; self.objectWillChange.send() }
-                    do {
-                        try await Task.sleep(for: .seconds(backoff))
-                        backoff = min(10, backoff * 2)
-                    } catch { if Task.isCancelled { return } }
+                    needsSnapshot = true
+                    retryAttempt += 1
+                    peer.recoveryStarted = peer.recoveryStarted ?? Date()
+                    peer.phase = "正在恢复"
+                    peer.lastFailure = NetworkConnectionPolicy.failureSummary(error)
+                    self.objectWillChange.send()
+                    var failure = error
+                    if !NetworkConnectionPolicy.isAuthenticationFailure(error) && !healthAttempted {
+                        do {
+                            let identity = try await self.authenticatedHealth(agentID: agentID,
+                                endpoint: peer.endpoint, credential: peer.credential)
+                            guard self.peers[agentID] === peer, !Task.isCancelled else { return }
+                            healthSucceeded = true
+                            peer.metadata = identity; peer.verified = true
+                            peer.lastVerified = Date(); peer.healthFailures = 0
+                        } catch {
+                            guard self.peers[agentID] === peer, !Task.isCancelled else { return }
+                            failure = error; peer.healthFailures += 1
+                        }
+                    } else if !healthSucceeded { peer.healthFailures += 1 }
+                    if !NetworkConnectionPolicy.retainsVerification(
+                        authenticationFailure: NetworkConnectionPolicy.isAuthenticationFailure(failure),
+                        healthFailures: peer.healthFailures,
+                        recoveryAge: Date().timeIntervalSince(peer.recoveryStarted ?? Date()),
+                        healthVerified: healthSucceeded) {
+                        peer.verified = false; peer.phase = "无法连接"
+                    }
+                    peer.lastFailure = NetworkConnectionPolicy.failureSummary(failure)
+                    self.objectWillChange.send()
+                    let delay = NetworkConnectionPolicy.retryDelay(attempt: retryAttempt, randomUnit: Double.random(in: 0...1))
+                    do { try await Task.sleep(for: .seconds(delay)) }
+                    catch { if Task.isCancelled { return } }
+
                 }
             }
         }
+    }
+
+    func networkReport() -> String {
+        let formatter = DateFormatter(); formatter.dateFormat = "MM-dd HH:mm:ss"
+        return agentIDs.map { id in
+            guard let peer = peers[id] else { return "" }
+            let name = PairedAndroidDeviceStore.records().first { $0.id == id }?.deviceName ?? "安卓设备"
+            let route = peer.endpoint.usesTLS ? "TLS 直连" : LocalWiFiSubnet.contains(peer.endpoint.host) ? "局域网" : "VPN／系统路由"
+            let recovery = peer.lastRecoveryDuration.map { String(format: "%.2f 秒", $0) } ?? "暂无恢复记录"
+            return "\(name) · \(peer.phase)\n连接：\(route) · \(peer.endpoint.host):\(peer.endpoint.controlPort)\n最近认证：\(formatter.string(from: peer.lastVerified))\n最近数据：\(formatter.string(from: peer.lastObservation))\n上次恢复耗时：\(recovery)\n最近故障：\(peer.lastFailure ?? "暂无")"
+        }.joined(separator: "\n\n")
     }
 
     private static func event(agentID: String, call: CallRecord, epoch: UInt64, terminal: Bool = false) -> DeviceCallEvent {
@@ -349,6 +450,6 @@ final class LocalDeviceDirectory: ObservableObject {
         default: state = .connecting
         }
         return DeviceCallEvent(agentID: agentID, callID: call.androidID ?? call.id, state: terminal ? .ended : state,
-            transport: .vowlan, transportEpoch: epoch, number: call.number, direction: call.direction, backendCallID: call.id, slotIndex: call.slotIndex)
+            transport: .vowlan, transportEpoch: epoch, number: call.number, direction: call.direction, backendCallID: call.id, slotIndex: call.slotIndex, numberRegion: call.numberRegion)
     }
 }
