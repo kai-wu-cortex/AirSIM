@@ -451,16 +451,36 @@ final class TunnelRecoveryRegressionTests: XCTestCase {
         XCTAssertEqual(starts, 1, "Foreground, discovery and watchdog must not invalidate each other's signed probe")
     }
 
-    func testSavedTailnetRouteIsNotReplacedByLANAdvertisementDuringVerification() throws {
+    func testSameSubnetAdvertisementPrecedesAnUnverifiedTailnetRoute() throws {
         let vpn = VoWLANManualRoute(agentID: "peer", host: "100.64.1.2", controlPort: 7592, pcmPort: 7593)
         let lan = VoWLANDiscoveredAgent(id: "peer",
             endpoint: try .init(host: "192.168.31.203", controlPort: 7592, pcmPort: 7593),
             deviceName: "Phone", manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)
         XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [lan], manual: [vpn],
-            live: [], preferred: nil).first?.endpoint, vpn.endpoint)
+            live: [], preferred: nil, canProbeLAN: { $0 == lan.endpoint }).first?.endpoint, lan.endpoint)
         XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [lan], manual: [vpn],
-            live: [lan], preferred: lan.endpoint).first?.endpoint, lan.endpoint,
-            "An already verified LAN route or active call must remain stable")
+            live: [], preferred: nil, canProbeLAN: { _ in false }).first?.endpoint, vpn.endpoint,
+            "Keep probing Tailnet when the LAN address is off-subnet or in backoff")
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [lan], manual: [vpn],
+            live: [lan], preferred: vpn.endpoint, canProbeLAN: { $0 == lan.endpoint }).first?.endpoint, vpn.endpoint,
+            "Keep a verified or locked route during browsing")
+    }
+
+    func testCachedSameSubnetAddressCanBeProbedBeforeBonjourReturns() throws {
+        let vpn = VoWLANManualRoute(agentID: "peer", host: "100.64.1.2", controlPort: 7592, pcmPort: 7593)
+        let cached = try VoWLANEndpoint(host: "192.168.31.203", controlPort: 7592, pcmPort: 7593)
+        let now = Date()
+        let pairing = VoWLANPairingRecord(id: "pair", agentID: vpn.agentID, deviceName: "Phone",
+            createdAt: now, lastSeenAt: now, endpoints: [.init(cached), .init(try XCTUnwrap(vpn.endpoint))])
+        let canProbeLAN: (VoWLANEndpoint) -> Bool = { $0 == cached }
+
+        let candidates = VoWLANRouteCandidates.cachedLANAgents(
+            pairings: [pairing], manual: [vpn], canProbeLAN: canProbeLAN)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: candidates, manual: [vpn],
+            live: [], preferred: nil, canProbeLAN: canProbeLAN).first?.endpoint, cached)
+        XCTAssertFalse(VoWLANAvailability.discovered(cached, at: now).isReady(at: now))
+        XCTAssertTrue(VoWLANRouteCandidates.cachedLANAgents(
+            pairings: [pairing], manual: [vpn], canProbeLAN: { _ in false }).isEmpty)
     }
 
     func testNetworkChangeKeepsPairedVPNCandidatesOutsideCGNAT() throws {

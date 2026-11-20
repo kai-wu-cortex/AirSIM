@@ -209,19 +209,32 @@ enum VoWLANRouteCandidates {
         }
     }
 
+    static func cachedLANAgents(pairings: [VoWLANPairingRecord], manual: [VoWLANManualRoute],
+                                canProbeLAN: (VoWLANEndpoint) -> Bool) -> [VoWLANDiscoveredAgent] {
+        let agentsWithTailnet = Set(manual.filter { VoWLANNetworkRoutePolicy.isOverlayHost($0.host) }.map(\.agentID))
+        return pairings.compactMap { pairing in
+            guard agentsWithTailnet.contains(pairing.agentID),
+                  let endpoint = pairing.endpoints.compactMap(\.endpoint).last(where: {
+                      !$0.usesTLS && !VoWLANNetworkRoutePolicy.isOverlayHost($0.host) && canProbeLAN($0)
+                  }) else { return nil }
+            return VoWLANDiscoveredAgent(id: pairing.agentID, endpoint: endpoint,
+                deviceName: pairing.deviceName ?? "Android 手动直连",
+                manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)
+        }
+    }
+
     static func merge(discovered: [VoWLANDiscoveredAgent], manual: [VoWLANManualRoute],
-                      live: [VoWLANDiscoveredAgent], preferred: VoWLANEndpoint?) -> [VoWLANDiscoveredAgent] {
+                      live: [VoWLANDiscoveredAgent], preferred: VoWLANEndpoint?,
+                      canProbeLAN: (VoWLANEndpoint) -> Bool = { LocalWiFiSubnet.contains($0.host) }) -> [VoWLANDiscoveredAgent] {
         var agents = Dictionary(discovered.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for route in manual.sorted(by: { !$0.isRemote && $1.isRemote }) {
             guard let endpoint = route.endpoint else { continue }
-            // Keep a healthy active endpoint stable; once unavailable, a fresh
-            // advertisement for this identity takes precedence over a saved address.
-            // An explicitly saved tailnet address remains a candidate while its
-            // signed probe is in flight. A stale LAN advertisement must not
-            // redirect it on every browser restart. Keep an already active LAN
-            // route stable; failed VPN probes can still try Bonjour below.
-            let prefersOverlay = preferred == nil && VoWLANNetworkRoutePolicy.isOverlayHost(endpoint.host)
-            if agents[route.agentID] != nil && preferred != endpoint && !prefersOverlay { continue }
+            if let existing = agents[route.agentID], preferred != endpoint {
+                // Keep an off-subnet or failed LAN advertisement from interrupting the Tailnet probe.
+                let prefersTailnet = preferred == nil && VoWLANNetworkRoutePolicy.isOverlayHost(endpoint.host)
+                    && !canProbeLAN(existing.endpoint)
+                guard prefersTailnet else { continue }
+            }
             agents[route.agentID] = live.first { $0.id == route.agentID && $0.endpoint == endpoint }
                 ?? VoWLANDiscoveredAgent(id: route.agentID, endpoint: endpoint, deviceName: "Android 手动直连",
                     manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)
@@ -737,10 +750,13 @@ final class VoWLANController: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self, self.browserLifecycle.markFailed(generation) else { return }
                     self.stopCurrentBrowser()
-                    if let endpoint = self.discoveredEndpoint, self.manualRoute(for: endpoint) != nil {
-                        // Manual routes do not depend on mDNS or its permission/state.
-                        await self.probeNow()
-                        return
+                    if let endpoint = self.discoveredEndpoint {
+                        let manual = self.permittedManualRoutes
+                        if manual.contains(where: { $0.endpoint == endpoint })
+                            || self.cachedLANAgents(manual: manual).contains(where: { $0.endpoint == endpoint }) {
+                            await self.probeNow()
+                            return
+                        }
                     }
                     self.discoveredEndpoint = nil
                     self.availability = .unavailable(
@@ -829,23 +845,36 @@ final class VoWLANController: ObservableObject {
         VoWLANManualRouteStore.routes().first { $0.endpoint == endpoint && PairedAndroidDeviceStore.permits($0.agentID) }
     }
 
-    private func mergingManualRoutes(with discovered: [VoWLANDiscoveredAgent]) -> [VoWLANDiscoveredAgent] {
-        let manual = VoWLANNetworkChangePolicy.manualCandidates(VoWLANManualRouteStore.routes()).filter { route in
+    private var permittedManualRoutes: [VoWLANManualRoute] {
+        VoWLANNetworkChangePolicy.manualCandidates(VoWLANManualRouteStore.routes()).filter { route in
             PairedAndroidDeviceStore.permits(route.agentID)
         }
-        return VoWLANRouteCandidates.merge(discovered: discovered,
+    }
+
+    private func canProbeLAN(_ endpoint: VoWLANEndpoint) -> Bool {
+        LocalWiFiSubnet.contains(endpoint.host) && (endpointFailures[endpoint]?.retry ?? .distantPast) <= Date()
+    }
+
+    private func cachedLANAgents(manual: [VoWLANManualRoute]) -> [VoWLANDiscoveredAgent] {
+        VoWLANRouteCandidates.cachedLANAgents(
+            pairings: VoWLANPairingRecordStore.records(), manual: manual, canProbeLAN: canProbeLAN)
+    }
+
+    private func mergingManualRoutes(with discovered: [VoWLANDiscoveredAgent]) -> [VoWLANDiscoveredAgent] {
+        let manual = permittedManualRoutes
+        return VoWLANRouteCandidates.merge(discovered: discovered + cachedLANAgents(manual: manual),
             manual: manual,
             live: discoveredAgents,
             // A cached pairing-time IP is not a healthy route. Let fresh Bonjour
             // for the same paired agent replace it until it actually verifies.
             // Keep an established call's route stable; never mid-call hand over.
-            preferred: (availability.isOnlineForDisplay || callInProgress()) ? discoveredEndpoint : nil)
+            preferred: (availability.isOnlineForDisplay || callInProgress()) ? discoveredEndpoint : nil,
+            canProbeLAN: canProbeLAN)
     }
 
     private func restoreManualRoutes() {
-        var routes = VoWLANNetworkChangePolicy.manualCandidates(VoWLANManualRouteStore.routes()).filter { route in
-            PairedAndroidDeviceStore.permits(route.agentID)
-        }
+        var routes = permittedManualRoutes
+        let cachedLAN = cachedLANAgents(manual: routes)
         // Cold launch must probe saved authenticated addresses immediately,
         // rather than wait for Bonjour to advertise again. They remain unverified.
         for record in VoWLANPairingRecordStore.records() where PairedAndroidDeviceStore.permits(record.agentID) {
@@ -855,12 +884,13 @@ final class VoWLANController: ObservableObject {
                     controlPort: endpoint.controlPort, pcmPort: endpoint.pcmPort) { routes.append(cached) }
         }
         discoveredAgents = VoWLANRouteCandidates.merge(
-            discovered: [], manual: routes, live: discoveredAgents, preferred: nil)
+            discovered: cachedLAN, manual: routes, live: discoveredAgents, preferred: nil,
+            canProbeLAN: canProbeLAN)
         // A newly saved remote record is usually last; restoration must still
         // try the device's local route first, just like the discovery merge.
         let route = routes.first(where: { $0.agentID == AndroidAgentBindingPreference.selected() })
             ?? VoWLANManualRouteStore.selected() ?? routes.first
-        if let endpoint = route?.endpoint {
+        if let endpoint = cachedLAN.first(where: { $0.id == route?.agentID })?.endpoint ?? route?.endpoint {
             discoveredEndpoint = endpoint
             availability = .discovered(endpoint, at: Date())
         } else if discoveredEndpoint != nil {
