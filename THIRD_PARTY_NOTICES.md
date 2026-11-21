@@ -46,3 +46,7 @@ SOFTWARE.
 
 The source hashes and transformation details are in `PhoneRegion-source.json`.
 Region labels are offline number-prefix estimates, not a subscriber's current location or carrier.
+
+## Service-number artwork
+
+The bundled iPhone and Watch service-number artwork identifies telecom, banking and courier services. Brand marks belong to their respective owners; inclusion does not imply endorsement or authenticate a message sender. Sources and exact number mappings are documented in [docs/SMSCarrierIcons.md](docs/SMSCarrierIcons.md). Visual assets and display mapping were adapted from 2020cqyd/AirSIM PR #47 (b8a9bac685c4c33f5ebbc4fd641b5da7677e3086).

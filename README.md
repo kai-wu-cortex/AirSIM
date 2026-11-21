@@ -107,12 +107,12 @@ VoBLE 是与 VoWLAN、云端 Relay 并列的模式选项，不是现有 Wi-Fi �
 
 ### 应用发布包
 
-当前版为 [Apps v0.9.8.26（Android 141 / iOS 185）](docs/releases/0.9.8.26.md)，重点包含：云端音频缓冲、兼容端短信加密、SIM 与未接通知、运营商语音开关。纯本地跨端功能仍属实验阶段。
+当前版为 [Apps v0.9.8.26（Android 141 / iOS 185）](docs/releases/0.9.8.26.md)，重点包含：通话视觉更新、PushKit 崩溃路径修复、Root 短信回执、云端 SIM 兼容与多卡信号。纯本地跨端功能仍属实验阶段。
 
-- `AirSIM-Android-Standalone-0.9.8.24-build135.apk`：推荐新安装，内置 Agent，不依赖 AVF Linux。
-- `AirSIM-Android-AVF-0.9.8.24-build135.apk`：旧 AVF 部署的 Android Bridge；不包含新的 Linux Agent。
-- `AirSIM-iOS-0.9.8-build175-unsigned.ipa`／`-sideload-unsigned.ipa`：公开未签名包，必须用部署者自己的 Team、Bundle ID 与 profiles 重签，不能直接安装或上传 TestFlight。
-- TestFlight：本版使用 production APNs 的 build 175，上传与处理状态见本版发布说明。上传成功不等于 Apple 处理完成、外测审核或测试者可更新。
+- `AirSIM-Android-Standalone-0.9.8.26-build141.apk`：推荐新安装，内置 Agent，不依赖 AVF Linux。
+- `AirSIM-Android-AVF-0.9.8.26-build141.apk`：旧 AVF 部署的 Android Bridge；不包含新的 Linux Agent。
+- `AirSIM-iOS-0.9.8-build185-unsigned.ipa`／`-sideload-unsigned.ipa`：公开未签名包，必须用部署者自己的 Team、Bundle ID 与 profiles 重签，不能直接安装或上传 TestFlight。
+- TestFlight：本版使用 production APNs 的 build 185，上传与处理状态见本版发布说明。上传成功不等于 Apple 处理完成、外测审核或测试者可更新。
 
 正式 APK 使用既有 AirSIM Release 证书，可覆盖同包名、同签名安装；不要先卸载或清除配对数据。历史版本与旧 Android 10–13 修复包仍保留在 [Releases](https://github.com/kai-wu-cortex/AirSIM/releases)。Debug 包与正式包签名不同，不能直接覆盖。
 
