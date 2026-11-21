@@ -22,8 +22,205 @@ public final class CloudCallManagerTests {
         oldMediaCannotRestartAfterPureLocalExit();
         media401RetriesThenStopsWithoutReplacingLiveSlot();
         successfulHandshakeResetsMedia401Window();
+        outgoingAnswerPreparesMediaWithoutAnsweringTelecom();
+        pendingAnswerCanRecoverWithSameIntent();
+        answerIdentityExpiryAndTerminalAreRechecked();
+        incomingAnswerDoesNotRepeatUnknownSideEffect();
+        incomingAnswerSuccessIsDeduplicated();
+        answerSocketReplayDoesNotRestartMedia();
         cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
+    }
+
+    private static JSONObject answerCommand() throws Exception {
+        return new JSONObject().put("command_id", "44444444-4444-4444-8444-444444444444")
+                .put("type", "call_control").put("action", "answer")
+                .put("call", new JSONObject().put("call_id", "new-cloud-call")
+                        .put("call_uuid", "11111111-1111-4111-8111-111111111111").put("generation", 1));
+    }
+
+    private static void outgoingAnswerPreparesMediaWithoutAnsweringTelecom() throws Exception {
+        var call = new android.telecom.Call(android.telecom.Call.STATE_DIALING, 1, "5550100") {
+            @Override public void answer(int videoState) { throw new AssertionError("outgoing must never answer Telecom"); }
+        };
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            var command = answerCommand();
+            var result = g.gateway.executeCloudCommand(command);
+            check("completed".equals(result.optString("status")), "DIALING must prepare media: " + result);
+            check(call.getState() == android.telecom.Call.STATE_DIALING, "media ACK must not fake ACTIVE");
+            check(result.getJSONObject("result").optBoolean("media_prepared")
+                    && !result.getJSONObject("result").optBoolean("answered"), "outgoing ACK is not a carrier answer");
+            for (int state : new int[]{android.telecom.Call.STATE_CONNECTING, android.telecom.Call.STATE_SELECT_PHONE_ACCOUNT}) {
+                call.setStateForTest(state);
+                check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")), "outgoing preparation state " + state);
+            }
+            call.setStateForTest(android.telecom.Call.STATE_ACTIVE);
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")), "same intent recovers after ACTIVE");
+        } finally { CallRepository.remove(call); }
+    }
+
+    private static void pendingAnswerCanRecoverWithSameIntent() throws Exception {
+        var observation = CallRepository.observeOutgoing("5550100");
+        var call = new android.telecom.Call(android.telecom.Call.STATE_DIALING, 1, "5550100");
+        try (var f = new Fixture(""); var g = new GatewayFixture(f)) {
+            set(f.descriptor, "outgoingObservation", observation);
+            var command = answerCommand();
+            check("call_not_ready".equals(g.gateway.executeCloudCommand(command).optString("error")), "before Telecom binding must be pending");
+            CallRepository.add(call);
+            set(f.manager, "sessions", new QueuedExecutor());
+            var socket = controlSocket(mediaAnswer(command)); set(f.active(), "webSocket", socket);
+            readControl(f.active(), socket);
+            check(socket.text.stream().anyMatch(v -> v.contains("answer_ok")), "failed HTTP preparation must recover through in-band same ID");
+            check(CallRepository.id(call).equals(f.boundID()), "must bind only the observed outgoing call");
+        } finally { observation.close(); CallRepository.remove(call); }
+    }
+
+    private static void answerIdentityExpiryAndTerminalAreRechecked() throws Exception {
+        var call = new android.telecom.Call(android.telecom.Call.STATE_DIALING, 1, "5550100");
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            var command = answerCommand();
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")), "preparation baseline");
+            for (String field : new String[]{"call_id", "call_uuid", "generation"}) {
+                var altered = new JSONObject(command.toString());
+                altered.getJSONObject("call").put(field, field.equals("generation") ? 2 : "other-call");
+                check("failed".equals(g.gateway.executeCloudCommand(altered).optString("status")), "same ID cannot change " + field);
+                altered.put("command_id", java.util.UUID.randomUUID().toString());
+                check("call_mismatch".equals(g.gateway.executeCloudCommand(altered).optString("error")), "new ID cannot bypass " + field);
+            }
+            check("failed".equals(g.gateway.executeCloudCommand(command, () -> false).optString("status")), "stale config cannot replay ACK");
+            RelayEgressGate.shared.disableAndDrain(1000);
+            check("failed".equals(g.gateway.executeCloudCommand(command).optString("status")), "pure local denies media preparation");
+            RelayEgressGate.shared.enableAfterRestore();
+            // The prior media session belongs to the old egress generation.
+            check("failed".equals(g.gateway.executeCloudCommand(command).optString("status")), "restore cannot revive old generation");
+        } finally { CallRepository.remove(call); RelayEgressGate.shared.enableAfterRestore(); }
+        call = new android.telecom.Call(android.telecom.Call.STATE_ACTIVE, 1, "5550100"); id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            var command = answerCommand().put("expires_at", java.time.Instant.now().minusSeconds(1).toString());
+            check("command_expired".equals(g.gateway.executeCloudCommand(command).optString("error")), "expired HTTP command");
+            command.remove("expires_at");
+            check("command_expired".equals(g.gateway.executeCloudCommand(command).optString("error")), "in-band cannot remove expiry");
+            command.put("expires_at", java.time.Instant.now().plusSeconds(60).toString());
+            check("command_expired".equals(g.gateway.executeCloudCommand(command).optString("error")), "same intent cannot extend expiry");
+            command = answerCommand().put("command_id", java.util.UUID.randomUUID().toString());
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")), "active preparation");
+            var attempts = (java.util.Map<?, ?>)field(g.gateway, "answerAttempts");
+            set(attempts.get(command.getString("command_id")), "expiresAt", java.time.Instant.now().minusSeconds(1));
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")),
+                    "confirmed live media can reconnect after the command execution deadline");
+            call.setStateForTest(android.telecom.Call.STATE_DISCONNECTING);
+            check("call_ended".equals(g.gateway.executeCloudCommand(command).optString("error")), "success cache cannot revive disconnecting call");
+            CallRepository.remove(call);
+            check("call_ended".equals(g.gateway.executeCloudCommand(command).optString("error")), "removed Telecom call cannot ACK");
+        } finally { CallRepository.remove(call); }
+    }
+
+    private static void incomingAnswerSuccessIsDeduplicated() throws Exception {
+        int[] answers = {0};
+        var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
+            @Override public void answer(int videoState) { answers[0]++; super.answer(videoState); }
+        };
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            set(f.descriptor, "direction", "incoming");
+            var command = answerCommand();
+            // A client-supplied direction cannot turn a real incoming answer into a no-op.
+            command.getJSONObject("call").put("direction", "outgoing");
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")), "incoming must actually answer");
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")) && answers[0] == 1, "incoming duplicate must not re-answer");
+            var end = new JSONObject(command.toString()).put("command_id", java.util.UUID.randomUUID().toString()).put("action", "end");
+            check("completed".equals(g.gateway.executeCloudCommand(end).optString("status")), "ordinary hangup still succeeds");
+            check("call_ended".equals(g.gateway.executeCloudCommand(command).optString("error")), "late incoming ACK cannot resurrect");
+        } finally { CallRepository.remove(call); }
+    }
+
+    private static void incomingAnswerDoesNotRepeatUnknownSideEffect() throws Exception {
+        int[] answers = {0};
+        var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
+            @Override public void answer(int videoState) { answers[0]++; throw new IllegalStateException("synthetic uncertain dispatch"); }
+        };
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            set(f.descriptor, "direction", "incoming");
+            var command = answerCommand();
+            check("failed".equals(g.gateway.executeCloudCommand(command).optString("status")), "incoming uncertain dispatch");
+            check("failed".equals(g.gateway.executeCloudCommand(command).optString("status")) && answers[0] == 1, "unknown answer cannot blindly repeat");
+            call.setStateForTest(android.telecom.Call.STATE_ACTIVE);
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")) && answers[0] == 1, "later ACTIVE confirms same intent without second answer");
+        } finally { CallRepository.remove(call); }
+    }
+
+    private static StandaloneWebSocket controlSocket(JSONObject... commands) throws Exception {
+        int[] index = {0};
+        return new StandaloneWebSocket(() -> {
+            if (index[0] == commands.length) throw new java.io.EOFException("fixture exhausted");
+            return new StandaloneWebSocket.Message(1, commands[index[0]++].toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        });
+    }
+
+    private static JSONObject mediaAnswer(JSONObject command) throws Exception {
+        return new JSONObject(command.getJSONObject("call").toString())
+                .put("command_id", command.getString("command_id")).put("action", "answer")
+                .put("early_media_version", 1);
+    }
+
+    private static void readControl(Object session, StandaloneWebSocket socket) throws Exception {
+        var read = session.getClass().getDeclaredMethod("readLoop", StandaloneWebSocket.class); read.setAccessible(true);
+        try { read.invoke(session, socket); }
+        catch (InvocationTargetException error) {
+            if (!(error.getCause() instanceof java.io.EOFException)) throw error;
+        }
+    }
+
+    private static void answerSocketReplayDoesNotRestartMedia() throws Exception {
+        var call = new android.telecom.Call(android.telecom.Call.STATE_DIALING, 1, "5550100");
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            var executor = new QueuedExecutor(); set(f.manager, "sessions", executor);
+            var command = answerCommand();
+            // First entry is the HTTP/command-channel gateway; the media retry shares its ID.
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")), "HTTP preparation");
+            Object session = f.active();
+            var legacy = mediaAnswer(command); legacy.remove("early_media_version");
+            var socket = controlSocket(legacy, legacy); set(session, "webSocket", socket);
+            readControl(session, socket);
+            check(socket.text.stream().filter(v -> v.contains("answer_ok")).count() == 2, "media duplicate ACK");
+            check(!(boolean)field(session, "earlyMediaAccepted"), "legacy client must not enable early media");
+            check(executor.tasks == 1, "duplicate answer must not spawn another PCM loop");
+            // Match the real reconnect loop, which clears mediaStarted for a new socket.
+            set(session, "mediaStarted", false);
+            var attempts = (java.util.Map<?, ?>)field(g.gateway, "answerAttempts");
+            set(attempts.get(command.getString("command_id")), "expiresAt", java.time.Instant.now().minusSeconds(1));
+            socket = controlSocket(mediaAnswer(command)); set(session, "webSocket", socket);
+            readControl(session, socket);
+            check(socket.text.stream().anyMatch(v -> v.contains("answer_ok")) && executor.tasks == 2,
+                    "same confirmed ID restores the new media socket after command expiry");
+            call.setStateForTest(android.telecom.Call.STATE_DISCONNECTED);
+            var late = controlSocket(mediaAnswer(command)); set(session, "webSocket", late);
+            readControl(session, late);
+            check(late.text.stream().noneMatch(v -> v.contains("answer_ok")) && executor.tasks == 2, "late success cannot restart media");
+        } finally { CallRepository.remove(call); }
+    }
+
+    static final class GatewayFixture implements AutoCloseable {
+        final Field mediaSingleton, gatewaySingleton;
+        final Object previousMedia, previousGateway;
+        final StandaloneAgentGateway gateway;
+        GatewayFixture(Fixture f) throws Exception {
+            mediaSingleton = StandaloneCloudMediaManager.class.getDeclaredField("instance"); mediaSingleton.setAccessible(true);
+            gatewaySingleton = StandaloneAgentGateway.class.getDeclaredField("instance"); gatewaySingleton.setAccessible(true);
+            previousMedia = mediaSingleton.get(null); previousGateway = gatewaySingleton.get(null);
+            var context = new android.content.Context();
+            context.setSystemService(android.app.role.RoleManager.class, new android.app.role.RoleManager());
+            var ctor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class); ctor.setAccessible(true);
+            gateway = ctor.newInstance(context);
+            mediaSingleton.set(null, f.manager); gatewaySingleton.set(null, gateway);
+        }
+        public void close() throws Exception {
+            mediaSingleton.set(null, previousMedia); gatewaySingleton.set(null, previousGateway);
+        }
     }
 
     private static void incomingIdentityUsesTelecomUUID() throws Exception {
@@ -47,14 +244,21 @@ public final class CloudCallManagerTests {
         String id = CallRepository.add(call);
         var threads = java.util.concurrent.Executors.newCachedThreadPool();
         var hellos = new java.util.concurrent.CopyOnWriteArrayList<String>();
-        try (var f = new Fixture(id); var server = new java.net.ServerSocket(0, 2, java.net.InetAddress.getLoopbackAddress())) {
+        try (var f = new Fixture(id); var g = new GatewayFixture(f);
+             var server = new java.net.ServerSocket(0, 2, java.net.InetAddress.getLoopbackAddress())) {
             set(f.manager, "pcmEndpoint", new java.net.InetSocketAddress(server.getInetAddress(), server.getLocalPort()));
+            set(f.manager, "sessions", new QueuedExecutor());
             Object session = f.active();
-            var owner = new StandaloneWebSocket(() -> { throw new AssertionError("no network reads"); });
-            set(session, "webSocket", owner); set(session, "mediaStarted", true);
+            var owner = controlSocket(mediaAnswer(answerCommand()));
+            set(session, "webSocket", owner);
             var eligible = session.getClass().getDeclaredMethod("earlyEligible"); eligible.setAccessible(true);
             check(!(boolean)eligible.invoke(session), "old client cannot open early media");
-            set(session, "earlyMediaAccepted", true);
+            readControl(session, owner);
+            check((boolean)field(session, "mediaStarted") && owner.text.stream().anyMatch(v -> v.contains("answer_ok")),
+                    "real gateway handshake must start media while DIALING");
+            // The queued start keeps the fixture deterministic; PCM pump workers
+            // below use real threads after the real control path has admitted it.
+            set(f.manager, "sessions", threads);
             check((boolean)eligible.invoke(session), "generic standalone outgoing is eligible");
             var other = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550199");
             CallRepository.add(other);

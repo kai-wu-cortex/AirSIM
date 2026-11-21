@@ -28,6 +28,37 @@ final class ShellProviderQuery {
 
     private ShellProviderQuery() {}
 
+    /** Root-only callback handoff, including the App's Android user/profile. */
+    static Bundle call(String authority, int userId, String method, String argument) throws Exception {
+        if (Process.myUid() != 0 || userId < 0) throw new SecurityException("root required");
+        Object activityManager = invoke(Class.forName("android.app.ActivityManager").getMethod("getService"), null);
+        IBinder token = new Binder();
+        Object holder = invoke(activityManager.getClass().getMethod("getContentProviderExternal",
+                String.class, int.class, IBinder.class, String.class),
+                activityManager, authority, userId, token, "airsim-sms");
+        if (holder == null) throw new IllegalStateException("callback provider unavailable");
+        try {
+            Object provider = holder.getClass().getField("provider").get(holder);
+            if (Build.VERSION.SDK_INT >= 31) {
+                AttributionSource source = new AttributionSource.Builder(0).setPackageName("root").build();
+                return (Bundle) invoke(provider.getClass().getMethod("call", AttributionSource.class,
+                        String.class, String.class, String.class, Bundle.class),
+                        provider, source, authority, method, argument, null);
+            }
+            if (Build.VERSION.SDK_INT == 30) {
+                return (Bundle) invoke(provider.getClass().getMethod("call", String.class, String.class,
+                        String.class, String.class, String.class, Bundle.class),
+                        provider, "root", null, authority, method, argument, null);
+            }
+            return (Bundle) invoke(provider.getClass().getMethod("call", String.class,
+                    String.class, String.class, String.class, Bundle.class),
+                    provider, "root", authority, method, argument, null);
+        } finally {
+            invoke(activityManager.getClass().getMethod("removeContentProviderExternalAsUser",
+                    String.class, IBinder.class, int.class), activityManager, authority, token, userId);
+        }
+    }
+
     /** Runs one query; {@code reader} may receive null, a cursor is closed and the provider released. */
     static <T> T query(String authority, Uri uri, String[] projection, String selection,
             String[] selectionArgs, String sortOrder, Reader<T> reader) throws Exception {

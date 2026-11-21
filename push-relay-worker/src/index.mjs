@@ -1,4 +1,4 @@
-import { simSlots } from "./sim-slots.mjs";
+import { simSlots, validSIMAccountID } from "./sim-slots.mjs";
 import {
   dashboardAuthorized,
   dashboardHTMLResponse,
@@ -489,9 +489,7 @@ function validateDeviceCommand(value) {
   }
   if (["dial", "send_sms"].includes(value.type)) {
     if (value.sim_account !== undefined &&
-        (typeof value.sim_account !== "string" ||
-         new TextEncoder().encode(value.sim_account).length > 512 ||
-         /[\u0000-\u001f\u007f]/.test(value.sim_account))) return "invalid SIM account";
+        value.sim_account !== "" && !validSIMAccountID(value.sim_account)) return "invalid SIM account";
   }
   return "";
 }

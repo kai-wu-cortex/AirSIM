@@ -447,11 +447,9 @@ final class ShizukuBridgeManager {
     String sendSms(String destination, String body, int subscriptionId) {
         RootBridgeTransport root = rootTransport;
         if (root != null) {
-            try {
-                return root.sendSms(destination, body, subscriptionId);
-            } catch (Exception error) {
-                return "error:root";
-            }
+            // RootSmsSender already attempted the confirmed Root path. Never run
+            // the legacy unconfirmed socket sender as a second Root attempt.
+            return "unavailable";
         }
         if (channel == PrivilegeChannelPreference.Channel.ROOT) return "unavailable";
         PrivilegedBridgeClient client = privilegedClient;

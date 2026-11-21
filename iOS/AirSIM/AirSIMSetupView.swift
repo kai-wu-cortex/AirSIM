@@ -1490,7 +1490,10 @@ struct AirSIMSettingsView: View {
         selfTestPhase = .running
         selfTestReport = .initial
         selfTestTask = Task { @MainActor in
-            let report = await VoIPPushController.shared.runCloudSelfTest { update in
+            let report = await VoIPPushController.shared.runCloudSelfTest(selectedSIM: { agentID in
+                UserDefaults.standard.string(forKey: "airsim.sim-account.\(agentID)")
+                    ?? model.selectedSIMSlotID(for: agentID)
+            }) { update in
                 guard !Task.isCancelled else { return }
                 selfTestReport = update
             }

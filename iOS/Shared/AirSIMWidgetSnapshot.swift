@@ -30,6 +30,34 @@ struct AndroidBatteryReading: Codable, Equatable, Sendable {
     }
 }
 
+/// Subscription-scoped signal sample. Missing or stale values are not zero bars.
+struct AndroidSIMSignal: Codable, Equatable, Hashable, Sendable {
+    let level: Int
+    let observedAtMS: Double
+    enum CodingKeys: String, CodingKey { case level; case observedAtMS = "observed_at_ms" }
+    init(level: Int, observedAtMS: Double) {
+        self.level = level; self.observedAtMS = observedAtMS
+    }
+    init(from decoder: Decoder) throws {
+        let values = try? decoder.container(keyedBy: CodingKeys.self)
+        level = (try? values?.decode(Int.self, forKey: .level)) ?? -1
+        observedAtMS = (try? values?.decode(Double.self, forKey: .observedAtMS)) ?? 0
+    }
+    var expiresAt: Date { Date(timeIntervalSince1970: observedAtMS / 1000 + 300) }
+    func freshLevel(at date: Date) -> Int? {
+        let age = date.timeIntervalSince1970 * 1000 - observedAtMS
+        return (0...4).contains(level) && observedAtMS.isFinite && observedAtMS > 0
+            && age >= -60_000 && age < 300_000 ? level : nil
+    }
+}
+
+/// No phone number, subscription ID or Telecom handle is exported into widget state.
+struct SIMSignalSummary: Codable, Equatable, Hashable, Identifiable, Sendable {
+    let id: Int
+    let title: String
+    let signal: AndroidSIMSignal?
+}
+
 /// A display snapshot with masked call numbers and bounded SMS previews.
 /// Never contains pairing secrets or endpoints, or authorizes a carrier command.
 struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
@@ -102,6 +130,7 @@ struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
         let transport: String
         let recentlyReachable: Bool
         let observedAt: Date?
+        var simSignals: [SIMSignalSummary]? = nil
         var batteryPercent: Int? = nil
         var battery: AndroidBatteryReading? = nil
         var unreadMessages: Int? = nil
@@ -135,13 +164,17 @@ struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
     /// Future entries turn old observations neutral even when the app sleeps.
     func expirationDates(after now: Date) -> [Date] {
         Array(Set((devices.compactMap { $0.observedAt?.addingTimeInterval(Self.freshness) }
-                   + devices.compactMap { $0.battery?.observedAt.addingTimeInterval(Self.freshness) })
+                   + devices.compactMap { $0.battery?.observedAt.addingTimeInterval(Self.freshness) }
+                   + devices.flatMap { ($0.simSignals ?? []).compactMap { $0.signal?.expiresAt } })
             .filter { $0 > now })).sorted()
     }
     static func preview(at now: Date = Date()) -> Self {
         .init(generatedAt: now, devices: [
             .init(id: "preview-galaxy", name: "Galaxy", transport: "VoWLAN", recentlyReachable: true,
-                  observedAt: now, batteryPercent: 82,
+                  observedAt: now, simSignals: [
+                    .init(id: 0, title: "SIM 1", signal: .init(level: 4, observedAtMS: now.timeIntervalSince1970 * 1000)),
+                    .init(id: 1, title: "SIM 2", signal: .init(level: 2, observedAtMS: now.timeIntervalSince1970 * 1000))
+                  ], batteryPercent: 82,
                   battery: .init(percent: 82, charging: false, observedAtMS: now.timeIntervalSince1970 * 1000)),
             .init(id: "preview-redmi", name: "Redmi", transport: "VoBLE", recentlyReachable: true,
                   observedAt: now.addingTimeInterval(-36000))

@@ -24,6 +24,7 @@ mkdir -p "$OUT"
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.AudioVolumePolicyServiceTests
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.PrivilegedSMSTests
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.ShellProviderQueryTests
+"$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.RootSMSProviderCallTests
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.PrivilegedInboxTests
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$ANDROID_JAR" com.airsim.phonecontrol.PCMOwnershipTests
 

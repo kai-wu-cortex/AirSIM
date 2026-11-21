@@ -91,7 +91,7 @@ public final class SMSCommandExecutor {
                 }
                 if (!SMSPrivilegedResult.mayFallback(result)) {
                     SmsSendConfirmationGate.disarm();
-                    BridgeLog.info("sms_send_root_unconfirmed no_fallback=true");
+                    BridgeLog.info("sms_send_root_unconfirmed no_fallback=true reason=" + SMSPrivilegedResult.diagnosticCode(result));
                     return AgentCommandDispatcher.Result.failure(SMSPrivilegedResult.failureMessage(result));
                 }
                 BridgeLog.info("sms_send_root_fallback result="
@@ -108,7 +108,7 @@ public final class SMSCommandExecutor {
                 }
                 if (!SMSPrivilegedResult.mayFallback(result)) {
                     SmsSendConfirmationGate.disarm();
-                    BridgeLog.info("sms_send_shizuku_unconfirmed no_fallback=true");
+                    BridgeLog.info("sms_send_shizuku_unconfirmed no_fallback=true reason=" + SMSPrivilegedResult.diagnosticCode(result));
                     return AgentCommandDispatcher.Result.failure(SMSPrivilegedResult.failureMessage(result));
                 }
                 BridgeLog.info("sms_send_shizuku_fallback result="

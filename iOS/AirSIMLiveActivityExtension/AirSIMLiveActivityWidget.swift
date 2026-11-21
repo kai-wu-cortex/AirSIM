@@ -423,12 +423,18 @@ struct AirSIMLiveActivityWidget: Widget {
                             .fixedSize()
                     }
                 }
+                if let signals = agent.simSignals, !signals.isEmpty {
+                    SIMSignalStrip(signals: signals, date: Date(),
+                                   available: agent.vowlanOnline || agent.bluetoothOnline || agent.cloudOnline)
+                        .foregroundStyle(.white)
+                } else {
                 Text("SIM · \(displayAgentNumber(agent.phoneNumber))")
                     .font(.system(size: compact ? 8.5 : 9.5, weight: .regular))
                     .foregroundStyle(.white.opacity(0.48))
                     .lineLimit(1)
                     .minimumScaleFactor(0.45)
                     .allowsTightening(true)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -663,14 +669,16 @@ struct AirSIMLiveActivityWidget: Widget {
         switch state.phase {
         case .active, .incoming, .held:
             EmptyView()
-        case .standby:
-            Image(systemName: "cellularbars")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white)
-        case .cloudStandby:
-            Image(systemName: "checkmark")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.cyan)
+        case .standby, .cloudStandby:
+            if let signals = state.agents?.first(where: \.isCurrent)?.simSignals, !signals.isEmpty {
+                SIMSignalStrip(signals: signals, date: Date(), compact: true)
+                    .foregroundStyle(.white)
+            } else if let dbm = state.signalDBM {
+                signalBars(dbm: dbm)
+            } else {
+                Text("—").font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("蜂窝信号未知")
+            }
         case .offline:
             Image(systemName: "minus")
                 .font(.caption)

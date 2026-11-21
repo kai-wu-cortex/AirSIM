@@ -51,7 +51,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         let bluetoothOnline: Bool?
         let cloudOnline: Bool?
         /// 排序后的完整待机列表；页码由主人 App 维护。可选以兼容旧版 ContentState。
-        let agents: [AgentSummary]?
+        var agents: [AgentSummary]?
         /// 0-based 当前页；每页最多 5 台。旧版没有该字段时按第 1 页处理。
         let agentPage: Int?
 
@@ -64,6 +64,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             let bluetoothOnline: Bool
             let cloudOnline: Bool
             let isCurrent: Bool
+            var simSignals: [SIMSignalSummary]? = nil
 
             var transport: Transport? {
                 if vowlanOnline { return .vowlan }
@@ -144,12 +145,24 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
 }
 
 extension AirSIMCallActivityAttributes.ContentState {
+    var simSignalExpirationDate: Date? {
+        agents?.flatMap { $0.simSignals ?? [] }.compactMap { $0.signal?.expiresAt }.min()
+    }
+
     /// ActivityKit 的 stale 只表示主 App 暂时没有提交新内容，不能证明 Agent 离线。
     /// 模块离线由主 App 的真实 HTTP 探测失败显式写入 `.offline`。
     func liveActivityDisplayState(isStale: Bool) -> Self {
         // CallKit exclusively owns in-call UI. Even an activity created by an older
         // build must never render a call phase, timer or hangup button.
-        guard phase == .incoming || phase == .active || phase == .held else { return self }
+        var display = self
+        if isStale {
+            display.agents = agents?.map { agent in
+                var copy = agent
+                copy.simSignals = agent.simSignals?.map { .init(id: $0.id, title: $0.title, signal: nil) }
+                return copy
+            }
+        }
+        guard phase == .incoming || phase == .active || phase == .held else { return display }
         return Self(
             callID: "",
             number: "",
@@ -164,7 +177,7 @@ extension AirSIMCallActivityAttributes.ContentState {
             vowlanOnline: vowlanOnline,
             bluetoothOnline: bluetoothOnline,
             cloudOnline: cloudOnline,
-            agents: agents,
+            agents: display.agents,
             agentPage: agentPage
         )
     }

@@ -38,11 +38,11 @@ enum PhoneTab: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .dial: return "phone"
-        case .recents: return "clock"
-        case .messages: return "bubble.left.and.bubble.right"
-        case .contacts: return "person.crop.rectangle"
-        case .settings: return "slider.horizontal.3"
+        case .dial: return "circle.grid.3x3.fill"
+        case .recents: return "clock.fill"
+        case .messages: return "bubble.left.fill"
+        case .contacts: return "person.crop.circle.fill"
+        case .settings: return "gearshape.fill"
         }
     }
 
@@ -51,7 +51,7 @@ enum PhoneTab: String, CaseIterable, Identifiable {
     private static let tabImages: [PhoneTab: UIImage] = Dictionary(uniqueKeysWithValues:
         allCases.map { tab in
             (tab, UIImage(systemName: tab.icon, withConfiguration:
-                UIImage.SymbolConfiguration(pointSize: 20.57, weight: .regular, scale: .small)) ?? UIImage())
+                UIImage.SymbolConfiguration(pointSize: 23, weight: .regular, scale: .medium)) ?? UIImage())
         })
 
     var tabImage: UIImage { Self.tabImages[self] ?? UIImage() }
@@ -76,6 +76,7 @@ struct RootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appUpdatePresentation: AppUpdatePresentation?
     @AppStorage("airsim.selected-tab") private var selectedTabRawValue = PhoneTab.dial.rawValue
+    @State private var collapsedCallID: String?
     @State private var callbackSIMRequest: CallbackSIMDialRequest?
     @State private var pendingSMSRecipient: String?
     @State private var messageListState = SMSConversationListState()
@@ -89,6 +90,12 @@ struct RootView: View {
            let preview = SMSNavigationFixture.previewCall { return preview }
 #endif
         return model.inAppPresentedCall
+    }
+
+    private var callSurfaceVisible: Bool {
+        guard let call = presentedCall else { return false }
+        // A new incoming state must never remain hidden by an earlier collapse.
+        return CallSurfaceContent(state: call.state).phase == .incoming || collapsedCallID != call.id
     }
 
     var body: some View {
@@ -159,15 +166,20 @@ struct RootView: View {
                 // Keep navigation state, but remove the underlying native tab
                 // chrome from rendering, hit testing and VoiceOver during calls.
                 // Duo promotes that chrome outside the SwiftUI content stack.
-                .opacity(presentedCall == nil ? 1 : 0)
-                .allowsHitTesting(presentedCall == nil)
-                .accessibilityHidden(presentedCall != nil)
+                .opacity(callSurfaceVisible ? 0 : 1)
+                .allowsHitTesting(!callSurfaceVisible)
+                .accessibilityHidden(callSurfaceVisible)
                 .phoneTabBarAlwaysExpanded()
                 .phoneTabSelectionFeedback(selectedTabRawValue)
                 .tint(settings.theme.accent)
 
             if let call = presentedCall {
-                ActiveCallView(call: call)
+                ActiveCallView(call: call, isPresented: callSurfaceVisible,
+                               onMinimize: { collapsedCallID = call.id })
+                    // Keep the same call view mounted; collapse changes presentation only.
+                    .opacity(callSurfaceVisible ? 1 : 0)
+                    .allowsHitTesting(callSurfaceVisible)
+                    .accessibilityHidden(!callSurfaceVisible)
                     .zIndex(1)
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
             }
@@ -179,7 +191,24 @@ struct RootView: View {
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.inAppPresentedCall?.id)
         .preferredColorScheme(settings.appearance.colorScheme)
+        .onChange(of: presentedCall?.id) { _ in collapsedCallID = nil }
         .safeAreaInset(edge: .top, spacing: 0) {
+            if let call = presentedCall, !callSurfaceVisible {
+                Button { collapsedCallID = nil } label: {
+                    HStack {
+                        Image(systemName: "phone.fill")
+                        Text("返回通话")
+                        Text(model.contacts.displayName(for: call.number)).lineLimit(1)
+                        Spacer()
+                        Image(systemName: "chevron.up")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .padding(12).foregroundStyle(.white)
+                    .background(Color.green.gradient, in: Capsule())
+                }
+                .buttonStyle(.plain).padding(.horizontal)
+                .accessibilityIdentifier("call.restore")
+            }
             if let reminder = model.otherDeviceCallReminders.first {
                 Button {
                     _ = model.openOtherDeviceCallNotification(reminder.userInfo)
@@ -390,6 +419,7 @@ struct RootView: View {
 
 /// 浅色模式使用系统电话式纯白底；深色模式才绘制深蓝黑底部环境光。
 struct PhoneBackdrop: View {
+    var grouped = true
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -406,7 +436,7 @@ struct PhoneBackdrop: View {
                     endPoint: .bottom
                 )
             } else {
-                Color(uiColor: .systemGroupedBackground)
+                Color(uiColor: grouped ? .systemGroupedBackground : .systemBackground)
             }
         }
         .ignoresSafeArea()

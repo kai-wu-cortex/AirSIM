@@ -1,6 +1,56 @@
 import XCTest
 
 final class SMSNavigationUITests: XCTestCase {
+    @MainActor func testVisualCallCollapseAndRestoreKeepsSameCall() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_CALL"] = "active"
+        app.launchEnvironment["AIRSIM_UI_REGION_NUMBER"] = "10086"
+        app.launch()
+        defer { app.terminate() }
+        let minimize = app.buttons["call.minimize"]
+        XCTAssertTrue(minimize.waitForExistence(timeout: 10))
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "184-call-reference"; shot.lifetime = .keepAlways; add(shot)
+        minimize.tap()
+        XCTAssertTrue(app.buttons["call.restore"].waitForExistence(timeout: 5))
+        XCTAssertFalse(minimize.isHittable)
+        app.buttons["最近"].tap()
+        app.buttons["call.restore"].tap()
+        XCTAssertTrue(minimize.waitForExistence(timeout: 5))
+        XCTAssertTrue(minimize.isHittable)
+        XCTAssertTrue(app.staticTexts["10086"].exists)
+        XCTAssertFalse(app.buttons["接听"].exists)
+        app.buttons["更多"].tap()
+        XCTAssertTrue(app.buttons["录音"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor func testVisualDialAndRecentScreens() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_RECENTS"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["拨号"].waitForExistence(timeout: 10))
+        app.buttons["拨号"].tap()
+        app.buttons["1"].tap(); app.buttons["2 ABC"].tap(); app.buttons["3 DEF"].tap()
+        XCTAssertEqual(app.staticTexts["dialpad.number"].label, "123")
+        let dial = XCTAttachment(screenshot: app.screenshot())
+        dial.name = "184-dial-reference"; dial.lifetime = .keepAlways; add(dial)
+        app.buttons["号码操作"].tap()
+        XCTAssertTrue(app.buttons["添加联系人"].waitForExistence(timeout: 5))
+        app.buttons["dialpad.clear"].tap()
+        app.buttons["最近"].tap()
+        let recent = XCTAttachment(screenshot: app.screenshot())
+        recent.name = "184-recents-reference"; recent.lifetime = .keepAlways; add(recent)
+        app.buttons["recents.actions"].tap()
+        XCTAssertTrue(app.buttons["recents.markAllSeen"].waitForExistence(timeout: 5))
+    }
+
     @MainActor private func openPreferences(in app: XCUIApplication) {
         let row = app.buttons["settings.link.preferences"]
         let form = app.collectionViews.firstMatch

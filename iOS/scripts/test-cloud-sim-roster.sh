@@ -11,6 +11,9 @@ source=(root/'AirSIM/APIModels.swift').read_text()
 models=source[source.index('struct CloudAndroidAgent:'):source.index('struct AndroidAgentMetadata:')]
 battery=(root/'Shared/AirSIMWidgetSnapshot.swift').read_text()
 battery=battery[battery.index('struct AndroidBatteryReading:'):battery.index('/// A display snapshot')]
+diagnostics=(root/'AirSIM/VoIPPushController.swift').read_text()
+diagnostics=diagnostics[diagnostics.index('enum CloudSelfTestStepID:'):diagnostics.index('struct CloudModeCapabilities:')]
+(out/'Diagnostics.swift').write_text('import Foundation\n'+diagnostics)
 (out/'Models.swift').write_text('import Foundation\n'+battery+'\nenum AirSIMWidgetSnapshot { static let freshness: TimeInterval = 300 }\n'+models)
 (out/'main.swift').write_text(r'''
 import Foundation
@@ -25,8 +28,23 @@ let encoded = try JSONEncoder().encode(status.agents[0])
 let decoded = try JSONDecoder().decode(CloudAndroidAgent.self, from: encoded)
 precondition(decoded == status.agents[0])
 precondition(decoded.simSlots?.last?.displayName == "SIM 2")
-print("Cloud SIM wire smoke: 7 checks passed (production models, no devices/network)")
+let androidID = "com.android.phone/com.android.services.telephony.TelephonyConnectionService\nopaque-account-2\nUserHandle{0}"
+let slotJSON = try JSONSerialization.data(withJSONObject: ["id":androidID,"label":"SIM 2"])
+let realSlot = try JSONDecoder().decode(AndroidSIMSlot.self, from: slotJSON)
+precondition(realSlot.id == androidID)
+for (slots, selected, passed) in [
+    (nil as [AndroidSIMSlot]?, nil as String?, false), ([], nil, false),
+    ([realSlot], androidID, true), ([realSlot], "other-agent-sim", false), ([realSlot], nil, true)
+] {
+    var report = CloudSelfTestReport.initial
+    for step in CloudSelfTestStepID.allCases { report.update(step, state: .passed, detail: "fixture") }
+    report.checkSIMRoster(slots, selectedID: selected)
+    report.completedAt = Date()
+    precondition(report.allPassed == passed)
+    precondition(!report.copyText.contains(androidID))
+}
+print("Cloud SIM wire and diagnostics passed: roundtrip, empty/missing roster, exact selection, mismatch, default, identifier privacy")
 ''')
 PY
-swiftc "$OUT/Models.swift" "$OUT/main.swift" -o "$OUT/check"
+swiftc "$OUT/Models.swift" "$OUT/Diagnostics.swift" "$OUT/main.swift" -o "$OUT/check"
 "$OUT/check"

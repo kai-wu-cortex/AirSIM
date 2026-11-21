@@ -661,3 +661,127 @@ private final class PendingSystemAnswerHandler: CallKitActionHandling {
     func callKitProviderDidReset() async {}
     func callKitDidFail(_ message: String) {}
 }
+
+@MainActor
+final class PushKitDeliveryRegressionTests: XCTestCase {
+    private func payload(uuid: UUID = UUID()) -> [AnyHashable: Any] {
+        ["event": "incoming_call", "call_id": "push-fixture", "call_uuid": uuid.uuidString,
+         "agent_id": "test-agent", "expires_at": Date().addingTimeInterval(60).timeIntervalSince1970]
+    }
+
+    func testInvalidAndExpiredPushesReportBeforeReturnThenCompleteExactlyOnce() {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(false)
+        var expired = payload(); expired["expires_at"] = 1
+        var badUUID = payload(); badUUID["call_uuid"] = "bad"
+        var missingID = payload(); missingID.removeValue(forKey: "call_id")
+        var badVirtual = payload(); badVirtual["virtual_call"] = true
+        for value in [[:], expired, badUUID, missingID, badVirtual, ["event": "sms"]] {
+            var events = [String](), callback: ((Error?) -> Void)?, reportID: UUID?
+            let accepted = controller.receiveVoIPPush(value, systemReport: { uuid, _, done in
+                events.append("report"); reportID = uuid; callback = done
+            }, systemEnd: { uuid in
+                XCTAssertEqual(uuid, reportID); events.append("end")
+            }, completion: { events.append("completion") })
+            XCTAssertNil(accepted)
+            XCTAssertEqual(events, ["report"], "Mandatory report must occur before delegate returns")
+            XCTAssertNotEqual(reportID?.uuidString, value["call_uuid"] as? String)
+            callback?(nil); callback?(nil)
+            XCTAssertEqual(events, ["report", "end", "completion"])
+            XCTAssertNil(controller.currentSystemCallUUID)
+        }
+    }
+
+    func testRejectedReportFailureCompletesWithoutEndingAnyCall() {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        var reports = 0, ends = 0, completions = 0
+        controller.receiveVoIPPush([:], systemReport: { _, _, done in
+            reports += 1
+            let error = NSError(domain: CXErrorDomainIncomingCall, code: 3)
+            done(error); done(error)
+        }, systemEnd: { _ in ends += 1 }, completion: { completions += 1 })
+        XCTAssertEqual(reports, 1); XCTAssertEqual(ends, 0); XCTAssertEqual(completions, 1)
+    }
+
+    func testExpiredCollidingPushCannotEndOrReplaceExistingCall() async {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        defer { controller.setEnabled(false) }
+        let existing = IncomingVoIPCall(bluetoothCallID: "owned", uuid: UUID(), generation: 1,
+                                        number: "5550100", agentID: "A")
+        let initial = expectation(description: "initial")
+        controller.reportIncomingPush(existing, systemReport: { _, _, done in done(nil) }) { _ in initial.fulfill() }
+        await fulfillment(of: [initial], timeout: 2)
+        var expired = payload(uuid: existing.uuid); expired["expires_at"] = 1
+        var callback: ((Error?) -> Void)?, ended = [UUID](), temporary: UUID?
+        controller.receiveVoIPPush(expired, systemReport: { uuid, _, done in
+            temporary = uuid; callback = done
+        }, systemEnd: { ended.append($0) }, completion: {})
+        XCTAssertEqual(controller.currentSystemCallUUID, existing.uuid)
+        callback?(nil)
+        XCTAssertNotEqual(temporary, existing.uuid)
+        XCTAssertEqual(ended, temporary.map { [$0] } ?? [])
+        XCTAssertEqual(controller.currentIncomingPush?.callID, "owned")
+        XCTAssertEqual(controller.currentIncomingPush?.agentID, "A")
+    }
+
+    func testValidPushReportsSynchronouslyAndDuplicateNeverEndsCurrentCall() async {
+        let keys = [CloudSignalingPreference.key, RelayEgressGate.persistenceKey]
+        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        UserDefaults.standard.set(true, forKey: keys[0])
+        UserDefaults.standard.set(false, forKey: keys[1])
+        defer { for (key, value) in zip(keys, saved) { UserDefaults.standard.set(value, forKey: key) } }
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        defer { controller.setEnabled(false) }
+        let value = payload(), uuid = UUID(uuidString: value["call_uuid"] as! String)!
+        var reports = [UUID](), ends = [UUID]()
+        let first = expectation(description: "first completion")
+        controller.receiveVoIPPush(value, systemReport: { id, _, done in reports.append(id); done(nil) },
+            systemEnd: { ends.append($0) }, completion: { first.fulfill() })
+        XCTAssertEqual(reports, [uuid])
+        await fulfillment(of: [first], timeout: 2)
+        var completions = 0
+        controller.receiveVoIPPush(value, systemReport: { id, _, done in
+            reports.append(id); done(NSError(domain: CXErrorDomainIncomingCall, code: 2))
+        }, systemEnd: { ends.append($0) }, completion: { completions += 1 })
+        XCTAssertEqual(reports, [uuid, uuid]); XCTAssertTrue(ends.isEmpty)
+        XCTAssertEqual(completions, 1); XCTAssertEqual(controller.currentSystemCallUUID, uuid)
+    }
+
+    func testCloudDisabledOrPureLocalStillReportsAndRetiresLateValidPush() async {
+        let keys = [CloudSignalingPreference.key, RelayEgressGate.persistenceKey]
+        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        defer { for (key, value) in zip(keys, saved) { UserDefaults.standard.set(value, forKey: key) } }
+        for pureLocal in [false, true] {
+            UserDefaults.standard.set(pureLocal, forKey: keys[0])
+            UserDefaults.standard.set(pureLocal, forKey: keys[1])
+            XCTAssertFalse(CloudSignalingPreference.isEnabled())
+            let controller = CallKitController(observesSystemCallbacks: false)
+            controller.setEnabled(true)
+            defer { controller.setEnabled(false) }
+            let value = payload()
+            var reports = [UUID](), ends = [UUID]()
+            let done = expectation(description: "completion")
+            controller.receiveVoIPPush(value, systemReport: { id, _, cb in reports.append(id); cb(nil) },
+                systemEnd: { ends.append($0) }, completion: { done.fulfill() })
+            XCTAssertEqual(reports.count, 1)
+            await fulfillment(of: [done], timeout: 2)
+            XCTAssertEqual(ends, reports); XCTAssertNil(controller.currentSystemCallUUID)
+        }
+    }
+
+    func testPendingReportCompletionSurvivesCallResetAndLateCallback() async {
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        var reportCallback: ((Error?) -> Void)?, completions = 0
+        let call = IncomingVoIPCall(bluetoothCallID: "pending", uuid: UUID(), generation: 1, number: nil, agentID: "A")
+        controller.reportIncomingPush(call, systemReport: { _, _, cb in reportCallback = cb }) { _ in completions += 1 }
+        controller.setEnabled(false)
+        XCTAssertEqual(completions, 1)
+        reportCallback?(nil)
+        await Task.yield()
+        XCTAssertEqual(completions, 1)
+        XCTAssertNil(controller.currentSystemCallUUID)
+    }
+}

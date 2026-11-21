@@ -3,6 +3,7 @@ import AVFoundation
 import UIKit
 import LinkPresentation
 import UniformTypeIdentifiers
+import ContactsUI
 
 enum DialPadPasteSanitizer {
     static func sanitize(_ value: String) -> String {
@@ -205,15 +206,15 @@ struct DialPadLayoutMetrics {
     let contactHeight: CGFloat
 
     var keypadWidth: CGFloat { keySize * 3 + keySpacing * 2 }
-    var digitFontSize: CGFloat { min(31, max(23, keySize * 0.34)) }
-    var letterFontSize: CGFloat { min(10, max(8, keySize * 0.115)) }
+    var digitFontSize: CGFloat { min(42, max(23, keySize * 0.46)) }
+    var letterFontSize: CGFloat { min(12, max(10, keySize * 0.14)) }
     var callIconSize: CGFloat { min(30, max(23, keySize * 0.33)) }
     var deleteIconSize: CGFloat { min(24, max(19, keySize * 0.27)) }
 
     init(availableHeight: CGFloat, availableWidth: CGFloat, compactWidth: Bool, twoColumns: Bool = false) {
         let compactHeight = availableHeight < 700
-        let desiredKeySize: CGFloat = compactWidth ? 84 : 90
-        let desiredKeySpacing: CGFloat = compactWidth ? 28 : 34
+        let desiredKeySize: CGFloat = compactWidth ? 88 : 92
+        let desiredKeySpacing: CGFloat = compactWidth ? 24 : 34
         let reservedHeight: CGFloat = twoColumns ? 64 : (compactHeight ? 205 : 220)
         let verticalKeySize = (availableHeight - reservedHeight) / 5
         let contentWidth = min(520, max(0, availableWidth - 32))
@@ -224,8 +225,8 @@ struct DialPadLayoutMetrics {
             desiredKeySpacing,
             max(14, (contentWidth - keySize * 3) / 2)
         )
-        rowSpacing = compactHeight ? 8 : (compactWidth ? 12 : 16)
-        sectionSpacing = compactHeight ? 8 : (compactWidth ? 12 : 16)
+        rowSpacing = compactHeight ? 8 : 20
+        sectionSpacing = compactHeight ? 8 : 26
         verticalPadding = compactHeight ? 6 : 10
         numberFontSize = compactHeight ? 32 : (compactWidth ? 36 : 42)
         numberHeight = compactHeight ? 40 : 46
@@ -241,6 +242,7 @@ struct DialPadView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var deleteRepeatTask: Task<Void, Never>?
     @State private var zeroWasLongPressed = false
+    @State private var showingNewContact = false
     @State private var pairedAgentListPresentation: PairedAgentListPresentation?
 
     private let rows = [
@@ -283,12 +285,12 @@ struct DialPadView: View {
                                     .font(
                                         .system(
                                             size: metrics.numberFontSize,
-                                            weight: .light,
-                                            design: .rounded
+                                            weight: .regular,
+                                            design: .default
                                         )
                                     )
                                     .monospacedDigit()
-                                    .foregroundStyle(model.numberInput.isEmpty ? .secondary : .primary)
+                                    .foregroundStyle(model.numberInput.isEmpty ? Color.clear : Color.primary)
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.45)
                                     .frame(minHeight: metrics.numberHeight)
@@ -316,74 +318,39 @@ struct DialPadView: View {
                                 }
                             }
 
-                            if agentSection == .current, let currentAgent {
-                                DialPadCurrentAgentCard(
-                                    agent: currentAgent,
-                                    agentCount: pairedAgents.count,
-                                    cloudModeEnabled: CloudModePreference.isEnabled(),
-                                    simSlots: model.simSlots(for: currentAgent.id),
-                                    selectedSIMSlotID: model.selectedSIMSlotID(for: currentAgent.id),
-                                    selectSIMSlot: { slot in
-                                        model.selectSIMSlot(slot.id, for: currentAgent.id)
+                            // Keep all existing device/SIM choices in a compact line instead of a card.
+                            HStack(spacing: 12) {
+                                if let currentAgent, agentSection == .current {
+                                    Button { pairedAgentListPresentation = PairedAgentListPresentation() } label: {
+                                        Label(currentAgent.deviceName, systemImage: "smartphone")
+                                            .lineLimit(1)
                                     }
-                                ) {
-                                    pairedAgentListPresentation = PairedAgentListPresentation()
-                                }
-                            } else if agentSection == .bluetooth {
-                                HStack(spacing: 10) {
-                                    Image(systemName: "wave.3.right")
-                                        .foregroundStyle(model.voble.state == .ready ? .green : .orange)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("VoBLE 蓝牙模式")
-                                            .font(.subheadline.weight(.semibold))
-                                        Text(
-                                            model.voble.state == .ready
-                                                ? "已认证 · 通话不经过 Relay"
-                                                : "等待 Android 蓝牙 Agent"
-                                        )
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Text(model.voble.state == .ready ? "在线" : "连接中")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(model.voble.state == .ready ? .green : .orange)
-                                }
-                                .padding(12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(
-                                    .thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            } else if agentSection == .selection {
-                                Button {
-                                    pairedAgentListPresentation = PairedAgentListPresentation()
-                                } label: {
-                                    HStack(spacing: 10) {
-                                        Image(
-                                            systemName: ConnectionModePreference.selected() == .bluetooth
-                                                ? "wave.3.right" : "smartphone"
-                                        )
-                                        .foregroundStyle(.secondary)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text("已配对 Android Agent · \(pairedAgents.count)")
-                                                .font(.subheadline.weight(.semibold))
-                                            Text(pairedAgents.count > 1 ? "请选择拨号设备" : "选择设备并检查拨号链路")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("dial-pad-device-selector")
+                                    let slots = model.simSlots(for: currentAgent.id)
+                                    if slots.count > 1 {
+                                        CompactSIMPicker(slots: slots,
+                                            selectedID: model.selectedSIMSlotID(for: currentAgent.id),
+                                            select: { model.selectSIMSlot($0.id, for: currentAgent.id) }) {
+                                            Label(slots.first(where: { $0.id == model.selectedSIMSlotID(for: currentAgent.id) })?.displayName ?? "选择通话卡",
+                                                  systemImage: "simcard.2")
+                                                .lineLimit(1)
                                         }
-                                        Spacer()
-                                        Image(systemName: "chevron.right")
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(.tertiary)
+                                        .accessibilityIdentifier("dial-pad-sim-slot")
                                     }
-                                    .padding(12)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(
-                                        .thinMaterial,
-                                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                } else if agentSection == .bluetooth {
+                                    Label(model.voble.state == .ready ? "VoBLE · 已认证" : "VoBLE · 等待连接", systemImage: "wave.3.right")
+                                        .foregroundStyle(.secondary)
+                                } else if agentSection == .selection {
+                                    Button { pairedAgentListPresentation = PairedAgentListPresentation() } label: {
+                                        Label("选择拨号设备", systemImage: "smartphone")
+                                    }
+                                    .accessibilityIdentifier("dial-pad-device-selector")
                                 }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier("dial-pad-device-selector")
                             }
+                            .font(.caption)
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .frame(minHeight: 24)
 
                         }
                         .frame(maxWidth: twoColumns ? 420 : 520)
@@ -401,7 +368,7 @@ struct DialPadView: View {
                 .scrollDisabled(true)
                 .scrollIndicators(.hidden)
             }
-            .background(PhoneBackdrop())
+            .background(PhoneBackdrop(grouped: false))
             .toolbar(.hidden, for: .navigationBar)
             .sheet(item: $pairedAgentListPresentation) { _ in
                 PairedAndroidAgentsView(
@@ -412,6 +379,9 @@ struct DialPadView: View {
                     }
                 )
             }
+            .sheet(isPresented: $showingNewContact, onDismiss: {
+                Task { await model.contacts.loadIfAuthorized(force: true) }
+            }) { NewDialContactView(number: model.numberInput) }
             .onDisappear(perform: stopRepeatingDelete)
         }
     }
@@ -443,18 +413,22 @@ struct DialPadView: View {
 
     private func dialActions(metrics: DialPadLayoutMetrics) -> some View {
         HStack(spacing: metrics.keySpacing) {
-            Button(action: clearNumber) {
-                Text(L10n.t("清空"))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+            Menu {
+                Button { showingNewContact = true } label: {
+                    Label("添加联系人", systemImage: "person.crop.circle.badge.plus")
+                }
+                Button(action: clearNumber) { Label("清空号码", systemImage: "xmark.circle") }
+                    .accessibilityIdentifier("dialpad.clear")
+            } label: {
+                Image(systemName: "person.crop.circle.fill.badge.plus")
+                    .font(.system(size: 25, weight: .medium))
+                    .foregroundStyle(.primary)
                     .frame(width: metrics.keySize, height: metrics.keySize)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
             .disabled(model.numberInput.isEmpty)
             .opacity(model.numberInput.isEmpty ? 0.4 : 1)
-            .accessibilityLabel(L10n.t("清空号码"))
-            .accessibilityIdentifier("dialpad.clear")
+            .accessibilityLabel("号码操作")
             Button {
                 Task { await model.dial() }
             } label: {
@@ -545,7 +519,7 @@ struct DialPadView: View {
         } label: {
             VStack(spacing: 0) {
                 Text(digit)
-                    .font(.system(size: metrics.digitFontSize, weight: .regular, design: .rounded))
+                    .font(.system(size: metrics.digitFontSize, weight: .regular, design: .default))
                 Text(letters)
                     .font(.system(size: metrics.letterFontSize, weight: .semibold))
                     .tracking(1.4)
@@ -565,6 +539,29 @@ struct DialPadView: View {
             }
         )
         .accessibilityLabel(letters.isEmpty ? digit : "\(digit) \(letters)")
+    }
+}
+
+private struct NewDialContactView: UIViewControllerRepresentable {
+    @Environment(\.dismiss) private var dismiss
+    let number: String
+    func makeCoordinator() -> Coordinator { Coordinator(dismiss: { dismiss() }) }
+    func makeUIViewController(context: Context) -> UINavigationController {
+        let contact = CNMutableContact()
+        contact.phoneNumbers = [CNLabeledValue(label: CNLabelPhoneNumberMobile,
+                                               value: CNPhoneNumber(stringValue: number))]
+        let editor = CNContactViewController(forNewContact: contact)
+        editor.contactStore = CNContactStore()
+        editor.delegate = context.coordinator
+        return UINavigationController(rootViewController: editor)
+    }
+    func updateUIViewController(_ controller: UINavigationController, context: Context) {}
+    final class Coordinator: NSObject, CNContactViewControllerDelegate {
+        let dismiss: () -> Void
+        init(dismiss: @escaping () -> Void) { self.dismiss = dismiss }
+        func contactViewController(_ viewController: CNContactViewController, didCompleteWith contact: CNContact?) {
+            dismiss()
+        }
     }
 }
 
@@ -833,6 +830,7 @@ struct RecentsView: View {
     @State private var confirmingDeletion = false
     @State private var searchText = ""
     @State private var missedOnly = false
+    @State private var selectedGroupID: String?
     private var groups: [RecentCallGroup] {
         RecentCallGroup.grouped(model.callHistory.filter { !missedOnly || ($0.direction == "incoming" && $0.missed) }).filter { group in
             group.records.contains { PhoneContentSearch.numberMatches($0.number, query: searchText) }
@@ -846,6 +844,7 @@ struct RecentsView: View {
                     Text("未接来电").tag(true)
                 }
                 .pickerStyle(.segmented)
+                .padding(4).phoneGlassSurface(cornerRadius: 24)
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
                 .listRowInsets(.init(top: 8, leading: PhoneListMetrics.horizontalInset,
@@ -859,14 +858,12 @@ struct RecentsView: View {
                         .listRowSeparator(.hidden)
                 }
                 ForEach(groups) { group in
-                    NavigationLink {
-                        detail(group.id)
-                    } label: {
+                    Button { selectedGroupID = group.id } label: {
                         HStack(spacing: PhoneListMetrics.avatarSpacing) {
                             InitialAvatar(name: contacts.displayName(for: group.latest.number),
                                 photoData: group.latest.number.flatMap { contacts.contact(for: $0)?.photoData },
                                 fallbackContent: RecentAvatarPolicy.content(contactName: group.latest.number.flatMap { contacts.contact(for: $0)?.name }),
-                                size: PhoneListMetrics.avatarSize)
+                                size: PhoneListMetrics.avatarSize, neutralFallback: true)
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 6) {
                                     Text(contacts.displayName(for: group.latest.number))
@@ -874,32 +871,35 @@ struct RecentsView: View {
                                         .foregroundStyle(group.latest.missed ? Color.red : Color.primary)
                                         .lineLimit(1)
                                         .frame(maxWidth: .infinity, alignment: .leading)
-                                    Text(group.latest.startedAt, format: .dateTime.month(.abbreviated).day())
+                                    Text(RecentCallTimeFormatter.string(for: group.latest.startedAt))
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                         .frame(width: PhoneListMetrics.timeColumnWidth, alignment: .trailing)
                                         .accessibilityLabel(Text(group.latest.startedAt, style: .date))
                                 }
-                                if let info = PhoneRegionLookup.infoLine(number: group.latest.number, slotIndex: group.latest.slotIndex, fallbackSIM: "SIM 未记录") {
-                                    Text(info).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                                HStack(spacing: 6) {
-                                    Text([group.latest.missed ? "未接" : group.latest.direction == "incoming" ? "呼入" : "呼出",
-                                          "\(group.records.count) 次通话"].joined(separator: " · "))
-                                        .foregroundStyle(.secondary)
+                                HStack(spacing: 5) {
+                                    Image(systemName: group.latest.missed ? "phone.badge.xmark" : group.latest.direction == "incoming" ? "arrow.down.left" : "arrow.up.right")
+                                        .accessibilityHidden(true)
+                                    Text([group.latest.missed ? "未接来电" : group.latest.direction == "incoming" ? "呼入" : "呼出",
+                                          group.latest.slotIndex.map { "SIM \($0 + 1)" } ?? "SIM 未记录"].joined(separator: " · "))
                                     if group.records.contains(where: { model.unseenMissedCallIDs.contains($0.id) }) {
                                         Text("未查看").foregroundStyle(.red)
                                     }
                                 }
-                                .font(.caption2)
-                                .lineLimit(1)
+                                .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                                Text([PhoneRegionLookup.serviceDescription(for: group.latest.number) ?? PhoneRegionLookup.region(for: group.latest.number),
+                                      "\(group.records.count) 次通话"].compactMap { $0 }.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            Image(systemName: "info.circle").font(.title3).foregroundStyle(.tint)
+                                .frame(width: 32, height: 44).accessibilityHidden(true)
                         }
                         .frame(minHeight: PhoneListMetrics.rowHeight)
 
                     }
+                    .buttonStyle(.plain)
                     .listRowBackground(Color.clear)
                     .listRowInsets(.init(top: 0, leading: PhoneListMetrics.horizontalInset,
                                          bottom: 0, trailing: PhoneListMetrics.horizontalInset))
@@ -917,17 +917,25 @@ struct RecentsView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, PhoneListMetrics.rowHeight)
-            .background(PhoneBackdrop())
+            .background(PhoneBackdrop(grouped: false))
             .navigationTitle(L10n.t("最近通话"))
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: Binding(get: { selectedGroupID != nil },
+                set: { if !$0 { selectedGroupID = nil } })) {
+                if let selectedGroupID { detail(selectedGroupID) }
+            }
             .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索号码")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { model.markMissedCallsSeen() } label: {
-                        Image(systemName: "checkmark.circle")
-                    }
-                        .accessibilityLabel("将全部未接来电标为已读")
+                    Menu {
+                        Button { model.markMissedCallsSeen() } label: {
+                            Label("将全部未接来电标为已读", systemImage: "checkmark.circle")
+                        }
                         .accessibilityIdentifier("recents.markAllSeen")
                         .disabled(model.unseenMissedCallIDs.isEmpty)
+                    } label: { Image(systemName: "ellipsis") }
+                    .accessibilityLabel("通话记录操作")
+                    .accessibilityIdentifier("recents.actions")
                 }
             }
             .confirmationDialog("删除该号码的全部本机通话记录？", isPresented: $confirmingDeletion, titleVisibility: .visible) {
@@ -1218,7 +1226,8 @@ struct MessagesView: View {
                     fallbackContent: contact == nil
                         ? .person
                         : RecentAvatarPolicy.content(contactName: contact?.name),
-                    size: PhoneListMetrics.avatarSize
+                    size: PhoneListMetrics.avatarSize,
+                    serviceNumber: sender
                 )
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
@@ -2021,6 +2030,8 @@ struct InitialAvatar: View {
     var photoData: Data? = nil
     var fallbackContent: AvatarFallbackContent? = nil
     var size: CGFloat = 44
+    var serviceNumber: String? = nil
+    var neutralFallback = false
 
     private var resolvedFallback: AvatarFallbackContent {
         fallbackContent
@@ -2031,6 +2042,8 @@ struct InitialAvatar: View {
         Group {
             if let photoData, let image = UIImage(data: photoData) {
                 Image(uiImage: image).resizable().scaledToFill()
+            } else if let serviceNumber, let brand = SMSCarrierBrand.match(serviceNumber) {
+                SMSServiceArtwork(brand: brand, size: size)
             } else {
                 avatarFallback
             }
@@ -2082,6 +2095,7 @@ struct InitialAvatar: View {
     }
 
     private var fallbackColors: [Color] {
+        if neutralFallback { return [Color(white: 0.76), Color(white: 0.55)] }
         switch resolvedFallback {
         case .person:
             return [
@@ -2200,14 +2214,13 @@ struct ActiveCallView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let call: CallRecord
+    var isPresented = true
+    var onMinimize: (() -> Void)? = nil
     @State private var showingKeypad = false
 
     private var isCompact: Bool { horizontalSizeClass == .compact }
     private var content: CallSurfaceContent { CallSurfaceContent(state: call.state) }
-    private var avatarSize: CGFloat {
-        content.phase == .incoming ? (isCompact ? 116 : 132) : (isCompact ? 92 : 112)
-    }
-    private var controlSize: CGFloat { isCompact ? 62 : 68 }
+    private var controlSize: CGFloat { isCompact ? 80 : 84 }
     private var displayName: String { model.contacts.displayName(for: call.number) }
     private var callSIMLabel: String? {
         guard let slot = call.slotIndex, slot >= 0 else { return nil }
@@ -2230,84 +2243,95 @@ struct ActiveCallView: View {
             GeometryReader { proxy in
                 let twoColumns = PhoneWindowLayout.usesTwoColumns(proxy.size,
                     accessibilitySize: dynamicTypeSize.isAccessibilitySize)
-                let layout = twoColumns
-                    ? AnyLayout(HStackLayout(alignment: .center, spacing: 32))
-                    : AnyLayout(VStackLayout(spacing: 32))
                 ScrollView {
-                    VStack(spacing: 24) {
-                        callHeader(title: content.phase == .incoming ? "AirSIM 来电" : "AirSIM 通话",
-                                   showsRecording: content.phase == .connected)
-                        layout {
-                            callIdentity(avatarDiameter: twoColumns ? 64 : avatarSize)
-                                .frame(maxWidth: .infinity)
-                            callActions
-                                .frame(maxWidth: .infinity)
+                    if twoColumns {
+                        HStack(spacing: 32) {
+                            callIdentity.frame(maxWidth: .infinity)
+                            callActions.frame(maxWidth: .infinity)
                         }
-                        .frame(maxWidth: 1000, maxHeight: .infinity)
+                        .padding(24)
+                        .frame(maxWidth: 1000, minHeight: proxy.size.height)
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        VStack(spacing: 0) {
+                            callIdentity.padding(.top, proxy.size.height < 600 ? 20 : 56)
+                            Spacer(minLength: 32)
+                            callActions.padding(.bottom, 32)
+                        }
+                        .padding(.horizontal, 22)
+                        .frame(maxWidth: 520, minHeight: proxy.size.height)
+                        .frame(maxWidth: .infinity)
                     }
-                    .padding(24)
-                    .frame(maxWidth: .infinity, minHeight: proxy.size.height)
                 }
                 .scrollIndicators(.hidden)
             }
         }
-        // The view identity and audio lifecycle survive window resizing. Overflow
-        // remains reachable in short windows and at accessibility text sizes.
         .contentShape(Rectangle())
         .sheet(isPresented: $showingKeypad) { DTMFKeypadView() }
         .environment(\.colorScheme, .dark)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(isPresented ? .dark : nil)
         .onAppear { updateProximityMonitoring() }
         .onChange(of: call.state) { _ in updateProximityMonitoring() }
+        .onChange(of: isPresented) { _ in updateProximityMonitoring() }
+        .onChange(of: call.id) { _ in showingKeypad = false }
         .onChange(of: model.audio.speakerEnabled) { _ in updateProximityMonitoring() }
         .onDisappear { UIDevice.current.isProximityMonitoringEnabled = false }
     }
 
-    private func callIdentity(avatarDiameter: CGFloat) -> some View {
-        VStack(spacing: 16) {
-            InitialAvatar(name: displayName, photoData: contactPhotoData, size: avatarDiameter)
-                .overlay { Circle().strokeBorder(.white.opacity(0.20), lineWidth: 1) }
-                .accessibilityHidden(true)
-            Text(displayName)
-                .font(.largeTitle.weight(.semibold))
-                .foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-                .textSelection(.enabled)
+    private var callIdentity: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "phone.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.blue)
+                    .frame(width: 16, height: 16)
+                    .background(.black.opacity(0.9), in: RoundedRectangle(cornerRadius: 4))
+                    .accessibilityHidden(true)
+                Text("AirSIM 音频 –")
+                if content.showsDuration {
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(durationText(at: context.date)).monospacedDigit()
+                    }
+                } else {
+                    Text(content.phase == .incoming ? "等待接听" : "正在呼叫")
+                }
+            }
+            .font(.title3.weight(.medium))
+            .foregroundStyle(.white.opacity(0.65))
+            HStack(spacing: 12) {
+                if contactPhotoData != nil {
+                    InitialAvatar(name: displayName, photoData: contactPhotoData, size: 32)
+                        .accessibilityHidden(true)
+                }
+                Text(displayName)
+                    .font(.largeTitle.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
             if let number = call.number, number != displayName {
-                Text(number)
-                    .font(.title3.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.68))
+                Text(number).font(.title3.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.85))
                     .textSelection(.enabled)
             }
             let simLabel = [callSIMLabel, PhoneRegionLookup.serviceDescription(for: call.number) ?? PhoneRegionLookup.region(for: call.number)].compactMap { $0 }.joined(separator: " · ")
             if !simLabel.isEmpty {
-                Label(simLabel, systemImage: call.slotIndex == nil ? "mappin.and.ellipse" : "simcard")
-                    .font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.68))
+                Text(simLabel).font(.subheadline).foregroundStyle(.white.opacity(0.78))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if content.phase == .incoming {
-                Text(L10n.t("等待接听"))
-                    .font(.subheadline).foregroundStyle(.white.opacity(0.68))
                 connectivityBadge
-            } else {
-                if content.phase == .outgoing {
-                    Text("正在呼叫 · 尚未接通")
-                        .font(.subheadline).foregroundStyle(.white.opacity(0.68))
-                }
-                if content.showsDuration {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(durationText(at: context.date))
-                            .font(.title2.weight(.medium).monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.82))
-                            .contentTransition(.numericText())
-                    }
-                }
+            } else if model.audio.receiveOnly || !model.callAudioIsActive {
+                // Keep early-media/recovery evidence visible; never imply a connected call.
                 audioStatusBadge
-                if let error = model.audio.errorMessage, !error.isEmpty {
-                    Text(error).font(.caption).foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                }
+            }
+            if let error = model.audio.errorMessage, !error.isEmpty {
+                Text(error).font(.caption).foregroundStyle(.red).multilineTextAlignment(.center)
             }
         }
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -2322,51 +2346,57 @@ struct ActiveCallView: View {
                 }
             }
         } else {
-            VStack(spacing: 28) {
-                HStack(spacing: 20) {
-                    if content.phase == .connected {
-                    CallCircleButton(
-                        title: model.isMuted ? L10n.t("取消静音") : L10n.t("静音"),
-                        icon: model.isMuted ? "mic.slash.fill" : "mic.fill",
-                        color: model.isMuted ? .orange : nil,
-                        foregroundColor: .white, size: controlSize
-                    ) { Task { await model.toggleMute() } }
-                    CallCircleButton(title: "键盘", icon: "circle.grid.3x3.fill", color: nil,
-                                     foregroundColor: .white, size: controlSize) {
-                        showingKeypad = true
-                    }
-                    }
+            VStack(spacing: 24) {
+                HStack(alignment: .top, spacing: 0) {
                     SpeakerRouteButton(audio: model.audio, size: controlSize, action: model.toggleSpeaker)
+                        .frame(maxWidth: .infinity)
+                    if let onMinimize {
+                        CallCircleButton(title: "收起", icon: "arrow.down.right.and.arrow.up.left",
+                                         color: nil, size: controlSize, action: onMinimize)
+                            .accessibilityIdentifier("call.minimize")
+                            .frame(maxWidth: .infinity)
+                    }
+                    CallCircleButton(title: model.isMuted ? "取消静音" : "静音", icon: "mic.slash.fill",
+                        color: model.isMuted ? .white : nil,
+                        foregroundColor: model.isMuted ? .black : .white, size: controlSize) {
+                        Task { await model.toggleMute() }
+                    }
+                    .disabled(content.phase != .connected)
+                    .frame(maxWidth: .infinity)
                 }
-                CallDecisionButton(title: L10n.t("挂断"), icon: "phone.down.fill", color: .red) {
-                    Task { await model.hangup() }
+                HStack(alignment: .top, spacing: 0) {
+                    Menu {
+                        Button {
+                            Task { await model.toggleRecording() }
+                        } label: {
+                            Label(model.isRecording ? "停止录音" : "录音",
+                                  systemImage: model.isRecording ? "stop.circle" : "record.circle")
+                        }
+                        .disabled(content.phase != .connected)
+                    } label: {
+                        VStack(spacing: 7) {
+                            Image(systemName: model.isRecording ? "record.circle.fill" : "ellipsis").font(.title2.weight(.semibold))
+                                .foregroundStyle(model.isRecording ? Color.red : Color.white)
+                                .frame(width: controlSize, height: controlSize)
+                                .callControlGlass(tint: nil, shape: .circle)
+                            Text("更多").font(.subheadline)
+                        }
+                        .foregroundStyle(.white)
+                    }
+                    .frame(maxWidth: .infinity)
+                    CallDecisionButton(title: "结束", icon: "phone.down.fill",
+                                       color: Color(red: 0.78, green: 0.06, blue: 0.04), size: controlSize) {
+                        Task { await model.hangup() }
+                    }
+                    .accessibilityLabel("挂断")
+                    .frame(maxWidth: .infinity)
+                    CallCircleButton(title: "拨号键盘", icon: "circle.grid.3x3.fill", color: nil,
+                                     size: controlSize) { showingKeypad = true }
+                        .disabled(content.phase != .connected)
+                        .frame(maxWidth: .infinity)
                 }
             }
         }
-    }
-
-    private func callHeader(title: String, showsRecording: Bool) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: "antenna.radiowaves.left.and.right")
-                .symbolRenderingMode(.hierarchical)
-            Text(title)
-            Spacer()
-            if showsRecording {
-                Button {
-                    Task { await model.toggleRecording() }
-                } label: {
-                    Image(systemName: model.isRecording ? "record.circle.fill" : "record.circle")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(model.isRecording ? .red : .white)
-                        .frame(width: 44, height: 44)
-                }
-                .callControlGlass(tint: model.isRecording ? .red.opacity(0.16) : nil)
-                .accessibilityLabel(model.isRecording ? L10n.t("停止录音") : L10n.t("录音"))
-            }
-        }
-        .font(.subheadline.weight(.semibold))
-        .foregroundStyle(.white.opacity(0.72))
-        .frame(maxWidth: 520)
     }
 
     private var connectivityBadge: some View {
@@ -2380,7 +2410,7 @@ struct ActiveCallView: View {
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 38)
-        .callControlGlass(tint: (moduleIsReachable ? Color.green : Color.orange).opacity(0.10))
+        .background(Color.white.opacity(0.08), in: Capsule())
         .accessibilityElement(children: .combine)
     }
 
@@ -2402,7 +2432,8 @@ struct ActiveCallView: View {
         }
         .padding(.horizontal, 13)
         .frame(minHeight: 38)
-        .callControlGlass(tint: statusColor.opacity(0.10))
+        .background(Color.white.opacity(0.08), in: Capsule())
+        .accessibilityElement(children: .combine)
     }
 
     private var moduleIsReachable: Bool {
@@ -2433,7 +2464,7 @@ struct ActiveCallView: View {
     }
 
     private func updateProximityMonitoring() {
-        UIDevice.current.isProximityMonitoringEnabled = CallProximityPolicy.shouldMonitor(
+        UIDevice.current.isProximityMonitoringEnabled = isPresented && CallProximityPolicy.shouldMonitor(
             state: call.state,
             speakerEnabled: model.audio.speakerEnabled
         )
@@ -2445,15 +2476,24 @@ private struct SpeakerRouteButton: View {
     let size: CGFloat
     let action: () -> Void
 
+    private var outputTitle: String {
+        if audio.speakerEnabled { return "扬声器" }
+        let output = AVAudioSession.sharedInstance().currentRoute.outputs.first
+        if output == nil || output?.portType == .builtInReceiver { return "听筒" }
+        return "音频"
+    }
+
     var body: some View {
         CallCircleButton(
-            title: L10n.t("扬声器"),
-            icon: audio.speakerEnabled ? "speaker.wave.2.fill" : "speaker.fill",
-            color: audio.speakerEnabled ? .blue : nil,
-            foregroundColor: .white,
+            title: outputTitle,
+            icon: "speaker.wave.2.fill",
+            color: audio.speakerEnabled ? .white : nil,
+            foregroundColor: audio.speakerEnabled ? .black : .white,
             size: size,
             action: action
         )
+        .accessibilityValue(audio.speakerEnabled ? "已开启" : "已关闭")
+        .accessibilityHint(audio.routeDescription)
     }
 }
 
@@ -2461,6 +2501,7 @@ private struct CallDecisionButton: View {
     let title: String
     let icon: String
     let color: Color
+    var size: CGFloat = 76
     let action: () -> Void
 
     var body: some View {
@@ -2468,18 +2509,18 @@ private struct CallDecisionButton: View {
             VStack(spacing: 10) {
                 Circle()
                     .fill(color.gradient)
-                    .frame(width: 76, height: 76)
+                    .frame(width: size, height: size)
                     .overlay {
                         Image(systemName: icon)
                             .font(.system(size: 28, weight: .semibold))
                             .foregroundStyle(.white)
                     }
-                    .shadow(color: color.opacity(0.28), radius: 16, y: 8)
+
                 Text(title)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white.opacity(0.92))
             }
-            .frame(minWidth: 96, minHeight: 108)
+            .frame(width: size)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -2501,14 +2542,15 @@ private struct CallCircleButton: View {
                 Circle().fill(.clear).frame(width: size, height: size).overlay {
                     Image(systemName: icon).font(.title2.weight(.semibold)).foregroundStyle(foregroundColor)
                 }
-                .callControlGlass(tint: color?.opacity(0.24), shape: .circle)
+                .callControlGlass(tint: color, shape: .circle)
                 Text(title)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.88))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(minWidth: size)
+            .frame(width: size, alignment: .top)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -2517,19 +2559,14 @@ private struct CallCircleButton: View {
 private struct CallBackdrop: View {
     var body: some View {
         ZStack {
-            Color(red: 0.008, green: 0.012, blue: 0.025)
-            RadialGradient(
-                colors: [Color.blue.opacity(0.24), .clear],
-                center: .topTrailing,
-                startRadius: 10,
-                endRadius: 420
-            )
-            RadialGradient(
-                colors: [Color.cyan.opacity(0.12), .clear],
-                center: .bottomLeading,
-                startRadius: 20,
-                endRadius: 360
-            )
+            LinearGradient(stops: [
+                .init(color: Color(red: 0.13, green: 0.25, blue: 0.40), location: 0),
+                .init(color: Color(red: 0.18, green: 0.31, blue: 0.48), location: 0.28),
+                .init(color: Color(red: 0.18, green: 0.24, blue: 0.34), location: 0.68),
+                .init(color: Color(red: 0.18, green: 0.19, blue: 0.19), location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+            RadialGradient(colors: [Color(red: 0.41, green: 0.28, blue: 0.35).opacity(0.38), .clear],
+                center: UnitPoint(x: 0.9, y: 0.48), startRadius: 0, endRadius: 440)
         }
         .ignoresSafeArea()
     }
@@ -2538,17 +2575,25 @@ private struct CallBackdrop: View {
 private enum CallControlShape { case capsule, circle }
 
 private struct CallControlGlass: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let tint: Color?
     let shape: CallControlShape
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
+        if reduceTransparency {
+            switch shape {
+            case .capsule:
+                content.background(tint ?? Color(white: 0.20), in: Capsule())
+            case .circle:
+                content.background(tint ?? Color(white: 0.20), in: Circle())
+            }
+        } else if #available(iOS 26.0, *) {
             switch shape {
             case .capsule:
                 content.glassEffect(.regular.tint(tint).interactive(), in: Capsule())
             case .circle:
-                content.glassEffect(.regular.tint(tint).interactive(), in: Circle())
+                content.glassEffect(.clear.tint(tint ?? .white.opacity(0.06)).interactive(), in: Circle())
             }
         } else {
             switch shape {
@@ -2556,6 +2601,7 @@ private struct CallControlGlass: ViewModifier {
                 content.background(.ultraThinMaterial, in: Capsule())
             case .circle:
                 content.background(.ultraThinMaterial, in: Circle())
+                    .background(tint ?? .clear, in: Circle())
             }
         }
     }
@@ -2615,10 +2661,15 @@ private struct DTMFKeypadView: View {
                             enteredDigits = String((enteredDigits + digit).suffix(18))
                             Task { await model.sendDTMF(digit) }
                         } label: {
-                            Text(digit)
-                                .font(.system(size: 29, weight: .medium, design: .rounded))
-                                .frame(width: keySize, height: keySize)
-                                .contentShape(Circle())
+                            VStack(spacing: 1) {
+                                Text(digit).font(.system(size: 29, weight: .regular))
+                                Text(["2": "ABC", "3": "DEF", "4": "GHI", "5": "JKL",
+                                      "6": "MNO", "7": "PQRS", "8": "TUV", "9": "WXYZ"][digit] ?? " ")
+                                    .font(.caption2.weight(.semibold)).tracking(1.5)
+                                    .accessibilityHidden(true)
+                            }
+                            .frame(width: keySize, height: keySize)
+                            .contentShape(Circle())
                         }
                         .buttonStyle(DTMFGlassButtonStyle())
                         .accessibilityLabel("发送 DTMF \(digit)")

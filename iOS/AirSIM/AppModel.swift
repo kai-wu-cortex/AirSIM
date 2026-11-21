@@ -1347,6 +1347,29 @@ final class AppModel: ObservableObject {
         return cloudSlots ?? []
     }
 
+    /// Use the current authenticated transport's roster, including an empty roster
+    /// after SIM removal. The selection override is not live signal telemetry.
+    private func simSignals(for agentID: String) -> [SIMSignalSummary] {
+        let agent = pairedAndroidAgents.first { $0.id == agentID }
+        let slots: [AndroidSIMSlot]
+        if ConnectionModePreference.selected() == .cloud {
+            slots = (cloudAgentDirectory ?? cloudAgentStatus)?.agents.first { $0.agentID == agentID }?.simSlots ?? []
+        } else if agent?.bluetoothOnline == true,
+                  ConnectionModePreference.selected() == .bluetooth,
+                  let values = vobleHub.retainedBundle(for: agentID)?.central.deviceInformation?.simSlots {
+            slots = values
+        } else if agent?.vowlanOnline == true,
+                  let values = localDevices.metadata(for: agentID)?.simSlots {
+            slots = values
+        } else if agent?.bluetoothOnline == true,
+                  let values = vobleHub.retainedBundle(for: agentID)?.central.deviceInformation?.simSlots {
+            slots = values
+        } else if agent?.cloudOnline == true {
+            slots = (cloudAgentDirectory ?? cloudAgentStatus)?.agents.first { $0.agentID == agentID }?.simSlots ?? []
+        } else { return [] }
+        return AndroidSIMSlot.signalSummaries(slots)
+    }
+
     func selectedSIMSlotID(for agentID: String) -> String? {
         let slots = simSlots(for: agentID)
         guard !slots.isEmpty else { return nil }
@@ -3027,7 +3050,8 @@ final class AppModel: ObservableObject {
             pairedAgentCount: agents.count,
             agents: agents,
             currentID: current?.id,
-            page: liveActivityAgentPage
+            page: liveActivityAgentPage,
+            signals: Dictionary(uniqueKeysWithValues: agents.map { ($0.id, simSignals(for: $0.id)) })
         )
     }
 
@@ -5478,6 +5502,7 @@ extension AppModel {
             return .init(id: agent.id, name: agent.deviceName,
                          transport: agent.vowlanOnline ? "VoWLAN" : agent.bluetoothOnline ? "VoBLE" : agent.cloudOnline ? "云端" : "",
                          recentlyReachable: reachable, observedAt: observed,
+                         simSignals: simSignals(for: agent.id),
                          battery: androidBattery(for: agent.id, at: now),
                          unreadMessages: messages.filter { $0.sourceAgentID == agent.id && unreadMessageIDs.contains($0.id) }.count,
                          unseenMissedCalls: callHistory.filter { $0.sourceAgentID == agent.id && unseenMissedCallIDs.contains($0.id) }.count)
@@ -5514,6 +5539,8 @@ extension AppModel {
                                            messages: recentMessages, controls: controls)
         let stateChanged = lastWidgetSnapshot?.devices.map { "\($0.id)|\($0.name)|\($0.transport)|\($0.recentlyReachable)" }
             != devices.map { "\($0.id)|\($0.name)|\($0.transport)|\($0.recentlyReachable)" }
+            || lastWidgetSnapshot?.devices.map { ($0.simSignals ?? []).map { "\($0.title)|\($0.signal?.freshLevel(at: now) ?? -1)" } }
+                != devices.map { ($0.simSignals ?? []).map { "\($0.title)|\($0.signal?.freshLevel(at: now) ?? -1)" } }
             || lastWidgetSnapshot?.calls != calls
             || lastWidgetSnapshot?.messages != recentMessages
             || lastWidgetSnapshot?.controls != controls

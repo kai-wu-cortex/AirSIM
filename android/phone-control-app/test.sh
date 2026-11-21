@@ -336,12 +336,24 @@ mkdir -p "$SMS_OUT"
   "$ROOT"/src/com/airsim/phonecontrol/SmsSendConfirmationGate.java \
   "$ROOT"/src/com/airsim/phonecontrol/SMSCommandExecutor.java \
   "$ROOT"/src/com/airsim/phonecontrol/SMSPrivilegedResult.java \
+  "$ROOT"/src/com/airsim/phonecontrol/RootSMSPreflight.java \
+  "$ROOT"/test/cloud-call/android/os/SystemClock.java \
   "$ROOT"/test/com/airsim/phonecontrol/FeedbackUploader.java
 "$JAVAC" --release 17 -cp "$SMS_OUT:$OUT:$ANDROID_JAR" -d "$SMS_OUT" \
   "$ROOT"/test/android/content/pm/PackageManager.java \
   "$ROOT"/test/compat/android/telephony/SmsManager.java \
   "$ROOT"/test/com/airsim/phonecontrol/SMSCompatibilityTests.java
 "$JAVA" -cp "$SMS_OUT:$OUT:$ANDROID_JAR" com.airsim.phonecontrol.SMSCompatibilityTests
+"$JAVAC" --release 17 -cp "$SMS_OUT:$OUT" -d "$SMS_OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/RootSMSPreflight.java \
+  "$ROOT"/test/com/airsim/phonecontrol/RootSMSPreflightTests.java
+"$JAVA" -cp "$SMS_OUT:$OUT" com.airsim.phonecontrol.RootSMSPreflightTests
+"$JAVAC" --release 17 -d "$SMS_OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/RootSMSCallbackStore.java \
+  "$ROOT"/test/com/airsim/phonecontrol/RootSMSCallbackStoreTests.java
+"$JAVA" -cp "$SMS_OUT" com.airsim.phonecontrol.RootSMSCallbackStoreTests
+sh "$ROOT/test-sms-confirmation.sh"
+
 
 "$JAVAC" --release 17 -cp "$OUT" -d "$OUT" \
   "$ROOT"/src/com/airsim/phonecontrol/CloudPCMAudioQueue.java \

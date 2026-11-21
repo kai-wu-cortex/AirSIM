@@ -160,10 +160,9 @@ public final class RootBridgeMain {
                 case "audio_snapshot" -> code = PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT;
                 case "ensure_dialer_role" -> code = PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE;
                 case "send_sms" -> {
-                    code = PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS;
-                    data.writeString(request.optString("destination", ""));
-                    data.writeString(request.optString("body", ""));
-                    data.writeInt(request.optInt("subscription_id", -1));
+                    // Retired: SMS now uses a separate helper with App-owned sent
+                    // callbacks. Do not block this PCM supervisor waiting for SMS.
+                    return "error:prepare:confirmed_sms_required";
                 }
                 default -> throw new IllegalArgumentException("unknown operation");
             }

@@ -140,8 +140,10 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
 		// Watch token 与跨设备接听所有权必须在冷启动阶段就可接收，不能等待
 		// SwiftUI 首屏 onAppear（锁屏 PushKit 唤醒时首屏可能永远不出现）。
 		WatchCallCoordinator.shared.start()
+        // Install the PushKit receiver even when cloud signaling is disabled;
+        // start() keeps desiredPushTypes empty in that case (no registration).
+        VoIPPushController.shared.start()
         if CloudSignalingPreference.isEnabled() {
-            VoIPPushController.shared.start()
             application.registerForRemoteNotifications()
         }
 #if DEBUG

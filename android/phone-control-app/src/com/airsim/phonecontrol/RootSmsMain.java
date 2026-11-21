@@ -1,6 +1,7 @@
 package com.airsim.phonecontrol;
 
-import android.os.Build;
+import android.app.PendingIntent;
+import android.os.Bundle;
 import android.telephony.SmsManager;
 
 import org.json.JSONObject;
@@ -12,12 +13,19 @@ import java.util.ArrayList;
 
 /**
  * Root-only helper launched as app_process by KernelSU. It never receives shell
- * metacharacters on its command line: the JSON payload is read from stdin.
+ * metacharacters on its command line: the JSON payload is read from an app-private file.
  */
 public final class RootSmsMain {
     private RootSmsMain() {}
 
     public static void main(String[] args) {
+        run(args);
+        // The callback handoff starts Binder threads. The App owns the actual
+        // receivers, so the helper must exit without waiting for those threads.
+        System.exit(0);
+    }
+
+    private static void run(String[] args) {
         String stage = "prepare";
         try {
             if (android.os.Looper.myLooper() == null) android.os.Looper.prepareMainLooper();
@@ -34,11 +42,23 @@ public final class RootSmsMain {
             if (manager == null) { result("error:no_service"); return; }
             ArrayList<String> parts = manager.divideMessage(body);
             if (parts == null || parts.isEmpty()) { result("error:divide"); return; }
+            int userId = payload.optInt("user_id", -1);
+            if (userId < 0) { result("error:prepare:missing_user"); return; }
+            // A bare app_process cannot register ordinary App receivers reliably.
+            // Claim the real App's PendingIntents via Binder before dispatching anything.
+            Bundle bundle = ShellProviderQuery.call(packageName + RootSMSCallbackProvider.SUFFIX,
+                    userId, RootSMSCallbackProvider.CLAIM, payload.optString("callback_token", ""));
+            if (bundle == null) { result("error:prepare:missing_callbacks"); return; }
+            bundle.setClassLoader(PendingIntent.class.getClassLoader());
+            ArrayList<PendingIntent> callbacks = bundle.getParcelableArrayList(RootSMSCallbackProvider.CALLBACKS);
+            if (callbacks == null || callbacks.size() != parts.size() || callbacks.contains(null)) {
+                result("error:prepare:callback_count"); return;
+            }
             stage = "send_unknown";
             if (parts.size() == 1) {
-                manager.sendTextMessage(destination, null, parts.get(0), null, null);
+                manager.sendTextMessage(destination, null, parts.get(0), callbacks.get(0), null);
             } else {
-                manager.sendMultipartTextMessage(destination, null, parts, null, null);
+                manager.sendMultipartTextMessage(destination, null, parts, callbacks, null);
             }
             result("ok:" + parts.size());
         } catch (SecurityException error) {

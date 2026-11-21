@@ -30,6 +30,7 @@ public class SubscriptionManager {
     public SubscriptionInfo info;
     public int numberReadCount;
     public java.util.List<SubscriptionInfo> active;
+    public static int getDefaultSmsSubscriptionId() { return 7; }
     public static int defaultVoiceId = -1;
     public static int getDefaultVoiceSubscriptionId() { return defaultVoiceId; }
     public java.util.List<SubscriptionInfo> getActiveSubscriptionInfoList() { return active; }

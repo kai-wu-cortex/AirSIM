@@ -21,7 +21,7 @@ public final class SimSlotJson {
             if (!snapshot.error().isEmpty()) return values;
             String selected = DefaultCallAccount.selectedKey(context);
             for (DefaultCallAccount.Account account : snapshot.accounts()) {
-                values.put(new JSONObject()
+                JSONObject slot = new JSONObject()
                         .put("id", account.key())
                         .put("label", account.label())
                         .put("number", account.number())
@@ -32,11 +32,40 @@ public final class SimSlotJson {
                         .put("is_embedded", account.embedded())
                         .put("is_default_voice", account.defaultVoice())
                         .put("is_default_sms", account.defaultSms()
-                                || account.subscriptionId() == SmsManager.getDefaultSmsSubscriptionId()));
+                                || account.subscriptionId() == SmsManager.getDefaultSmsSubscriptionId());
+                JSONObject signal = signal(context, account.subscriptionId());
+                if (signal != null) slot.put("signal", signal);
+                values.put(slot);
             }
         } catch (RuntimeException | org.json.JSONException ignored) {
             // A missing permission or OEM restriction leaves the selector hidden.
         }
         return values;
     }
+    /** Read only this resolved subscription. Never use the default SIM as a fallback. */
+    private static JSONObject signal(Context context, int subscriptionId) {
+        if (subscriptionId < 0) return null;
+        try {
+            android.telephony.TelephonyManager manager = context.getSystemService(android.telephony.TelephonyManager.class);
+            if (manager == null) return null;
+            android.telephony.SignalStrength strength = manager.createForSubscriptionId(subscriptionId).getSignalStrength();
+            if (strength == null || strength.getCellSignalStrengths().isEmpty()) return null;
+            int level = strength.getLevel();
+            if (level < 0 || level > 4) return null;
+            long now = System.currentTimeMillis();
+            long age = 0;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                long measured = strength.getTimestampMillis();
+                age = android.os.SystemClock.elapsedRealtime() - measured;
+                if (measured <= 0 || age < 0 || age >= 300_000) return null;
+            }
+            // API 29 exposes no measurement timestamp: use retrieval time. Newer
+            // systems retain the modem timestamp so an old sample cannot look fresh.
+            return new JSONObject().put("level", level).put("observed_at_ms", now - age);
+        } catch (RuntimeException | org.json.JSONException ignored) {
+            // Optional telemetry; missing permissions/OEM support must not hide SIMs.
+            return null;
+        }
+    }
+
 }

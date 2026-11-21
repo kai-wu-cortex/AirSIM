@@ -200,8 +200,9 @@ struct AndroidSIMSlot: Codable, Equatable, Identifiable, Sendable {
     let isEmbedded: Bool?
     let isDefaultVoice: Bool?
     let isDefaultSMS: Bool?
+    var signal: AndroidSIMSignal? = nil
     enum CodingKeys: String, CodingKey {
-        case id, label, number
+        case id, label, number, signal
         case isDefault = "default"
         case slotIndex = "slot_index"
         case subID = "sub_id"
@@ -209,6 +210,17 @@ struct AndroidSIMSlot: Codable, Equatable, Identifiable, Sendable {
         case isEmbedded = "is_embedded"
         case isDefaultVoice = "is_default_voice"
         case isDefaultSMS = "is_default_sms"
+    }
+    static func signalSummaries(_ slots: [Self]) -> [SIMSignalSummary] {
+        var seen = Set<String>()
+        return slots.filter { seen.insert($0.id).inserted }.sorted {
+            let a = $0.slotIndex.flatMap { (0..<8).contains($0) ? $0 : nil } ?? Int.max
+            let b = $1.slotIndex.flatMap { (0..<8).contains($0) ? $0 : nil } ?? Int.max
+            return a == b ? $0.id < $1.id : a < b
+        }.prefix(4).enumerated().map { index, slot in
+            let title = slot.slotIndex.flatMap { (0..<8).contains($0) ? "SIM \($0 + 1)" : nil } ?? "卡 \(index + 1)"
+            return SIMSignalSummary(id: index, title: title, signal: slot.signal)
+        }
     }
     var displayNumber: String? {
         let value = number?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

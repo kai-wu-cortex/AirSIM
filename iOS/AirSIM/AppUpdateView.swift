@@ -13,6 +13,10 @@ enum AppReleaseNotes {
     // Bundled: showing installed-version notes never needs GitHub, Relay or pairing.
     // Keep this summary in sync with the candidate's source and docs when publishing.
     static let items = [
+        "更新拨号、最近通话和通话中界面；保留原有通话、选卡与连接方式。",
+        "修复 iPhone 与 Watch 已确认的 PushKit 来电上报崩溃路径；仍需真实锁屏来电回归。",
+        "完善 Root 短信逐段系统回执与安全回退；修复云端 SIM 标识兼容和呼出接通状态处理。",
+        "灵动岛与桌面小组件展示各张 SIM 的信号；需要新版安卓上报，无可靠采样时显示未知。",
         "蓝牙来电会等待已配对设备恢复认证，再沿蓝牙链路接听；固定蓝牙模式不改用云端接听。",
         "优化蓝牙运营商接通前语音的合包与传输节奏；保留只接收音频、不提前计时和不开启麦克风。",
         "修复部分安卓短信 SIM 映射与发送回执，发送结果不确定时不重复发送；确认成功后保留 iPhone 发信记录。",
@@ -106,6 +110,18 @@ private struct NewFeaturePage: Identifiable {
 
 private enum NewFeatureCatalog {
     static let pages: [NewFeaturePage] = [
+        NewFeaturePage(
+            id: 11, kicker: "拨号与通话界面",
+            title: "更清晰的拨号，\n更直观的通话控制",
+            body: "大圆拨号键、紧凑通话记录与蓝灰通话页。通话中可收起界面后返回；沿用现有连接、选卡和通话逻辑。",
+            symbol: "phone", accent: .blue, demo: .callVisuals
+        ),
+        NewFeaturePage(
+            id: 12, kicker: "多卡信号与稳定性",
+            title: "分卡查看信号，\n确认短信发送结果",
+            body: "灵动岛和小组件显示各张 SIM 的信号，旧端或过期采样显示未知。完善系统短信回执，并修复已确认的 iPhone 与 Watch 来电上报崩溃路径。需配套更新。",
+            symbol: "antenna.radiowaves.left.and.right", accent: .green, demo: .simSignals
+        ),
         NewFeaturePage(
             id: 9, kicker: "蓝牙连接与音频",
             title: "来电沿蓝牙接听，\n提示语音更连贯",
@@ -301,7 +317,7 @@ private struct NewFeaturePageView: View {
 
 
 private enum NewFeatureDemo: String {
-    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications, bluetoothRecovery, smsReceipt
+    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications, bluetoothRecovery, smsReceipt, callVisuals, simSignals
 }
 
 private struct FeatureDemoView: View {
@@ -383,6 +399,8 @@ private enum FeatureDemoHTML {
     static func html(for demo: NewFeatureDemo, animated: Bool) -> String {
         let illustration: String
         switch demo {
+        case .callVisuals: illustration = callVisuals
+        case .simSignals: illustration = simSignals
         case .bluetoothRecovery: illustration = bluetoothRecovery
         case .smsReceipt: illustration = smsReceipt
         case .audioBuffer: illustration = audioBuffer
@@ -423,6 +441,26 @@ private enum FeatureDemoHTML {
         </svg></body></html>
         """
     }
+
+    private static let callVisuals = """
+    <rect x="18" y="15" width="150" height="190" rx="24" fill="#F5F8FC"/>
+    <text x="93" y="45" text-anchor="middle" fill="#152D46" font-size="17">123</text>
+    <g fill="#E1EAF5" stroke="#B7CBE1"><circle cx="55" cy="75" r="16"/><circle cx="93" cy="75" r="16"/><circle cx="131" cy="75" r="16"/><circle cx="55" cy="115" r="16"/><circle cx="93" cy="115" r="16"/><circle cx="131" cy="115" r="16"/></g>
+    <circle class="pulse" cx="93" cy="167" r="22" fill="#30C65A"/>
+    <rect x="190" y="15" width="152" height="190" rx="24" fill="#294564"/>
+    <text x="266" y="49" text-anchor="middle" fill="white" font-size="16">AirSIM 通话</text>
+    <g fill="#8194AA"><circle cx="225" cy="127" r="17"/><circle cx="266" cy="127" r="17"/><circle cx="307" cy="127" r="17"/><circle cx="225" cy="170" r="17"/><circle cx="307" cy="170" r="17"/></g>
+    <circle class="reveal" cx="266" cy="170" r="17" fill="#E83932"/>
+    """
+
+    private static let simSignals = """
+    <rect x="18" y="20" width="324" height="180" rx="26" fill="#172B33"/>
+    <text x="42" y="51" fill="#C3E7F5" font-size="15">当前设备 · 分卡信号示意</text>
+    <text x="43" y="99" fill="white" font-size="16">SIM 1</text><text x="43" y="155" fill="white" font-size="16">SIM 2</text>
+    <g fill="#42D985"><rect x="160" y="88" width="17" height="8" rx="3"/><rect x="184" y="80" width="17" height="16" rx="3"/><rect x="208" y="72" width="17" height="24" rx="3"/><rect x="232" y="64" width="17" height="32" rx="3"/></g>
+    <g fill="#6ECBF7"><rect x="160" y="144" width="17" height="8" rx="3"/><rect x="184" y="136" width="17" height="16" rx="3"/></g><g fill="#455962"><rect x="208" y="128" width="17" height="24" rx="3"/><rect x="232" y="120" width="17" height="32" rx="3"/></g>
+    <text class="reveal" x="180" y="184" text-anchor="middle" fill="#C3E7F5" font-size="12">不猜测信号 · 过期显示未知</text>
+    """
 
     private static let bluetoothRecovery = """
     <rect x="18" y="20" width="324" height="180" rx="26" fill="#142535" stroke="#345970"/>

@@ -6073,3 +6073,66 @@ final class CloudSIMSelectionTests: XCTestCase {
         XCTAssertNil(agent.simSlots)
     }
 }
+
+
+final class SIMSignalDisplayTests: XCTestCase {
+    func testDualSIMMappingAndLegacyDecode() throws {
+        let json = #"[{"id":"b","label":"secondary","slot_index":1,"signal":{"level":1,"observed_at_ms":1795150000000}},{"id":"a","label":"primary","slot_index":0,"signal":{"level":4,"observed_at_ms":1795150000000}}]"#
+        let slots = try JSONDecoder().decode([AndroidSIMSlot].self, from: Data(json.utf8))
+        let summaries = AndroidSIMSlot.signalSummaries(slots)
+        XCTAssertEqual(summaries.map(\.title), ["SIM 1", "SIM 2"])
+        XCTAssertEqual(summaries.map { $0.signal?.level }, [4, 1])
+        XCTAssertEqual(AndroidSIMSlot.signalSummaries(slots + slots).count, 2)
+        XCTAssertTrue(AndroidSIMSlot.signalSummaries([]).isEmpty)
+        let old = try JSONDecoder().decode(AndroidSIMSlot.self, from: Data(#"{"id":"old","label":"SIM"}"#.utf8))
+        XCTAssertNil(old.signal)
+        XCTAssertNil(AndroidSIMSlot.signalSummaries([old]).first?.signal)
+    }
+
+    func testUnknownIsDistinctFromZeroAndMalformedSignalDoesNotHideSIM() throws {
+        let now = Date(timeIntervalSince1970: 1795150000)
+        XCTAssertEqual(AndroidSIMSignal(level: 0, observedAtMS: 1795150000000).freshLevel(at: now), 0)
+        for level in [-1, 5] {
+            XCTAssertNil(AndroidSIMSignal(level: level, observedAtMS: 1795150000000).freshLevel(at: now))
+        }
+        let slot = try JSONDecoder().decode(AndroidSIMSlot.self, from: Data(#"{"id":"a","label":"SIM","signal":{"level":"bad","observed_at_ms":0}}"#.utf8))
+        XCTAssertEqual(slot.id, "a")
+        XCTAssertNil(slot.signal?.freshLevel(at: now))
+    }
+
+    func testSignalExpiresAndRejectsFutureSample() {
+        let now = Date(timeIntervalSince1970: 1795150000)
+        let signal = AndroidSIMSignal(level: 3, observedAtMS: 1795150000000)
+        XCTAssertEqual(signal.freshLevel(at: now.addingTimeInterval(299)), 3)
+        XCTAssertNil(signal.freshLevel(at: now.addingTimeInterval(300)))
+        XCTAssertNil(signal.freshLevel(at: now.addingTimeInterval(-61)))
+    }
+
+    func testWidgetRoundTripExpiryAndOldSnapshot() throws {
+        let now = Date(timeIntervalSince1970: 1795150000)
+        var snapshot = AirSIMWidgetSnapshot.preview(at: now)
+        snapshot.devices[0].simSignals = [
+            .init(id:0,title:"SIM 1",signal:.init(level:4,observedAtMS:1795150000000)),
+            .init(id:1,title:"SIM 2",signal:.init(level:1,observedAtMS:1795149990000))]
+        XCTAssertEqual(try JSONDecoder().decode(AirSIMWidgetSnapshot.self, from: JSONEncoder().encode(snapshot)), snapshot)
+        XCTAssertTrue(snapshot.expirationDates(after: now).contains(now.addingTimeInterval(290)))
+        let old = try JSONDecoder().decode(AirSIMWidgetSnapshot.Device.self, from: Data(#"{"id":"old","name":"old","transport":"VoBLE","recentlyReachable":true}"#.utf8))
+        XCTAssertNil(old.simSignals)
+    }
+
+    func testLiveActivityStaleClearsSignalWithoutMarkingDeviceOffline() throws {
+        let agent = AirSIMCallActivityAttributes.ContentState.AgentSummary(id:"a",name:"Phone",phoneNumber:nil,agentKind:nil,
+            vowlanOnline:false,bluetoothOnline:true,cloudOnline:false,isCurrent:true,
+            simSignals:[.init(id:0,title:"SIM 1",signal:.init(level:2,observedAtMS:1795150000000))])
+        let state = AirSIMCallActivityAttributes.ContentState(callID:"",number:"",displayName:"Phone",phase:.standby,
+            startedAt:Date(),transport:.bluetooth,agents:[agent])
+        XCTAssertEqual(state.simSignalExpirationDate?.timeIntervalSince1970, 1795150300)
+        let stale = state.liveActivityDisplayState(isStale:true)
+        XCTAssertEqual(stale.phase, .standby)
+        XCTAssertEqual(stale.agents?.first?.bluetoothOnline, true)
+        XCTAssertNil(stale.agents?.first?.simSignals?.first?.signal)
+        XCTAssertEqual(state.liveActivityDisplayState(isStale:false), state)
+        XCTAssertEqual(try JSONDecoder().decode(AirSIMCallActivityAttributes.ContentState.self,
+            from: JSONEncoder().encode(state)), state)
+    }
+}

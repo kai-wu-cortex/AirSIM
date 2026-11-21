@@ -11,6 +11,7 @@ import WatchConnectivity
 /// VoWLAN 专用版由 iPhone 协调控制，Watch 直连安卓 PCM；Relay 仅用于推送。
 @MainActor
 final class WatchCallSession: NSObject, ObservableObject {
+    static let shared = WatchCallSession()
     @Published private(set) var call = WatchCallPayload(
         callID: "", callUUID: nil, phase: .idle, number: nil,
         callerName: nil, updatedAt: Date()
@@ -119,8 +120,6 @@ final class WatchCallSession: NSObject, ObservableObject {
         super.init()
         if isUIFixture { installUIFixture(); return }
 
-		requestMicrophonePermissionIfNeeded()
-
         provider.setDelegate(self, queue: .main)
         media.onRemoteEnded = { [weak self] uuid in
             DispatchQueue.main.async {
@@ -139,6 +138,8 @@ final class WatchCallSession: NSObject, ObservableObject {
         registry.delegate = self
         pushRegistry = registry
 		registry.desiredPushTypes = [.voIP]
+
+        requestMicrophonePermissionIfNeeded()
 
         if WCSession.isSupported() {
             let session = WCSession.default
@@ -834,62 +835,75 @@ extension WatchCallSession: @preconcurrency PKPushRegistryDelegate {
         completion: @escaping () -> Void
     ) {
         guard type == .voIP else { completion(); return }
-        do {
-            let incoming = try WatchVoIPCall(userInfo: payload.dictionaryPayload)
-            let disposition = WatchReliabilityPolicy.incomingDisposition(currentUUID: voIPCall?.uuid,
-                incomingUUID: incoming.uuid, retired: endedCallIDs.contains(incoming.callID) || endedCallUUIDs.contains(incoming.uuid))
-            if disposition == .duplicate {
-                // A WC mirror can arrive before APNs. Enrich the pending identity,
-                // but never overwrite an already-owned local/cloud media route.
-                if !answered, directIncoming == nil, voIPCall?.agentID == nil,
-                   case .pendingLocal = voIPCall?.media, incoming.agentID != nil {
-                    voIPCall = incoming
-                }
-                monitorRingingCall(incoming)
-                let update = CallKitNumberPresentation.update(number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
-                provider.reportNewIncomingCall(with: incoming.uuid, update: update) { _ in completion() }
-                return
-            }
-            if disposition == .busy || disposition == .retired {
-                // Fulfil the push report for this real call without replacing or ending
-                // the different call that currently owns media and UI.
-                let update = CallKitNumberPresentation.update(number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
-                provider.reportNewIncomingCall(with: incoming.uuid, update: update) { [provider] error in
-                    if error == nil { provider.reportCall(with: incoming.uuid, endedAt: Date(), reason: .unanswered) }
-                    completion()
-                }
-                return
-            }
-            voIPCall = incoming
-            resetAnswerState()
-            errorMessage = nil
-            publishLocalPhase(.incoming, notifyPhone: false)
+        VoIPPushDelivery.receive(payload: payload.dictionaryPayload,
+            parse: { try WatchVoIPCall(userInfo: $0) },
+            report: { incoming, done in self.reportIncomingVoIPCall(incoming, completion: done) },
+            reportRejected: { [provider] uuid, done in
+                let update = CallKitNumberPresentation.update(number: nil, callerName: nil, fallback: "AirSIM")
+                update.supportsHolding = false
+                update.supportsGrouping = false
+                update.supportsUngrouping = false
+                update.supportsDTMF = false
+                provider.reportNewIncomingCall(with: uuid, update: update, completion: done)
+            }, endRejected: { [provider] uuid in
+                provider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+            }, rejected: { _ in
+                // Do not replace the error/UI of an unrelated active call.
+            }, completion: completion)
+    }
 
-            let update = CallKitNumberPresentation.update(
-                number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
-            update.hasVideo = false
-            update.supportsHolding = false
-            update.supportsGrouping = false
-            update.supportsUngrouping = false
-            update.supportsDTMF = false
-            provider.reportNewIncomingCall(with: incoming.uuid, update: update) { [weak self] error in
-                Task { @MainActor [weak self] in
-                    guard let self, self.voIPCall?.uuid == incoming.uuid else { return }
-                    if let error {
-                        self.publishLocalPhase(.ended, notifyPhone: false)
-                        self.voIPCall = nil
-                        self.errorMessage = error.localizedDescription
-                    } else {
-                        self.monitorRingingCall(incoming)
-                    }
-                }
+    private func reportIncomingVoIPCall(_ incoming: WatchVoIPCall, completion: @escaping () -> Void) {
+        let disposition = WatchReliabilityPolicy.incomingDisposition(currentUUID: voIPCall?.uuid,
+            incomingUUID: incoming.uuid, retired: endedCallIDs.contains(incoming.callID) || endedCallUUIDs.contains(incoming.uuid))
+        if disposition == .duplicate {
+            // A WC mirror can arrive before APNs. Enrich the pending identity,
+            // but never overwrite an already-owned local/cloud media route.
+            if !answered, directIncoming == nil, voIPCall?.agentID == nil,
+               case .pendingLocal = voIPCall?.media, incoming.agentID != nil {
+                voIPCall = incoming
+            }
+            monitorRingingCall(incoming)
+            let update = CallKitNumberPresentation.update(number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
+            provider.reportNewIncomingCall(with: incoming.uuid, update: update) { _ in completion() }
+            return
+        }
+        if disposition == .busy || disposition == .retired {
+            // Fulfil the push report for this real call without replacing or ending
+            // the different call that currently owns media and UI.
+            let update = CallKitNumberPresentation.update(number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
+            provider.reportNewIncomingCall(with: incoming.uuid, update: update) { [provider] error in
+                if error == nil { provider.reportCall(with: incoming.uuid, endedAt: Date(), reason: .unanswered) }
                 completion()
             }
-        } catch {
-            errorMessage = error.localizedDescription
+            return
+        }
+        voIPCall = incoming
+        resetAnswerState()
+        errorMessage = nil
+        publishLocalPhase(.incoming, notifyPhone: false)
+
+        let update = CallKitNumberPresentation.update(
+            number: incoming.number, callerName: incoming.callerName, fallback: incoming.displayName)
+        update.hasVideo = false
+        update.supportsHolding = false
+        update.supportsGrouping = false
+        update.supportsUngrouping = false
+        update.supportsDTMF = false
+        provider.reportNewIncomingCall(with: incoming.uuid, update: update) { [weak self] error in
+            Task { @MainActor [weak self] in
+                guard let self, self.voIPCall?.uuid == incoming.uuid else { return }
+                if let error {
+                    self.publishLocalPhase(.ended, notifyPhone: false)
+                    self.voIPCall = nil
+                    self.errorMessage = error.localizedDescription
+                } else {
+                    self.monitorRingingCall(incoming)
+                }
+            }
             completion()
         }
     }
+
 }
 
 extension WatchCallSession: @preconcurrency CXProviderDelegate {

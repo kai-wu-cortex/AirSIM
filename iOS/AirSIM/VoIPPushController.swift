@@ -377,6 +377,7 @@ enum CloudSelfTestStepID: String, CaseIterable, Sendable {
     case agentDirectory
     case agentHeartbeat
     case commandRouting
+    case simRoster
 }
 
 enum CloudSelfTestStepState: Equatable, Sendable {
@@ -416,9 +417,22 @@ struct CloudSelfTestReport: Equatable, Sendable {
             CloudSelfTestStep(id: .agentDirectory, title: "Agent 记录", state: .pending, detail: "查询 Relay 已登记的 Android Agent"),
             CloudSelfTestStep(id: .agentHeartbeat, title: "Agent 心跳", state: .pending, detail: "检查最近 150 秒心跳"),
             CloudSelfTestStep(id: .commandRouting, title: "命令路由", state: .pending, detail: "检查 Agent 是否支持定向接听/挂断"),
+            CloudSelfTestStep(id: .simRoster, title: "云端 SIM 确认", state: .pending, detail: "检查目标 Agent 的 SIM 列表与所选卡"),
         ],
         completedAt: nil
     )
+
+    mutating func checkSIMRoster(_ slots: [AndroidSIMSlot]?, selectedID: String?) {
+        guard let slots, !slots.isEmpty else {
+            fail(.simRoster, detail: "云端未确认 SIM 列表；请更新安卓与 Relay，并在安卓发送心跳后重试。Agent 在线不代表所选 SIM 可用。")
+            return
+        }
+        if let selectedID, !slots.contains(where: { $0.id == selectedID }) {
+            fail(.simRoster, detail: "云端尚未确认所选 SIM；请刷新卡槽并重新选择，不能自动改用其他卡。")
+            return
+        }
+        update(.simRoster, state: .passed, detail: "云端已确认 \(slots.count) 张 SIM；\(selectedID == nil ? "未指定卡，使用默认策略" : "所选卡匹配")。此项不代表真实拨号或短信已成功。")
+    }
 
     var allPassed: Bool {
         completedAt != nil && steps.allSatisfy { $0.state == .passed }
@@ -983,23 +997,16 @@ final class VoIPPushController: NSObject {
     private var observedActivityIDs = Set<String>()
 
     func start() {
-        guard CloudSignalingPreference.isEnabled() else { return }
-        startActivityKitRegistration()
-        if let registry {
-            // 重新赋值会让系统在授权或网络状态变化后再次核对现有凭据。
-            registry.desiredPushTypes = [.voIP]
-#if DEBUG
-            print("[AirSIM PushKit] 已刷新 VoIP token 注册")
-#endif
-            return
+        // Keep the receiving delegate alive across preference changes. A push
+        // already queued by APNs may still arrive after cloud signaling is off.
+        if registry == nil {
+            let registry = PKPushRegistry(queue: .main)
+            registry.delegate = self
+            self.registry = registry
         }
-        let registry = PKPushRegistry(queue: .main)
-        registry.delegate = self
-        registry.desiredPushTypes = [.voIP]
-        self.registry = registry
-#if DEBUG
-        print("[AirSIM PushKit] 已创建 VoIP token 注册")
-#endif
+        let enabled = CloudSignalingPreference.isEnabled()
+        registry?.desiredPushTypes = enabled ? [.voIP] : []
+        if enabled { startActivityKitRegistration() }
     }
 
     func setSignalingEnabled(_ enabled: Bool) {
@@ -1015,8 +1022,6 @@ final class VoIPPushController: NSObject {
         } else {
             pendingRegistrationAPIs.removeAll()
             registry?.desiredPushTypes = []
-            registry?.delegate = nil
-            registry = nil
             activityKitRegistrationTasks.forEach { $0.cancel() }
             activityKitRegistrationTasks.removeAll()
             activityKitRegistrationStarted = false
@@ -1333,6 +1338,7 @@ final class VoIPPushController: NSObject {
 
     /// 只验证控制面，不发起电话或短信：本机凭据 → Relay 身份 → 注册鉴权 → Agent 心跳。
     func runCloudSelfTest(
+        selectedSIM: @MainActor (String) -> String? = { _ in nil },
         onUpdate: @MainActor @escaping (CloudSelfTestReport) -> Void = { _ in }
     ) async -> CloudSelfTestReport {
         var report = CloudSelfTestReport.initial
@@ -1452,10 +1458,16 @@ final class VoIPPushController: NSObject {
 
         report.update(.commandRouting, state: .running, detail: "检查 Agent 的 command_routing_version")
         onUpdate(report)
-        let activeID = status.activeAgentID
-        let active = status.agents.first { $0.agentID == activeID } ?? status.agents.first
+        let activeID = AndroidAgentBindingPreference.selected() ?? status.activeAgentID
+        let active = activeID.flatMap { id in status.agents.first { $0.agentID == id } }
+            ?? (activeID == nil ? status.agents.first : nil)
         guard let active else {
             report.fail(.commandRouting, detail: "找不到 active Agent 记录")
+            onUpdate(report)
+            return report
+        }
+        guard active.cloudOnline else {
+            report.fail(.commandRouting, detail: "目标 Agent 心跳已过期，不能用其他在线设备代替")
             onUpdate(report)
             return report
         }
@@ -1467,6 +1479,7 @@ final class VoIPPushController: NSObject {
         }
         report.update(.commandRouting, state: .passed,
             detail: "Agent \(active.deviceName ?? active.agentID) 支持 command_routing=v\(routing)")
+        report.checkSIMRoster(active.simSlots, selectedID: selectedSIM(active.agentID))
         report.completedAt = Date()
         onUpdate(report)
         return report
@@ -1944,7 +1957,7 @@ final class VoIPPushController: NSObject {
     }
 }
 
-extension VoIPPushController: PKPushRegistryDelegate {
+extension VoIPPushController: @preconcurrency PKPushRegistryDelegate {
     nonisolated func pushRegistry(
         _ registry: PKPushRegistry,
         didUpdate pushCredentials: PKPushCredentials,
@@ -1975,44 +1988,31 @@ extension VoIPPushController: PKPushRegistryDelegate {
         }
     }
 
-    nonisolated func pushRegistry(
+    func pushRegistry(
         _ registry: PKPushRegistry,
         didReceiveIncomingPushWith payload: PKPushPayload,
         for type: PKPushType,
         completion: @escaping () -> Void
     ) {
-        guard type == .voIP else {
-            completion()
-            return
-        }
-        let userInfo = payload.dictionaryPayload
-        Task { @MainActor in
-            PushDiagnostics.record("收到 PushKit 来电", fields: [
-                "app_state": String(UIApplication.shared.applicationState.rawValue)])
-            do {
-                let call = try IncomingVoIPCall(userInfo: userInfo)
-                CallKitController.shared.reportRequiredVoIPPush(call) { error in
-                    PushDiagnostics.record("PushKit 系统来电上报完成", error: error)
-                    completion()
+        guard type == .voIP else { completion(); return }
+        // PKPushRegistry is created with queue: .main. Do not defer the required
+        // report to a Task: cold launch must report within this delegate callback.
+        let controller = CallKitController.shared
+        let call = controller.receiveVoIPPush(payload.dictionaryPayload, completion: completion)
+        PushDiagnostics.record("收到 PushKit 来电", fields: [
+            "app_state": String(UIApplication.shared.applicationState.rawValue)])
+        guard let call, controller.currentSystemCallUUID == call.uuid else { return }
+        WatchCallCoordinator.shared.publishIncoming(call)
+        if call.callerName == nil, let number = call.number {
+            Task {
+                let resolvedName = await Task.detached(priority: .userInitiated) {
+                    try? ContactFetcher().displayName(for: number)
+                }.value
+                // Contact lookup can complete after this call has already ended.
+                guard controller.currentSystemCallUUID == call.uuid else { return }
+                if let resolvedName, resolvedName != number {
+                    WatchCallCoordinator.shared.publishIncoming(call, callerName: resolvedName)
                 }
-                guard CallKitController.shared.currentSystemCallUUID == call.uuid else { return }
-                WatchCallCoordinator.shared.publishIncoming(call)
-                if call.callerName == nil, let number = call.number {
-                    Task {
-                        let resolvedName = await Task.detached(priority: .userInitiated) {
-                            try? ContactFetcher().displayName(for: number)
-                        }.value
-                        if let resolvedName, resolvedName != number {
-                            WatchCallCoordinator.shared.publishIncoming(call, callerName: resolvedName)
-                        }
-                    }
-                }
-            } catch {
-                PushDiagnostics.record("PushKit 来电解析失败", error: error)
-#if DEBUG
-                print("[AirSIM PushKit] 丢弃无效来电推送：\(error.localizedDescription)")
-#endif
-                completion()
             }
         }
     }

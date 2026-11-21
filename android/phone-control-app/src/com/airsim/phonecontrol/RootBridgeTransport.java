@@ -128,13 +128,6 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
         return request("ensure_dialer_role", new JSONObject());
     }
 
-    String sendSms(String destination, String body, int subscriptionId) throws Exception {
-        return request("send_sms", new JSONObject()
-                .put("destination", destination)
-                .put("body", body)
-                .put("subscription_id", subscriptionId));
-    }
-
     private String request(String op, JSONObject args) throws Exception {
         if (closed) throw new IOException("root transport closed");
         JSONObject request = new JSONObject(args.toString()).put("op", op).put("token", token);

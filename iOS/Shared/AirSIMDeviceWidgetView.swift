@@ -62,6 +62,7 @@ struct AirSIMDeviceWidgetView: View {
                 if snapshot.controls != nil { switchControls(vertical: true, compact: true) }
                 else { Text(d.name).font(.caption2.bold()).lineLimit(1) }
                 Text(d.status(at: date)).font(.caption2).lineLimit(1).minimumScaleFactor(0.6)
+                simSignals(d)
                 if snapshot.controls == nil, let observed = d.observedAt {
                     Text(observed, style: .time).font(.caption2).foregroundStyle(secondaryText)
                         .accessibilityLabel("最近更新时间 \(observed.formatted(date: .abbreviated, time: .shortened))")
@@ -69,7 +70,8 @@ struct AirSIMDeviceWidgetView: View {
             }
         } else if family == .systemMedium {
             HStack(spacing: 12) {
-                accessibleIdentity(d).frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) { accessibleIdentity(d); simSignals(d) }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if snapshot.controls != nil { switchControls(vertical: true, compact: true).frame(maxWidth: .infinity) }
                 else { VStack(spacing: 8) {
                     action("通话", symbol: nil, to: .recents, agent: d.id)
@@ -100,9 +102,17 @@ struct AirSIMDeviceWidgetView: View {
                family != .systemExtraLarge || d.id == controls.currentAgentID {
                 switchControls(vertical: false, compact: true)
             }
+            simSignals(d)
             Divider()
             recentDetails(d)
             Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private func simSignals(_ d: AirSIMWidgetSnapshot.Device) -> some View {
+        if let signals = d.simSignals, !signals.isEmpty {
+            SIMSignalStrip(signals: signals, date: date, available: d.recentlyReachable && d.isFresh(at: date))
+                .foregroundStyle(accent)
         }
     }
 
@@ -111,6 +121,7 @@ struct AirSIMDeviceWidgetView: View {
             if snapshot.controls != nil {
                 switchControls(vertical: true)
                 Text(d.status(at: date)).font(.caption).lineLimit(1)
+                simSignals(d)
                 HStack { battery(d, compact: true); Spacer(minLength: 2); updated(d).font(.caption2).lineLimit(1) }
             } else {
             HStack { brand(size: 34); Spacer(); battery(d, compact: true) }
@@ -119,6 +130,7 @@ struct AirSIMDeviceWidgetView: View {
             Label(d.transport.isEmpty ? "连接待确认" : d.transport, systemImage: transportSymbol(d))
                 .font(.caption).foregroundStyle(secondaryText).lineLimit(1)
             Text(d.status(at: date)).font(.caption).lineLimit(1)
+            simSignals(d)
             if !textSize.isAccessibilitySize { Divider() }
             updated(d).font(.caption2)
             }
@@ -143,6 +155,7 @@ struct AirSIMDeviceWidgetView: View {
                 status(d)
                 HStack { battery(d, compact: true); Spacer(minLength: 2); updated(d).font(.caption2).lineLimit(1) }
                 }
+                simSignals(d)
             }.frame(maxWidth: .infinity, alignment: .leading)
             Divider()
             VStack(alignment: .leading, spacing: 8) {
@@ -188,6 +201,7 @@ struct AirSIMDeviceWidgetView: View {
             Divider()
             if snapshot.controls != nil { switchControls(vertical: false) }
             HStack { battery(d); Spacer(); updated(d).font(.caption2) }
+            simSignals(d)
             Divider()
             recentDetails(d)
             Spacer(minLength: 0)
@@ -299,6 +313,7 @@ struct AirSIMDeviceWidgetView: View {
                             }
                         }
                         HStack { battery(d); Spacer(); updated(d).font(.caption2) }
+                        simSignals(d)
                         actions(d, compact: true)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -494,5 +509,59 @@ struct AirSIMDeviceWidgetView: View {
                 }
             }
         }
+    }
+}
+
+/// A small, shared signal indicator; it is not the iPhone's own cellular signal.
+/// Unknown values use a dash, distinct from a valid zero-bar measurement.
+struct SIMSignalStrip: View {
+    let signals: [SIMSignalSummary]
+    let date: Date
+    var available = true
+    var compact = false
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            strip(compact: compact)
+            if !compact { strip(compact: true) }
+        }
+    }
+    private func strip(compact: Bool) -> some View {
+        HStack(spacing: compact ? 4 : 8) {
+            ForEach(Array(signals.prefix(compact ? 2 : 4))) { sim in
+                SIMSignalItem(sim: sim, level: available ? sim.signal?.freshLevel(at: date) : nil, compact: compact)
+            }
+            if compact && signals.count > 2 {
+                Text("+\(signals.count - 2)").font(.system(size: 8))
+            }
+        }
+    }
+}
+
+
+private struct SIMSignalItem: View {
+    let sim: SIMSignalSummary
+    let level: Int?
+    let compact: Bool
+    private var spokenLabel: String {
+        let strength = level.map { "信号 \($0)/4 格" } ?? "信号未知或待刷新"
+        return "\(sim.title)，\(strength)"
+    }
+    var body: some View {
+        HStack(spacing: 3) {
+            if !compact { Text(sim.title).font(.system(size: 10, weight: .medium)).lineLimit(1) }
+            if let level {
+                HStack(alignment: .bottom, spacing: 1.5) {
+                    ForEach(0..<4, id: \.self) { bar in
+                        Capsule().opacity(bar < level ? 1 : 0.18)
+                            .frame(width: 2.5, height: 3 + CGFloat(bar) * 2.5)
+                    }
+                }.frame(height: 11)
+            } else {
+                Text("—").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spokenLabel)
     }
 }

@@ -49,6 +49,26 @@ public final class SMSCompatibilityTests {
             throw new AssertionError("modem rejection must not be treated as success or repeated");
         if (!SMSPrivilegedResult.failureMessage(failure).startsWith("系统短信发送失败"))
             throw new AssertionError("known failure must differ from unknown status");
-        System.out.println("SMSCompatibilityTests passed (API 29–35, no SMS sent)");
+        Context sendContext = new Context();
+        sendContext.grant("android.permission.SEND_SMS");
+        sendContext.getPackageManager().features.add("android.hardware.telephony.messaging");
+        int[] privilegedCalls = {0};
+        SMSCommandExecutor.setRootSender((n,b,s) -> RootSMSPreflight.check(() -> {
+            throw new java.io.IOException("no su on this phone");
+        }, 1));
+        SMSCommandExecutor.setPrivilegedSender((n,b,s) -> { privilegedCalls[0]++; return "ok:1"; });
+        var command = new AgentCommand("fixture", "send_sms", "", "10086", "synthetic", "");
+        if (!SMSCommandExecutor.execute(sendContext, command).success())
+            throw new AssertionError("VoWLAN/cloud shared executor blocked before dispatch");
+        if (!SMSCommandExecutor.sendFromVoBLE(sendContext,"fixture2","10086","synthetic","").equals("ok:1"))
+            throw new AssertionError("VoBLE adapter blocked before dispatch");
+        if (privilegedCalls[0] != 2) throw new AssertionError("fallback was not exactly once per intent");
+        SMSCommandExecutor.setRootSender((n,b,s) -> "error:send_unknown:IOException");
+        if (SMSCommandExecutor.execute(sendContext, command).success()) throw new AssertionError("unknown falsely accepted");
+        SMSCommandExecutor.sendFromVoBLE(sendContext,"fixture3","10086","synthetic","");
+        if (privilegedCalls[0] != 2) throw new AssertionError("ambiguous send retried on another sender");
+        SMSCommandExecutor.setRootSender(null);
+        SMSCommandExecutor.setPrivilegedSender(null);
+        System.out.println("SMSCompatibilityTests passed (API 29–35, shared executor and VoBLE fallback, no SMS sent)");
     }
 }

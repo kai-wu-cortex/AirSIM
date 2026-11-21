@@ -277,6 +277,36 @@ final class CallKitController: NSObject {
         handler?.callKitDidReceiveIncoming(call)
     }
 
+    /// Called directly on PushKit's main queue, before returning from its delegate.
+    @discardableResult
+    func receiveVoIPPush(_ payload: [AnyHashable: Any],
+        systemReport: RequiredSystemReporter? = nil, systemEnd: ((UUID) -> Void)? = nil,
+        completion: @escaping () -> Void) -> IncomingVoIPCall? {
+        let report: RequiredSystemReporter = systemReport ?? { [provider] uuid, update, done in
+            provider.reportNewIncomingCall(with: uuid, update: update, completion: done)
+        }
+        let end = systemEnd ?? { [provider] uuid in
+            provider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
+        }
+        return VoIPPushDelivery.receive(payload: payload,
+            parse: { try IncomingVoIPCall(userInfo: $0) },
+            report: { call, done in
+                self.reportRequiredVoIPPush(call, systemReport: report, systemEnd: systemEnd) { error in
+                    PushDiagnostics.record("PushKit 系统来电上报完成", error: error)
+                    done()
+                }
+            }, reportRejected: { uuid, done in
+                let update = CallKitNumberPresentation.update(number: nil, callerName: nil, fallback: "AirSIM")
+                update.supportsHolding = false
+                update.supportsGrouping = false
+                update.supportsUngrouping = false
+                update.supportsDTMF = false
+                report(uuid, update, done)
+            }, endRejected: end, rejected: { error in
+                PushDiagnostics.record("PushKit 无效或过期来电已交由系统收尾", error: error)
+            }, completion: completion)
+    }
+
     typealias RequiredSystemReporter = (UUID, CXCallUpdate, @escaping (Error?) -> Void) -> Void
     /// A genuine VoIP push is still reported even if local mode is selected or
     /// another device owns the primary call. Never reset/retarget that primary.
@@ -316,7 +346,7 @@ final class CallKitController: NSObject {
            !localOwnerBusy,
            currentUUID == nil || currentUUID == call.uuid,
            incomingDeduplicator.shouldAccept(callID: call.callID, uuid: call.uuid) {
-            reportIncomingPush(call, completion: completion)
+            reportIncomingPush(call, systemReport: systemReport, completion: completion)
             return
         }
         let report: RequiredSystemReporter = systemReport ?? { [provider] uuid, update, done in

@@ -80,7 +80,8 @@ struct LiveActivityAgentSnapshot: Equatable {
         pairedAgentCount: Int,
         agents: [AndroidAgentPresentation] = [],
         currentID: String? = nil,
-        page: Int = 0
+        page: Int = 0,
+        signals: [String: [SIMSignalSummary]] = [:]
     ) {
         let current = agent
             ?? agents.first(where: { $0.id == currentID })
@@ -103,7 +104,13 @@ struct LiveActivityAgentSnapshot: Equatable {
                 vowlanOnline: value.vowlanOnline,
                 bluetoothOnline: value.bluetoothOnline,
                 cloudOnline: value.cloudOnline,
-                isCurrent: value.id == current?.id
+                isCurrent: value.id == current?.id,
+                // Keep the ActivityKit payload bounded: details belong to the
+                // selected phone, rather than multiplying every device's SIMs.
+                simSignals: value.id == current?.id ? signals[value.id]?.map { sim in
+                    .init(id: sim.id, title: sim.title,
+                          signal: sim.signal?.freshLevel(at: Date()) != nil ? sim.signal : nil)
+                } : nil
             )
         }
     }
@@ -224,7 +231,7 @@ final class SystemLiveActivityStore: LiveActivityStore {
 
     func create(_ state: AirSIMCallActivityAttributes.ContentState) throws -> String {
         let activity = try Activity.request(attributes: AirSIMCallActivityAttributes(moduleName: "AirSIM"),
-            content: ActivityContent(state: state, staleDate: nil),
+            content: ActivityContent(state: state, staleDate: state.simSignalExpirationDate),
             pushType: LiveActivityCreationPolicy.pushType(localModeEnabled: !CloudModePreference.isEnabled()))
         handles[activity.id] = activity
         VoIPPushController.shared.observeLiveActivity(activity)
@@ -234,7 +241,7 @@ final class SystemLiveActivityStore: LiveActivityStore {
     func update(_ id: String, state: AirSIMCallActivityAttributes.ContentState) async {
         guard let activity = handles[id] else { return }
         VoIPPushController.shared.observeLiveActivity(activity)
-        await activity.update(ActivityContent(state: state, staleDate: nil))
+        await activity.update(ActivityContent(state: state, staleDate: state.simSignalExpirationDate))
     }
 
     func end(_ id: String) async {

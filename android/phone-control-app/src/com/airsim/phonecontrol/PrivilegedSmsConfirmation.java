@@ -6,6 +6,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Build;
+import android.os.SystemClock;
 import java.util.ArrayList;
 import java.util.UUID;
 
@@ -49,6 +50,7 @@ final class PrivilegedSmsConfirmation {
                         PendingIntent.FLAG_ONE_SHOT | PendingIntent.FLAG_IMMUTABLE));
             }
             dispatched = true;
+            long deadline = SystemClock.elapsedRealtime() + 45_000L;
             String result;
             try { result = dispatch.send(callbacks); }
             catch (Exception error) { result = "error:send_unknown:" + error.getClass().getSimpleName(); }
@@ -57,7 +59,9 @@ final class PrivilegedSmsConfirmation {
             if (SMSPrivilegedResult.mayFallback(result)) return result;
             BridgeLog.info("sms_privileged_wait trace=" + trace + " segments=" + count
                     + " dispatch=" + result);
-            SMSConfirmation.Outcome outcome = confirmation.await(45_000L);
+            // Include helper startup/dispatch in the budget, keeping Root below the
+            // VoBLE request timeout even when the helper's reply is lost.
+            SMSConfirmation.Outcome outcome = confirmation.await(Math.max(0, deadline - SystemClock.elapsedRealtime()));
             String resolved = SMSPrivilegedResult.confirmed(outcome, count);
             BridgeLog.info("sms_privileged_resolved trace=" + trace + " result=" + resolved
                     + " callbacks=" + outcome.confirmedSegments());

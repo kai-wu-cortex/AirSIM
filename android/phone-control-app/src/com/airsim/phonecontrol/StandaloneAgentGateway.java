@@ -36,6 +36,15 @@ final class StandaloneAgentGateway {
     private final StandaloneLongPoll agentEvents = new StandaloneLongPoll();
     private volatile long simRevision;
     private final Map<String, String> commandResults = new LinkedHashMap<>();
+    private final Map<String, AnswerAttempt> answerAttempts = new LinkedHashMap<>();
+
+    private static final class AnswerAttempt {
+        final String identity;
+        Instant expiresAt;
+        String result;
+        boolean confirmed;
+        AnswerAttempt(String identity) { this.identity = identity; }
+    }
     private JSONObject activeCall;
     private final JSONArray callHistory = new JSONArray();
 
@@ -240,6 +249,10 @@ final class StandaloneAgentGateway {
         if (!stillCurrent.getAsBoolean()) return new JSONObject().put("command_id",commandID)
                 .put("status","failed").put("error","command_configuration_changed");
         String commandKey = commandID.trim().toLowerCase(Locale.ROOT);
+        if ("call_control".equals(command.optString("type")) && "answer".equals(command.optString("action"))) {
+            return executeCloudAnswer(command, commandKey, stillCurrent);
+        }
+        if (answerAttempts.containsKey(commandKey)) return answerFailure(commandID, "command_identity_mismatch");
         if (!commandKey.isEmpty()) {
             synchronized (commandsLock) {
                 String cached = commandResults.get(commandKey);
@@ -311,6 +324,83 @@ final class StandaloneAgentGateway {
         } finally {
             if (!handedToMedia && outgoing != null) outgoing.close();
         }
+    }
+
+    /** Legacy wire `answer` means media preparation for an owned outgoing call. */
+    private JSONObject executeCloudAnswer(JSONObject command, String key,
+                                         java.util.function.BooleanSupplier stillCurrent) throws Exception {
+        String id = command.optString("command_id", "");
+        if (!id.matches("[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,36}")) return answerFailure(id, "invalid_command_id");
+        if (commandResults.containsKey(key)) return answerFailure(id, "command_identity_mismatch");
+        JSONObject call = command.optJSONObject("call");
+        if (call == null) return answerFailure(id, "call_mismatch");
+        String identity = new JSONArray().put(call.optString("call_id"))
+                .put(call.optString("call_uuid").toLowerCase(Locale.ROOT))
+                .put(call.optLong("generation", -1)).toString();
+        AnswerAttempt attempt = answerAttempts.get(key);
+        if (attempt != null && !attempt.identity.equals(identity)) return answerFailure(id, "command_identity_mismatch");
+        if (attempt == null) {
+            attempt = new AnswerAttempt(identity);
+            answerAttempts.put(key, attempt);
+            while (answerAttempts.size() > 128) answerAttempts.remove(answerAttempts.keySet().iterator().next());
+        }
+        // HTTP and media retries share an intent. Omitting/changing expires_at on
+        // the media frame cannot extend an expiry already supplied by Relay.
+        String expires = command.optString("expires_at", "");
+        if (!expires.isEmpty()) {
+            try {
+                Instant supplied = Instant.parse(expires);
+                if (attempt.expiresAt == null || supplied.isBefore(attempt.expiresAt)) attempt.expiresAt = supplied;
+            } catch (Exception invalid) { return answerFailure(id, "invalid_command_expiry"); }
+        }
+        // Expiry limits first execution, not restoration of an already confirmed
+        // media session (iOS reuses the answer ID for the lifetime of a call).
+        // Such replays still resolve the exact live call below and invoke no answer.
+        if (!attempt.confirmed && attempt.expiresAt != null && !Instant.now().isBefore(attempt.expiresAt))
+            return answerFailure(id, "command_expired");
+        if (!stillCurrent.getAsBoolean()) return answerFailure(id, "command_configuration_changed");
+        var target = StandaloneCloudMediaManager.get(context).cloudAnswerTarget(call);
+        if (target == null) return answerFailure(id, "call_mismatch");
+        if (target.waitingForTelecom()) return answerFailure(id, "call_not_ready");
+        int state = target.state();
+        if (state < 0 || state == android.telecom.Call.STATE_DISCONNECTING
+                || state == android.telecom.Call.STATE_DISCONNECTED) return answerFailure(id, "call_ended");
+        if (target.outgoing()) {
+            if (state != android.telecom.Call.STATE_DIALING && state != android.telecom.Call.STATE_CONNECTING
+                    && state != android.telecom.Call.STATE_SELECT_PHONE_ACCOUNT
+                    && state != android.telecom.Call.STATE_ACTIVE && state != android.telecom.Call.STATE_HOLDING)
+                return answerFailure(id, "call_not_ready");
+            // ACK only grants the existing state-gated PCM loop permission to
+            // prepare. It neither invokes Telecom.answer nor declares ACTIVE.
+            attempt.confirmed = true;
+            return new JSONObject().put("command_id", id).put("status", "completed")
+                    .put("result", new JSONObject().put("media_prepared", true).put("android_confirmed", true));
+        }
+        // A timed-out incoming answer can later be confirmed without invoking it
+        // again. Never blindly retry a Telecom side effect with an unknown result.
+        if (state == android.telecom.Call.STATE_ACTIVE || state == android.telecom.Call.STATE_HOLDING) {
+            attempt.confirmed = true;
+            attempt.result = new JSONObject().put("command_id", id).put("status", "completed")
+                    .put("result", new JSONObject().put("answered", true).put("android_confirmed", true)).toString();
+            return new JSONObject(attempt.result);
+        }
+        if (attempt.confirmed) return answerFailure(id, "call_not_ready");
+        if (attempt.result != null) return new JSONObject(attempt.result);
+        if (state != android.telecom.Call.STATE_RINGING) return answerFailure(id, "call_not_ready");
+        // Reserve before dispatch; an exception is also an unknown outcome.
+        attempt.result = answerFailure(id, "answer_result_unknown").toString();
+        AgentCommandDispatcher.Result result = execute(new AgentCommand(id, "answer", target.androidID(), "", "", ""));
+        JSONObject output = result.success()
+                ? new JSONObject().put("command_id", id).put("status", "completed")
+                    .put("result", new JSONObject().put("answered", true).put("android_confirmed", true))
+                : answerFailure(id, result.error());
+        attempt.result = output.toString();
+        attempt.confirmed = result.success();
+        return output;
+    }
+
+    private static JSONObject answerFailure(String id, String error) throws Exception {
+        return new JSONObject().put("command_id", id).put("status", "failed").put("error", error);
     }
 
     private JSONObject rememberCommand(String commandKey, JSONObject output) {

@@ -96,6 +96,27 @@ final class StandaloneCloudMediaManager implements Closeable {
         }
     }
 
+    record AnswerTarget(String androidID, boolean outgoing, int state, boolean waitingForTelecom) {}
+
+    /** Resolve direction from our owned descriptor, never from an untrusted control frame. */
+    AnswerTarget cloudAnswerTarget(JSONObject call) {
+        if (call == null) return null;
+        synchronized (lock) {
+            var candidates = incomingIdentities.values();
+            if (active != null && active.running && active.relayGeneration.isCurrent()) candidates.add(active.descriptor);
+            for (Descriptor descriptor : candidates) {
+                if (!descriptor.callID.equals(call.optString("call_id"))
+                        || !descriptor.callUUID.equalsIgnoreCase(call.optString("call_uuid"))
+                        || descriptor.generation != call.optLong("generation", -1)) continue;
+                bindOutgoing(descriptor);
+                boolean outgoing = "outgoing".equals(descriptor.direction);
+                return new AnswerTarget(descriptor.androidID, outgoing, CallRepository.state(descriptor.androidID),
+                        outgoing && descriptor.androidID.isEmpty() && descriptor.outgoingObservation != null);
+            }
+            return null;
+        }
+    }
+
     void handleCallEvent(JSONObject registration, JSONObject event, StandaloneRelayClient relay) throws Exception {
         var generation = RelayEgressGate.shared.generation();
         if (!generation.isCurrent()) return;
@@ -406,6 +427,12 @@ final class StandaloneCloudMediaManager implements Closeable {
                     continue;
                 }
                 if ("answer".equals(action)) {
+                    // An end/configuration/socket replacement may race the gateway ACK.
+                    // A historical success must never resurrect the old media session.
+                    int state = CallRepository.state(descriptor.androidID);
+                    if (!running || webSocket != owner || !relayGeneration.isCurrent()
+                            || state < 0 || state == android.telecom.Call.STATE_DISCONNECTING
+                            || state == android.telecom.Call.STATE_DISCONNECTED) continue;
                     owner.writeText(status("answer_ok", ""));
                     if (!mediaStarted) {
                         mediaStarted = true;

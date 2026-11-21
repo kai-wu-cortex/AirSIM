@@ -1,6 +1,7 @@
 package com.airsim.phonecontrol;
 
 import android.content.Context;
+import android.app.PendingIntent;
 
 import org.json.JSONObject;
 
@@ -10,9 +11,10 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
 
-/** KernelSU/root SMS channel. Payload goes over stdin; no user text in a shell command. */
+/** Root SMS channel with App-owned sent callbacks; no user text in a shell command. */
 final class RootSmsSender {
     private static final String MARKER = "AIRSIM_ROOT_SMS:";
 
@@ -26,11 +28,29 @@ final class RootSmsSender {
     }
 
     private static String send(Context context, String destination, String body, int subscriptionId) {
+        String su = new File("/system/bin/su").canExecute() ? "/system/bin/su" : "su";
+        String readiness = RootSMSPreflight.check(() -> new ProcessBuilder(su, "-c", "id -u")
+                .redirectErrorStream(true).start(), 5_000L);
+        if (!"ready".equals(readiness)) {
+            BridgeLog.info("sms_root_preflight result=" + readiness + " dispatched=false");
+            return readiness;
+        }
+        return PrivilegedSmsConfirmation.send(context, destination, body, subscriptionId,
+                callbacks -> dispatch(context, su, destination, body, subscriptionId, callbacks));
+    }
+
+    private static String dispatch(Context context, String su, String destination, String body,
+            int subscriptionId, ArrayList<PendingIntent> callbacks) {
         Process process = null;
-        File payloadFile = new File(context.getCacheDir(), "root-sms-" + UUID.randomUUID() + ".json");
+        String callbackToken = null;
+        File payloadFile = null;
         try {
+            callbackToken = RootSMSCallbackProvider.register(callbacks);
+            payloadFile = new File(context.getCacheDir(), "root-sms-" + UUID.randomUUID() + ".json");
             JSONObject payload = new JSONObject()
                     .put("package_name", context.getPackageName())
+                    .put("user_id", context.getApplicationInfo().uid / 100_000)
+                    .put("callback_token", callbackToken)
                     .put("destination", destination)
                     .put("body", body)
                     .put("subscription_id", subscriptionId);
@@ -43,7 +63,6 @@ final class RootSmsSender {
             String command = "CLASSPATH='" + escapedApk
                     + "' /system/bin/app_process /system/bin com.airsim.phonecontrol.RootSmsMain '"
                     + escapedPayload + "'";
-            String su = new File("/system/bin/su").canExecute() ? "/system/bin/su" : "su";
             process = new ProcessBuilder(su, "-c", command)
                     .redirectErrorStream(true)
                     .start();
@@ -58,12 +77,16 @@ final class RootSmsSender {
             int newline = value.indexOf('\n');
             if (newline >= 0) value = value.substring(0, newline).trim();
             return value;
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return "error:interrupted";
         } catch (Exception error) {
-            return "error:" + error.getClass().getSimpleName();
+            return RootSMSPreflight.launchFailure(process != null, error);
         } finally {
+            RootSMSCallbackProvider.revoke(callbackToken);
             if (process != null && process.isAlive()) process.destroyForcibly();
             //noinspection ResultOfMethodCallIgnored
-            payloadFile.delete();
+            if (payloadFile != null) payloadFile.delete();
         }
     }
 

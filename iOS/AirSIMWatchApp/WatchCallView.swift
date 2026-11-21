@@ -261,7 +261,10 @@ private struct WatchSMSInboxView: View {
                             WatchSMSConversationView(conversation: conversation).environmentObject(session)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
-                                HStack {
+                                HStack(spacing: 6) {
+                                    if let brand = SMSCarrierBrand.match(conversation.latest.sender) {
+                                        SMSServiceArtwork(brand: brand, size: 24)
+                                    }
                                     if conversation.rows.contains(where: { session.isSMSUnread($0) }) { Circle().fill(.blue).frame(width: 5, height: 5) }
                                     Text(conversation.latest.sender.isEmpty ? "未知联系人" : conversation.latest.sender).font(.headline).lineLimit(1)
                                 }

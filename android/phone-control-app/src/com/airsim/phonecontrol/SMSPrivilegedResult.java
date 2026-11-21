@@ -9,6 +9,10 @@ final class SMSPrivilegedResult {
         return "ok:" + segments;
     }
 
+    static String diagnosticCode(String result) {
+        return result != null && result.length() <= 96 && result.matches("[A-Za-z0-9_:.-]+")
+                ? result : "unknown";
+    }
     static String failureMessage(String result) {
         if (result != null && result.startsWith("error:sent:")) {
             try { return "系统短信发送失败（" + SMSResultCode.describe(Integer.parseInt(result.substring(11))) + "）"; }

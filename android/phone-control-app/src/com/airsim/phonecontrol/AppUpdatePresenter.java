@@ -50,7 +50,10 @@ final class AppUpdatePresenter {
     void showNotes(Runnable after) {
         Activity activity = liveOwner();
         if (activity == null || dialog != null) return;
-        String notes = "• 优化 VoBLE 来电恢复和运营商接通前音频传输；需要配套新版 iPhone，接通前不提前计时或开启麦克风。\n\n"
+        String notes = "• 完善 Root 短信系统回执及安全回退，避免结果未知时重复发送。\n\n"
+                + "• 支持逐 SIM 信号上报，配合新版 iPhone 灵动岛与小组件；无可靠信号时显示未知。\n\n"
+                + "• 修复云端呼出接通状态处理，配合 Relay 的 SIM 标识兼容更新。\n\n"
+                + "• 优化 VoBLE 来电恢复和运营商接通前音频传输；需要配套新版 iPhone，接通前不提前计时或开启麦克风。\n\n"
                 + "• 修复蓝牙电量展示、部分安卓短信 SIM 映射和 Shizuku 发送回执；未确认结果不会自动重发。\n\n"
                 + "• 系统确认短信发送成功后，iPhone 保存发信记录；发送成功不等于对方已收到。\n\n"
                 + "• 云端模式补齐 SIM 选择，需兼容 Relay；Watch 通话与短信按设备身份同步。\n\n"

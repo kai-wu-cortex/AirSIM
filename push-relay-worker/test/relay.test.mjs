@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, webcrypto } from "node:crypto";
 import test from "node:test";
+import { validSIMAccountID, simSlots } from "../src/sim-slots.mjs";
+const androidSIM = "com.android.phone/com.android.services.telephony.TelephonyConnectionService\nopaque-account-2\nUserHandle{0}";
 import worker, {
   bindMediaOwner,
   applyCallLifecycle,
@@ -1967,8 +1969,8 @@ test("cloud SIM roster is authenticated, Agent scoped, bounded and clears on rem
   await worker.fetch(post("/v1/devices/register", registration), env);
   const auth = {device_id: registration.device_id, device_secret: registration.device_secret};
   const heartbeat = { ...auth, event:"agent_heartbeat", agent_id:"android-A", at_ok:true, cellular_state:"registered" };
-  const slots = [{id:"account-A/1", label:"SIM 1", slot_index:0, default:true},
-    {id:"account-A/2", label:"SIM 2", slot_index:1, default:false}];
+  const slots = [{id:androidSIM, label:"SIM 1", slot_index:0, default:true, signal:{level:1,observed_at_ms:Date.now()}},
+    {id:"account-A/2", label:"SIM 2", slot_index:1, default:false, signal:{level:4,observed_at_ms:Date.now()}}];
   const send = body => worker.fetch(post("/v1/events/heartbeat", body), env);
   const status = async () => (await (await worker.fetch(post("/v1/devices/status", auth),env)).json()).agents;
   assert.equal((await send({...heartbeat,sim_slots:slots})).status,202);
@@ -1995,9 +1997,9 @@ test("dial and SMS preserve selected SIM and reject changes to an existing inten
     await worker.fetch(post("/v1/devices/register", registration),env);
     const auth={device_id:registration.device_id,device_secret:registration.device_secret};
     const command={...auth,command_id:"c87f982a-1750-4f03-9a96-6553e454f522",type,
-      target_agent_id:"android-A",number:"10086",message:"synthetic",sim_account:"account/2"};
+      target_agent_id:"android-A",number:"10086",message:"synthetic",sim_account:androidSIM};
     const enqueue = body => worker.fetch(post("/v2/commands/enqueue",body),env);
-    for (const invalid of [123, null, "bad\n", "x".repeat(513)]) {
+    for (const invalid of [123, null, "bad\n", androidSIM + "\n", androidSIM.replaceAll("\n", "\r\n"), androidSIM.replace("UserHandle{0}", "bad"), "x".repeat(513)]) {
       assert.equal((await enqueue({...command,sim_account:invalid})).status,400);
     }
     assert.equal((await enqueue(command)).status,202);
@@ -2005,11 +2007,43 @@ test("dial and SMS preserve selected SIM and reject changes to an existing inten
     assert.equal((await enqueue({...command,sim_account:"account/1"})).status,409);
     const pulled=await (await worker.fetch(post("/v2/commands/pull",{...auth,agent_id:"android-A"}),env)).json();
     assert.equal(pulled.commands.length,1);
-    assert.equal(pulled.commands[0].sim_account,"account/2");
+    assert.equal(pulled.commands[0].sim_account,androidSIM);
     const other=await (await worker.fetch(post("/v2/commands/pull",{...auth,agent_id:"android-B"}),env)).json();
     assert.deepEqual(other.commands,[]);
     const legacy={...command,command_id:"d87f982a-1750-4f03-9a96-6553e454f522"};
     delete legacy.sim_account;
     assert.equal((await enqueue(legacy)).status,202);
+  }
+});
+
+
+test("Android Telecom SIM IDs allow only structured LF separators and preserve identity", () => {
+  const invalid = [null, 1, "", "   ", "bad\n", androidSIM + "\n", androidSIM.replaceAll("\n", "\r\n"),
+    androidSIM.replace("opaque-account-2", ""), androidSIM.replace("UserHandle{0}", "user0"),
+    androidSIM.replace("com.android.phone/", "bad component/"), androidSIM.replace("opaque-account-2", "bad\tvalue"),
+    androidSIM.replace("opaque-account-2", "bad\u0000value"), "a".repeat(513), "é".repeat(257),
+    androidSIM.replace("opaque-account-2", "a".repeat(512))];
+  for (const id of invalid) {
+    assert.equal(validSIMAccountID(id), false);
+    assert.deepEqual(simSlots([{id,label:"SIM"}]), []);
+  }
+  for (const id of [androidSIM, androidSIM.replace("UserHandle{0}", "UserHandle{10}"),
+    "com.vendor.phone/.TelephonyService\nopaque-id\nUserHandle{0}", "opaque/2", "a".repeat(512)]) {
+    assert.equal(validSIMAccountID(id), true);
+    assert.equal(simSlots([{id,label:"SIM"}])[0].id, id);
+  }
+  assert.deepEqual(simSlots([{id:androidSIM,label:"bad\nlabel"}]), []);
+});
+
+
+test("SIM signal sanitizer preserves distinct and zero levels, rejects malformed samples without hiding SIMs", () => {
+  for (const level of [0, 1, 2, 3, 4]) {
+    const signal = {level, observed_at_ms: 1795150000000};
+    assert.deepEqual(simSlots([{id:androidSIM,label:"SIM 1",signal}])[0].signal, signal);
+  }
+  for (const signal of [null, {}, {level:5,observed_at_ms:1}, {level:-1,observed_at_ms:1},
+    {level:1.5,observed_at_ms:1}, {level:"4",observed_at_ms:1}, {level:1,observed_at_ms:0},
+    {level:1,observed_at_ms:Infinity}]) {
+    assert.deepEqual(simSlots([{id:androidSIM,label:"SIM 1",signal}]), [{id:androidSIM,label:"SIM 1"}]);
   }
 });
