@@ -6156,3 +6156,82 @@ final class SIMSignalDisplayTests: XCTestCase {
             from: JSONEncoder().encode(state)), state)
     }
 }
+
+final class VoWLANLANFirstIntegrationTests: XCTestCase {
+    private func endpoint(_ host: String, tls: Bool = false) throws -> VoWLANEndpoint {
+        try .init(host: host, controlPort: 7592, pcmPort: 7593, usesTLS: tls)
+    }
+    private func agent(_ endpoint: VoWLANEndpoint, id: String = "peer") -> VoWLANDiscoveredAgent {
+        .init(id: id, endpoint: endpoint, deviceName: id, manufacturer: nil, model: nil,
+              phoneNumber: nil, agentKind: nil)
+    }
+    private var vpn: VoWLANManualRoute {
+        .init(agentID: "peer", host: "100.64.1.2", controlPort: 7592, pcmPort: 7593)
+    }
+    private func pairing(_ endpoints: [VoWLANEndpoint], id: String = "peer") -> VoWLANPairingRecord {
+        .init(id: "pair-\(id)", agentID: id, deviceName: id, createdAt: Date(), lastSeenAt: Date(),
+              endpoints: endpoints.map { .init($0) })
+    }
+    func testSameSubnetBonjourFirstAndTailnetFallback() throws {
+        let lan = try endpoint("192.168.31.20")
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [agent(lan)], manual: [vpn],
+            live: [], preferred: nil, canProbeLAN: { $0 == lan }).first?.endpoint, lan)
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [agent(lan)], manual: [vpn],
+            live: [], preferred: nil, canProbeLAN: { _ in false }).first?.endpoint, vpn.endpoint)
+    }
+    func testCachedLANReplacesOffSubnetOrFailedBonjour() throws {
+        let stale = try endpoint("192.168.2.20"), cached = try endpoint("192.168.31.20")
+        let history = VoWLANRouteCandidates.cachedLANAgents(pairings: [pairing([cached])],
+            manual: [vpn], canProbeLAN: { $0 == cached })
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [agent(stale)] + history,
+            manual: [vpn], live: [], preferred: nil, canProbeLAN: { $0 == cached }).first?.endpoint, cached)
+    }
+    func testFreshSameSubnetBonjourWinsOverCachedLAN() throws {
+        let fresh = try endpoint("192.168.31.21"), cached = try endpoint("192.168.31.20")
+        XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [agent(fresh), agent(cached)],
+            manual: [vpn], live: [], preferred: nil, canProbeLAN: { _ in true }).first?.endpoint, fresh)
+    }
+    func testVerifiedOrCallLockedCachedLANSurvivesNewBonjour() throws {
+        let current = try endpoint("192.168.31.20"), next = try endpoint("192.168.31.21")
+        for eligible in [true, false] {
+            XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [agent(next)], manual: [vpn],
+                live: [agent(current)], preferred: current, canProbeLAN: { _ in eligible }).first?.endpoint, current)
+        }
+    }
+    func testVerifiedTailnetAndTLSPreserveRoute() throws {
+        let lan = try endpoint("192.168.31.20")
+        let tls = VoWLANManualRoute(agentID: "peer", host: "gateway.example.com", controlPort: 443, pcmPort: 443, tls: true)
+        for route in [vpn, tls] {
+            let current = try XCTUnwrap(route.endpoint)
+            XCTAssertEqual(VoWLANRouteCandidates.merge(discovered: [agent(lan)], manual: [vpn, tls],
+                live: [agent(current)], preferred: current, canProbeLAN: { _ in true }).first?.endpoint, current)
+        }
+    }
+    func testCachedLANUsesNewestEligibleAddressAndExcludesTLS() throws {
+        let older = try endpoint("192.168.31.20"), latest = try endpoint("192.168.31.21")
+        let tls = try endpoint("gateway.example.com", tls: true)
+        let saved = pairing([older, latest, try XCTUnwrap(vpn.endpoint), tls])
+        XCTAssertEqual(VoWLANRouteCandidates.cachedLANAgents(pairings: [saved], manual: [vpn],
+            canProbeLAN: { _ in true }).first?.endpoint, latest)
+        XCTAssertEqual(VoWLANRouteCandidates.cachedLANAgents(pairings: [saved], manual: [vpn],
+            canProbeLAN: { $0 == older }).first?.endpoint, older)
+        XCTAssertTrue(VoWLANRouteCandidates.cachedLANAgents(pairings: [saved], manual: [vpn],
+            canProbeLAN: { _ in false }).isEmpty)
+    }
+    func testHistoryCannotCrossAgentOrRestoreUnpermittedPeer() throws {
+        let lan = try endpoint("192.168.31.20")
+        XCTAssertTrue(VoWLANRouteCandidates.cachedLANAgents(pairings: [pairing([lan], id: "other")],
+            manual: [vpn], canProbeLAN: { _ in true }).isEmpty)
+        XCTAssertTrue(VoWLANRouteCandidates.cachedLANAgents(pairings: [pairing([lan])],
+            manual: [], canProbeLAN: { _ in true }).isEmpty)
+        XCTAssertTrue(VoWLANRouteCandidates.merge(discovered: [], manual: [], live: [agent(lan)],
+            preferred: lan, canProbeLAN: { _ in true }).isEmpty)
+    }
+    func testLANFailureFallsBackOnlyToSameAgentAndNoLoop() throws {
+        let lan = try endpoint("192.168.31.20")
+        let other = VoWLANManualRoute(agentID: "other", host: "100.64.1.3", controlPort: 7592, pcmPort: 7593)
+        XCTAssertEqual(VoWLANRouteCandidates.alternateManualRoute([other, vpn], agentID: "peer", failed: lan), vpn)
+        XCTAssertNil(VoWLANRouteCandidates.alternateManualRoute([other, vpn], agentID: "peer", failed: lan,
+            attempted: [try XCTUnwrap(vpn.endpoint)]))
+    }
+}

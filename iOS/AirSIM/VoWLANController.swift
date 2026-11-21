@@ -226,7 +226,11 @@ enum VoWLANRouteCandidates {
     static func merge(discovered: [VoWLANDiscoveredAgent], manual: [VoWLANManualRoute],
                       live: [VoWLANDiscoveredAgent], preferred: VoWLANEndpoint?,
                       canProbeLAN: (VoWLANEndpoint) -> Bool = { LocalWiFiSubnet.contains($0.host) }) -> [VoWLANDiscoveredAgent] {
-        var agents = Dictionary(discovered.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var agents = Dictionary(discovered.map { ($0.id, $0) }, uniquingKeysWith: { first, next in
+            // Bonjour comes first, but a stale/off-subnet or backed-off address
+            // must not hide an eligible same-device LAN address from pairing history.
+            canProbeLAN(first.endpoint) || !canProbeLAN(next.endpoint) ? first : next
+        })
         for route in manual.sorted(by: { !$0.isRemote && $1.isRemote }) {
             guard let endpoint = route.endpoint else { continue }
             if let existing = agents[route.agentID], preferred != endpoint {
@@ -238,6 +242,13 @@ enum VoWLANRouteCandidates {
             agents[route.agentID] = live.first { $0.id == route.agentID && $0.endpoint == endpoint }
                 ?? VoWLANDiscoveredAgent(id: route.agentID, endpoint: endpoint, deviceName: "Android 手动直连",
                     manufacturer: nil, model: nil, phoneNumber: nil, agentKind: nil)
+        }
+        // A verified/locked cached LAN address need not be in the manual store.
+        // Preserve it across newer Bonjour results, without resurrecting an agent
+        // that no longer has any permitted candidate in this merge.
+        if let preferred, let active = live.first(where: { $0.endpoint == preferred }),
+           agents[active.id] != nil {
+            agents[active.id] = active
         }
         return agents.values.sorted { $0.id < $1.id }
     }
