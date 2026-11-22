@@ -1,0 +1,14 @@
+on post-fs-data
+    mkdir /data/local/f50-wifi 0700 shell shell
+    restorecon_recursive /data/local/f50-wifi
+
+on property:sys.boot_completed=1
+    start codex_f50_wifi_autostart
+
+service codex_f50_wifi_autostart /system/bin/sh ${MAGISKTMP}/codex-f50-wifi-autostart.sh ${MAGISKTMP}/f50-tether-control.dex
+    class late_start
+    user shell
+    group shell inet
+    disabled
+    restart_period 10
+    seclabel u:r:magisk:s0

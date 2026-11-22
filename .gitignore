@@ -32,3 +32,6 @@ module/module-agent/*.tar.gz
 
 # Local distribution output; upload selected artifacts to Releases, never Git.
 /release-assets/
+
+# Local device screenshots can contain private network identifiers.
+/.impeccable/review/
