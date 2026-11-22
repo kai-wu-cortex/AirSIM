@@ -23,4 +23,6 @@ cp build/dex/classes.dex build/f50-wifi.dex
 "$JAVA_HOME/bin/java" -cp build/test com.airsim.f50wifi.PortalRulesTest
 "$JAVA_HOME/bin/java" -cp build/test com.airsim.f50wifi.CallSafeNetworkPolicyTest
 "$JAVA_HOME/bin/java" -cp build/test com.airsim.f50wifi.DualSimPolicyTest
+"$JAVA_HOME/bin/javac" -d build/test src/HotelProxy.java test/HotelProxyTest.java
+"$JAVA_HOME/bin/java" -cp build/test com.airsim.f50wifi.HotelProxyTest
 printf 'Built f50-wifi/build/f50-wifi.dex\n'

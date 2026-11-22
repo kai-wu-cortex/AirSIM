@@ -54,7 +54,7 @@ Standalone 复用 [`android/phone-control-app`](../android/phone-control-app/REA
 
 ## F50 Pro 本地配网辅助服务
 
-已修复 B28 Wi-Fi 客户端的 MU3356 可使用独立的 [iPhone Wi-Fi 配置页](f50-wifi/README.md)，先通过热点保存目标，重启后自动连接指定网络。它还可在所有者显式启用并核验 APK 签名后，监督既有 loopback 控制桥自启动。此辅助服务不是通用 APK 功能，首次安装需要核验特定启动镜像；沿用 USB ADB、SIM 和 AirSIM 配对数据。只接电源的验收与云端连接结果见组件验证记录。
+已修复 B28 Wi-Fi 客户端的 MU3356 可使用独立的 [iPhone Wi-Fi 配置页](f50-wifi/README.md)，先通过热点保存目标，重启后自动连接指定网络。它还可在所有者显式启用并核验 APK 签名后，监督既有 loopback 控制桥自启动。此辅助服务不是通用 APK 功能，首次安装需要核验特定启动镜像；沿用 USB ADB、SIM 和 AirSIM 配对数据。只接电源的验收与云端连接结果见组件验证记录。 酒店认证辅助使用临时 Wi-Fi Direct 热点和绑定该热点的受限代理，让 iPhone 完成网页登录；无需旅行路由器的实测范围、代理设置及结束步骤见组件文档。
 
 独立供电更新须同时核对 Wi-Fi 启动脚本：旧版地址保护依赖 USB 调试状态，仅更新 DEX 不足；修复改为等待系统启动，USB ADB 初始化保持原样。实际验收结果以组件验证记录为准。B28 缺少默认电话角色时，可另行显式启用空默认值的 Telecom 绑定恢复；仅对签名匹配的 AirSIM 生效，保留其他默认应用，开关及回退见组件文档。
 
