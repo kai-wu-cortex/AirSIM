@@ -47,6 +47,25 @@ B28 可能没有标准 `ROLE_DIALER`，普通角色分配会失败，从而使�
 
 删除启用标记会停止后续监督，但不主动结束现有桥接或通话。完整回退时应在空闲状态结束既有桥接进程，再恢复更新前 runtime；保留原 token 和配对资料。升级已有服务时，必须同时核对启动镜像中的地址保护脚本：旧版要求 `sys.usb.state=ncm,mtp,adb`，仅替换 runtime 不能解除这项依赖。修复版等待系统启动完成，并保持原有固件摘要校验与 USB ADB 初始化不变。本次两台 MU3356 B28 已分别完成“只接电源”冷启动：自动 Wi-Fi、控制桥与各自云端身份恢复在线，用户分别反馈 iPhone 4G/5G 云端自检全部通过；追加设备还验证了可选默认电话绑定的冷启动恢复。详见 [验证记录](VALIDATION.md)。不同电源/固件仍需实际验收；连接 Mac 时的重启结果不能替代独立供电。
 
+## 可选：无服务时保持双卡启用
+
+MU3356 B28 的原厂电话框架在开启双卡 60 秒后检查副卡服务状态；副卡无服务时会关闭双卡及副卡协议栈。关闭“智能切卡”不能停用这一检查。本组件提供所有者显式开启的运行时缓解：每 15 秒由 shell 监督器将原厂值保持为 `1`，再由注册的辅助 Provider 通知原厂观察器，替换待执行的关闭计时器。它不写 `0`，也不循环关闭/重开 SIM。
+
+这只保持两个卡槽启用、让无服务卡继续被系统与 AirSIM 识别；不能让运营商拒绝注册的 SIM 获得信号、拨号或收短信。默认不启用。启用后原厂网页关闭双卡会被恢复，必须先删除下述标记才能恢复手动控制。保持无服务卡开启可能增加耗电。
+
+该功能额外使用 `dsds-helper/` 中的小型独立 APK，**不替换 AirSIM 主 APK**。它没有网络权限、界面、后台常驻服务或通话接口，仅暴露 `status` / `pulse` 两个操作。Provider 同时要求系统 `DUMP` 权限和 shell/root 调用 UID；不接受任意设置名或值。它只在 `/system/framework/vendor-telephony-common.jar` SHA-256 为 `600edb6d53fefa464503a3d8958ccd15befce847648528a4b0439df8c738a2a0` 时工作。源码不包含原厂 JAR 或 DEX。
+
+部署顺序：
+
+1. 用 `dsds-helper/build.sh` 构建未签名 APK，用自己的私有密钥签名并通过 `apksigner verify --print-certs` 核验。签名密钥与口令留在仓库外。
+2. 针对正确设备执行 `adb -s SERIAL install -r SIGNED_APK`，再执行 `adb -s SERIAL shell pm grant com.airsim.f50dsds android.permission.WRITE_SECURE_SETTINGS`。先用 `content call --uri content://com.airsim.f50dsds --method status` 确认 `supported=true`。
+3. 备份旧 runtime，按下方原子更新流程安装新的 `f50-wifi.dex`。在私有服务目录保存核验后的辅助 APK 证书摘要为 `dsds-helper-signer.sha256`，创建 `dsds-keep-enabled`，两者权限均为 0600。监督器每次调用前验证证书，失败不执行操作。
+4. 重启服务及设备，实际观察两个卡槽、蜂窝注册、默认电话绑定、Wi-Fi、云端和 USB ADB。`/api/status` 的 `dual_sim.ready` 只代表最近一次保持操作成功，不代表两个运营商都已注册。
+
+监督器有独立线程，故障状态写入受限服务日志；依赖已安装的 init Wi-Fi 配置服务自启动，不需要 Mac 监听。若服务停止超过原厂检查时限，固件仍可能关闭副卡，恢复后会重新开启；这是一项可撤销缓解，不是永久修改原厂规则。
+
+回退：删除 `/data/local/f50-wifi/dsds-keep-enabled`，等监督器下一次检查停止调用，或重启配置服务；随后可在原厂页手动选择双卡状态。需要彻底卸载时撤回辅助 APK 的 `WRITE_SECURE_SETTINGS` 授权，卸载 `com.airsim.f50dsds` 并移除其证书 pin。保留原 AirSIM 配对、Wi-Fi 配置和默认电话恢复标记。无需刷写启动分区。
+
 ## 构建与部署范围
 
 需要 JDK 17+、Android SDK platform 35 和 build-tools 35.0.0：
@@ -90,3 +109,7 @@ python3 prepare-b28.py \
 ## 通话期间的网络保护
 
 自动连接、恢复热点和网页手动恢复热点／重启均检查系统 Telecom 与音频状态。响铃、拨号、通话、非普通音频模式或权限／状态查询异常时，保留当前网络；连续观察到空闲 30 秒后才允许切换，避免截断运营商提示语音的收尾。网页重启还会在延迟执行前再次检查。系统无法提供状态时不会强行切网，需要通过 USB 检查权限。该策略不会改变 AirSIM 的通话路线选择。
+
+### 双卡保持默认关闭与兼容检查
+
+仓库、构建和启动脚本均不创建 `dsds-keep-enabled`；未主动创建该标记时，监督器不查询辅助 Provider、不写系统设置，也不发送 pulse。每轮启用监督先验证 APK 签名，再调用只读 status 验证固件，确认通话空闲后才写系统设置并发送 pulse。固件不支持、状态异常、通话忙碌时均跳过写入；删除标记后停止后续监督，不自动强制关闭任一 SIM。此批代码已通过模拟回归，最终固件的独立供电双卡冷启动与通话共存仍须真机验证。

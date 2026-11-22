@@ -19,7 +19,8 @@ PY
 "$JAVA_HOME/bin/jar" cf build/classes.jar -C build/classes .
 "$ANDROID_HOME/build-tools/35.0.0/d8" --min-api 34 --lib "$sdk" --output build/dex build/classes.jar
 cp build/dex/classes.dex build/f50-wifi.dex
-"$JAVA_HOME/bin/javac" -d build/test src/PortalRules.java src/CallSafeNetworkPolicy.java test/PortalRulesTest.java test/CallSafeNetworkPolicyTest.java
+"$JAVA_HOME/bin/javac" -d build/test src/PortalRules.java src/CallSafeNetworkPolicy.java src/DualSimPolicy.java test/PortalRulesTest.java test/CallSafeNetworkPolicyTest.java test/DualSimPolicyTest.java
 "$JAVA_HOME/bin/java" -cp build/test com.airsim.f50wifi.PortalRulesTest
 "$JAVA_HOME/bin/java" -cp build/test com.airsim.f50wifi.CallSafeNetworkPolicyTest
+"$JAVA_HOME/bin/java" -cp build/test com.airsim.f50wifi.DualSimPolicyTest
 printf 'Built f50-wifi/build/f50-wifi.dex\n'
