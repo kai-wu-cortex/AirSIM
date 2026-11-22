@@ -18,6 +18,7 @@ public final class CloudCallManagerTests {
         ownEndedClosesSession();
         endedControlPrecedesHTTPAndUsesOwnedIdentity();
         terminalControlFailureKeepsCleanup();
+        blockedTerminalControlKeepsCleanup();
         genericCloseDoesNotClaimRemoteHangup();
         droppedEndedClosesOnlyOwner();
         pendingDialBindsOnlyUniqueNewMatchingCall();
@@ -375,6 +376,7 @@ public final class CloudCallManagerTests {
             check("new-cloud-call".equals(control.optString("call_id"))
                     && "11111111-1111-4111-8111-111111111111".equals(control.optString("call_uuid"))
                     && control.optLong("generation") == 1, "full exact lifecycle identity required");
+            check(f.active() == null && socket.closed, "HTTP failure must still clean up native-ended owner");
             f.relay.onState = null;
             f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
             check(f.active() == null && socket.closed, "HTTP retry must still clean up owner");
@@ -389,6 +391,31 @@ public final class CloudCallManagerTests {
             f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
             check(f.active() == null && socket.closed && f.relay.states.size() == 1,
                     "lost socket must not prevent HTTP terminal / cleanup");
+        }
+    }
+
+    private static void blockedTerminalControlKeepsCleanup() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            socket.writeEntered = new java.util.concurrent.CountDownLatch(1);
+            socket.releaseWrite = new java.util.concurrent.CountDownLatch(1);
+            socket.ignoreWriteInterrupt = true; // models TLS I/O that ignores interrupt
+            set(f.active(), "webSocket", socket);
+            var failure = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+            Thread worker = new Thread(() -> {
+                try { f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay); }
+                catch (Throwable e) { failure.set(e); }
+            });
+            worker.setDaemon(true);
+            worker.start();
+            try {
+                check(socket.writeEntered.await(2, java.util.concurrent.TimeUnit.SECONDS), "entered terminal write");
+                worker.join(2500);
+                check(!worker.isAlive() && failure.get() == null, "ended handler must finish within deadline despite blocked write");
+                check(f.relay.states.size() == 1 && f.active() == null && socket.closed,
+                        "deadline must preserve HTTP ended and cleanup");
+                check(socket.text.isEmpty(), "cancelled write cannot send after close");
+            } finally { socket.close(); worker.join(2000); }
         }
     }
 

@@ -21,6 +21,16 @@ import java.util.concurrent.Executors;
 /** Owns the single cloud call and bridges Relay WebSocket media to loopback Shizuku PCM. */
 final class StandaloneCloudMediaManager implements Closeable {
     private static volatile StandaloneCloudMediaManager instance;
+    // A stalled TLS writer must not occupy the lifecycle event thread indefinitely.
+    // No queue: if both workers are stuck, skip media notification and use HTTP.
+    private static final long TERMINAL_WRITE_TIMEOUT_MS = 750;
+    private static final java.util.concurrent.ThreadPoolExecutor terminalWrites =
+            new java.util.concurrent.ThreadPoolExecutor(0, 2, 30, java.util.concurrent.TimeUnit.SECONDS,
+                    new java.util.concurrent.SynchronousQueue<>(), action -> {
+                        Thread thread = new Thread(action, "airsim-terminal-control");
+                        thread.setDaemon(true);
+                        return thread;
+                    });
 
     static StandaloneCloudMediaManager get(android.content.Context context) {
         StandaloneCloudMediaManager value = instance;
@@ -157,6 +167,7 @@ final class StandaloneCloudMediaManager implements Closeable {
             // terminal media control to iPhone. Send the native terminal fact
             // on this call's authenticated socket before HTTP or socket close.
             if ("ended".equals(state)) notifyEnded(descriptor);
+            try {
             String phase = phase(state);
             if (!phase.isEmpty()) {
                 JSONObject lifecycle = identity(registration).put("event", "call_state")
@@ -187,7 +198,10 @@ final class StandaloneCloudMediaManager implements Closeable {
                     }
                 }
             }
-            if ("ended".equals(state)) closeActive(descriptor);
+            } finally {
+                // HTTP failure/retry must not keep native-ended audio resources alive.
+                if ("ended".equals(state)) closeActive(descriptor);
+            }
         }
     }
 
@@ -292,6 +306,7 @@ final class StandaloneCloudMediaManager implements Closeable {
         final CloudCallRetryPolicy.MediaRetry mediaRetry = new CloudCallRetryPolicy.MediaRetry();
         final RelayEgressGate.Generation relayGeneration;
         volatile boolean running = true;
+        final java.util.concurrent.atomic.AtomicBoolean terminalRequested = new java.util.concurrent.atomic.AtomicBoolean();
         volatile StandaloneWebSocket webSocket;
         volatile Socket pcm;
         volatile CloudPCMMediaPump mediaPump;
@@ -311,7 +326,7 @@ final class StandaloneCloudMediaManager implements Closeable {
 
         @Override public void run() {
             int reconnectFailures = 0;
-            while (running && relayGeneration.isCurrent()) {
+            while (running && !terminalRequested.get() && relayGeneration.isCurrent()) {
                 StandaloneWebSocket owner = null;
                 boolean connected = false;
                 try {
@@ -320,7 +335,7 @@ final class StandaloneCloudMediaManager implements Closeable {
                             + URLEncoder.encode(descriptor.secret, "UTF-8"));
                     owner = StandaloneWebSocket.connect(endpoint, "");
                     synchronized (this) {
-                        if (!running || !relayGeneration.isCurrent()) { closeSocket(owner); return; }
+                        if (!running || terminalRequested.get() || !relayGeneration.isCurrent()) { closeSocket(owner); return; }
                         webSocket = owner;
                     }
                     mediaRetry.authenticated();
@@ -568,14 +583,25 @@ final class StandaloneCloudMediaManager implements Closeable {
         }
 
         void notifyEnded() {
+            if (!terminalRequested.compareAndSet(false, true)) return;
             StandaloneWebSocket owner = webSocket;
             if (!running || owner == null || !relayGeneration.isCurrent()) return;
+            var task = new java.util.concurrent.FutureTask<Void>(() -> {
+                if (running && relayGeneration.isCurrent() && webSocket == owner) {
+                    owner.writeText(status("ended", ""));
+                }
+                return null;
+            });
             try {
-                owner.writeText(status("ended", ""));
+                terminalWrites.execute(task);
+                task.get(TERMINAL_WRITE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
                 BridgeLog.info("standalone_cloud_terminal_control_sent");
             } catch (Exception error) {
-                // Keep the existing HTTP retry / cleanup path even if the
-                // media socket was already lost. Never manufacture a new call.
+                task.cancel(true);
+                // close() takes no WebSocket write monitor; it releases a blocked writer.
+                // Only this captured call socket is closed, never a replacement session.
+                closeSocket(owner);
+                if (error instanceof InterruptedException) Thread.currentThread().interrupt();
                 BridgeLog.info("standalone_cloud_terminal_control_failed type="
                         + error.getClass().getSimpleName());
             }

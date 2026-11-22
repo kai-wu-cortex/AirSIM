@@ -155,6 +155,8 @@ final class StandaloneWebSocket implements Closeable {
     void setReadTimeout(int timeoutMillis) throws IOException { socket.setSoTimeout(timeoutMillis); }
 
     private void write(int opcode, byte[] payload) throws Exception {
+        // A terminal writer can time out while waiting for the synchronized monitor.
+        if (Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("WebSocket write cancelled");
         relayLease.checkCurrent();
         if (payload.length > MAX_FRAME) throw new IOException("WebSocket frame too large");
         ByteArrayOutputStream header = new ByteArrayOutputStream();
