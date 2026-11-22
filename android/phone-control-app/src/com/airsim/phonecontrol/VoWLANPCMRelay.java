@@ -74,6 +74,10 @@ public final class VoWLANPCMRelay implements Closeable {
             }
             BufferedInputStream peerInput = new BufferedInputStream(peer.getInputStream());
             String line = readLine(peerInput);
+            if (line.startsWith("AIRSIMWATCH2 ")) {
+                handleWatch(peer, peerInput, line, owner);
+                return;
+            }
             if (line.startsWith("AIRSIMEM1 ")) {
                 handleEarly(peer, peerInput, line, owner);
                 return;
@@ -184,6 +188,57 @@ public final class VoWLANPCMRelay implements Closeable {
         }
     }
 
+    private void handleWatch(Socket peer, InputStream input, String line, String owner) throws Exception {
+        String[] fields = line.trim().split(" ", -1);
+        if (fields.length != 5) throw new SecurityException("watch preface");
+        String grant = fields[1]; long timestamp = Long.parseLong(fields[2]);
+        long now = System.currentTimeMillis()/1000L;
+        WatchMediaGrant entry = WatchMediaSessions.media(context, grant, now, true);
+        if (entry == null) throw new SecurityException("watch grant");
+        byte[] key = WatchMediaSessions.mediaKey(context, entry);
+        try {
+            if (fields[3].isEmpty() || !VoWLANAuth.verify(key, fields[4], WatchMediaGrant.pcmCanonical(grant, timestamp, fields[3]), timestamp, now)
+                    || !replayCache.accept(fields[3], now)) throw new SecurityException("watch authentication");
+        } finally { Arrays.fill(key, (byte)0); }
+        if (!gate.tryAcquire(owner)) throw new IllegalStateException("PCM session busy");
+        Socket internal = new Socket();
+        Object scope = new Object();
+        java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Thread guard = new Thread(() -> {
+            try {
+                while (running.get() && WatchMediaSessions.media(context, grant, System.currentTimeMillis()/1000L, false) != null)
+                    Thread.sleep(100);
+            } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            finally { closeQuietly(peer); closeQuietly(internal); }
+        }, "airsim-watch-grant");
+        try (internal) {
+            if (!track(internal)) return;
+            activeSession = true;
+            internal.connect(shellPCM, 3000); internal.setSoTimeout(3000); internal.setTcpNoDelay(true);
+            internal.getOutputStream().write("AIRSIMPCM1\n".getBytes(StandardCharsets.US_ASCII));
+            if (!VoWLANPCMProtocol.acceptReady(internal.getInputStream())
+                    || WatchMediaSessions.media(context, grant, System.currentTimeMillis()/1000L, true) == null)
+                throw new SecurityException("watch call no longer active");
+            guard.start();
+            peer.getOutputStream().write(VoWLANPCMProtocol.READY.getBytes(StandardCharsets.US_ASCII)); peer.getOutputStream().flush();
+            peer.setSoTimeout(0); internal.setSoTimeout(0);
+            RemoteCallAudioScope.SHARED.bind(scope, entry.instance);
+            RemoteCallHangupGuard.ownerBound(entry.instance);
+            RemoteAudioSessionRegistry.setVoWLAN(true);
+            CountDownLatch finished = new CountDownLatch(2);
+            workers.execute(() -> copy(input, internal, new PCMStats(), peer, internal, finished));
+            workers.execute(() -> copy(activeInternalInput(internal), peer, new PCMStats(), peer, internal, finished));
+            finished.await();
+        } finally {
+            running.set(false); guard.interrupt();
+            closeQuietly(internal); sockets.remove(internal);
+            RemoteCallAudioScope.SHARED.release(scope);
+            RemoteCallHangupGuard.ownerLost(entry.instance);
+            RemoteAudioSessionRegistry.setVoWLAN(false);
+            activeSession = false; gate.release(owner);
+        }
+    }
+
     private static InputStream activeInternalInput(Socket socket) {
         try { return socket.getInputStream(); }
         catch (IOException error) { return new java.io.ByteArrayInputStream(new byte[0]); }
@@ -211,7 +266,7 @@ public final class VoWLANPCMRelay implements Closeable {
     }
 
     private static String readLine(InputStream input) throws IOException {
-        byte[] bytes = new byte[1024];
+        byte[] bytes = new byte[4096];
         int count = 0;
         while (count < bytes.length) {
             int value = input.read();

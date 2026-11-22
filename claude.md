@@ -1,5 +1,9 @@
 # AirSIM 全项目 Claude 部署辅助
 
+F50 Pro 另附[临时 USB 注册诊断工具与 CMHK 对照记录](docs/f50pro-cmhk-diagnostic.md)，独立于 APK/AVF 安装；英国卡无服务尚未修复，不能将双卡启用视为双卡已注册。
+
+未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](docs/f50pro-cloud-hangup.md)。
+
 2026-10-31 发布准备：Apps `v0.9.8.20`，Android `0.9.8.20 (125)`、Apple `0.9.8 (152)`，见 `docs/releases/0.9.8.20.md`。本轮授权提交推送 VoBLE、GitHub Release 与 TestFlight 上传；不部署 Worker、不发布 Linux Agent、不改变现有 Latest 标记。TestFlight 使用 production APNs，上传／处理／外测可用分别核实。下文旧候选与授权仅为历史记录。
 
 未发布试验性功能：NAS／软路由自建域名 TLS 直连见 `docs/self-hosted-tls-direct.md`。支持 HTTPS 域名首次配对，以及已配对设备主动添加 HTTPS／PCM TLS 路由；沿用 Android 私网网关和 HMAC／身份验证。首次配对使用临时 TLS 入口，不直接暴露安卓明文配对或 AVF 内部端口，不新增后台推送。修改时同步 iPhone 与 Watch 的可选 `pcm_tls` 字段，保留旧路由解码、设备绑定、关闭／删除清理及通话路径固定。
@@ -68,6 +72,7 @@ v0.4.5 是一次签名信任根迁移：v0.4.4 的私钥未留存，旧 installe
 - 主 App：部署者的唯一 Bundle ID。
 - Watch App：主 Bundle ID 加 `.watchkitapp`。
 - Live Activity：主 Bundle ID 加 `.liveactivity`。
+- Notification Service Extension：主 Bundle ID 加 `.notificationservice`，与主 App 共用钥匙串组 `$(AppIdentifierPrefix)airsim.e2e-sms`（端到端加密云端短信）。
 - 测试 Target：主 Bundle ID 加 `.tests`。
 - Watch companion 标识：等于主 App Bundle ID。
 - Relay `ALLOWED_BUNDLE_ID`：等于主 App Bundle ID。

@@ -13,6 +13,7 @@ import android.os.SystemClock;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
@@ -88,6 +89,89 @@ public final class PhoneAudioBridge {
         return !routeVerified
             && firstPlaybackAt != 0
             && now - firstPlaybackAt >= ROUTE_VERIFY_TIMEOUT_MS;
+    }
+
+    // Narrow workaround for the reported HONOR Android 16 framework audit NPE.
+    // Always try the ordinary API first. Do not change native capture construction.
+    private static final int AUDIT_BYPASS_SOURCE_ID = 5;
+    private static volatile Field recordSourceField;
+    private static volatile boolean recordSourceFieldResolved;
+    private static final java.util.concurrent.atomic.AtomicBoolean auditBypassReported =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    private static Field resolveRecordSourceField() {
+        if (recordSourceFieldResolved) return recordSourceField;
+        synchronized (PhoneAudioBridge.class) {
+            if (!recordSourceFieldResolved) {
+                try {
+                    Field field = AudioRecord.class.getDeclaredField("mRecordSource");
+                    field.setAccessible(true);
+                    recordSourceField = field;
+                } catch (ReflectiveOperationException | RuntimeException ignored) {
+                    recordSourceField = null;
+                }
+                recordSourceFieldResolved = true;
+            }
+        }
+        return recordSourceField;
+    }
+
+    static boolean matchesCaptureAuditFailure(NullPointerException error) {
+        if (!"HONOR".equalsIgnoreCase(Build.MANUFACTURER) || Build.VERSION.SDK_INT != 36) return false;
+        StackTraceElement[] frames = error.getStackTrace();
+        // requireNonNull must throw directly into AudioRecord.startRecording.
+        return frames.length >= 2
+                && frames[0].getClassName().equals("java.util.Objects")
+                && frames[0].getMethodName().equals("requireNonNull")
+                && frames[1].getClassName().equals("android.media.AudioRecord")
+                && frames[1].getMethodName().equals("startRecording");
+    }
+
+    static void startRecordingCompat(AudioRecord recorder, long started) {
+        NullPointerException originalFailure;
+        try {
+            recorder.startRecording();
+            return;
+        } catch (NullPointerException error) {
+            if (!matchesCaptureAuditFailure(error)
+                    || recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) throw error;
+            originalFailure = error;
+        }
+        Field field = resolveRecordSourceField();
+        if (field == null) throw originalFailure;
+        int original;
+        try {
+            original = field.getInt(recorder);
+            field.setInt(recorder, AUDIT_BYPASS_SOURCE_ID);
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            originalFailure.addSuppressed(error);
+            throw originalFailure;
+        }
+        Throwable startupFailure = null;
+        try {
+            recorder.startRecording();
+        } catch (RuntimeException | Error error) {
+            startupFailure = error;
+            throw error;
+        } finally {
+            try {
+                field.setInt(recorder, original);
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                // Never report READY with a mutated source. The caller's endpoint lease
+                // stops/releases capture on failure, preserving the initial exception.
+                if (startupFailure != null) startupFailure.addSuppressed(error);
+                else throw new IllegalStateException("capture source restore failed", error);
+            }
+        }
+        if (recorder.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING
+                && auditBypassReported.compareAndSet(false, true)) {
+            Map<String, Object> fields = new LinkedHashMap<>();
+            fields.put("builder", Build.MANUFACTURER + "/" + Build.DEVICE);
+            fields.put("capture_source_id", original);
+            fields.put("bypass_source_id", AUDIT_BYPASS_SOURCE_ID);
+            fields.put("result", "ok");
+            emit(started, "capture_audit_bypass", fields);
+        }
     }
 
     private static void serve(BridgeArguments arguments, long started, BridgeStats stats) {
@@ -183,10 +267,8 @@ public final class PhoneAudioBridge {
     private static void streamEarlyAudio(Socket client, long started, BridgeStats stats) throws Exception {
         String phase="select_capture_route";
         try {
-            if (!Redmi9PCMProfile.matches(Build.MANUFACTURER, Build.DEVICE, Build.HARDWARE))
-                throw new IllegalStateException("receive-only profile unavailable");
             AudioDeviceInfo rx=findTelephonyDevice(true);
-            if(rx==null || !Redmi9PCMProfile.supports(rx.getSampleRates(),rx.getChannelCounts(),rx.getEncodings(),8000,1))
+            if(rx==null || !TelephonyDownlinkProfile.supports(rx.getSampleRates(),rx.getChannelCounts(),rx.getEncodings()))
                 throw new IllegalStateException("Telephony Rx unavailable");
             phase="create_capture";
             int buffer=AudioRecord.getMinBufferSize(SAMPLE_RATE,CHANNEL_IN,ENCODING);
@@ -211,13 +293,13 @@ public final class PhoneAudioBridge {
                 phase="validate_capture";
                 if(recorder.getState()!=AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("capture unavailable");
                 phase="start_capture";
-                recorder.startRecording();
+                startRecordingCompat(recorder,started);
                 phase="verify_capture";
                 if(recorder.getRecordingState()!=AudioRecord.RECORDSTATE_RECORDING) throw new IOException("capture not recording");
                 phase="send_ready";
                 BridgeProtocol.writeReady(client.getOutputStream());
                 stats.resetAudio();
-                emit(started,"audio_profile",Map.of("profile","redmi9_mtk_experimental","direction","recvonly","capture_rate",8000,"capture_source","voice_downlink"));
+                emit(started,"audio_profile",Map.of("profile","telephony_downlink","direction","recvonly","capture_rate",8000,"capture_source","voice_downlink"));
                 emit(started,"client_ready",Map.of("result","receive_only_capture","route_verified",false));
                 client.setSoTimeout(0);
                 Thread disconnect=new Thread(() -> {
@@ -329,7 +411,7 @@ public final class PhoneAudioBridge {
                     // Start the real endpoints, then send READY; a successful TCP
                     // handshake alone is not evidence of usable call audio.
                     phase[0] = "start_capture";
-                    recorder.startRecording();
+                    startRecordingCompat(recorder, started);
                     phase[0] = "start_playback";
                     track.play();
                     phase[0] = "verify_capture";
@@ -410,7 +492,7 @@ public final class PhoneAudioBridge {
                         if (config != null) silenced = config.isClientSilenced() ? "yes" : "no";
                     } catch (RuntimeException | LinkageError ignored) { /* Missing metadata is not verified routing. */ }
                     emit(0, "capture_route_observed", Map.of("capture_route", route, "capture_silenced", silenced));
-                    if (strictTelephony && route.equals("other")) throw new IOException("capture is not routed to Telephony Rx");
+                    if (strictTelephony && (route.equals("other") || silenced.equals("yes"))) throw new IOException("capture is not routed to Telephony Rx");
                 }
                 if (awaitAudibleFrame) {
                     if (!hasSignal(frame, evenCount)) continue;

@@ -192,6 +192,7 @@ final class DeviceCallActionRouter {
     @discardableResult
     func ingest(_ event: DeviceCallEvent, mode: AirSIMConnectionMode) -> [DeviceCallEffect] {
         defer { pruneRetiredCalls() }
+        if mode == .vowlan, event.transport == .bluetooth, event.state == .ringing { return [] }
         // The authenticated dial receipt, not arrival order, proves the alias.
         // Preserve early Telecom events until that proof names this operation.
         if event.replacesCallID == nil, event.direction == "outgoing",
@@ -251,7 +252,14 @@ final class DeviceCallActionRouter {
         let eventLaneAllowed = event.transport == .vowlan
             ? ConnectionModeRuntimePolicy(mode: mode).startsVoWLAN : ConnectionModeRuntimePolicy(mode: mode).startsBluetooth
         guard eventLaneAllowed, let eventService = backend(event.agentID, event.transport) else { return effects }
-        routes[key] = LockedDeviceCallRoute(key: key, transport: event.transport, systemUUID: UUID())
+        // Match the Telecom UUID used by incoming APNs. Do not reuse a UUID
+        // already owned by another device, even if it reports the same call ID.
+        let telecomUUID = event.direction == "incoming"
+            ? UUID(uuidString: event.callID) : nil
+        let systemUUID = telecomUUID.flatMap { candidate in
+            routes.values.contains { $0.systemUUID == candidate && $0.key != key } ? nil : candidate
+        } ?? UUID()
+        routes[key] = LockedDeviceCallRoute(key: key, transport: event.transport, systemUUID: systemUUID)
         targets[key] = Target(backend: transport == event.transport ? service : eventService, identity: .init(callID: event.callID,
             backendID: event.backendCallID ?? event.callID, generation: event.backendGeneration))
         return effects
@@ -281,6 +289,7 @@ final class DeviceCallActionRouter {
     }
     func route(for key: DeviceCallKey) -> LockedDeviceCallRoute? { routes[key] }
     func contains(uuid: UUID) -> Bool { routes.values.contains { $0.systemUUID == uuid } }
+    func retainedRoute(for uuid: UUID) -> LockedDeviceCallRoute? { routes.values.first { $0.systemUUID == uuid } }
     func renewIdlePresentation(for key: DeviceCallKey) throws {
         guard context.registry.active == nil, context.registry.latestEvent(for: key)?.state == .ringing,
               let route = routes[key] else { throw DeviceCallRoutingError.stale }
@@ -316,19 +325,12 @@ final class DeviceCallActionRouter {
         _ = context.registry.apply(.init(agentID: ringing.agentID, callID: ringing.callID,
             state: .connecting, transport: ringing.transport, transportEpoch: ringing.transportEpoch,
             backendGeneration: ringing.backendGeneration, number: ringing.number,
-            direction: ringing.direction, backendCallID: ringing.backendCallID))
+            direction: ringing.direction, backendCallID: ringing.backendCallID, slotIndex: ringing.slotIndex))
         onActivate?(route)
         do {
             try await target.backend.answer(callID: target.identity.backendID, generation: target.identity.generation)
             guard context.registry.active == key else { throw CancellationError() }
-            if let current = context.registry.latestEvent(for: key), current.state == .connecting {
-                var confirmed = current
-                confirmed = DeviceCallEvent(agentID: current.agentID, callID: current.callID, state: .active,
-                    transport: current.transport, transportEpoch: current.transportEpoch,
-                    backendGeneration: current.backendGeneration, number: current.number,
-                    direction: current.direction, backendCallID: current.backendCallID)
-                _ = context.registry.apply(confirmed)
-            }
+
         } catch {
             // An answer failure must not retire the ringing call. Release the
             // optimistic ownership only; a late agent .active (the Android
@@ -447,4 +449,40 @@ final class BLEDeviceCallBackend: DeviceCallBackend {
         try require(callID, generation); try await calls.end(rejectIfRinging: reject)
     }
     func dtmf(_ digits: String, callID: String, generation: UInt64?) async throws { try require(callID, generation); try await calls.sendDTMF(digits) }
+}
+
+/// Never infer a pushed call's BLE identity from a number, selected device, or
+/// coincident generation. Relay and BLE use separate generation namespaces.
+enum BluetoothIncomingCallPolicy {
+    static func matches(push: IncomingVoIPCall, event: DeviceCallEvent,
+                        authenticatedAgent: String?, callID: String,
+                        generation: UInt64, epoch: UInt64) -> Bool {
+        guard let agent = authenticatedAgent, !agent.isEmpty, generation > 0 else { return false }
+        return push.agentID == agent && event.agentID == agent
+            && push.callID == callID && event.callID == callID
+            && event.transport == .bluetooth && event.state == .ringing
+            && event.backendGeneration == generation && event.transportEpoch == epoch
+    }
+}
+
+/// A cold BLE reconnect can include an 8s connection attempt, backoff and a
+/// 20s authenticated handshake. This budget never sends a call command itself.
+@MainActor
+enum BluetoothIncomingRecovery {
+    static func wait<Value>(isCurrent: () -> Bool, resolve: () -> Value?,
+                            refresh: () -> Void,
+                            now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+                            sleep: () async throws -> Void = { try await Task.sleep(for: .milliseconds(200)) }) async throws -> Value? {
+        let deadline = now() + 35
+        while now() < deadline {
+            try Task.checkCancellation()
+            guard isCurrent() else { throw CancellationError() }
+            if let value = resolve() { return value }
+            refresh()
+            try await sleep()
+        }
+        try Task.checkCancellation()
+        guard isCurrent() else { throw CancellationError() }
+        return nil
+    }
 }

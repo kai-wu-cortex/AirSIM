@@ -142,6 +142,15 @@ enum VoBLESessionAuthenticator {
         )
     }
 
+    static func addressRecoveryMessage(challengeID: String, identity: String,
+                                       androidPublic: Data, androidNonce: Data) throws -> Data {
+        guard !challengeID.isEmpty, challengeID.utf8.count <= 128 else { throw VoBLEPairingError.invalidTranscript }
+        let transcript = VoBLEPairingTranscript(androidIdentity: identity, androidPublicKey: androidPublic,
+            iphonePublicKey: Data(count: 32), androidNonce: androidNonce, iphoneNonce: Data(count: 32))
+        try transcript.validate()
+        return Data("\(prefix)address-recovery/\(challengeID)".utf8) + transcript.encoded
+    }
+
     static func confirmationTag(pairingKey: Data, challengeID: String) throws -> Data {
         guard !challengeID.isEmpty else { throw VoBLEPairingError.confirmationFailed }
         return try tag(

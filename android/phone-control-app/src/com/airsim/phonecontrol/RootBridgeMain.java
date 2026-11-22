@@ -155,6 +155,12 @@ public final class RootBridgeMain {
                     code = PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_MUTED;
                     data.writeInt(request.optBoolean("muted", false) ? 1 : 0);
                 }
+                case "output_policy" -> {
+                    code = PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_POLICY;
+                    data.writeInt(request.optBoolean("muted", false) ? 1 : 0);
+                    data.writeString(request.optString("transport", "vowlan"));
+                    data.writeString(request.getString("policy"));
+                }
                 case "audio_snapshot" -> code = PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT;
                 case "ensure_dialer_role" -> code = PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE;
                 case "send_sms" -> {
@@ -184,7 +190,7 @@ public final class RootBridgeMain {
         }
     }
 
-    private static Context appContext(String packageName) throws Exception {
+    static Context appContext(String packageName) throws Exception {
         Class<?> activityThread = Class.forName("android.app.ActivityThread");
         Object thread = activityThread.getMethod("currentActivityThread").invoke(null);
         if (thread == null) thread = activityThread.getMethod("systemMain").invoke(null);

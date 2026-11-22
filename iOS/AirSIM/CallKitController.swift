@@ -286,14 +286,27 @@ final class CallKitController: NSObject {
         // Watch may own the shared route without an iPhone CallKit UUID.
         // Native presentation state alone is therefore not an admission gate.
         let model = handler as? AppModel
+        let conflictingAgent = (currentAgentID ?? currentIncomingPush?.agentID).flatMap { current in
+            call.agentID.map { $0 != current }
+        } ?? false
         if currentUUID != nil,
-           ((currentUUID == call.uuid || (call.agentID != nil && currentIncomingPush?.agentID == call.agentID))
-                && currentIncomingPush?.callID == call.callID
+           (currentUUID == call.uuid
+                || (call.agentID != nil && currentIncomingPush?.agentID == call.agentID
+                    && currentIncomingPush?.callID == call.callID)
                 || model?.ownsSystemPresentation(for: call) == true) {
             // This real call is already reported. Reporting and then ending the
             // duplicate UUID would otherwise end the active CallKit surface.
             PushDiagnostics.record("PushKit 复用已有通话会话", fields: ["call_uuid": currentUUID!.uuidString])
-            completion(nil)
+            let report: RequiredSystemReporter = systemReport ?? { [provider] uuid, update, done in
+                provider.reportNewIncomingCall(with: uuid, update: update, completion: done)
+            }
+            // Fulfil the mandatory PushKit report using the existing system identity.
+            // Never send an end for that identity, even if CallKit accepts the report.
+            // A colliding UUID from another device must neither replace the
+            // caller details nor end the existing system call.
+            report(currentUUID!, update(number: conflictingAgent ? currentNumber : call.number,
+                callerName: conflictingAgent ? nil : call.callerName,
+                genericHandle: call.isVirtual), completion)
             return
         }
         let localOwnerBusy = model?.ownsLocalCallPresentation == true
@@ -880,6 +893,7 @@ enum CallKitBridgeError: LocalizedError {
     case callInProgress
     case noReachableTransport
     case cloudMediaDisabled
+    case bluetoothUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -888,8 +902,9 @@ enum CallKitBridgeError: LocalizedError {
         case .handlerUnavailable: return "通话控制器尚未就绪"
         case .unavailable: return "系统 CallKit 当前不可用"
         case .callInProgress: return "当前已有进行中的系统通话"
-        case .noReachableTransport: return "三星本地链路和云端语音当前都不可达"
-        case .cloudMediaDisabled: return "三星本地链路不可达，云端语音中继已关闭"
+        case .noReachableTransport: return "安卓本地链路和云端语音当前都不可达"
+        case .bluetoothUnavailable: return "蓝牙通话链路尚未就绪，请确认安卓蓝牙和 AirSIM 蓝牙服务已开启；当前模式不会改用云端接听"
+        case .cloudMediaDisabled: return "安卓本地链路不可达，云端语音中继已关闭"
         }
     }
 }

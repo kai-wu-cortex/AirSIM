@@ -80,7 +80,7 @@ struct VoBLECallLifecycleReducer: Sendable {
 
         let identity: VoBLECallIdentity
         if let current, current.generation == event.generation {
-            if current.callID != event.callID, current.direction != "outgoing" { return .ignored }
+            if current.callID != event.callID, !(current.direction == "outgoing" && current.isProvisional) { return .ignored }
             // Android assigns the authoritative Telecom call ID after an outgoing dial.
             identity = VoBLECallIdentity(
                 callID: event.callID, generation: event.generation, uuid: current.uuid,
@@ -103,7 +103,7 @@ struct VoBLECallLifecycleReducer: Sendable {
             let shouldStart = !mediaRequested
             mediaRequested = true
             return .active(identity, startMedia: shouldStart)
-        case "dialing", "connecting": return .connecting(identity)
+        case "dialing", "connecting": return mediaRequested ? .ignored : .connecting(identity)
         default: return .ignored
         }
     }
@@ -128,6 +128,16 @@ final class VoBLECallCoordinator {
     var onError: ((String) -> Void)?
     var audioSessionContext: () -> (managedByCallKit: Bool, active: Bool) = { (true, false) }
     var mediaPermission: (VoBLECallIdentity) -> Bool = { _ in true }
+    var onEarlyPlayback: (() -> Void)?
+    private(set) var earlyMediaAudible = false
+    private(set) var earlyMediaUnavailable = false
+    private var carrierEarlyMediaEnabled = true
+    // Retry only admission or an explicit pre-start rejection, never an ambiguous timeout.
+    var earlyMediaRetryWait: () async throws -> Void = { try await Task.sleep(for: .milliseconds(250)) }
+    private var earlyAttempt: VoBLECallIdentity?
+    private var earlyDeadlineTask: Task<Void, Never>?
+    private var mediaRequestVersion = 0
+    private var endingIdentity: VoBLECallIdentity?
     var onOutgoingIntent: ((VoBLECallIdentity) -> Void)?
 
     private let central: any VoBLECallControlling
@@ -155,6 +165,12 @@ final class VoBLECallCoordinator {
         self.audio = audio
         self.defaults = defaults
         self.traceRecorder = traceRecorder
+        audio.onEarlyPlayback = { [weak self] in
+            guard let self, !self.earlyMediaAudible, self.audio.receiveOnly, !self.reducer.mediaRequested,
+                  let identity = self.reducer.current, self.mediaPermission(identity) else { return }
+            self.earlyMediaAudible = true
+            self.onEarlyPlayback?()
+        }
         central.onEvent = { [weak self] event in self?.receive(event) }
         central.onAudioDownlinkFragment = { [weak media] fragment in
             media?.receiveDownlinkFragment(fragment)
@@ -176,6 +192,7 @@ final class VoBLECallCoordinator {
     func startOutgoing(number: String, operationID: String? = nil, systemUUID: UUID? = nil,
                        simAccount: String? = nil) async throws -> VoBLECallIdentity {
         guard pendingOutgoing == nil, reducer.current == nil else { throw VoBLECentralError.bluetooth("call_in_progress") }
+        carrierEarlyMediaEnabled = CarrierRingbackPreference.isEnabled()
         let provisionalID = operationID ?? UUID().uuidString.lowercased()
         let token = UUID()
         pendingOutgoing = (provisionalID, token)
@@ -243,6 +260,10 @@ final class VoBLECallCoordinator {
 
     func end(rejectIfRinging: Bool) async throws {
         guard let identity = reducer.current else { throw VoBLECentralError.invalidResponse }
+        endingIdentity = identity
+        earlyDeadlineTask?.cancel(); earlyDeadlineTask = nil
+        mediaRequestVersion += 1; earlyMediaAudible = false
+        audio.stop(); media.stop(identity: identity.mediaIdentity)
         do {
             try await requireSuccess(rejectIfRinging ? "reject" : "end", identity: identity)
         } catch {
@@ -274,6 +295,8 @@ final class VoBLECallCoordinator {
     func setCallKitAudioActive(_ active: Bool) { audio.setCallKitAudioActive(active) }
 
     func disconnect() {
+        earlyDeadlineTask?.cancel(); earlyDeadlineTask = nil
+        mediaRequestVersion += 1; earlyMediaAudible = false
         pendingOutgoing = nil
         guard let identity = reducer.current, recoveringIdentity == nil else { return }
         audio.setMediaReady(false)
@@ -287,11 +310,26 @@ final class VoBLECallCoordinator {
         }
     }
 
+    private func stopEarlyMedia(_ identity: VoBLECallIdentity) {
+        guard reducer.current == identity, !reducer.mediaRequested else { return }
+        mediaRequestVersion += 1
+        earlyDeadlineTask?.cancel(); earlyDeadlineTask = nil
+        earlyMediaAudible = false; earlyMediaUnavailable = true
+        audio.stop(); media.stop(identity: identity.mediaIdentity)
+    }
+
     private func receive(_ event: VoBLEAndroidEvent) {
+        if event.state == "early_media_stopped" {
+            if let identity = reducer.current, identity.callID == event.callID,
+               identity.generation == event.generation { stopEarlyMedia(identity) }
+            return
+        }
 #if DEBUG
         print("[AirSIM VoBLE Call] event state=\(event.state) generation=\(event.generation)")
 #endif
         if let recoveringIdentity, event.generation != recoveringIdentity.generation { return }
+        if let endingIdentity, event.callID == endingIdentity.callID,
+           event.generation == endingIdentity.generation, event.state != "ended" { return }
         defaults.set(Int(max(event.generation, UInt64(max(0, defaults.integer(forKey: generationKey))))),
                      forKey: generationKey)
         switch reducer.apply(event) {
@@ -301,11 +339,22 @@ final class VoBLECallCoordinator {
                 bluetoothCallID: identity.callID, uuid: identity.uuid,
                 generation: identity.generation, number: identity.number))
             onState?(identity, .ringing)
-        case let .connecting(identity): onState?(identity, .connecting)
+        case let .connecting(identity):
+            onState?(identity, .connecting)
+            if CarrierRingbackPreference.allowsReceiveOnly(enabled: carrierEarlyMediaEnabled,
+                outgoing: identity.direction == "outgoing", state: .connecting),
+               event.state == "dialing", earlyAttempt != identity {
+                earlyMediaUnavailable = false
+                earlyAttempt = identity
+                Task { await startMedia(for: identity, receiveOnly: true) }
+            }
         case let .active(identity, shouldStartMedia):
+            earlyMediaAudible = false
             onState?(identity, .active)
             if shouldStartMedia { Task { await startMedia(for: identity) } }
         case let .ended(identity):
+            earlyDeadlineTask?.cancel(); earlyDeadlineTask = nil
+            mediaRequestVersion += 1; earlyMediaAudible = false; earlyAttempt = nil
             audio.stop()
             media.stop(identity: identity.mediaIdentity)
             onEnded?(identity)
@@ -318,7 +367,7 @@ final class VoBLECallCoordinator {
         recoveryTask?.cancel()
         recoveryTask = nil
         recoveringIdentity = nil
-        Task { await startMedia(for: identity) }
+        Task { await startMedia(for: identity, receiveOnly: !reducer.mediaRequested) }
     }
 
     private func failRecovery(_ identity: VoBLECallIdentity) {
@@ -330,7 +379,16 @@ final class VoBLECallCoordinator {
         onEnded?(identity)
     }
 
-    private func startMedia(for identity: VoBLECallIdentity) async {
+    private func startMedia(for identity: VoBLECallIdentity, receiveOnly: Bool = false, earlyRetry: Int = 0) async {
+        guard !receiveOnly || carrierEarlyMediaEnabled else { return }
+        guard endingIdentity != identity, reducer.current == identity, reducer.mediaRequested != receiveOnly,
+              !receiveOnly || (identity.direction == "outgoing" && !identity.isProvisional) else { return }
+        mediaRequestVersion += 1
+        earlyDeadlineTask?.cancel(); earlyDeadlineTask = nil
+        let version = mediaRequestVersion
+        let nonce = UUID().uuidString.lowercased()
+        audio.setMediaReady(false)
+        media.stop(identity: identity.mediaIdentity)
         if mediaStartIdentity != identity {
             mediaStartIdentity = identity
             mediaStartAttempts = 0
@@ -340,32 +398,64 @@ final class VoBLECallCoordinator {
             phase: "media_admission", title: "蓝牙媒体归属检查",
             fields: ["permitted": String(permitted), "identity_current": String(matches),
                      "generation": String(identity.generation)], isFailure: !permitted || !matches) }
-        guard permitted, matches else { return }
+        guard permitted, matches else {
+            if receiveOnly, matches {
+                await retryEarlyMedia(identity, version: version, attempt: earlyRetry)
+            }
+            return
+        }
         do {
             let context = audioSessionContext()
             try await audio.prepareForCall(
                 managedByCallKit: context.managedByCallKit,
-                callKitAudioActive: context.active)
-            guard reducer.current == identity, mediaPermission(identity) else {
+                callKitAudioActive: context.active, receiveOnly: receiveOnly)
+            guard mediaRequestVersion == version, reducer.current == identity, reducer.mediaRequested != receiveOnly, mediaPermission(identity) else {
                 if reducer.current == nil { audio.stop() }
                 return
             }
             // Permission prompts can yield while CallKit activates its session.
             audio.setCallKitAudioActive(audioSessionContext().active)
             let response = try await central.send(
-                command: "start_media", callID: identity.callID,
-                generation: identity.generation, number: "")
-            guard response.success, response.detail == "media_ready",
-                  reducer.current == identity, mediaPermission(identity) else {
+                command: receiveOnly ? "start_early_media" : "start_media", callID: identity.callID,
+                generation: identity.generation, number: receiveOnly ? nonce : "")
+            guard mediaRequestVersion == version, reducer.current == identity, reducer.mediaRequested != receiveOnly else { return }
+            if receiveOnly, !response.success, response.code == "early_media_not_ready" {
+                await retryEarlyMedia(identity, version: version, attempt: earlyRetry)
+                return
+            }
+            let earlyKeepalive = receiveOnly && response.detail == "early_media_ready_keepalive_v1"
+            let mediaReady = receiveOnly
+                ? (response.detail == "early_media_ready_v1" || earlyKeepalive)
+                : response.detail == "media_ready"
+            guard response.success, mediaReady,
+                  mediaPermission(identity) else {
                 throw VoBLECentralError.bluetooth(
                     response.detail.isEmpty ? response.code : response.detail)
             }
+            let key = try central.mediaKey(callID: identity.callID, generation: identity.generation)
             try media.start(identity: identity.mediaIdentity,
-                            mediaKey: central.mediaKey(
-                                callID: identity.callID, generation: identity.generation))
+                            mediaKey: receiveOnly ? VoBLEGATTMediaTransport.earlyMediaKey(key, nonce: nonce) : key,
+                            receiveOnly: receiveOnly, earlyKeepalive: earlyKeepalive)
             audio.setMediaReady(true)
+            if receiveOnly {
+                earlyDeadlineTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(120))
+                    guard !Task.isCancelled, let self, self.mediaRequestVersion == version else { return }
+                    self.stopEarlyMedia(identity)
+                }
+            }
             mediaStartAttempts = 0
         } catch {
+            guard mediaRequestVersion == version, reducer.current == identity else { return }
+            if receiveOnly {
+                // Old agents reject the optional command. Keep waiting for Telecom;
+                // never retry dial, manufacture ACTIVE, or acquire a microphone.
+                audio.stop()
+                earlyMediaUnavailable = true
+                await traceRecorder.recordEvent(source: "APP", category: "voble", phase: "early_media_unavailable",
+                    title: "此设备暂未提供接通前运营商音频", fields: [:])
+                return
+            }
             await AgentVerboseTraceRecorder.shared.recordFailure(category: "voble", phase: "start_media", error: error)
             onError?(error.localizedDescription)
             // Only retry failures that prove the command never reached a ready
@@ -383,6 +473,18 @@ final class VoBLECallCoordinator {
             guard !Task.isCancelled, reducer.current == identity else { return }
             await startMedia(for: identity)
         }
+    }
+
+    private func retryEarlyMedia(_ identity: VoBLECallIdentity, version: Int, attempt: Int) async {
+        guard attempt < 24 else {
+            earlyMediaUnavailable = true
+            return
+        }
+        do { try await earlyMediaRetryWait() } catch { return }
+        guard !Task.isCancelled, mediaRequestVersion == version,
+              reducer.current == identity, !reducer.mediaRequested,
+              endingIdentity != identity else { return }
+        await startMedia(for: identity, receiveOnly: true, earlyRetry: attempt + 1)
     }
 
     private func requireSuccess(_ command: String, identity: VoBLECallIdentity) async throws {

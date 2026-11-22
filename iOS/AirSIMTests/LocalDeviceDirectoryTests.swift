@@ -410,7 +410,12 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ringing,
             transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
         peer.setCallState("incoming")
-        if answered { try await model.callKitAnswer(uuid: pushed.uuid, origin: .system) }
+        if answered {
+            try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+            XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+            _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .active,
+                transport: .vowlan, transportEpoch: epoch, backendCallID: "backend-A"))
+        }
         _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "telecom-A", state: .ended,
             transport: .bluetooth, transportEpoch: 5, backendGeneration: 11))
         let before = model.callLifecycleSnapshot
@@ -469,6 +474,10 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
         peer.setCallState("incoming")
         try await model.callKitAnswer(uuid: pushed.uuid, origin: .system)
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+        XCTAssertNil(model.callConnectedAt)
+        _ = model.receiveOwnedCallEvent(.init(agentID: "A", callID: "cold-call", state: .active,
+            transport: .vowlan, transportEpoch: directory.transportEpoch(for: "A"), backendCallID: "cold-call"))
         XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
         XCTAssertTrue(peer.commands.contains { $0.path == "/api/calls/answer" })
         controller.reportCurrentCallEnded(reason: .remoteEnded)
@@ -478,6 +487,164 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertEqual(model.callLifecycleSnapshot.state, .ended)
         XCTAssertEqual(model.callLifecycleSnapshot.callUUID, pushed.uuid)
         XCTAssertNil(controller.currentSystemCallUUID)
+    }
+
+    private func smsPollResult(_ api: AirSIMAPI, agentID: String?) -> AppModel.AgentPollResult {
+        .init(
+            call: .init(active: nil, history: [], polling: true, eventDriven: true,
+                pollIntervalSeconds: 1, lastPollError: "", revision: 1),
+            smsChanged: true, api: api, agentID: agentID
+        )
+    }
+
+    func testSMSIngestionUsesPolledProducerWhenDirectoryIsCold() async throws {
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(nil)
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let boundary = SMSProducerBoundary()
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 8575, pcmPort: 39001)
+        let api = AirSIMAPI(
+            route: .vowlan(endpoint: endpoint, credential: try VoWLANCredential(secret: aSecret)),
+            transport: boundary
+        )
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { _ in api })
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let store = LocalHistoryStore(directoryURL: path)
+        let pushed = SMSMessage(
+            sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "same-wire-id", direction: .incoming, sourceAgentID: "A"
+        )
+        XCTAssertTrue(store.saveMessages([pushed]))
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, historyStore: store)
+        defer { model.stop() }
+        model.reloadMessagesFromLocalStore()
+        XCTAssertTrue(directory.agentIDs.isEmpty, "the verified directory is still cold")
+
+        await model.synchronizeSMS(from: smsPollResult(api, agentID: "A"))
+
+        XCTAssertEqual(model.messages.count, 1)
+        XCTAssertEqual(model.messages.first?.sourceAgentID, "A")
+        XCTAssertEqual(model.messages.first?.simSlot, "中国联通 — Club")
+        XCTAssertEqual(boundary.acks, [["same-wire-id"]])
+    }
+
+    func testLegacyUnscopedPushDoesNotSplitWhenOnlyProducerIsKnown() async throws {
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(nil)
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let boundary = SMSProducerBoundary()
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 8575, pcmPort: 39001)
+        let api = AirSIMAPI(
+            route: .vowlan(endpoint: endpoint, credential: try VoWLANCredential(secret: aSecret)),
+            transport: boundary
+        )
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { _ in api })
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let suite = "AirSIMTests.single-sms-producer.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        PairedAndroidDeviceStore.remember(.init(id: "A", deviceName: "A", agentKind: "avf"), defaults: defaults)
+        let store = LocalHistoryStore(directoryURL: path)
+        let pushed = SMSMessage(
+            sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "same-wire-id", direction: .incoming
+        )
+        XCTAssertTrue(store.saveMessages([pushed]))
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, historyStore: store, pairedDeviceDefaults: defaults)
+        defer { model.stop() }
+        model.reloadMessagesFromLocalStore()
+
+        await model.synchronizeSMS(from: smsPollResult(api, agentID: "A"))
+
+        XCTAssertEqual(model.messages.count, 1)
+        XCTAssertEqual(model.messages.first?.sourceAgentID, "A")
+        // Review regression: the authenticated pull must remain usable by the
+        // current develop Watch device-scoped conversation feature.
+        XCTAssertTrue(WatchSMSPolicy.permits(sourceAgentID: model.messages.first?.sourceAgentID,
+            selectedAgentID: "A", pairedIDs: ["A"]), "authenticated delivery disappears from Watch")
+        XCTAssertEqual(model.messages.first?.simSlot, "中国联通 — Club")
+        XCTAssertEqual(boundary.acks, [["same-wire-id"]])
+    }
+
+    func testPR32PairingChangesDuringInboxFetchMustNotAliasAnotherProducer() async throws {
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(nil)
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let boundary = SMSProducerBoundary()
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 8575, pcmPort: 39001)
+        let api = AirSIMAPI(
+            route: .vowlan(endpoint: endpoint, credential: try VoWLANCredential(secret: aSecret)),
+            transport: boundary
+        )
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { _ in api })
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let suite = "AirSIMTests.single-sms-producer.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        PairedAndroidDeviceStore.remember(.init(id: "A", deviceName: "A", agentKind: "avf"), defaults: defaults)
+        let store = LocalHistoryStore(directoryURL: path)
+        let pushed = SMSMessage(
+            sender: "fixture", content: "same", code: nil, timestamp: Date(),
+            deliveryID: "same-wire-id", direction: .incoming
+        )
+        XCTAssertTrue(store.saveMessages([]))
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, historyStore: store, pairedDeviceDefaults: defaults)
+        defer { model.stop() }
+        model.reloadMessagesFromLocalStore()
+
+        boundary.beforeInbox = { @MainActor in
+            PairedAndroidDeviceStore.remember(.init(id: "B", deviceName: "B", agentKind: "avf"), defaults: defaults)
+            // Legacy APNs from newly added B arrives while A's inbox is in flight.
+            XCTAssertTrue(store.saveMessages([pushed]))
+            model.reloadMessagesFromLocalStore()
+        }
+        await model.synchronizeSMS(from: smsPollResult(api, agentID: "A"))
+
+        XCTAssertEqual(model.messages.count, 2, "pairing changed: A and unknown/B must remain distinct")
+        XCTAssertEqual(Set(model.messages.map(\.sourceAgentID)), [nil, "A"])
+        XCTAssertEqual(boundary.acks, [["same-wire-id"]])
+    }
+
+    func testSMSIngestionPrefersFullRouteWhenEndpointIsReused() async throws {
+        let aID = "A-route-\(UUID().uuidString)", bID = "B-route-\(UUID().uuidString)"
+        let a = try AuthenticatedHealthPeer(agentID: aID, secret: aSecret)
+        defer { a.stop() }
+        let boundary = SMSProducerBoundary()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), apiFactory: { route in
+            AirSIMAPI(route: route, transport: boundary)
+        }, healthTransport: AuthenticatedHealthPeer.transport)
+        let endpoint = try await a.start()
+        try await directory.verifyPairing(agentID: aID, endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        await a.stopAndWait()
+        let b = try AuthenticatedHealthPeer(agentID: bID, secret: bSecret, requestedPort: endpoint.controlPort)
+        defer { b.stop() }
+        let reused = try await b.start()
+        defer {
+            VoWLANPairingRecordStore.remove(agentID: aID)
+            VoWLANPairingRecordStore.remove(agentID: bID)
+        }
+        XCTAssertEqual(reused, endpoint)
+        try await directory.verifyPairing(agentID: bID, endpoint: reused, credential: VoWLANCredential(secret: bSecret))
+        XCTAssertEqual(Set(directory.agentIDs), [aID, bID])
+        let previous = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
+        ConnectionModePreference.set(.cloud); AndroidAgentBindingPreference.set(bID)
+        defer { ConnectionModePreference.set(previous); AndroidAgentBindingPreference.set(binding) }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: directory, historyStore: LocalHistoryStore(directoryURL: path))
+        defer { model.stop() }
+
+        await model.loadMessagesFromAgent(silently: true, reportingAgent: directory.api(for: bID))
+
+        XCTAssertEqual(model.messages.count, 1)
+        XCTAssertEqual(model.messages.first?.sourceAgentID, bID)
     }
 
     func testSMSIngestionCapturesAuthenticatedProducerAndAcknowledgesRawDeliveryIDs() async throws {
@@ -865,6 +1032,68 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertNil(directory.metadata(for: "A")?.phoneNumber)
     }
 
+    func testFailedKeyWriteDoesNotClaimPairingSucceeded() async throws {
+        let id = "e2e-failure-" + UUID().uuidString
+        defer { VoWLANPairingRecordStore.remove(agentID: id) }
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            e2eKeys: MemoryE2EKeyStore(failure: .unavailable))
+        let credential = try VoWLANCredential(secret: aSecret)
+        directory.stagePairing(agentID: id, credential: credential,
+            e2e: .save(.init(key: Data(repeating: 7, count: 32), deviceID: "fixture")))
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 39000, pcmPort: 39001)
+        for _ in 0..<2 {
+            do {
+                try await directory.persistPairing(agentID: id, credential: credential, endpoint: endpoint, deviceName: nil)
+                XCTFail("Failed E2E write must remain pending and surface on retry")
+            } catch { XCTAssertEqual(error as? E2EKeyStoreError, .unavailable) }
+        }
+    }
+
+    func testStagedKeyChangeCommitsWithCredential() async throws {
+        let id = "e2e-" + UUID().uuidString
+        defer { VoWLANPairingRecordStore.remove(agentID: id) }
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), e2eKeys: keys)
+        let endpoint = try VoWLANEndpoint(host: "10.0.0.1", controlPort: 39000, pcmPort: 39001)
+        let credential = try VoWLANCredential(secret: aSecret)
+        let record = E2EKeyRecord(key: Data(repeating: 7, count: 32), deviceID: "iphone-air")
+        func pair(_ change: E2EPairingKeyChange?) async throws {
+            directory.stagePairing(agentID: id, credential: credential, e2e: change)
+            try await directory.persistPairing(agentID: id, credential: credential, endpoint: endpoint, deviceName: nil)
+        }
+        directory.stagePairing(agentID: id, credential: credential, e2e: .save(record))
+        XCTAssertEqual(keys.all, [:])
+        try await directory.persistPairing(agentID: id, credential: credential, endpoint: endpoint, deviceName: nil)
+        XCTAssertEqual(keys.all, [id: record])
+        // A local-only pairing leaves the key; a cloud pairing without a key removes it.
+        try await pair(nil)
+        XCTAssertEqual(keys.all, [id: record])
+        try await pair(.remove)
+        XCTAssertEqual(keys.all, [:])
+        // Deleting the device drops a change that was never committed.
+        directory.stagePairing(agentID: id, credential: credential, e2e: .save(record))
+        try await directory.forget(agentID: id)
+        try await pair(nil)
+        XCTAssertEqual(keys.all, [:])
+    }
+
+    func testUnprovenPairingWritesNoKey() async throws {
+        // The Bonjour claim reply is unauthenticated: only the signed health check commits the key.
+        let impostor = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, includeProof: false)
+        let android = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret)
+        defer { impostor.stop(); android.stop() }
+        let impostorEndpoint = try await impostor.start(), androidEndpoint = try await android.start()
+        let keys = MemoryE2EKeyStore()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(), e2eKeys: keys,
+                                             healthTransport: AuthenticatedHealthPeer.transport)
+        let record = E2EKeyRecord(key: Data(repeating: 7, count: 32), deviceID: "iphone-air")
+        directory.stagePairing(agentID: "A", credential: try VoWLANCredential(secret: aSecret), e2e: .save(record))
+        do { try await directory.verify(agentID: "A", endpoint: impostorEndpoint); XCTFail("unsigned health accepted") } catch {}
+        XCTAssertEqual(keys.all, [:])
+        try await directory.verify(agentID: "A", endpoint: androidEndpoint)
+        XCTAssertEqual(keys.all, ["A": record])
+    }
+
     func testEndpointReplacementDropsOldPollResponse() async throws {
         let old = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, callID: "old-call")
         let fresh = try AuthenticatedHealthPeer(agentID: "A", secret: aSecret, callID: "new-call")
@@ -1016,13 +1245,15 @@ private struct HistoryAckGateTransport: AirSIMHTTPTransport {
 }
 
 private final class SMSProducerBoundary: AirSIMHTTPTransport, @unchecked Sendable {
+    var beforeInbox: (@Sendable () async -> Void)?
     private let lock = NSLock()
     private var captured: [[String]] = []
     var acks: [[String]] { lock.withLock { captured } }
     func send(_ request: URLRequest, uploadFileURL: URL?) async throws -> WiredHTTPResponse {
         if request.url?.path == "/api/sms" {
+            await beforeInbox?()
             return .init(statusCode: 200, body: Data(
-                #"[{"sender":"fixture","content":"same","timestamp":"2026-10-18T00:00:00Z","delivery_id":"same-wire-id","source_agent_id":"untrusted"}]"#.utf8))
+                #"[{"sender":"fixture","content":"same","timestamp":"2026-10-18T00:00:00Z","delivery_id":"same-wire-id","source_agent_id":"untrusted","sim_slot":"中国联通 — Club"}]"#.utf8))
         }
         if request.url?.path == "/api/sms/ack" {
             let body = try JSONSerialization.jsonObject(with: request.httpBody ?? Data()) as? [String:Any]
@@ -1070,17 +1301,18 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
     private var requestCount = 0
     private var nonces = Set<String>()
     private var connections: [NWConnection] = []
+    private var stopped = false
     var requests: Int { lock.withLock { requestCount } }
     var commands: [Command] { lock.withLock { commandLog } }
     func setCallState(_ value: String?) { lock.withLock { callState = value } }
 
-    init(agentID: String, secret: Data, includeProof: Bool = true, callID: String? = nil, backendCallID: String? = nil, dialSuffix: String = "", deviceName: String? = "Fixture Android") throws {
+    init(agentID: String, secret: Data, includeProof: Bool = true, callID: String? = nil, backendCallID: String? = nil, dialSuffix: String = "", deviceName: String? = "Fixture Android", requestedPort: UInt16 = 0) throws {
         self.agentID = agentID; self.secret = secret; self.includeProof = includeProof
         self.callID = callID ?? "call-\(agentID)"
         self.backendCallID = backendCallID ?? self.callID
         self.dialSuffix = dialSuffix
         self.deviceName = deviceName
-        listener = try NWListener(using: .tcp)
+        listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: requestedPort) ?? 0)
     }
     func start() async throws -> VoWLANEndpoint {
         listener.newConnectionHandler = { [weak self] connection in
@@ -1191,5 +1423,23 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
         let (data, response) = try await session.data(for: local)
         return WiredHTTPResponse(statusCode: (response as! HTTPURLResponse).statusCode, body: data)
     }
-    func stop() { listener.cancel(); lock.withLock { connections.forEach { $0.cancel() }; connections.removeAll() } }
+    func stopAndWait() async {
+        await withCheckedContinuation { continuation in
+            listener.stateUpdateHandler = { state in
+                guard case .cancelled = state else { return }
+                continuation.resume()
+            }
+            stop()
+        }
+    }
+    func stop() {
+        let shouldStop = lock.withLock { () -> Bool in
+            if stopped { return false }
+            stopped = true
+            return true
+        }
+        guard shouldStop else { return }
+        listener.cancel()
+        lock.withLock { connections.forEach { $0.cancel() }; connections.removeAll() }
+    }
 }

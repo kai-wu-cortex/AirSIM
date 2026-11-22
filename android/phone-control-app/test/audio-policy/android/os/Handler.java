@@ -10,6 +10,8 @@ public final class Handler {
         else action.run();
         return true;
     }
+    // Delayed teardown is tested with an injected clock in RemoteOutputTailTests.
+    public boolean postDelayed(Runnable action, long delayMillis) { return true; }
     public static void runPendingForTest() {
         while (!pending.isEmpty()) pending.remove().run();
     }

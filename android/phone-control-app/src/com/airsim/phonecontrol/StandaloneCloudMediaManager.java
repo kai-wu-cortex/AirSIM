@@ -21,6 +21,16 @@ import java.util.concurrent.Executors;
 /** Owns the single cloud call and bridges Relay WebSocket media to loopback Shizuku PCM. */
 final class StandaloneCloudMediaManager implements Closeable {
     private static volatile StandaloneCloudMediaManager instance;
+    // A stalled TLS writer must not occupy the lifecycle event thread indefinitely.
+    // No queue: if both workers are stuck, skip media notification and use HTTP.
+    private static final long TERMINAL_WRITE_TIMEOUT_MS = 750;
+    private static final java.util.concurrent.ThreadPoolExecutor terminalWrites =
+            new java.util.concurrent.ThreadPoolExecutor(0, 2, 30, java.util.concurrent.TimeUnit.SECONDS,
+                    new java.util.concurrent.SynchronousQueue<>(), action -> {
+                        Thread thread = new Thread(action, "airsim-terminal-control");
+                        thread.setDaemon(true);
+                        return thread;
+                    });
 
     static StandaloneCloudMediaManager get(android.content.Context context) {
         StandaloneCloudMediaManager value = instance;
@@ -37,6 +47,12 @@ final class StandaloneCloudMediaManager implements Closeable {
     private final ExecutorService sessions = Executors.newCachedThreadPool();
     private final Object lock = new Object();
     private CloudSession active;
+    private final CloudCallRetryPolicy.IncomingIdentities<Descriptor> incomingIdentities =
+            new CloudCallRetryPolicy.IncomingIdentities<>();
+
+    private static String incomingKey(JSONObject registration, String androidID) {
+        return registration.optString("relay_url") + "\n" + registration.optString("device_id") + "\n" + androidID;
+    }
 
     private StandaloneCloudMediaManager(android.content.Context context) {
         this.context = context.getApplicationContext();
@@ -75,13 +91,18 @@ final class StandaloneCloudMediaManager implements Closeable {
     String androidCallIDFor(JSONObject call) {
         if (call == null) return "";
         synchronized (lock) {
-            if (active == null) return "";
-            Descriptor descriptor = active.descriptor;
-            bindOutgoing(descriptor);
-            return new CloudCallTarget(descriptor.callID, descriptor.callUUID,
-                    descriptor.generation, descriptor.androidID).resolve(
-                    call.optString("call_id"), call.optString("call_uuid"),
-                    call.optLong("generation", 1));
+            // Publish identity before waiting for HTTP: APNs can arrive even if its
+            // HTTP acknowledgement is lost, and LAN answer must resolve that UUID.
+            java.util.List<Descriptor> candidates = incomingIdentities.values();
+            if (active != null) candidates.add(active.descriptor);
+            for (Descriptor descriptor : candidates) {
+                bindOutgoing(descriptor);
+                String resolved = new CloudCallTarget(descriptor.callID, descriptor.callUUID,
+                        descriptor.generation, descriptor.androidID).resolve(
+                        call.optString("call_id"), call.optString("call_uuid"), call.optLong("generation", 1));
+                if (!resolved.isEmpty() && CallRepository.state(resolved) >= 0) return resolved;
+            }
+            return "";
         }
     }
 
@@ -98,22 +119,28 @@ final class StandaloneCloudMediaManager implements Closeable {
         if ("incoming".equals(direction) && "incoming".equals(state) && descriptor == null) {
             // A queued ringing event can survive a Relay time-out until after the
             // carrier call has ended. Never wake CallKit with a stale ring.
-            if (CallRepository.state(androidID) < 0 && eventAgeMillis(event) > 3_000) {
+            if (CallRepository.state(androidID) != android.telecom.Call.STATE_RINGING) {
                 BridgeLog.info("standalone_incoming_skipped_ended");
                 return;
             }
-            descriptor = Descriptor.incoming(registration, androidID);
+            String identityKey = incomingKey(registration, androidID);
+            boolean retry = incomingIdentities.get(identityKey) != null;
+            descriptor = incomingIdentities.getOrCreate(identityKey, () -> Descriptor.incoming(registration, androidID));
+            BridgeLog.info("standalone_incoming_identity call_id=" + DebugRedactor.safeIdentifier(androidID)
+                    + " call_uuid=" + DebugRedactor.safeIdentifier(descriptor.callUUID) + " retry=" + retry);
             JSONObject payload = identity(registration).put("event", "incoming_call")
                     .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
                     .put("generation", descriptor.generation).put("call_secret", descriptor.secret)
                     .put("number", event.optString("number", "")).put("caller_name", "")
+                    .put("slot_index", event.optInt("slot_index", -1))
                     .put("issued_at", Instant.now().toString())
                     .put("expires_at", Instant.now().plusSeconds(90).toString())
                     .put("media_transport", "legacy_pcm");
             // Keep ringing latency bounded; a failed call event stays queued for
             // the priority retry path instead of blocking the agent loop for 15s.
             postRelay(registration, relay, "/v2/events/call", payload, 5_000);
-            start(descriptor, generation);
+            // A call can end while HTTP is outstanding; never start its media afterward.
+            if (CallRepository.state(androidID) == android.telecom.Call.STATE_RINGING) start(descriptor, generation);
         } else if (descriptor != null && descriptor.androidID.isEmpty()) {
             bindOutgoing(descriptor);
             synchronized (lock) {
@@ -128,6 +155,7 @@ final class StandaloneCloudMediaManager implements Closeable {
                 }
             }
         }
+        if (descriptor == null) descriptor = incomingIdentities.get(incomingKey(registration, androidID));
         if (descriptor != null && !CloudCallTarget.owns(descriptor.androidID, androidID)) {
             // Call waiting, or a late event of an earlier call: it must not rewrite or end
             // the lifecycle of the call this session owns.
@@ -135,6 +163,11 @@ final class StandaloneCloudMediaManager implements Closeable {
             return;
         }
         if (descriptor != null) {
+            // HTTP lifecycle storage / Live Activity updates do not deliver a
+            // terminal media control to iPhone. Send the native terminal fact
+            // on this call's authenticated socket before HTTP or socket close.
+            if ("ended".equals(state)) notifyEnded(descriptor);
+            try {
             String phase = phase(state);
             if (!phase.isEmpty()) {
                 JSONObject lifecycle = identity(registration).put("event", "call_state")
@@ -147,7 +180,14 @@ final class StandaloneCloudMediaManager implements Closeable {
                     JSONObject owner = identity(registration).put("event", "call_owner")
                             .put("call_id", descriptor.callID).put("call_uuid", descriptor.callUUID)
                             .put("generation", descriptor.generation).put("owner", "android")
-                            .put("phase", phase);
+                            .put("phase", phase)
+                            .put("direction", direction)
+                            .put("number", event.optString("number", ""))
+                            .put("slot_index", event.optInt("slot_index", -1))
+                            .put("timestamp", Instant.now().toString());
+                    // Only an explicit native terminal fact can authorize a missed alert.
+                    if ("ended".equals(phase) && event.has("missed"))
+                        owner.put("missed", event.optBoolean("missed", false));
                     // Best effort: an older Relay may not know owner=android yet, and
                     // this notification must never block the authoritative call path.
                     try {
@@ -158,7 +198,10 @@ final class StandaloneCloudMediaManager implements Closeable {
                     }
                 }
             }
-            if ("ended".equals(state)) closeActive(descriptor);
+            } finally {
+                // HTTP failure/retry must not keep native-ended audio resources alive.
+                if ("ended".equals(state)) closeActive(descriptor);
+            }
         }
     }
 
@@ -248,16 +291,31 @@ final class StandaloneCloudMediaManager implements Closeable {
         }
     }
 
+    private void notifyEnded(Descriptor descriptor) {
+        CloudSession session;
+        synchronized (lock) {
+            session = active != null && active.descriptor.same(descriptor) ? active : null;
+        }
+        if (session != null) session.notifyEnded();
+    }
+
+    private final InetSocketAddress pcmEndpoint = new InetSocketAddress("127.0.0.1", 7580);
+
     private final class CloudSession implements Runnable, Closeable {
         final Descriptor descriptor;
         final CloudCallRetryPolicy.MediaRetry mediaRetry = new CloudCallRetryPolicy.MediaRetry();
         final RelayEgressGate.Generation relayGeneration;
         volatile boolean running = true;
+        final java.util.concurrent.atomic.AtomicBoolean terminalRequested = new java.util.concurrent.atomic.AtomicBoolean();
         volatile StandaloneWebSocket webSocket;
         volatile Socket pcm;
         volatile CloudPCMMediaPump mediaPump;
         volatile String mediaProtocol = "";
         volatile boolean mediaStarted;
+        volatile boolean earlyMediaAccepted;
+        private volatile CloudPCMAudioQueue.Policy audioBufferPolicy = CloudPCMAudioQueue.Policy.automatic();
+        private boolean audioBufferPolicyReceived;
+        final long earlyMediaDeadline = System.nanoTime() + 120_000_000_000L;
         int sequence;
 
         CloudSession(Descriptor descriptor) { this(descriptor, RelayEgressGate.shared.generation()); }
@@ -268,7 +326,7 @@ final class StandaloneCloudMediaManager implements Closeable {
 
         @Override public void run() {
             int reconnectFailures = 0;
-            while (running && relayGeneration.isCurrent()) {
+            while (running && !terminalRequested.get() && relayGeneration.isCurrent()) {
                 StandaloneWebSocket owner = null;
                 boolean connected = false;
                 try {
@@ -277,7 +335,7 @@ final class StandaloneCloudMediaManager implements Closeable {
                             + URLEncoder.encode(descriptor.secret, "UTF-8"));
                     owner = StandaloneWebSocket.connect(endpoint, "");
                     synchronized (this) {
-                        if (!running || !relayGeneration.isCurrent()) { closeSocket(owner); return; }
+                        if (!running || terminalRequested.get() || !relayGeneration.isCurrent()) { closeSocket(owner); return; }
                         webSocket = owner;
                     }
                     mediaRetry.authenticated();
@@ -345,7 +403,24 @@ final class StandaloneCloudMediaManager implements Closeable {
                 JSONObject control = new JSONObject(new String(message.payload(), StandardCharsets.UTF_8));
                 String action = control.optString("action", "");
                 if (!"answer".equals(action) && !"reject".equals(action) && !"end".equals(action)) continue;
+                // The socket token scopes a session; the frame must also name that
+                // exact call. Never let a delayed control operate the replacement.
+                if (!descriptor.callID.equals(control.optString("call_id"))
+                        || !descriptor.callUUID.equalsIgnoreCase(control.optString("call_uuid"))
+                        || descriptor.generation != control.optLong("generation", -1)) continue;
                 mediaProtocol = control.optString("media_protocol", "");
+                earlyMediaAccepted = control.optInt("early_media_version", 0) == 1;
+                // Only accept preferences after the authenticated socket + exact
+                // call identity checks above. Replays cannot retune a live call.
+                if ("answer".equals(action) && !audioBufferPolicyReceived) {
+                    audioBufferPolicy = CloudPCMAudioQueue.Policy.fromWire(
+                            control.optInt("audio_buffer_version", 0),
+                            control.optString("audio_buffer_mode", "automatic"),
+                            control.optInt("audio_buffer_ms", 0));
+                    audioBufferPolicyReceived = true;
+                    BridgeLog.info("cloud_audio_buffer target_ms=" + audioBufferPolicy.minimum * 20
+                            + " max_ms=" + audioBufferPolicy.maximum * 20);
+                }
                 JSONObject command = new JSONObject().put("command_id",
                                 control.optString("command_id", UUID.randomUUID().toString()))
                         .put("type", "call_control").put("action", action)
@@ -370,60 +445,116 @@ final class StandaloneCloudMediaManager implements Closeable {
             }
         }
 
+        private boolean earlyEligible() {
+            return earlyMediaAccepted && System.nanoTime() < earlyMediaDeadline && "outgoing".equals(descriptor.direction)
+                    && AndroidEarlyMedia.supported(context)
+                    && CallRepository.earlyMediaEligible(descriptor.androidID)
+                    && CallRepository.state(descriptor.androidID) == android.telecom.Call.STATE_DIALING;
+        }
+
+        private boolean duplexEligible() {
+            int state = CallRepository.state(descriptor.androidID);
+            return state == android.telecom.Call.STATE_ACTIVE || state == android.telecom.Call.STATE_HOLDING;
+        }
+
         private void runPCM(StandaloneWebSocket owner) {
-            long deadline = System.currentTimeMillis() + 45_000;
-            while (running && webSocket == owner && mediaStarted && System.currentTimeMillis() < deadline) {
-                Socket connection = new Socket();
-                try {
-                    connection.connect(new InetSocketAddress("127.0.0.1", 7580), 2_000);
-                    connection.setTcpNoDelay(true);
-                    connection.setSoTimeout(5_000);
-                    OutputStream output = connection.getOutputStream();
-                    output.write("AIRSIMPCM1\n".getBytes(StandardCharsets.US_ASCII));
-                    output.flush();
-                    byte[] ready = new byte[11];
-                    new DataInputStream(connection.getInputStream()).readFully(ready);
-                    if (!"AIRSIMREADY".equals(new String(ready, StandardCharsets.US_ASCII))) {
-                        connection.close();
-                        throw new java.io.IOException("PCM handshake failed");
-                    }
-                    connection.setSoTimeout(0);
-                    synchronized (this) {
-                        if (!running || webSocket != owner || !mediaStarted) {
-                            closeSocket(connection); return;
+            long startupDeadline = 0; // Retry budget begins when duplex is actually needed.
+            Socket connection = null;
+            Boolean receiveOnly = null;
+            boolean earlyFailed = false;
+            try {
+                while (running && webSocket == owner && mediaStarted && relayGeneration.isCurrent()) {
+                    bindOutgoing(descriptor);
+                    boolean duplex = duplexEligible();
+                    boolean early = !duplex && !earlyFailed && earlyEligible();
+                    // Revoke the old media before opening a new direction. This
+                    // loop also observes Telecom independently of slow Relay POSTs.
+                    if (connection != null && (receiveOnly ? !early : !duplex)) {
+                        synchronized (this) {
+                            if (pcm == connection) {
+                                pcm = null;
+                                RemoteAudioSessionRegistry.setCloud(connection, false, "");
+                                closeSocket(mediaPump); mediaPump = null;
+                            }
                         }
-                        pcm = connection;
-                        boolean[] first = {true};
-                        mediaPump = new CloudPCMMediaPump(connection.getInputStream(), output, frame -> {
-                            owner.writeBinary(encodePCM(frame));
-                            if (first[0]) { first[0] = false; owner.writeText(status("pcm_first_frame", "")); }
-                        }, error -> {
-                            if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
-                            // Only the owning connection is closed; old workers cannot touch a new call/socket.
-                            closeSocket(owner);
-                        }, sessions);
-                        mediaPump.start();
-                        if (!descriptor.androidID.isBlank()) {
-                            RemoteAudioSessionRegistry.setCloud(connection, true, descriptor.androidID);
+                        closeSocket(connection); connection = null;
+                        if (Boolean.TRUE.equals(receiveOnly) && !duplex)
+                            owner.writeText(status("early_media_unavailable", "运营商下行已停止"));
+                    }
+                    if (connection == null && (duplex || early)) {
+                        final boolean rxOnly = early;
+                        if (!rxOnly && startupDeadline == 0) startupDeadline = System.nanoTime() + 45_000_000_000L;
+                        final Socket next = new Socket();
+                        try {
+                            next.connect(pcmEndpoint, 2_000);
+                            next.setTcpNoDelay(true); next.setSoTimeout(5_000);
+                            OutputStream output = next.getOutputStream();
+                            output.write((rxOnly ? "AIRSIMRX01\n" : "AIRSIMPCM1\n").getBytes(StandardCharsets.US_ASCII));
+                            output.flush();
+                            byte[] ready = new byte[11];
+                            new DataInputStream(next.getInputStream()).readFully(ready);
+                            if (!"AIRSIMREADY".equals(new String(ready, StandardCharsets.US_ASCII)))
+                                throw new java.io.IOException("PCM handshake failed");
+                            next.setSoTimeout(0);
+                            synchronized (this) {
+                                if (!running || webSocket != owner || !mediaStarted
+                                        || (rxOnly ? !earlyEligible() : !duplexEligible())) {
+                                    closeSocket(next); continue;
+                                }
+                                pcm = next;
+                                // Capability ACK precedes the first binary frame.
+                                // No ACTIVE is inferred from a successful audio handshake.
+                                owner.writeText(status(rxOnly ? "early_media_ready_v1" : "active", ""));
+                                boolean[] first = {true};
+                                mediaPump = new CloudPCMMediaPump(next.getInputStream(), output, frame -> {
+                                    if (!running || pcm != next || webSocket != owner
+                                            || (rxOnly ? !earlyEligible() : !duplexEligible())) return;
+                                    owner.writeBinary(encodePCM(frame));
+                                    if (first[0]) { first[0] = false; owner.writeText(status("pcm_first_frame", "")); }
+                                }, error -> {
+                                    if (running && pcm == next && webSocket == owner) {
+                                        BridgeLog.error("standalone_pcm_bridge_failed", error);
+                                        // Keep signaling alive even when optional early media fails.
+                                        closeSocket(next);
+                                    }
+                                }, sessions, rxOnly, audioBufferPolicy);
+                                mediaPump.start();
+                                RemoteAudioSessionRegistry.setCloud(next, true, descriptor.androidID);
+                            }
+                            connection = next; receiveOnly = rxOnly;
+                        } catch (Exception error) {
+                            closeSocket(next);
+                            if (rxOnly) {
+                                earlyFailed = true;
+                                owner.writeText(status("early_media_unavailable", "此设备未提供可用的运营商下行音频"));
+                            } else if (System.nanoTime() > startupDeadline) throw error;
                         }
                     }
-                    owner.writeText(status("pcm_listening", ""));
-                    owner.writeText(status("active", ""));
-                    owner.writeText(status("pcm_ready", ""));
-                    return;
-                } catch (Exception error) {
-                    closeSocket(connection);
-                    synchronized (this) {
-                        if (pcm == connection) {
-                            RemoteAudioSessionRegistry.setCloud(connection, false, "");
-                            closeSocket(mediaPump); mediaPump = null; pcm = null;
+                    if (connection != null && connection.isClosed()) {
+                        if (Boolean.TRUE.equals(receiveOnly)) {
+                            earlyFailed = true;
+                            owner.writeText(status("early_media_unavailable", "运营商下行已停止"));
                         }
+                        synchronized (this) {
+                            if (pcm == connection) {
+                                pcm = null;
+                                RemoteAudioSessionRegistry.setCloud(connection, false, "");
+                                closeSocket(mediaPump); mediaPump = null;
+                            }
+                        }
+                        connection = null;
                     }
-                    if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
+                    Thread.sleep(connection == null && duplex ? 750 : 50);
                 }
-                if (running) {
-                    try { Thread.sleep(750); }
-                    catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+            } catch (Exception error) {
+                if (running && webSocket == owner) BridgeLog.error("standalone_pcm_bridge_failed", error);
+            } finally {
+                synchronized (this) {
+                    if (webSocket == owner) {
+                        RemoteAudioSessionRegistry.setCloud(pcm, false, "");
+                        closeSocket(mediaPump); mediaPump = null; closeSocket(pcm); pcm = null;
+                        mediaStarted = false;
+                    }
                 }
             }
         }
@@ -449,6 +580,31 @@ final class StandaloneCloudMediaManager implements Closeable {
                     .put("call_uuid", descriptor.callUUID).put("generation", descriptor.generation);
             if (!message.isEmpty()) result.put("message", message);
             return result.toString();
+        }
+
+        void notifyEnded() {
+            if (!terminalRequested.compareAndSet(false, true)) return;
+            StandaloneWebSocket owner = webSocket;
+            if (!running || owner == null || !relayGeneration.isCurrent()) return;
+            var task = new java.util.concurrent.FutureTask<Void>(() -> {
+                if (running && relayGeneration.isCurrent() && webSocket == owner) {
+                    owner.writeText(status("ended", ""));
+                }
+                return null;
+            });
+            try {
+                terminalWrites.execute(task);
+                task.get(TERMINAL_WRITE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+                BridgeLog.info("standalone_cloud_terminal_control_sent");
+            } catch (Exception error) {
+                task.cancel(true);
+                // close() takes no WebSocket write monitor; it releases a blocked writer.
+                // Only this captured call socket is closed, never a replacement session.
+                closeSocket(owner);
+                if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+                BridgeLog.info("standalone_cloud_terminal_control_failed type="
+                        + error.getClass().getSimpleName());
+            }
         }
 
         @Override public synchronized void close() {
@@ -498,7 +654,12 @@ final class StandaloneCloudMediaManager implements Closeable {
             new SecureRandom().nextBytes(secret);
             StringBuilder encoded = new StringBuilder(64);
             for (byte value : secret) encoded.append(String.format("%02x", value & 0xff));
-            Descriptor result = new Descriptor("android-" + System.currentTimeMillis(), UUID.randomUUID().toString(), 1,
+            // Telecom assigns a UUID. Share it across LAN, iPhone and Watch pushes.
+            // Keep compatibility with older/custom repositories using non-UUID IDs.
+            String incomingUUID;
+            try { incomingUUID = UUID.fromString(androidID).toString(); }
+            catch (IllegalArgumentException invalid) { incomingUUID = UUID.randomUUID().toString(); }
+            Descriptor result = new Descriptor(androidID, incomingUUID, 1,
                     encoded.toString(), registration.optString("relay_url"), "incoming", androidID);
             result.validate();
             return result;
@@ -544,6 +705,7 @@ final class StandaloneCloudMediaManager implements Closeable {
         synchronized (lock) {
             if (active != null) active.close();
             active = null;
+            incomingIdentities.clear();
         }
     }
 }

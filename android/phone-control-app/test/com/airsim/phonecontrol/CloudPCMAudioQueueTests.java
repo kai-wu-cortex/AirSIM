@@ -37,7 +37,38 @@ public final class CloudPCMAudioQueueTests {
         check(CloudPCMAudioQueue.nextTickNanos(0, 1_000_000) == 20_000_000, "regular 20 ms cadence");
         check(CloudPCMAudioQueue.nextTickNanos(0, 500_000_000) == 520_000_000,
                 "blocked socket must not cause catch-up bursts");
+        bufferPreferences();
         System.out.println("CloudPCMAudioQueueTests passed");
+    }
+    private static void bufferPreferences() {
+        var policy = CloudPCMAudioQueue.Policy.fromWire(1, "manual", 720);
+        var manual = new CloudPCMAudioQueue(true, policy);
+        byte[] pcm = new byte[320];
+        for (int i = 0; i < 35; i++) {
+            manual.offer(pcm, i * 20);
+            check(manual.poll(i * 20) == null, "manual waits for 36 frames");
+        }
+        manual.offer(pcm, 700);
+        for (int i = 0; i < 20; i++) check(manual.poll(720 + i * 20) != null, "buffer absorbs 400ms arrival gap");
+        check(manual.underruns() == 0 && manual.size() == 16, "gap uses real buffered audio");
+        for (int i = 0; i < 30; i++) manual.poll(1200 + i * 20);
+        check(manual.targetFrames() == 36, "manual target does not grow on outage");
+        manual.clear();
+        for (int i = 0; i < 300; i++) manual.offer(pcm, 2000 + i * 20);
+        check(manual.size() == 38 && manual.targetFrames() == 36, "manual memory and latency bounded");
+        var stable = new CloudPCMAudioQueue(true, CloudPCMAudioQueue.Policy.fromWire(1, "stable", 0));
+        for (int i = 0; i < 100; i++) stable.offer(pcm, i * 1000);
+        check(stable.targetFrames() == 36 && stable.size() <= 38, "stable mode tolerates larger jitter");
+        for (int i = 0; i < 3000; i++) { stable.offer(pcm, 100000 + i * 20); stable.poll(100000 + i * 20); }
+        check(stable.targetFrames() == 12 && stable.size() <= 14, "stable mode recovers its baseline");
+        check(CloudPCMAudioQueue.Policy.fromWire(0, "manual", 720).minimum == 4, "old client defaults to auto");
+        check(CloudPCMAudioQueue.Policy.fromWire(1, "manual", Integer.MAX_VALUE).minimum == 4, "invalid wire value rejected");
+        check(CloudPCMAudioQueue.Policy.fromWire(1, "unknown", 720).minimum == 4, "unknown mode rejected");
+        var capture = new CloudPCMAudioQueue(false, policy);
+        capture.offer(pcm, 0);
+        check(capture.poll(0) != null, "large playback reserve never delays microphone capture");
+        for (int i = 0; i < 100; i++) capture.offer(pcm, 0);
+        check(capture.size() == 12 && capture.poll(500) == null, "capture backlog and age remain unchanged");
     }
     private static int sample(byte[] frame) { return (short) ((frame[0] & 0xff) | (frame[1] << 8)); }
     private static void check(boolean value, String message) { if (!value) throw new AssertionError(message); }

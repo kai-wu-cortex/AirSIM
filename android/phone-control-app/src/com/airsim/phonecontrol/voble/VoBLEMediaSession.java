@@ -59,6 +59,12 @@ public final class VoBLEMediaSession implements Closeable {
     private volatile byte[] mediaKey;
     private volatile boolean running;
     private volatile boolean downlinkDiscontinuity;
+    private java.util.function.BooleanSupplier captureAllowed = () -> true;
+    private volatile boolean earlyKeepaliveEnabled;
+    private final AtomicLong earlyKeepalives = new AtomicLong();
+    public void setEarlyKeepaliveEnabled(boolean enabled) { earlyKeepaliveEnabled = enabled; }
+    public long earlyKeepalives() { return earlyKeepalives.get(); }
+    public void setCaptureAllowed(java.util.function.BooleanSupplier allowed) { captureAllowed = allowed; }
 
     public VoBLEMediaSession(
             InetSocketAddress endpoint, BridgeFactory bridgeFactory, DownlinkSink downlink) {
@@ -95,11 +101,21 @@ public final class VoBLEMediaSession implements Closeable {
             return thread;
         });
         pumps.execute(this::pumpDownlink);
-        pumps.execute(this::pumpUplink);
+        if (!opened.receiveOnly()) pumps.execute(this::pumpUplink);
+        else pumps.execute(() -> {
+            try {
+                while (running) {
+                    if (!captureAllowed.getAsBoolean()) { stopFromPump(); return; }
+                    Thread.sleep(50);
+                }
+            } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        });
     }
 
     public synchronized boolean onUplinkFragment(Identity call, byte[] fragment) {
-        if (!running || identity == null || !identity.equals(call)) return false;
+        if (!running || identity == null || !identity.equals(call) || bridge == null) return false;
+        boolean early = bridge.receiveOnly();
+        if (early && (!earlyKeepaliveEnabled || !captureAllowed.getAsBoolean())) return false;
         try {
             VoBLEProtocol.AudioPacket packet = uplinkReassembler.append(
                     fragment, System.currentTimeMillis());
@@ -112,6 +128,15 @@ public final class VoBLEMediaSession implements Closeable {
             Encrypted encrypted = new Encrypted(packet.payload(), packet.authenticationTag());
             byte[] encoded = decrypt(encrypted, mediaKey, true, packet.streamId(),
                     packet.sequence(), packet.sampleTimestamp());
+            // Stream 2 is negotiated early-media transport metadata, not PCM.
+            // Authenticate and replay-check it under this call's nonce-derived key.
+            if (early) {
+                if (packet.streamId() != 2 || encoded.length != 0) return false;
+                uplinkSequences.put(packet.streamId(), packet.sequence());
+                earlyKeepalives.incrementAndGet();
+                return true;
+            }
+            if (encoded.length != 160) return false;
             byte[] pcm = decodeMuLaw(encoded);
             uplinkSequences.put(packet.streamId(), packet.sequence());
             uplinkQueue.offer(packet.sequence(), pcm);
@@ -123,6 +148,7 @@ public final class VoBLEMediaSession implements Closeable {
     }
 
     public boolean matches(Identity call) { return running && call != null && call.equals(identity); }
+    public boolean receiveOnly() { return bridge != null && bridge.receiveOnly(); }
     public boolean ready() { return running && bridge != null && bridge.ready(); }
     public Stats stats() {
         return new Stats(downlinkFrames.get(), uplinkFrames.get(),
@@ -135,6 +161,7 @@ public final class VoBLEMediaSession implements Closeable {
         try {
             while (running) {
                 byte[] pcm = readFrame(bridge.input(), 320);
+                if (!captureAllowed.getAsBoolean()) throw new IOException("call no longer permits capture");
                 byte[] encoded = encodeMuLaw(pcm);
                 long current = sequence++ & 0xffff_ffffL;
                 byte[] key = keySnapshot();
@@ -218,6 +245,13 @@ public final class VoBLEMediaSession implements Closeable {
     private synchronized byte[] keySnapshot() throws GeneralSecurityException {
         if (!running || mediaKey == null) throw new GeneralSecurityException("media session stopped");
         return mediaKey.clone();
+    }
+
+    public static byte[] earlyMediaKey(byte[] key, String nonce) throws GeneralSecurityException {
+        if (nonce == null || !nonce.matches("[a-fA-F0-9-]{36}")) throw new GeneralSecurityException("invalid media nonce");
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return mac.doFinal(("airsim-early-media-v1:" + nonce).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     public static Encrypted encrypt(

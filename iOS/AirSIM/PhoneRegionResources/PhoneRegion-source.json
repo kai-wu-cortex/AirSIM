@@ -1,0 +1,15 @@
+{
+  "revision": "5ea78f46ccc1a258012344801ce04eb6eb4c55da",
+  "mobile_supplement": {
+    "repository": "https://github.com/ls0f/phone",
+    "revision": "bfbfe19cfe5024616a28327e81178d289bc7720d",
+    "sha256": "cb17a69eafa68d7706cfcc68d47cdf165ea916e9d5c476b4dd5f06cf74aed23d",
+    "added_prefixes": 168559,
+    "license": "MIT (declared in bundled upstream README)",
+    "snapshot": "2312"
+  },
+  "source_sha256": "d764aabe5dfd5a74abe84bfd6599f67af875ab80bd593b29822581e7462a6ce9",
+  "records": 298746,
+  "regions": 736,
+  "format": "ASREG001, little-endian UInt64 prefix/UInt16 region index"
+}

@@ -1,5 +1,7 @@
 # AirSIM iOS 与 watchOS
 
+2026-11-08：[Apps v0.9.8.24](../docs/releases/0.9.8.24.md)，iOS／Watch／Widget `0.9.8（175）`。包含云端音频缓冲、兼容端短信加密、SIM 与未接通知和运营商语音开关；AVF Linux Agent 未更新，不能仅通过更新 Bridge 获得新媒体能力。发布及实机验证范围见说明；以下旧版本记录保留追溯。
+
 2026-10-31 发布准备：[Apps v0.9.8.21](../docs/releases/0.9.8.21.md)，iOS／Watch／Live Activity `0.9.8 (162)`。包含 PR #18、后台 VoWLAN 恢复与 CallKit 无区号号码原样展示；TestFlight 使用 production APNs，上传、处理及外测可用状态见发布说明。下文旧候选状态仅作历史记录，不能代表当前发布状态。
 
 2026-10-30 未发布修复：[APNs 接听后的本地音频启动竞态](../docs/vowlan-first-call-startup.md)。兼容通话的音频任务独立于轮询；前后台刷新不再因轮询世代或调用方取消而关闭已握手的 PCM。挂断、停止、CallKit 停用／重置仍取消在途启动，回滚记录固定原因码，不记录通话身份或 PCM。未安装、发布或上传 TestFlight，锁屏 APNs 接听与双向声音须真机复验。
@@ -13,6 +15,24 @@
 0.9.8.1 新增应用更新入口：首次安装／升级启动展示包内版本说明；「设置 → 关于」可重看和手动检查新版。前台每日最多自动检查一次（失败也限频），不自动下载／安装 IPA，不访问 Relay；TestFlight 可用性与 GitHub 发布分开提示。[行为、维护和验证边界](../docs/app-updates.md)。
 
 本轮应用版本为 [0.9.8（92）](../docs/releases/0.9.8.md)：本地双通道／多安卓归属、配对与 Verbose 改进、云端 Android 挂断回执兼容及设置顶部的派生本地模式开关。公开 full／sideload IPA 均须重签；TestFlight 上传状态单独核对。后文 91 及更早版本为历史记录。最新真机验收尚未全部完成，详见发布说明。
+
+## 未发布功能：端到端加密云端短信
+
+见 [issue #24](https://github.com/kai-wu-cortex/AirSIM/issues/24) 第一阶段：Standalone 收到的短信经 Relay 推给 iPhone 时，Relay 和 APNs 只看到密文。需要 Relay（[#25](https://github.com/kai-wu-cortex/AirSIM/pull/25)，已合并，部署后生效）与安卓 Standalone（[#27](https://github.com/kai-wu-cortex/AirSIM/pull/27)）也支持；任何一端是旧版本时照旧明文。
+
+- **何时启用**：云端（非「本地模式配对」）配对时，Relay 的 `/healthz` 声明 `capabilities.e2e_sms: 1`、安卓在 Bonjour TXT（`e2e=1`）或 `/pair/v1/info` 中声明支持、且共享钥匙串组可写，iPhone 才为这次配对生成 32 字节钥匙，只放进六位码加密的配对包（`e2e_key`）。注册信息本身、之后的 `/api/push/register` 和 Relay 注册都不含它。已在用云端的用户需要在同一 Wi-Fi 下重新配对一次；成功提示带「云端短信已加密」。
+- **钥匙保存**：配对回执未经认证，钥匙与 VoWLAN 密钥一起暂存，安卓通过身份验证（手动地址或 HTTPS 域名配对的端口证明，或签名健康检查）后才按 agentID 写入钥匙串组 `$(AppIdentifierPrefix)airsim.e2e-sms`，首次解锁后可读，不同步、不随备份迁到其他设备。每次云端配对换新钥匙；不带钥匙的云端配对删除旧钥匙；本地模式配对不改动；删除已配对设备不删除钥匙（下一次云端配对会替换或删除它）。
+- **通知**：Relay 推送占位文案「AirSIM／新短信」并带 `mutable-content`。`AirSIMNotificationService` 解密后换成真实发件人、正文和会话分组，副标题与明文推送一样显示「接收于 SIM n」或「SIM 未知」；无法解密时显示「收到一条加密短信，但无法解密，请在同一 Wi-Fi 下重新配对」，重启后首次解锁前显示「解锁 iPhone 后，在 AirSIM 中查看这条短信」。
+- **历史与防伪**：App 收到推送时同样解密后再写历史，截断标记的处理与明文推送的 `content_truncated` 相同。接收卡槽（`sim_slot`，回复时据此选卡）只取密文里的值，不采用推送里另带的明文字段。对已有钥匙的安卓，明文短信推送不写历史；推送若经过扩展，通知改为「收到一条未加密的短信推送，已忽略」。
+
+已知限制：
+
+- 防伪按安卓设备区分：Relay 仍可用一台没有钥匙（或不存在）的安卓编号推送明文；不带 `mutable-content` 的推送不经过扩展，横幅显示 Relay 发来的原文（但不写入历史）。
+- 钥匙跟随 Relay：在 iPhone 上更换 Relay 地址会清除短信钥匙，云端短信回到明文，需在新 Relay 下重新配对才能再次加密。安卓在 Standalone 与 AVF 之间切换后也要重新配对；在此之前，这台安卓发来的明文短信不会写入历史（通知仍会显示）。
+- 自动发现配对在通话网关身份验证完成前只把钥匙暂存在内存；此时退出 AirSIM，之后的云端短信会提示无法解密，需要重新配对。重新配对时 Relay 不可达（已重试三次）或不支持，会关闭原有加密，成功提示会写明「云端短信加密已关闭」。
+- 云端推送的短信不会自动复制验证码，与加密前相同；只有局域网和蓝牙路径会复制。
+- 签名构建必须为主 App 和扩展开启同一个 Keychain Sharing 组。未开启时（包括未签名构建和重签时漏掉 entitlements）App 不会下发钥匙，云端短信保持明文。
+- 只在 GitHub Actions 的 Xcode 27 模拟器上完成未签名构建和 XCTest；尚未在真机上验证钥匙串共享、APNs、通知扩展和 Apple Watch 上的镜像通知。
 
 ## 未发布修复：短信会话与 Tab 栏转场
 
@@ -108,6 +128,7 @@ iOS/AirSIM.xcodeproj
 - `AirSIM`：iPhone / iPad 主 App
 - `AirSIMWatchApp`：Apple Watch App
 - `AirSIMLiveActivityExtension`：锁屏与灵动岛实时活动
+- `AirSIMNotificationService`：解密端到端加密的云端短信通知
 - `AirSIMTests`：传输选择和协议边界测试
 
 ## 客户端能力
@@ -144,7 +165,7 @@ Standalone 的本地 Gateway 与云端通话描述仍分别生成后端 ID；两
 
 ### 短信收发与推送
 
-AirSIM 与 DJOneHub 采用相同的通道分工，但使用各自独立的 Relay 和 APNs topic：iPhone 发短信时，VoWLAN 就绪则直接调用 Agent；离线且云端模式开启时，向 Relay 提交经设备鉴权的 `send_sms` 命令，由 AVF Agent 执行并回传结果。Agent 收到短信后，把带 `delivery_id` 的事件送到 Relay；Relay 使用主 App topic 的普通 APNs `alert` 通知 iPhone，App 保存本地历史并按 `delivery_id` 与下次 Agent 同步去重。点开通知会进入发件人会话，冷启动时也会保留这一导航请求。
+AirSIM 与 DJOneHub 采用相同的通道分工，但使用各自独立的 Relay 和 APNs topic：iPhone 发短信时，VoWLAN 就绪则直接调用 Agent；离线且云端模式开启时，向 Relay 提交经设备鉴权的 `send_sms` 命令，由 AVF Agent 执行并回传结果。Agent 收到短信后，把带 `delivery_id` 的事件送到 Relay；Relay 使用主 App topic 的普通 APNs `alert` 通知 iPhone，App 保存本地历史并按 `delivery_id` 与下次 Agent 同步去重。点开通知会进入发件人会话，冷启动时也会保留这一导航请求。启用端到端加密后，Relay 推送里只有密文，由通知扩展和 App 各自解密，见上文「端到端加密云端短信」。
 
 PushKit VoIP push 仅用于真实来电并交给 CallKit，不能拿它承载短信正文或唤醒发信任务。短信通知需要用户允许普通通知、iPhone 已取得 alert token，且 Relay、Agent 注册与心跳正常。普通 APNs 的送达及后台执行由 iOS 决定；正式验收必须分别测试前台、锁屏、冷启动和云端发信，不应把控制面自检通过等同于短信实测通过。
 
@@ -202,10 +223,11 @@ xcodebuild -project iOS/AirSIM.xcodeproj \
 1. 在 Xcode 为 `AirSIM` 选择自己的 Team，将 Bundle Identifier 改为自己控制的唯一标识，例如 `org.example.airsim`。
 2. 将 Watch App 改为主标识加 `.watchkitapp`，例如 `org.example.airsim.watchkitapp`，并将 `WKCompanionAppBundleIdentifier` 设置为主 App 标识。
 3. 将 Live Activity Extension 改为主标识加 `.liveactivity`，例如 `org.example.airsim.liveactivity`；测试 Target 可使用主标识加 `.tests`。
-4. 在 Apple Developer 为三个正式 Target 创建 Explicit App ID，启用所需 capabilities，并重新生成属于自己 Team 的开发/分发 provisioning profile。
-5. 在 Relay 的 `ALLOWED_BUNDLE_ID` 使用同一个主 App 标识；PushKit、Watch 和 Live Activity 的 APNs topic 会以它为基础生成。
+4. 将 Notification Service Extension 改为主标识加 `.notificationservice`，例如 `org.example.airsim.notificationservice`。主 App 与它都要在 Signing & Capabilities 开启 Keychain Sharing，共用 `$(AppIdentifierPrefix)airsim.e2e-sms`（工程的 entitlements 已声明，两个 Info.plist 的 `AirSIME2EKeychainGroup` 与之对应）。扩展不需要 Push Notifications capability。
+5. 在 Apple Developer 为四个正式 Target 创建 Explicit App ID，启用所需 capabilities，并重新生成属于自己 Team 的开发/分发 provisioning profile。
+6. 在 Relay 的 `ALLOWED_BUNDLE_ID` 使用同一个主 App 标识；PushKit、Watch 和 Live Activity 的 APNs topic 会以它为基础生成。
 
-只替换签名证书而保留其他人的 Bundle ID 不会获得对应 App ID/APNs topic 的权限。主 App、Watch、Live Activity、provisioning profile 与 Relay 必须使用同一套标识关系。
+只替换签名证书而保留其他人的 Bundle ID 不会获得对应 App ID/APNs topic 的权限。主 App、Watch、Live Activity、Notification Service Extension、provisioning profile 与 Relay 必须使用同一套标识关系。
 
 Relay 地址通过 `AIRSIM_PUSH_RELAY_URL` 注入，APNs 环境通过 `AIRSIM_APNS_ENVIRONMENT` 配置。Debug 开发签名对应 APNs `sandbox`，Release/TestFlight 对应 `production`。
 
@@ -213,7 +235,7 @@ Relay 地址通过 `AIRSIM_PUSH_RELAY_URL` 注入，APNs 环境通过 `AIRSIM_AP
 
 新安装需要重新完成三星配对、通知授权、CallKit/PushKit 注册和 Watch 配套安装。
 
-GitHub Release 中的 `AirSIM-iOS-<version>-unsigned.ipa` 是供重签的 arm64 构建产物，不包含 `_CodeSignature` 或 `embedded.mobileprovision`，不能直接安装。不能只签主 App：必须同步替换并签署 Watch App 与 Live Activity Extension 的 Bundle ID、entitlements 和 provisioning profile。公开 Release 不应上传包含开发设备 UDID 的 development/ad hoc IPA。
+GitHub Release 中的 `AirSIM-iOS-<version>-unsigned.ipa` 是供重签的 arm64 构建产物，不包含 `_CodeSignature` 或 `embedded.mobileprovision`，不能直接安装。不能只签主 App：必须同步替换并签署 Watch App、Live Activity Extension 与 Notification Service Extension 的 Bundle ID、entitlements 和 provisioning profile。重签时若丢掉共享钥匙串组，App 不会下发短信钥匙，云端短信保持明文。公开 Release 不应上传包含开发设备 UDID 的 development/ad hoc IPA。
 
 ### 干净打包与侧载候选包
 

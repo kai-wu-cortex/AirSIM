@@ -63,25 +63,26 @@
 
 需要有效的 Apple Developer Program 团队和一台可用于真机调试的 Mac。本仓库是源码可见、仅限非商业用途的项目，不附带原作者的 App ID、开发团队权限、证书或 provisioning profile。仓库中的 `com.example.airsim` 只是不可直接发布的占位符；每位部署者都必须换成自己控制的唯一反向域名标识，并使用自己的 Apple Developer Team 重新签名。
 
-例如，拥有 `example.org` 的部署者可以选择 `org.example.airsim`。为主 App、Watch App 和 Live Activity Extension 创建三个 Explicit App ID：
+例如，拥有 `example.org` 的部署者可以选择 `org.example.airsim`。为主 App、Watch App、Live Activity Extension 和 Notification Service Extension 创建四个 Explicit App ID：
 
 | Target | 占位 Bundle ID | 替换规则 |
 | --- | --- | --- |
 | AirSIM | `com.example.airsim` | 改成部署者自己的主 Bundle ID，例如 `org.example.airsim` |
 | AirSIMWatchApp | `com.example.airsim.watchkitapp` | 必须是主 Bundle ID 加 `.watchkitapp` |
 | AirSIMLiveActivityExtension | `com.example.airsim.liveactivity` | 必须是主 Bundle ID 加 `.liveactivity` |
+| AirSIMNotificationService | `com.example.airsim.notificationservice` | 必须是主 Bundle ID 加 `.notificationservice`；没有自己的 APNs topic |
 
 首次构建前必须同时修改：
 
-1. Xcode → Signing & Capabilities 中三个 Target 的 Team 和 Bundle Identifier。
+1. Xcode → Signing & Capabilities 中四个 Target 的 Team 和 Bundle Identifier。
 2. Watch Target 的 `WKCompanionAppBundleIdentifier`，使其等于新的主 App Bundle ID。
 3. `wrangler.toml` 的 `ALLOWED_BUNDLE_ID`，使其等于新的主 App Bundle ID。
-4. Apple Developer 中三个 Explicit App ID、capabilities 和对应 provisioning profile。
+4. Apple Developer 中四个 Explicit App ID、capabilities 和对应 provisioning profile。
 5. Debug/Release 实际签名 entitlement、Relay 注册字段和所有 APNs topic。
 
-不要尝试注册或签名仓库历史版本中的原作者标识；它不属于源码使用者。仅修改 `DEVELOPMENT_TEAM` 也不够，三个 Bundle ID、Watch companion 关系和 Relay allowlist 必须一起修改。
+不要尝试注册或签名仓库历史版本中的原作者标识；它不属于源码使用者。仅修改 `DEVELOPMENT_TEAM` 也不够，四个 Bundle ID、Watch companion 关系和 Relay allowlist 必须一起修改。
 
-主 App 和 Watch App 需要 Push Notifications capability。主 App 的 Background Modes 至少包含 Voice over IP 和 Remote notifications；本项目还使用后台音频。Live Activity Target 需要正确的 ActivityKit 配置。
+主 App 和 Watch App 需要 Push Notifications capability。主 App 的 Background Modes 至少包含 Voice over IP 和 Remote notifications；本项目还使用后台音频。Live Activity Target 需要正确的 ActivityKit 配置。主 App 与 Notification Service Extension 需要 Keychain Sharing，共用 `$(AppIdentifierPrefix)airsim.e2e-sms`，用于端到端加密短信；未开启时 App 不会启用加密。
 
 仓库的主 App entitlement 包含：
 
