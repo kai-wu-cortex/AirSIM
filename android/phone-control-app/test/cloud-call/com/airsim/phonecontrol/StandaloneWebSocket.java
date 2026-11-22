@@ -20,7 +20,7 @@ final class StandaloneWebSocket implements Closeable {
     Message read() throws Exception { return reader.run(); }
     final java.util.List<String> text = new java.util.concurrent.CopyOnWriteArrayList<>();
     final java.util.concurrent.atomic.AtomicInteger frames = new java.util.concurrent.atomic.AtomicInteger();
-    void writeText(String text) throws java.io.IOException {
+    synchronized void writeText(String text) throws java.io.IOException {
         if (writeEntered != null) {
             writeEntered.countDown();
             while (releaseWrite.getCount() > 0) {

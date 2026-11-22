@@ -19,6 +19,8 @@ public final class CloudCallManagerTests {
         endedControlPrecedesHTTPAndUsesOwnedIdentity();
         terminalControlFailureKeepsCleanup();
         blockedTerminalControlKeepsCleanup();
+        blockedTerminalMonitorKeepsCleanup();
+        terminalRetryNeverEndsReplacementLifecycle();
         genericCloseDoesNotClaimRemoteHangup();
         droppedEndedClosesOnlyOwner();
         pendingDialBindsOnlyUniqueNewMatchingCall();
@@ -378,7 +380,10 @@ public final class CloudCallManagerTests {
                     && control.optLong("generation") == 1, "full exact lifecycle identity required");
             check(f.active() == null && socket.closed, "HTTP failure must still clean up native-ended owner");
             f.relay.onState = null;
+            int statesBeforeRetry = f.relay.states.size();
             f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+            check(f.relay.states.size() == statesBeforeRetry + 1, "released outgoing call retains exact identity for HTTP retry");
+            check("new-cloud-call".equals(f.relay.states.get(statesBeforeRetry).optString("call_id")), "retry cannot change identity");
             check(f.active() == null && socket.closed, "HTTP retry must still clean up owner");
         }
     }
@@ -416,6 +421,49 @@ public final class CloudCallManagerTests {
                         "deadline must preserve HTTP ended and cleanup");
                 check(socket.text.isEmpty(), "cancelled write cannot send after close");
             } finally { socket.close(); worker.join(2000); }
+        }
+    }
+
+    private static void blockedTerminalMonitorKeepsCleanup() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var socket = new StandaloneWebSocket(() -> { throw new AssertionError("no reads"); });
+            set(f.active(), "webSocket", socket);
+            var held = new java.util.concurrent.CountDownLatch(1);
+            var release = new java.util.concurrent.CountDownLatch(1);
+            Thread audioWriter = new Thread(() -> {
+                synchronized (socket) {
+                    held.countDown();
+                    try { release.await(); } catch (InterruptedException ignored) {}
+                }
+            });
+            audioWriter.setDaemon(true); audioWriter.start();
+            try {
+                check(held.await(2, java.util.concurrent.TimeUnit.SECONDS), "audio owns the writer monitor");
+                long started = System.nanoTime();
+                f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+                check((System.nanoTime()-started)/1_000_000 < 2500, "monitor contention has a deadline");
+                check(f.active() == null && socket.closed && f.relay.states.size() == 1,
+                        "cleanup and HTTP do not wait for audio writer monitor");
+                check(socket.text.isEmpty(), "no terminal message while audio monitor is held");
+            } finally { release.countDown(); audioWriter.join(2000); }
+        }
+    }
+
+    private static void terminalRetryNeverEndsReplacementLifecycle() throws Exception {
+        try (var f = new Fixture("owner")) {
+            var attempts = new java.util.concurrent.atomic.AtomicInteger();
+            f.relay.onState = () -> {
+                attempts.incrementAndGet();
+                throw new RelayHTTPException(409, "{\"reason\":\"identity_mismatch\",\"lifecycle\":{\"call_id\":\"replacement\",\"call_uuid\":\"22222222-2222-4222-8222-222222222222\",\"generation\":2}}");
+            };
+            for (int retry=0; retry<2; retry++) {
+                try {
+                    f.manager.handleCallEvent(registration(), event("owner", "outgoing", "ended"), f.relay);
+                    throw new AssertionError("terminal conflict must propagate to bounded event retry policy");
+                } catch (RelayHTTPException expected) { check(expected.statusCode()==409,"expected conflict"); }
+                check(attempts.get()==retry+1,"never send ended for the replacement identity from 409");
+                check(f.active()==null,"terminal HTTP failure cannot retain audio");
+            }
         }
     }
 

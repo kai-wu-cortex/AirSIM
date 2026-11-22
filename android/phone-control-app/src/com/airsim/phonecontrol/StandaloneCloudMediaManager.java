@@ -166,7 +166,13 @@ final class StandaloneCloudMediaManager implements Closeable {
             // HTTP lifecycle storage / Live Activity updates do not deliver a
             // terminal media control to iPhone. Send the native terminal fact
             // on this call's authenticated socket before HTTP or socket close.
-            if ("ended".equals(state)) notifyEnded(descriptor);
+            if ("ended".equals(state)) {
+                // Release audio even when HTTP fails, but retain the exact identity
+                // for the existing bounded event-queue retry (also for outgoing calls).
+                Descriptor endedDescriptor = descriptor;
+                incomingIdentities.getOrCreate(incomingKey(registration, androidID), () -> endedDescriptor);
+                notifyEnded(descriptor);
+            }
             try {
             String phase = phase(state);
             if (!phase.isEmpty()) {
@@ -213,7 +219,13 @@ final class StandaloneCloudMediaManager implements Closeable {
      */
     private void postCallState(JSONObject registration, StandaloneRelayClient relay,
                                JSONObject lifecycle) throws Exception {
-        postRelay(registration, relay, "/v2/events/call-state", lifecycle, 12_000);
+        if ("ended".equals(lifecycle.optString("phase"))) {
+            // A late terminal retry must never "repair" a newer Relay lifecycle
+            // by ending the identity returned in a 409 response.
+            relay.postJSON(registration, "/v2/events/call-state", lifecycle, 12_000);
+        } else {
+            postRelay(registration, relay, "/v2/events/call-state", lifecycle, 12_000);
+        }
     }
 
     private static long eventAgeMillis(JSONObject event) {
