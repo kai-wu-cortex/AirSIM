@@ -1,5 +1,7 @@
 # AirSIM — Android 与 iPhone / Apple Watch 跨设备通话、短信和 VoWLAN
 
+F50 Pro 可复用部署技能见 [F50Skill](skills/f50skill/SKILL.md)：覆盖新机兼容核验、USB ADB、双卡、AirSIM、酒店认证及逐台验收；不提供未知固件通刷。
+
 F50 Pro 另附[临时 USB 注册诊断工具与 CMHK 对照记录](docs/f50pro-cmhk-diagnostic.md)，独立于 APK/AVF 安装；英国卡无服务尚未修复，不能将双卡启用视为双卡已注册。
 
 未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](docs/f50pro-cloud-hangup.md)。
