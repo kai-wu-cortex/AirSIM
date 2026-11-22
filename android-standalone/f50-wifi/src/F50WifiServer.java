@@ -28,6 +28,7 @@ public final class F50WifiServer {
  final AirSimSupervisor airSim;
  final CallSafeNetworkPolicy callSafety;
  final DualSimSupervisor dualSim;
+ final HotelLogin hotel;
  String lastBootReadiness="";
  F50WifiServer(File dir, boolean boot)throws Exception {
   directory=dir; if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException("settings directory unavailable");
@@ -56,7 +57,7 @@ public final class F50WifiServer {
    // quiet window for carrier announcements and teardown after Telecom ends.
    return telecom.isInCall()||audio.getMode()!=android.media.AudioManager.MODE_NORMAL;
   },android.os.SystemClock::elapsedRealtime);
-  airSim=new AirSimSupervisor(this);dualSim=new DualSimSupervisor(this);
+  airSim=new AirSimSupervisor(this);dualSim=new DualSimSupervisor(this);hotel=new HotelLogin(this);
  }
  void persist()throws Exception {synchronized(storageLock){
   settings.remove("preferred_network");settings.put("automatic",automatic).put("preferred_ssid",preferredSsid).put("preferred_security",preferredSecurity).put("setup_boot_id",setupBootId);
@@ -85,7 +86,7 @@ public final class F50WifiServer {
  String security(WifiConfiguration c){return c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.SAE)?"wpa3":c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA_PSK)?"wpa2":c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA_EAP)||c.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.IEEE8021X)||Arrays.stream(c.wepKeys).anyMatch(Objects::nonNull)?"unsupported":"open";}
  JSONObject status()throws Exception {
   WifiInfo info=wifi.getConnectionInfo(); boolean ready=connected();
-  JSONArray saved=new JSONArray();for(WifiConfiguration c:networks())saved.put(new JSONObject().put("id",c.networkId).put("ssid",unquote(c.SSID)).put("security",security(c)).put("preferred",c.networkId==selected).put("connected",ready&&info.getNetworkId()==c.networkId));
+  JSONArray saved=new JSONArray();for(WifiConfiguration c:networks())saved.put(new JSONObject().put("id",c.networkId).put("ssid",unquote(c.SSID)).put("security",security(c)).put("hotel",hotel.enabled(unquote(c.SSID),security(c))).put("preferred",c.networkId==selected).put("connected",ready&&info.getNetworkId()==c.networkId));
   String apName="F50 Pro 原热点";
   try {Object ap=wifi.getClass().getMethod("getSoftApConfiguration").invoke(wifi);String name=(String)ap.getClass().getMethod("getSsid").invoke(ap);if(name!=null)apName=name;}catch(Exception ignored){}
   return new JSONObject().put("mode",mode.equals("rebooting")?mode:ready?"connected":mode).put("message",mode.equals("rebooting")?message:ready?"已连接，可通过此网络访问设备":message).put("error",lastError)
@@ -93,7 +94,7 @@ public final class F50WifiServer {
    .put("target_ssid",preferredSsid).put("can_reboot",preferredId()>=0)
    .put("uptime_seconds",android.os.SystemClock.elapsedRealtime()/1000).put("usb_host_state",usbHostState()).put("airsim_bridge",airSim.status()).put("dual_sim",dualSim.status())
    .put("hotspot_ssid",apName).put("saved",saved).put("usb_adb",run("getprop","sys.usb.config").contains("adb"))
-   .put("local_url","http://f50wifi.local:8088").put("setup_url","http://192.168.0.1:8088");
+   .put("local_url","http://f50wifi.local:8088").put("setup_url","http://192.168.0.1:8088").put("hotel",hotel.status());
  }
  JSONArray scans()throws Exception {
   Map<String,JSONObject> found=new LinkedHashMap<>();
@@ -131,6 +132,7 @@ public final class F50WifiServer {
  }
  void beginConnect(int id)throws Exception {
   callSafety.requireIdle();
+  if(hotel.active())hotel.stop("正在切换 Wi-Fi，认证通道已关闭");
   if(id<0)throw new IllegalArgumentException("请先指定要连接的 Wi-Fi，再重启设备。");
   bootPending=false;lastError="";selected=id;
   mode="connecting";message="正在连接，最多等待 90 秒；失败会恢复原热点";
@@ -152,6 +154,7 @@ public final class F50WifiServer {
  }
  void hotspot(String reason)throws Exception {
   callSafety.requireIdle();
+  if(hotel.active())hotel.stop("已返回原热点，可重新配置酒店网络");
   bootPending=false;setupBootId=bootId;persist();mode="recovering";message="正在恢复原热点";
   wifi.setWifiEnabled(false);run("settings","put","global","wifi_on","0");
   for(int i=0;i<12&&wifi.getWifiState()!=WifiManager.WIFI_STATE_DISABLED;i++)Thread.sleep(500);
@@ -193,11 +196,15 @@ public final class F50WifiServer {
     else if(security.equals("wpa3")){config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.SAE);config.preSharedKey=PortalRules.quoted(password);}
     else config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
     int id=wifi.addNetwork(config);if(id<0)throw new IllegalArgumentException("保存失败，请核对网络名称和加密方式。");
-    stage(id);if(in.optBoolean("reboot",false))requestReboot();return new JSONObject().put("saved",true).put("rebooting",in.optBoolean("reboot",false));
+    hotel.configure(ssid,security,in.optBoolean("hotel",false));stage(id);if(in.optBoolean("reboot",false))requestReboot();return new JSONObject().put("saved",true).put("rebooting",in.optBoolean("reboot",false)).put("hotel",hotel.status());
    }
    case "/api/select":{int id=in.getInt("id");if(networks().stream().noneMatch(c->c.networkId==id&&!security(c).equals("unsupported")))throw new IllegalArgumentException("该网络已不存在，请刷新列表。");stage(id);return new JSONObject().put("saved",true);}
    case "/api/forget":{int id=in.getInt("id");WifiInfo current=wifi.getConnectionInfo();if(connected()&&current.getNetworkId()==id)throw new IllegalArgumentException("请先连接其他网络，再移除当前网络。");if(!wifi.removeNetwork(id))throw new IllegalArgumentException("没有移除该网络，请刷新后重试。");if(selected==id)prefer(-1);else persist();return new JSONObject().put("ok",true);}
    case "/api/automatic":automatic=in.getBoolean("enabled");persist();return new JSONObject().put("ok",true);
+   case "/api/hotel/configure":if(preferredId()<0)throw new IllegalArgumentException("请先保存或指定一个 Wi-Fi。");hotel.configure(preferredSsid,preferredSecurity,in.getBoolean("enabled"));return new JSONObject().put("ok",true);
+   case "/api/hotel/start":hotel.start();return new JSONObject().put("accepted",true);
+   case "/api/hotel/check":hotel.check(false);return new JSONObject().put("accepted",true);
+   case "/api/hotel/stop":hotel.stop("认证已结束，酒店 Wi-Fi 连接保持不变");return new JSONObject().put("ok",true);
    case "/api/reboot":requestReboot();return new JSONObject().put("accepted",true);
    case "/api/connect":case "/api/retry":throw new IllegalArgumentException("配网流程已更新，请刷新页面后保存并重启。");
    case "/api/hotspot":guarded(()->hotspot(""));return new JSONObject().put("accepted",true);
@@ -208,6 +215,7 @@ public final class F50WifiServer {
   long now=android.os.SystemClock.elapsedRealtime();
   callSafety.sample();
   if(operationPending||mode.equals("rebooting"))return;
+  hotel.tick();
   if(bootPending){
    boolean systemReady=run("getprop","sys.boot_completed").equals("1"),guardReady=new File("/dev/f50-ifconfig-ready").exists();
    // The verified guard is installed after system boot, independently of USB.

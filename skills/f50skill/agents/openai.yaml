@@ -1,0 +1,4 @@
+interface:
+  display_name: "F50Skill"
+  short_description: "部署与验收 F50 Pro 的 ADB、双卡、AirSIM 云端及酒店配网"
+  default_prompt: "使用 $f50skill 核对这台 F50 Pro，并完成兼容性检查、备份、升级与真机验收。"

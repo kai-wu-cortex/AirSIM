@@ -49,6 +49,11 @@ final class PortalHttp {
   if(!PortalRules.validHost(headers.get("host"))){error(s,403,"请使用设备 IP 或 f50wifi.local 打开页面。");return;}
   if(headers.containsKey("transfer-encoding")){error(s,400,"请求格式不受支持。");return;}
   if(method.equals("GET")&&path.equals("/")){reply(s,200,"text/html; charset=utf-8",WebPage.HTML.getBytes(StandardCharsets.UTF_8),null);return;}
+  if(method.equals("GET")&&path.matches("/hotel/[A-Za-z0-9_-]{32}\\.pac")){
+   String pac=server.hotel.pac(path.substring(7,path.length()-4),s.getInetAddress());
+   if(pac==null){error(s,403,"请在认证热点内登录配网页并启用认证通道。");return;}
+   reply(s,200,"application/x-ns-proxy-autoconfig",pac.getBytes(StandardCharsets.US_ASCII),null);return;
+  }
   if(!path.startsWith("/api/")){error(s,404,"页面不存在。");return;}
   if(!method.equals("GET")&&!method.equals("POST")){error(s,405,"请求方法不支持。");return;}
   JSONObject body=new JSONObject();
@@ -68,9 +73,10 @@ final class PortalHttp {
   if(method.equals("GET")&&path.equals("/api/networks")){json(s,200,new JSONObject().put("networks",server.scans()),null);return;}
   if(!method.equals("POST")){error(s,404,"页面不存在。");return;}
   if(!PortalRules.same(session.csrf,headers.get("x-csrf-token"))){error(s,403,"会话已更新，请刷新页面后重试。");return;}
+  if(path.equals("/api/hotel/authorize")){server.hotel.authorize(s.getInetAddress());json(s,200,new JSONObject().put("ok",true),null);return;}
   if(path.equals("/api/logout")){sessions.remove(key);json(s,200,new JSONObject().put("ok",true),"");return;}
   if(path.equals("/api/password")){
-   String p=body.optString("password");if(p.length()<8||p.length()>64)throw new IllegalArgumentException("管理密码需为 8–64 个字符。");setPassword(p);new File(server.directory,"initial-access-code").delete();sessions.clear();json(s,200,new JSONObject().put("ok",true),"");return;
+   String p=body.optString("password");if(p.length()<8||p.length()>64)throw new IllegalArgumentException("管理密码需为 8–64 个字符。");setPassword(p);new File(server.directory,"initial-access-code").delete();sessions.clear();server.hotel.stop("管理密码已更新，请重新登录开启认证通道");json(s,200,new JSONObject().put("ok",true),"");return;
   }
   try{json(s,200,server.action(path,body),null);}catch(IllegalArgumentException e){error(s,400,e.getMessage());}
  }catch(JSONException|NumberFormatException failure){error(s,400,"请求内容无效，请刷新页面后重试。");}catch(IllegalArgumentException failure){error(s,400,failure.getMessage());}catch(IOException failure){error(s,400,"请求不完整或格式无效。");}catch(Exception failure){System.err.println("http_request_failed="+failure.getClass().getSimpleName());error(s,500,"设备操作未完成，请稍后重试。");}}catch(Exception ignored){}}

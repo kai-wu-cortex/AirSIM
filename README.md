@@ -1,5 +1,7 @@
 # AirSIM — Android 与 iPhone / Apple Watch 跨设备通话、短信和 VoWLAN
 
+F50 Pro 可复用部署技能见 [F50Skill](skills/f50skill/SKILL.md)：覆盖新机兼容核验、USB ADB、双卡、AirSIM、酒店认证及逐台验收；不提供未知固件通刷。
+
 F50 Pro 另附[临时 USB 注册诊断工具与 CMHK 对照记录](docs/f50pro-cmhk-diagnostic.md)，独立于 APK/AVF 安装；英国卡无服务尚未修复，不能将双卡启用视为双卡已注册。
 
 未发布 F50 Pro 候选：Standalone 在收到本通 Telecom 挂断事实后，先通过已认证媒体连接发送带完整通话身份的 `ended`，再提交 HTTP 生命周期及关闭连接；避免 iOS 176 将远端挂断误当作 Agent 恢复等待。保持既有签名、配对、F50 音频适配及旧事件隔离；验证状态见 [现场记录](docs/f50pro-cloud-hangup.md)。
@@ -7,6 +9,8 @@ F50 Pro 另附[临时 USB 注册诊断工具与 CMHK 对照记录](docs/f50pro-c
 [Apps v0.9.8.25 · Android 140 / iOS 176](docs/releases/0.9.8.25.md)：VoBLE 来电恢复与早期音频优化、短信发送回执、电量和 SIM 选择修复。纯本地跨端协商及零 Relay 流量仍未完成端到端验收；请阅读发布限制。AVF Linux Agent 保持 v0.4.7。
 
 F50 Pro 本地配网辅助服务见 [使用与恢复说明](android-standalone/f50-wifi/README.md)：针对已修复的 MU3356 B28，以独立管理密码保护本地 `8088` 页面，先连原热点配网，保存后重启才连接指定 Wi-Fi；失败恢复热点等待配置。可保存多个网络，目标按 SSID／加密方式识别。首次启动服务安装需核验机型限定镜像；USB 更新、回退、可选的签名固定控制桥自启动及独立供电实测范围见组件文档。此端口不用于 AirSIM 配对，不改变现有 APK／Relay 版本。
+
+酒店网页登录可选用临时 Wi-Fi Direct 热点和仅绑定该热点的认证代理（8089），通过 iPhone 自动代理设置完成；无需新增 root 或修改 USB，使用步骤、20 分钟到期和实测边界见上述组件文档。
 
 独立供电更新须同时核对 Wi-Fi 启动脚本：旧版地址保护依赖 USB 调试状态，仅更新 DEX 不足；修复改为等待系统启动，USB ADB 初始化保持原样。实际验收结果以组件验证记录为准。B28 缺少默认电话角色时，可另行显式启用空默认值的 Telecom 绑定恢复；仅对签名匹配的 AirSIM 生效，保留其他默认应用，开关及回退见组件文档。
 
