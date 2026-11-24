@@ -34,3 +34,13 @@
 - 公开 HTTPS/WSS 同一组鉴权、去重、PCM 检查通过；8 个已部署业务模块 SHA-256 与发布源码逐个一致。
 - 生产／沙盒 APNs 的 TLS 与 HTTP/2 探测通过；无真实推送。
 - Notion 凭据仍未配置，为原部署状态；本轮不更改。
+
+## 已发布结果
+
+- 发布源码提交：`ccefb2a`；已推送 develop，标签 `v0.9.8.27` 指向该提交。
+- GitHub Release：https://github.com/kai-wu-cortex/AirSIM/releases/tag/v0.9.8.27 ，已公开并标记 latest。
+- 8 个附件（两种 APK、两种 unsigned IPA、三份许可说明、SHA256SUMS）均核对 GitHub 返回的大小和 SHA-256，与本地完全一致。
+- TestFlight 188 于 2026-11-24 14:43（Asia/Shanghai）上传成功，Xcode 返回 `Uploaded package is processing`、`Upload succeeded`、`EXPORT SUCCEEDED`。Apple 处理与测试分发可用性尚未另行确认。
+- 本次上传沿用当前网络代理，成功完成，无须更改系统代理。
+- 原始归档：`~/Library/Developer/Xcode/Archives/2026-11-24/AirSIM-0.9.8-188.xcarchive`，包含 dSYM。
+- Cloudflare 部署完成不等于额度故障恢复：线上 429／1027 仍待账户额度恢复。ECS 独立部署与公开合成检查正常。
