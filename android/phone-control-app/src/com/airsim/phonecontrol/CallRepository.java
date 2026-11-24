@@ -167,8 +167,7 @@ public final class CallRepository {
     public static String number(String callId) {
         Call call = CALLS.get(callId);
         if (call == null || call.getDetails() == null || call.getDetails().getHandle() == null) return "";
-        String value = call.getDetails().getHandle().getSchemeSpecificPart();
-        return value == null ? "" : value;
+        return CallerNumber.display(call.getDetails().getHandle().toString());
     }
 
     public static String idForAction(String action) {

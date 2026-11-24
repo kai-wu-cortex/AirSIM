@@ -211,7 +211,7 @@ public final class AirSIMInCallService extends InCallService {
     private static String number(Call call) {
         Call.Details details = call.getDetails();
         Uri handle = details == null ? null : details.getHandle();
-        return handle == null || handle.getSchemeSpecificPart() == null ? "" : handle.getSchemeSpecificPart();
+        return handle == null ? "" : CallerNumber.display(handle.toString());
     }
 
     @Override public void onDestroy() {

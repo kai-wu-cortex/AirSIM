@@ -15,6 +15,7 @@ let package = Package(name: "HistoryCore", platforms: [.macOS(.v13)],
     targets: [.target(name: "HistoryCore"), .testTarget(name: "HistoryCoreTests", dependencies: ["HistoryCore"])],
     swiftLanguageModes: [.v5])
 ''')
+(out/'Sources/HistoryCore/CallerNumber.swift').write_text((root/'Shared/CallerNumber.swift').read_text())
 source = (root/'AirSIM/APIModels.swift').read_text()
 models = source[source.index('struct CallRecord:'):source.index('struct CallStatus:')]
 models += source[source.index('enum SMSDirection:'):source.index('struct SMSStatus:')]

@@ -20,6 +20,7 @@ mkdir -p "$OUT"
   "$ROOT"/src/com/airsim/phonecontrol/RemoteOutputTail.java \
   "$ROOT"/src/com/airsim/phonecontrol/RemoteAudioSessionRegistry.java \
   "$ROOT"/src/com/airsim/phonecontrol/voble/VoBLEMediaSession.java \
+  "$ROOT"/src/com/airsim/phonecontrol/CallerNumber.java \
   "$ROOT"/src/com/airsim/phonecontrol/AirSIMInCallService.java \
   "$ROOT"/test/com/airsim/phonecontrol/RemoteCallMuteLifecycleTests.java
 "$TASK_JAVA_HOME/bin/java" -cp "$OUT:$BASE:$ANDROID_JAR" com.airsim.phonecontrol.RemoteCallMuteLifecycleTests

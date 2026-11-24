@@ -13,7 +13,12 @@ enum AppReleaseNotes {
     // Bundled: showing installed-version notes never needs GitHub, Relay or pairing.
     // Keep this summary in sync with the candidate's source and docs when publishing.
     static let items = [
-        "更新拨号、最近通话和通话中界面；保留原有通话、选卡与连接方式。",
+        "新增已保存端点管理，可单独删除失效地址；同一设备、同一主机和传输类型的新端口验证成功后替换旧端口。",
+        "号码不再因信号未知或过期而消失，按 SIM 显示已有号码和各卡信号；修复双卡信号采样混用。",
+        "移除配对设备和小组件设备目录的数量限制；灵动岛仍按页展示。",
+        "清理兼容 IMS 来电中的 SIP／TEL 号码格式，改善来电显示与联系人匹配。",
+        "完善同网段局域网连接候选选择与恢复，保留通话中的路线保护。",
+        "恢复熟悉的拨号、最近通话、短信头像与通话界面；保留通话、短信和连接修复。",
         "修复 iPhone 与 Watch 已确认的 PushKit 来电上报崩溃路径；仍需真实锁屏来电回归。",
         "完善 Root 短信逐段系统回执与安全回退；修复云端 SIM 标识兼容和呼出接通状态处理。",
         "灵动岛与桌面小组件展示各张 SIM 的信号；需要新版安卓上报，无可靠采样时显示未知。",
@@ -111,10 +116,16 @@ private struct NewFeaturePage: Identifiable {
 private enum NewFeatureCatalog {
     static let pages: [NewFeaturePage] = [
         NewFeaturePage(
-            id: 11, kicker: "拨号与通话界面",
-            title: "更清晰的拨号，\n更直观的通话控制",
-            body: "大圆拨号键、紧凑通话记录与蓝灰通话页。通话中可收起界面后返回；沿用现有连接、选卡和通话逻辑。",
-            symbol: "phone", accent: .blue, demo: .callVisuals
+            id: 14, kicker: "端点管理",
+            title: "清理旧地址，\n保留设备配对",
+            body: "在地址与配对信息中删除失效端点。相同主机的新端口验证成功后替换旧端口，不清除短信、通话记录或配对密钥。通话中暂不可删除。",
+            symbol: "network", accent: .cyan, demo: .endpointManagement
+        ),
+        NewFeaturePage(
+            id: 15, kicker: "号码与设备",
+            title: "信号未知，\n号码依然保留",
+            body: "各张 SIM 显示已有号码与对应信号，信号过期不再隐藏号码。移除设备目录数量限制，灵动岛按页查看。安卓需配套更新；SIM 未提供号码时无法凭空获取。",
+            symbol: "simcard", accent: .green, demo: .simSignals
         ),
         NewFeaturePage(
             id: 12, kicker: "多卡信号与稳定性",
@@ -317,7 +328,7 @@ private struct NewFeaturePageView: View {
 
 
 private enum NewFeatureDemo: String {
-    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications, bluetoothRecovery, smsReceipt, callVisuals, simSignals
+    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications, bluetoothRecovery, smsReceipt, simSignals, endpointManagement
 }
 
 private struct FeatureDemoView: View {
@@ -399,7 +410,7 @@ private enum FeatureDemoHTML {
     static func html(for demo: NewFeatureDemo, animated: Bool) -> String {
         let illustration: String
         switch demo {
-        case .callVisuals: illustration = callVisuals
+        case .endpointManagement: illustration = endpointManagement
         case .simSignals: illustration = simSignals
         case .bluetoothRecovery: illustration = bluetoothRecovery
         case .smsReceipt: illustration = smsReceipt
@@ -442,24 +453,22 @@ private enum FeatureDemoHTML {
         """
     }
 
-    private static let callVisuals = """
-    <rect x="18" y="15" width="150" height="190" rx="24" fill="#F5F8FC"/>
-    <text x="93" y="45" text-anchor="middle" fill="#152D46" font-size="17">123</text>
-    <g fill="#E1EAF5" stroke="#B7CBE1"><circle cx="55" cy="75" r="16"/><circle cx="93" cy="75" r="16"/><circle cx="131" cy="75" r="16"/><circle cx="55" cy="115" r="16"/><circle cx="93" cy="115" r="16"/><circle cx="131" cy="115" r="16"/></g>
-    <circle class="pulse" cx="93" cy="167" r="22" fill="#30C65A"/>
-    <rect x="190" y="15" width="152" height="190" rx="24" fill="#294564"/>
-    <text x="266" y="49" text-anchor="middle" fill="white" font-size="16">AirSIM 通话</text>
-    <g fill="#8194AA"><circle cx="225" cy="127" r="17"/><circle cx="266" cy="127" r="17"/><circle cx="307" cy="127" r="17"/><circle cx="225" cy="170" r="17"/><circle cx="307" cy="170" r="17"/></g>
-    <circle class="reveal" cx="266" cy="170" r="17" fill="#E83932"/>
+    private static let endpointManagement = """
+    <rect x="18" y="20" width="324" height="180" rx="26" fill="#172B33"/>
+    <text x="40" y="50" fill="#C3E7F5" font-size="15">同一设备 · 地址与配对信息</text>
+    <g class="mode-a"><text x="42" y="90" fill="#ADC2CC" font-size="16">relay.example : 443</text><path d="M42 84H300" stroke="#FF7E7E" stroke-width="2"/></g>
+    <text x="42" y="130" fill="white" font-size="16">relay.example : 9443</text>
+    <g class="mode-b"><path d="M283 121l7 7 15-19" fill="none" stroke="#42D985" stroke-width="4"/><text x="42" y="90" fill="#42D985" font-size="14">新端口已验证 · 旧地址已替换</text></g>
+    <text x="180" y="177" text-anchor="middle" fill="#C3E7F5" font-size="12">保留配对密钥与历史记录 · 示例地址</text>
     """
 
     private static let simSignals = """
     <rect x="18" y="20" width="324" height="180" rx="26" fill="#172B33"/>
     <text x="42" y="51" fill="#C3E7F5" font-size="15">当前设备 · 分卡信号示意</text>
-    <text x="43" y="99" fill="white" font-size="16">SIM 1</text><text x="43" y="155" fill="white" font-size="16">SIM 2</text>
+    <text x="30" y="99" fill="white" font-size="13">SIM 1 · 10086</text><text x="30" y="155" fill="white" font-size="13">SIM 2 · 10010</text>
     <g fill="#42D985"><rect x="160" y="88" width="17" height="8" rx="3"/><rect x="184" y="80" width="17" height="16" rx="3"/><rect x="208" y="72" width="17" height="24" rx="3"/><rect x="232" y="64" width="17" height="32" rx="3"/></g>
     <g fill="#6ECBF7"><rect x="160" y="144" width="17" height="8" rx="3"/><rect x="184" y="136" width="17" height="16" rx="3"/></g><g fill="#455962"><rect x="208" y="128" width="17" height="24" rx="3"/><rect x="232" y="120" width="17" height="32" rx="3"/></g>
-    <text class="reveal" x="180" y="184" text-anchor="middle" fill="#C3E7F5" font-size="12">不猜测信号 · 过期显示未知</text>
+    <text class="reveal" x="180" y="184" text-anchor="middle" fill="#C3E7F5" font-size="12">信号过期显示未知 · 已有号码继续保留</text>
     """
 
     private static let bluetoothRecovery = """
@@ -511,12 +520,12 @@ private enum FeatureDemoHTML {
     private static let secureNotifications = """
     <rect x="24" y="20" width="312" height="83" rx="22" fill="#182D42" stroke="#385876"/>
     <path d="M49 57v-9a9 9 0 0 1 18 0v9m-22 0h26v23H45z" fill="none" stroke="#6ECBF7" stroke-width="3" stroke-linejoin="round"/>
-    <text x="89" y="52" fill="#6ECBF7" font-size="13">短信 · SIM 2</text>
+    <text x="89" y="52" fill="#6ECBF7" font-size="13">短信 · SIM 2 · 10010</text>
     <text x="89" y="78" fill="white" font-size="16">已协商端到端加密</text>
     <rect x="24" y="118" width="312" height="83" rx="22" fill="#32291E" stroke="#725339"/>
     <circle class="pulse" cx="58" cy="159" r="17" fill="#EF685B"/>
     <text x="58" y="165" text-anchor="middle" fill="white" font-size="18" font-weight="700">1</text>
-    <text x="89" y="150" fill="#FFBD78" font-size="13">未接来电 · SIM 1</text>
+    <text x="89" y="150" fill="#FFBD78" font-size="13">未接来电 · SIM 1 · 10086</text>
     <text x="89" y="177" fill="white" font-size="16">号码与来源，一目了然</text>
     """
 

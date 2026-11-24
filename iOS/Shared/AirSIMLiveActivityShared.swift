@@ -50,10 +50,12 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         let vowlanOnline: Bool?
         let bluetoothOnline: Bool?
         let cloudOnline: Bool?
-        /// 排序后的完整待机列表；页码由主人 App 维护。可选以兼容旧版 ContentState。
+        /// 当前页设备；旧版为完整列表，由 agentsArePage 区分。
         var agents: [AgentSummary]?
-        /// 0-based 当前页；每页最多 5 台。旧版没有该字段时按第 1 页处理。
+        /// 0-based 当前页；旧版没有该字段时按第 1 页处理。
         let agentPage: Int?
+        var agentsArePage: Bool? = nil
+        var agentSIMSignals: [SIMSignalSummary]? = nil
 
         struct AgentSummary: Codable, Hashable, Identifiable {
             let id: String
@@ -95,7 +97,9 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             bluetoothOnline: Bool? = nil,
             cloudOnline: Bool? = nil,
             agents: [AgentSummary]? = nil,
-            agentPage: Int? = nil
+            agentPage: Int? = nil,
+            agentsArePage: Bool? = nil,
+            agentSIMSignals: [SIMSignalSummary]? = nil
         ) {
             self.callID = callID
             self.number = number
@@ -118,6 +122,8 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             self.cloudOnline = cloudOnline
             self.agents = agents
             self.agentPage = agentPage
+            self.agentsArePage = agentsArePage
+            self.agentSIMSignals = agentSIMSignals
         }
 
         enum Phase: String, Codable, Hashable {
@@ -156,9 +162,10 @@ extension AirSIMCallActivityAttributes.ContentState {
         // build must never render a call phase, timer or hangup button.
         var display = self
         if isStale {
+            display.agentSIMSignals = agentSIMSignals?.map(\.withoutSignal)
             display.agents = agents?.map { agent in
                 var copy = agent
-                copy.simSignals = agent.simSignals?.map { .init(id: $0.id, title: $0.title, signal: nil) }
+                copy.simSignals = agent.simSignals?.map(\.withoutSignal)
                 return copy
             }
         }
@@ -178,7 +185,11 @@ extension AirSIMCallActivityAttributes.ContentState {
             bluetoothOnline: bluetoothOnline,
             cloudOnline: cloudOnline,
             agents: display.agents,
-            agentPage: agentPage
+            agentPage: agentPage,
+            agentsArePage: agentsArePage,
+            agentSIMSignals: isStale ? agentSIMSignals?.map {
+                .init(id: $0.id, title: $0.title, signal: nil, phoneNumber: $0.phoneNumber)
+            } : agentSIMSignals
         )
     }
 }

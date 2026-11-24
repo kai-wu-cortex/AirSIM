@@ -51,11 +51,56 @@ struct AndroidSIMSignal: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-/// No phone number, subscription ID or Telecom handle is exported into widget state.
+/// Display-only SIM identity; never exports subscription IDs or Telecom handles.
 struct SIMSignalSummary: Codable, Equatable, Hashable, Identifiable, Sendable {
     let id: Int
     let title: String
     let signal: AndroidSIMSignal?
+    var phoneNumber: String? = nil
+
+    init(id: Int, title: String, signal: AndroidSIMSignal?, phoneNumber: String? = nil) {
+        self.id = id; self.title = title; self.signal = signal; self.phoneNumber = phoneNumber
+    }
+
+    // Compact internal snapshot encoding keeps all visible devices' SIM rows within
+    // ActivityKit's budget. Android/Relay wire models are unchanged.
+    private enum Keys: String, CodingKey { case id = "i", title = "t", phoneNumber = "n", level = "l", observedAtMS = "a" }
+    private enum LegacyKeys: String, CodingKey { case id, title, signal, phoneNumber }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: Keys.self)
+        if values.contains(.id) {
+            id = try values.decode(Int.self, forKey: .id)
+            title = try values.decode(String.self, forKey: .title)
+            phoneNumber = try values.decodeIfPresent(String.self, forKey: .phoneNumber)
+            if let level = try? values.decode(Int.self, forKey: .level),
+               let observed = try? values.decode(Double.self, forKey: .observedAtMS) {
+                signal = .init(level: level, observedAtMS: observed)
+            } else { signal = nil }
+        } else {
+            let old = try decoder.container(keyedBy: LegacyKeys.self)
+            id = try old.decode(Int.self, forKey: .id)
+            title = try old.decode(String.self, forKey: .title)
+            phoneNumber = try old.decodeIfPresent(String.self, forKey: .phoneNumber)
+            signal = try old.decodeIfPresent(AndroidSIMSignal.self, forKey: .signal)
+        }
+    }
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: Keys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(title, forKey: .title)
+        try values.encodeIfPresent(phoneNumber, forKey: .phoneNumber)
+        if let signal {
+            try values.encode(signal.level, forKey: .level)
+            try values.encode(signal.observedAtMS, forKey: .observedAtMS)
+        }
+    }
+
+    var withoutSignal: Self { .init(id: id, title: title, signal: nil, phoneNumber: phoneNumber) }
+
+    /// A missing transport response is not SIM removal. An explicit empty roster is.
+    static func displayRows(live: [Self]?, cached: [Self]?) -> [Self] {
+        live ?? (cached ?? []).map(\.withoutSignal)
+    }
 }
 
 /// A display snapshot with masked call numbers and bounded SMS previews.
@@ -131,6 +176,7 @@ struct AirSIMWidgetSnapshot: Codable, Equatable, Sendable {
         let recentlyReachable: Bool
         let observedAt: Date?
         var simSignals: [SIMSignalSummary]? = nil
+        var phoneNumber: String? = nil
         var batteryPercent: Int? = nil
         var battery: AndroidBatteryReading? = nil
         var unreadMessages: Int? = nil

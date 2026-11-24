@@ -110,9 +110,16 @@ struct AirSIMDeviceWidgetView: View {
     }
 
     @ViewBuilder private func simSignals(_ d: AirSIMWidgetSnapshot.Device) -> some View {
-        if let signals = d.simSignals, !signals.isEmpty {
-            SIMSignalStrip(signals: signals, date: date, available: d.recentlyReachable && d.isFresh(at: date))
-                .foregroundStyle(accent)
+        VStack(alignment: .leading, spacing: 2) {
+            if let signals = d.simSignals, !signals.isEmpty {
+                SIMSignalStrip(signals: signals, date: date, available: d.recentlyReachable && d.isFresh(at: date))
+                    .foregroundStyle(accent)
+            }
+            if !(d.simSignals ?? []).contains(where: { $0.phoneNumber?.isEmpty == false }),
+               let number = d.phoneNumber, !number.isEmpty {
+                Text(number).font(.caption2.monospacedDigit()).lineLimit(1)
+                    .minimumScaleFactor(0.7).privacySensitive()
+            }
         }
     }
 
@@ -521,19 +528,25 @@ struct SIMSignalStrip: View {
     var compact = false
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            strip(compact: compact)
-            if !compact { strip(compact: true) }
+        if compact {
+            strip
+        } else {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(signals) { sim in
+                    SIMSignalItem(sim: sim,
+                                  level: available ? sim.signal?.freshLevel(at: date) : nil,
+                                  compact: false, showsNumber: true)
+                }
+            }
         }
     }
-    private func strip(compact: Bool) -> some View {
-        HStack(spacing: compact ? 4 : 8) {
-            ForEach(Array(signals.prefix(compact ? 2 : 4))) { sim in
-                SIMSignalItem(sim: sim, level: available ? sim.signal?.freshLevel(at: date) : nil, compact: compact)
-            }
-            if compact && signals.count > 2 {
-                Text("+\(signals.count - 2)").font(.system(size: 8))
-            }
+    private func item(_ sim: SIMSignalSummary) -> some View {
+        SIMSignalItem(sim: sim, level: available ? sim.signal?.freshLevel(at: date) : nil, compact: compact)
+    }
+    private var strip: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(signals.prefix(2))) { sim in item(sim) }
+            if signals.count > 2 { Text("+\(signals.count - 2)").font(.system(size: 8)) }
         }
     }
 }
@@ -543,13 +556,19 @@ private struct SIMSignalItem: View {
     let sim: SIMSignalSummary
     let level: Int?
     let compact: Bool
+    var showsNumber = false
     private var spokenLabel: String {
         let strength = level.map { "信号 \($0)/4 格" } ?? "信号未知或待刷新"
-        return "\(sim.title)，\(strength)"
+        return "\(sim.title)，\(showsNumber ? (sim.phoneNumber ?? "号码未提供") + "，" : "")\(strength)"
     }
     var body: some View {
         HStack(spacing: 3) {
-            if !compact { Text(sim.title).font(.system(size: 10, weight: .medium)).lineLimit(1) }
+            Text(sim.title).font(.system(size: compact ? 8 : 10, weight: .medium)).lineLimit(1)
+            if showsNumber {
+                Text(sim.phoneNumber ?? "号码未提供")
+                    .font(.system(size: 10)).monospacedDigit()
+                    .lineLimit(1).minimumScaleFactor(0.65).privacySensitive()
+            }
             if let level {
                 HStack(alignment: .bottom, spacing: 1.5) {
                     ForEach(0..<4, id: \.self) { bar in
@@ -558,7 +577,7 @@ private struct SIMSignalItem: View {
                     }
                 }.frame(height: 11)
             } else {
-                Text("—").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(compact ? "—" : "信号未知").font(.system(size: compact ? 11 : 9)).foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .ignore)

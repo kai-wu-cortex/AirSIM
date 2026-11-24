@@ -50,7 +50,9 @@ final class AppUpdatePresenter {
     void showNotes(Runnable after) {
         Activity activity = liveOwner();
         if (activity == null || dialog != null) return;
-        String notes = "• 完善 Root 短信系统回执及安全回退，避免结果未知时重复发送。\n\n"
+        String notes = "• 修复双卡信号采样与过期处理，不使用另一张卡的信号代替。\n\n"
+                + "• 归一化兼容 IMS 来电的 SIP／TEL 号码，改善 iPhone 来电显示与联系人匹配。\n\n"
+                + "• 完善 Root 短信系统回执及安全回退，避免结果未知时重复发送。\n\n"
                 + "• 支持逐 SIM 信号上报，配合新版 iPhone 灵动岛与小组件；无可靠信号时显示未知。\n\n"
                 + "• 修复云端呼出接通状态处理，配合 Relay 的 SIM 标识兼容更新。\n\n"
                 + "• 优化 VoBLE 来电恢复和运营商接通前音频传输；需要配套新版 iPhone，接通前不提前计时或开启麦克风。\n\n"

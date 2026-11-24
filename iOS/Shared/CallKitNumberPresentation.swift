@@ -7,7 +7,7 @@ enum CallKitNumberPresentation {
     static func handle(number: String?, fallback: String = "未知号码") -> CXHandle {
         let value = number.flatMap {
             $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
-        } ?? fallback
+        }.map(CallerNumber.display) ?? fallback
         return CXHandle(type: hasExplicitInternationalNumber(value) ? .phoneNumber : .generic,
                         value: value)
     }
@@ -17,7 +17,7 @@ enum CallKitNumberPresentation {
         let handle = handle(number: number, fallback: fallback)
         update.remoteHandle = handle
         if let callerName, !callerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           callerName != number {
+           callerName != number, callerName != handle.value {
             update.localizedCallerName = callerName
         } else if handle.type == .generic {
             // Keep unqualified numbers literal instead of asking the system to

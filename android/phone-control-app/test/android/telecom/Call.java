@@ -30,7 +30,7 @@ public class Call {
         private final android.net.Uri handle;
         private final PhoneAccountHandle accountHandle = null;
         private final DisconnectCause disconnectCause = new DisconnectCause(0);
-        Details(int direction, String number) { this.direction = direction; handle = android.net.Uri.parse("tel:" + number); }
+        Details(int direction, String number) { this.direction = direction; handle = android.net.Uri.parse(number.matches("(?i)^(sip|sips|tel):.*") ? number : "tel:" + number); }
         public int getCallDirection() { return direction; }
         public android.net.Uri getHandle() { return handle; }
         public PhoneAccountHandle getAccountHandle() { return accountHandle; }
@@ -38,6 +38,7 @@ public class Call {
         public long getConnectTimeMillis() { return 0; }
     }
     public Call(int state, int direction, String number) { this.state = state; details = new Details(direction, number); }
+    public void setNumberForTest(String number) { details = new Details(details.direction, number); }
     public Details getDetails() { return details; }
 
     public Call(int state) { this.state = state; }

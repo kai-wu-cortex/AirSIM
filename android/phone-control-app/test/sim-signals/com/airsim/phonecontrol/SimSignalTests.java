@@ -17,6 +17,35 @@ public final class SimSignalTests {
             check(values.getJSONObject(1).getJSONObject("signal").getInt("level") == 1, "second SIM distinct signal");
             check(values.getJSONObject(0).getJSONObject("signal").getLong("observed_at_ms") <= System.currentTimeMillis(), "timestamp");
         }
+        a.level = 0; a.componentLevel = 4;
+        check(SimSlotJson.slots(context).getJSONObject(0).getJSONObject("signal").getInt("level") == 4,
+                "sole valid radio wins over OEM empty aggregate");
+        a.level = 1; a.multiple = true;
+        check(SimSlotJson.slots(context).getJSONObject(0).getJSONObject("signal").getInt("level") == 1,
+                "multi-RAT aggregate preserved, never strongest-radio fabrication");
+        a.level = 4; a.componentLevel = null; a.multiple = false;
+        SimSlotJson.startSignals(context);
+        check(TelephonyManager.listeners.size() == 2, "both subscriptions observed");
+        var firstListener = TelephonyManager.listeners.get(10);
+        var next = new SignalStrength(3); next.timestamp = 999_900;
+        firstListener.onSignalStrengthsChanged(next);
+        var observed = SimSlotJson.slots(context);
+        check(observed.getJSONObject(0).getJSONObject("signal").getInt("level") == 3, "newer first SIM callback retained");
+        check(observed.getJSONObject(1).getJSONObject("signal").getInt("level") == 1, "second SIM not overwritten");
+        SimSlotJson.startSignals(context);
+        check(TelephonyManager.listeners.get(10) == firstListener, "no duplicate listeners");
+        var savedAccounts = DefaultCallAccount.accounts;
+        DefaultCallAccount.accounts = java.util.List.of(savedAccounts.get(1));
+        SimSlotJson.slots(context);
+        check(!TelephonyManager.listeners.containsKey(10), "removed subscription detached");
+        firstListener.onSignalStrengthsChanged(new SignalStrength(0));
+        DefaultCallAccount.accounts = savedAccounts;
+        SimSlotJson.slots(context);
+        check(TelephonyManager.listeners.get(10) != firstListener, "reinserted SIM gets new listener");
+        check(SimSlotJson.slots(context).getJSONObject(0).getJSONObject("signal").getInt("level") == 4,
+                "late removed callback cannot resurrect sample");
+        SimSlotJson.stopSignals();
+        check(TelephonyManager.listeners.isEmpty(), "service teardown releases listeners");
         b.level = 0;
         check(SimSlotJson.slots(context).getJSONObject(1).getJSONObject("signal").getInt("level") == 0, "zero is a real measurement");
         b.timestamp = 600_000;

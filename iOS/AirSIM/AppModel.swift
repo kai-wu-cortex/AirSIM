@@ -393,7 +393,7 @@ final class AppModel: ObservableObject {
     private var vobleMedia: VoBLEGATTMediaTransport { ownedBLESession.media }
     private var vobleCalls: VoBLECallCoordinator { ownedBLESession.calls }
     private var cancellables: Set<AnyCancellable> = []
-    private var lastWidgetSnapshot: AirSIMWidgetSnapshot?
+    private var lastWidgetSnapshot: AirSIMWidgetSnapshot? = AirSIMWidgetStore().load()
     private var lastWidgetReloadAt = Date.distantPast
 
     private var pollingTask: Task<Void, Never>?
@@ -1281,7 +1281,7 @@ final class AppModel: ObservableObject {
             return nil
         }()
 
-        return values.values.map { item in
+        return AndroidAgentPresentation.retainingSavedDevices(values.values.map { item in
             AndroidAgentPresentation(
                 id: item.id,
                 deviceName: item.deviceName,
@@ -1292,7 +1292,7 @@ final class AppModel: ObservableObject {
                 bluetoothOnline: item.bluetoothOnline,
                 isCurrent: item.id == currentID
             )
-        }.sorted {
+        }, records: pairedDeviceRecords.filter { PairedAndroidDeviceStore.permits($0.id) }).sorted {
             if $0.isCurrent != $1.isCurrent { return $0.isCurrent }
             let leftOnline = $0.vowlanOnline || $0.bluetoothOnline || $0.cloudOnline
             let rightOnline = $1.vowlanOnline || $1.bluetoothOnline || $1.cloudOnline
@@ -1351,9 +1351,9 @@ final class AppModel: ObservableObject {
     /// after SIM removal. The selection override is not live signal telemetry.
     private func simSignals(for agentID: String) -> [SIMSignalSummary] {
         let agent = pairedAndroidAgents.first { $0.id == agentID }
-        let slots: [AndroidSIMSlot]
+        let slots: [AndroidSIMSlot]?
         if ConnectionModePreference.selected() == .cloud {
-            slots = (cloudAgentDirectory ?? cloudAgentStatus)?.agents.first { $0.agentID == agentID }?.simSlots ?? []
+            slots = (cloudAgentDirectory ?? cloudAgentStatus)?.agents.first { $0.agentID == agentID }?.simSlots
         } else if agent?.bluetoothOnline == true,
                   ConnectionModePreference.selected() == .bluetooth,
                   let values = vobleHub.retainedBundle(for: agentID)?.central.deviceInformation?.simSlots {
@@ -1365,9 +1365,11 @@ final class AppModel: ObservableObject {
                   let values = vobleHub.retainedBundle(for: agentID)?.central.deviceInformation?.simSlots {
             slots = values
         } else if agent?.cloudOnline == true {
-            slots = (cloudAgentDirectory ?? cloudAgentStatus)?.agents.first { $0.agentID == agentID }?.simSlots ?? []
-        } else { return [] }
-        return AndroidSIMSlot.signalSummaries(slots)
+            slots = (cloudAgentDirectory ?? cloudAgentStatus)?.agents.first { $0.agentID == agentID }?.simSlots
+        } else { slots = nil }
+        return SIMSignalSummary.displayRows(
+            live: slots.map(AndroidSIMSlot.signalSummaries),
+            cached: lastWidgetSnapshot?.devices.first(where: { $0.id == agentID })?.simSignals)
     }
 
     func selectedSIMSlotID(for agentID: String) -> String? {
@@ -1481,6 +1483,31 @@ final class AppModel: ObservableObject {
         if hasStarted { restartPolling() }
     }
 
+    func removeDeviceEndpoint(agentID: String, endpoint: VoWLANPairingRecord.Endpoint) throws {
+        guard !callLifecycleSnapshot.state.representsCall else {
+            throw NSError(domain: "AirSIM.Endpoint", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "请先结束当前通话，再删除端点"])
+        }
+        if let address = endpoint.endpoint {
+            try vowlan.removeSavedEndpoint(agentID: agentID, endpoint: address)
+            localDevices.invalidateEndpoint(agentID: agentID, endpoint: address)
+            // Offline fallbacks must not retain an address explicitly removed by the user.
+            if case let .vowlan(endpoint, _) = lastSuccessfulLocalAPI?.route, endpoint == address {
+                lastSuccessfulLocalAPI = nil
+            }
+            if case let .vowlan(endpoint, _) = currentLocalAPI?.route, endpoint == address {
+                currentLocalAPI = nil
+            }
+            if case let .vowlan(endpoint, _) = observedCallLocalAPI?.service.route, endpoint == address {
+                observedCallLocalAPI = nil
+            }
+        } else {
+            VoWLANPairingRecordStore.removeEndpoint(agentID: agentID, endpoint: endpoint)
+        }
+        objectWillChange.send()
+        if hasStarted { restartPolling() }
+    }
+
     func configureRemoteDirect(agentID: String, route: VoWLANManualRoute?) async throws {
         try await vowlan.configureRemoteRoute(agentID: agentID, route: route)
         localDevices.invalidateRemoteRoute(agentID: agentID)
@@ -1518,6 +1545,7 @@ final class AppModel: ObservableObject {
                               e2e: E2EPairingKeyChange? = nil) async throws {
         guard let encoded = registration.vowlanSecret else { throw VoWLANAuthError.invalidSecret }
         let credential = try VoWLANCredential(encodedSecret: encoded, clockOffset: clockOffset)
+        if let endpoint { VoWLANPairingRecordStore.allowEndpoint(agentID: agentID, endpoint: endpoint) }
         localDevices.stagePairing(agentID: agentID, credential: credential, e2e: e2e)
         if let endpoint, endpoint.usesTLS {
             // The claim authenticates the device/key and its internal ports,
@@ -5491,7 +5519,7 @@ extension AppModel {
             if a.isCurrent != b.isCurrent { return a.isCurrent }
             return a.deviceName.localizedStandardCompare(b.deviceName) == .orderedAscending
         }
-        let devices = agents.prefix(12).map { agent -> AirSIMWidgetSnapshot.Device in
+        let devices = agents.map { agent -> AirSIMWidgetSnapshot.Device in
             let local = agent.vowlanOnline || agent.bluetoothOnline
             let reachable = local || agent.cloudOnline
             let observed: Date?
@@ -5503,6 +5531,7 @@ extension AppModel {
                          transport: agent.vowlanOnline ? "VoWLAN" : agent.bluetoothOnline ? "VoBLE" : agent.cloudOnline ? "云端" : "",
                          recentlyReachable: reachable, observedAt: observed,
                          simSignals: simSignals(for: agent.id),
+                         phoneNumber: agent.phoneNumber.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(32)) },
                          battery: androidBattery(for: agent.id, at: now),
                          unreadMessages: messages.filter { $0.sourceAgentID == agent.id && unreadMessageIDs.contains($0.id) }.count,
                          unseenMissedCalls: callHistory.filter { $0.sourceAgentID == agent.id && unseenMissedCallIDs.contains($0.id) }.count)
@@ -5537,10 +5566,10 @@ extension AppModel {
             blockedByCall: widgetSwitchBlocked)
         let snapshot = AirSIMWidgetSnapshot(generatedAt: now, devices: devices, calls: calls,
                                            messages: recentMessages, controls: controls)
-        let stateChanged = lastWidgetSnapshot?.devices.map { "\($0.id)|\($0.name)|\($0.transport)|\($0.recentlyReachable)" }
-            != devices.map { "\($0.id)|\($0.name)|\($0.transport)|\($0.recentlyReachable)" }
-            || lastWidgetSnapshot?.devices.map { ($0.simSignals ?? []).map { "\($0.title)|\($0.signal?.freshLevel(at: now) ?? -1)" } }
-                != devices.map { ($0.simSignals ?? []).map { "\($0.title)|\($0.signal?.freshLevel(at: now) ?? -1)" } }
+        let stateChanged = lastWidgetSnapshot?.devices.map { "\($0.id)|\($0.name)|\($0.transport)|\($0.recentlyReachable)|\($0.phoneNumber ?? "")" }
+            != devices.map { "\($0.id)|\($0.name)|\($0.transport)|\($0.recentlyReachable)|\($0.phoneNumber ?? "")" }
+            || lastWidgetSnapshot?.devices.map { ($0.simSignals ?? []).map { "\($0.title)|\($0.phoneNumber ?? "")|\($0.signal?.freshLevel(at: now) ?? -1)" } }
+                != devices.map { ($0.simSignals ?? []).map { "\($0.title)|\($0.phoneNumber ?? "")|\($0.signal?.freshLevel(at: now) ?? -1)" } }
             || lastWidgetSnapshot?.calls != calls
             || lastWidgetSnapshot?.messages != recentMessages
             || lastWidgetSnapshot?.controls != controls

@@ -4,11 +4,22 @@ import android.telecom.Call;
 
 public final class CloudOutgoingObservationTests {
     public static void main(String[] args) throws Exception {
+        imsDisplayKeepsCallIdentity();
         existingCallsExcludedAndRemovedCallsRetained();
         ambiguousCallsStayAmbiguousAfterRemoval();
         closedAndExpiredObservationCannotAcquireFutureCalls();
         overflowFailsClosed();
         System.out.println("CloudOutgoingObservationTests passed");
+    }
+    private static void imsDisplayKeepsCallIdentity() {
+        var call = new Call(Call.STATE_RINGING, 0, "sip:%2B8613800138000@ims.example;user=phone");
+        String id = CallRepository.add(call);
+        try {
+            check(CallRepository.number(id).equals("+8613800138000"), "raw IMS domain leaked");
+            call.setNumberForTest("tel:+8613800138000");
+            check(CallRepository.id(call).equals(id), "display update changed call identity");
+            check(CallRepository.number(id).equals("+8613800138000"), "plain handle changed");
+        } finally { CallRepository.remove(call); }
     }
     private static Call outgoing() { return new Call(1, 1, "5550100"); }
     private static void check(boolean ok, String message) { if (!ok) throw new AssertionError(message); }

@@ -618,6 +618,8 @@ struct AirSIMSettingsView: View {
     @State private var selfTestPhase: SelfTestPhase = .idle
     @State private var selfTestReport: CloudSelfTestReport?
     @State private var selfTestTask: Task<Void, Never>?
+    @State private var deletingEndpoint: (agentID: String, endpoint: VoWLANPairingRecord.Endpoint)?
+    @State private var endpointDeletionError: String?
     @State private var deletingDevice: AndroidAgentPresentation?
     @State private var deviceDeletionInProgress = false
     @State private var deviceDeletionError: String?
@@ -671,6 +673,17 @@ struct AirSIMSettingsView: View {
             if phase == .active { Task { await readNotificationPermission() } }
         }
         .onChange(of: model.errorMessage) { _ in presentManualAppUpdateIfIdle() }
+        .confirmationDialog("删除这个端点？",
+            isPresented: Binding(get: { deletingEndpoint != nil }, set: { if !$0 { deletingEndpoint = nil } }),
+            titleVisibility: .visible, presenting: deletingEndpoint) { target in
+            Button("删除端点", role: .destructive) {
+                do { try model.removeDeviceEndpoint(agentID: target.agentID, endpoint: target.endpoint) }
+                catch { endpointDeletionError = error.localizedDescription }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { target in
+            Text("删除 \(target.endpoint.host):\(target.endpoint.controlPort) 的控制和音频端点。保留设备配对、其他地址及通话和短信记录；可通过手动配置或重新配对添加回来。")
+        }
         .confirmationDialog("忘记这个设备？",
             isPresented: Binding(get: { deletingDevice != nil }, set: { if !$0 { deletingDevice = nil } }),
             titleVisibility: .visible, presenting: deletingDevice) { device in
@@ -1003,12 +1016,26 @@ struct AirSIMSettingsView: View {
                 LabeledContent("本机记录", value: String(record.id.prefix(8)))
                 LabeledContent("已保存端点", value: "\(record.endpoints.count)")
                 ForEach(Array(record.endpoints.enumerated()), id: \.offset) { _, endpoint in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(endpoint.host).textSelection(.enabled)
-                        Text("控制 \(endpoint.controlPort) · 音频 \(endpoint.pcmPort) · \(endpoint.tls == true ? "TLS" : "私网直连")")
-                            .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(endpoint.host).textSelection(.enabled)
+                            Text("控制 \(endpoint.controlPort) · 音频 \(endpoint.pcmPort) · \(endpoint.tls == true ? "TLS" : "私网直连")")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(role: .destructive) {
+                            endpointDeletionError = nil
+                            deletingEndpoint = (id, endpoint)
+                        } label: {
+                            Image(systemName: "trash").frame(width: 44, height: 44)
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("删除 \(endpoint.host) 控制端口 \(endpoint.controlPort) 的端点")
+                        .disabled(updateCallBusy)
                     }
                 }
+                if let endpointDeletionError { Text(endpointDeletionError).font(.footnote).foregroundStyle(.red) }
+                if record.endpoints.isEmpty { Text("尚无保存的端点，设备配对仍保留。").foregroundStyle(.secondary) }
                 Text("配对密钥保存在本机安全存储，不在页面显示。").font(.footnote)
             }
         }

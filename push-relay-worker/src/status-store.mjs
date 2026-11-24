@@ -311,9 +311,16 @@ export async function readAgentHeartbeatsFromKV(env, deviceID) {
 async function readKVAgentRoster(env, deviceID) {
   try {
     const prefix = `${HEARTBEAT_PREFIX}${deviceID}:agent:`;
-    const listing = await env.DEVICES.list({ prefix, limit: 100 });
-    const records = await Promise.all((listing.keys || []).map((item) => readKVRecord(env.DEVICES, item.name)));
-    const available = records.filter(Boolean);
+    const available = [];
+    let cursor;
+    do {
+      const listing = await env.DEVICES.list({ prefix, limit: 100, ...(cursor ? { cursor } : {}) });
+      const records = await Promise.all((listing.keys || []).map((item) => readKVRecord(env.DEVICES, item.name)));
+      available.push(...records.filter(Boolean));
+      if (listing.list_complete !== false) break;
+      if (!listing.cursor || listing.cursor === cursor) throw new Error("KV roster pagination did not advance");
+      cursor = listing.cursor;
+    } while (cursor);
     if (available.length > 0) return available;
   } catch (error) {
     warnDegraded("kv-roster", "KV heartbeat roster read failed; using latest heartbeat", error);

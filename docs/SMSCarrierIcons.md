@@ -1,5 +1,7 @@
 # SMS carrier icons
 
+> 2026-11-21：用户要求恢复旧 UI，本次 PR 的视觉代码、后续截图补齐及服务号码图标已撤回。以下为历史整合记录，不代表当前界面。
+
 Local UI assets for exact service numbers: 10086 (China Mobile), 10010 (China Unicom), 10000 (China Telecom). Contact photos take precedence on iPhone. No prefix matching or runtime image downloads.
 
 Logo sources (downloaded 2026-11-20):

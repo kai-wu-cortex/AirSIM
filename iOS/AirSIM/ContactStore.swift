@@ -140,7 +140,7 @@ final class ContactStore: ObservableObject {
     }
 
     nonisolated static func normalized(_ phone: String) -> String {
-        var value = phone.filter { $0.isNumber || $0 == "+" }
+        var value = CallerNumber.matching(phone).filter { $0.isNumber || $0 == "+" }
         if value.hasPrefix("+86") {
             value.removeFirst(3)
         } else if value.hasPrefix("86"), value.count > 11 {
@@ -232,7 +232,7 @@ final class ContactStore: ObservableObject {
 
     func displayName(for number: String?) -> String {
         guard let number, !number.isEmpty else { return "未知号码" }
-        return contact(for: number)?.name ?? number
+        return contact(for: number)?.name ?? CallerNumber.display(number)
     }
 }
 

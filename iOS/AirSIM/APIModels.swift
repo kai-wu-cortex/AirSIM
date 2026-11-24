@@ -63,6 +63,31 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// Normalize display data from old Agents without changing call identity.
+extension CallRecord {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try values.decode(String.self, forKey: .id),
+            index: try values.decode(Int.self, forKey: .index),
+            direction: try values.decode(String.self, forKey: .direction),
+            state: try values.decode(String.self, forKey: .state),
+            number: (try values.decodeIfPresent(String.self, forKey: .number)).map(CallerNumber.display),
+            startedAt: try values.decode(Date.self, forKey: .startedAt),
+            updatedAt: try values.decode(Date.self, forKey: .updatedAt),
+            endedAt: try values.decodeIfPresent(Date.self, forKey: .endedAt),
+            missed: try values.decode(Bool.self, forKey: .missed),
+            connectedAt: try values.decodeIfPresent(Date.self, forKey: .connectedAt),
+            androidID: try values.decodeIfPresent(String.self, forKey: .androidID),
+            sourceAgentID: try values.decodeIfPresent(String.self, forKey: .sourceAgentID),
+            sourceCallID: try values.decodeIfPresent(String.self, forKey: .sourceCallID),
+            historyEstimated: try values.decodeIfPresent(Bool.self, forKey: .historyEstimated),
+            slotIndex: try values.decodeIfPresent(Int.self, forKey: .slotIndex),
+            slotID: try values.decodeIfPresent(Int.self, forKey: .slotID)
+        )
+    }
+}
+
 /// 通话轮询结果；额外音频诊断字段由专门接口读取。
 struct CallStatus: Codable, Sendable {
     let active: CallRecord?
@@ -217,9 +242,10 @@ struct AndroidSIMSlot: Codable, Equatable, Identifiable, Sendable {
             let a = $0.slotIndex.flatMap { (0..<8).contains($0) ? $0 : nil } ?? Int.max
             let b = $1.slotIndex.flatMap { (0..<8).contains($0) ? $0 : nil } ?? Int.max
             return a == b ? $0.id < $1.id : a < b
-        }.prefix(4).enumerated().map { index, slot in
-            let title = slot.slotIndex.flatMap { (0..<8).contains($0) ? "SIM \($0 + 1)" : nil } ?? "卡 \(index + 1)"
-            return SIMSignalSummary(id: index, title: title, signal: slot.signal)
+        }.enumerated().map { index, slot in
+            let title = slot.slotIndex.flatMap { (0..<8).contains($0) ? "SIM \($0 + 1)" : nil } ?? "卡槽未知"
+            return SIMSignalSummary(id: index, title: title, signal: slot.signal,
+                                    phoneNumber: slot.displayNumber.map { String($0.prefix(32)) })
         }
     }
     var displayNumber: String? {
@@ -304,6 +330,19 @@ struct AndroidAgentPresentation: Equatable, Identifiable, Sendable {
         self.vowlanOnline = vowlanOnline
         self.bluetoothOnline = bluetoothOnline
         self.isCurrent = isCurrent
+    }
+
+    /// Pairing history remains visible when a transport drops an idle peer.
+    /// Missing live data is explicitly offline, never an authorization to route a call.
+    static func retainingSavedDevices(_ live: [Self], records: [PairedAndroidDeviceRecord]) -> [Self] {
+        var result = live
+        var ids = Set(live.map(\.id))
+        for record in records where ids.insert(record.id).inserted {
+            result.append(.init(id: record.id, deviceName: record.deviceName, phoneNumber: nil,
+                agentKind: record.agentKind, cloudOnline: false, vowlanOnline: false,
+                bluetoothOnline: false, isCurrent: false))
+        }
+        return result
     }
 
     var agentKindTitle: String {

@@ -168,7 +168,8 @@ final class LocalDeviceDirectory: ObservableObject {
         }
     }
     func verifyPairing(agentID: String, endpoint: VoWLANEndpoint, credential: VoWLANCredential) async throws {
-        guard !agentID.isEmpty, PairedAndroidDeviceStore.permits(agentID) else { throw VoWLANControllerError.notPaired }
+        guard !agentID.isEmpty, PairedAndroidDeviceStore.permits(agentID),
+              !VoWLANPairingRecordStore.isExcluded(agentID: agentID, endpoint: endpoint) else { throw VoWLANControllerError.notPaired }
         let token = UUID()
         verification[agentID] = token
         let identity: VoWLANHealthIdentity
@@ -183,10 +184,11 @@ final class LocalDeviceDirectory: ObservableObject {
         guard verification[agentID] == token, PairedAndroidDeviceStore.permits(agentID) else { throw CancellationError() }
         let store = credentials
         try await Task.detached { try store.save(credential, agentID: agentID) }.value
-        guard verification[agentID] == token else { throw CancellationError() }
+        guard verification[agentID] == token,
+              !VoWLANPairingRecordStore.isExcluded(agentID: agentID, endpoint: endpoint) else { throw CancellationError() }
         VoWLANPairingRecordStore.remember(
             agentID: agentID, credential: credential, endpoint: endpoint,
-            deviceName: identity.deviceName)
+            deviceName: identity.deviceName, replaceSameHost: true)
         try commitStagedE2E(agentID: agentID, credential: credential)
         pendingCredentials.removeValue(forKey: agentID)
         if let old = peers[agentID], old.endpoint == endpoint, old.credential == credential {
@@ -207,6 +209,13 @@ final class LocalDeviceDirectory: ObservableObject {
         objectWillChange.send()
         if let api = api(for: agentID) { onVerified?(api) }
         if enabled { subscribe(agentID: agentID) }
+    }
+    func invalidateEndpoint(agentID: String, endpoint: VoWLANEndpoint) {
+        verification[agentID] = UUID()
+        if peers[agentID]?.endpoint == endpoint {
+            peers.removeValue(forKey: agentID)?.poll?.cancel()
+            objectWillChange.send()
+        }
     }
     func invalidateRemoteRoute(agentID: String) {
         verification[agentID] = UUID()

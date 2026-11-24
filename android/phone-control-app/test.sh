@@ -212,6 +212,7 @@ assert_contains "$ROOT/src/com/airsim/phonecontrol/FeedbackUploader.java" \
   "$ROOT"/src/com/airsim/phonecontrol/CrashReportStore.java \
   "$ROOT"/src/com/airsim/phonecontrol/CrashReportSharePayload.java \
   "$ROOT"/src/com/airsim/phonecontrol/AgentCommand.java \
+  "$ROOT"/src/com/airsim/phonecontrol/CallerNumber.java \
   "$ROOT"/src/com/airsim/phonecontrol/CallRepository.java \
   "$ROOT"/src/com/airsim/phonecontrol/DefaultCallAccount.java \
   "$ROOT"/src/com/airsim/phonecontrol/CloudCallTarget.java \

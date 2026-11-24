@@ -257,7 +257,7 @@ struct AirSIMLiveActivityWidget: Widget {
         let current = state.agents?.first(where: \.isCurrent)
             ?? displayAgents(state).first(where: \.isCurrent)
             ?? displayAgents(state).first
-        return Text(current?.name ?? "Android Agent")
+        return Text(state.agentDeviceName ?? current?.name ?? "Android Agent")
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.white.opacity(0.9))
             .lineLimit(1)
@@ -276,8 +276,9 @@ struct AirSIMLiveActivityWidget: Widget {
         _ state: AirSIMCallActivityAttributes.ContentState
     ) -> [AirSIMCallActivityAttributes.ContentState.AgentSummary] {
         if let values = state.agents, !values.isEmpty {
-            // AppModel 已按“置顶固定 + 用户排序”排好序；每页最多 3 台。
-            return LiveActivityAgentPaging.slice(values, requestedPage: state.agentPage)
+            // New payloads already contain the visible page; retain old activity decoding.
+            return state.agentsArePage == true ? values
+                : LiveActivityAgentPaging.slice(values, requestedPage: state.agentPage)
         }
         guard let name = nonEmpty(state.agentDeviceName) else {
             return [.init(
@@ -427,13 +428,15 @@ struct AirSIMLiveActivityWidget: Widget {
                     SIMSignalStrip(signals: signals, date: Date(),
                                    available: agent.vowlanOnline || agent.bluetoothOnline || agent.cloudOnline)
                         .foregroundStyle(.white)
-                } else {
-                Text("SIM · \(displayAgentNumber(agent.phoneNumber))")
-                    .font(.system(size: compact ? 8.5 : 9.5, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.48))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.45)
-                    .allowsTightening(true)
+                }
+                if !(agent.simSignals ?? []).contains(where: { $0.phoneNumber?.isEmpty == false }) {
+                    Text("SIM · \(displayAgentNumber(agent.phoneNumber))")
+                        .font(.system(size: compact ? 8.5 : 9.5, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.48))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.45)
+                        .allowsTightening(true)
+                        .privacySensitive()
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -670,7 +673,7 @@ struct AirSIMLiveActivityWidget: Widget {
         case .active, .incoming, .held:
             EmptyView()
         case .standby, .cloudStandby:
-            if let signals = state.agents?.first(where: \.isCurrent)?.simSignals, !signals.isEmpty {
+            if let signals = state.agentSIMSignals ?? state.agents?.first(where: \.isCurrent)?.simSignals, !signals.isEmpty {
                 SIMSignalStrip(signals: signals, date: Date(), compact: true)
                     .foregroundStyle(.white)
             } else if let dbm = state.signalDBM {

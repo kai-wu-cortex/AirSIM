@@ -74,6 +74,7 @@ struct LiveActivityAgentSnapshot: Equatable {
     let cloudOnline: Bool
     let agents: [AirSIMCallActivityAttributes.ContentState.AgentSummary]
     let page: Int
+    let currentSIMSignals: [SIMSignalSummary]?
 
     init(
         agent: AndroidAgentPresentation?,
@@ -94,8 +95,14 @@ struct LiveActivityAgentSnapshot: Equatable {
         vowlanOnline = current?.vowlanOnline == true
         bluetoothOnline = current?.bluetoothOnline == true
         cloudOnline = current?.cloudOnline == true
-        self.page = max(0, page)
-        self.agents = agents.map { value in
+        let currentSignals: [SIMSignalSummary]? = current.flatMap { signals[$0.id] }?.map { sim in
+            .init(id: sim.id, title: sim.title,
+                  signal: sim.signal?.freshLevel(at: Date()) != nil ? sim.signal : nil,
+                  phoneNumber: sim.phoneNumber)
+        }
+        self.page = LiveActivityAgentPaging.pageIndex(page, for: agents.count)
+        // Only the visible page enters ActivityKit; the complete directory stays in the app.
+        self.agents = LiveActivityAgentPaging.slice(agents, requestedPage: self.page).map { value in
             AirSIMCallActivityAttributes.ContentState.AgentSummary(
                 id: value.id,
                 name: value.deviceName,
@@ -105,14 +112,14 @@ struct LiveActivityAgentSnapshot: Equatable {
                 bluetoothOnline: value.bluetoothOnline,
                 cloudOnline: value.cloudOnline,
                 isCurrent: value.id == current?.id,
-                // Keep the ActivityKit payload bounded: details belong to the
-                // selected phone, rather than multiplying every device's SIMs.
-                simSignals: value.id == current?.id ? signals[value.id]?.map { sim in
-                    .init(id: sim.id, title: sim.title,
-                          signal: sim.signal?.freshLevel(at: Date()) != nil ? sim.signal : nil)
-                } : nil
+                simSignals: signals[value.id]?.map { sim in
+                    sim.signal?.freshLevel(at: Date()) == nil ? sim.withoutSignal : sim
+                }
             )
         }
+        // The visible current row already supplies the compact island's SIMs.
+        // Avoid duplicating those numbers in the size-limited ActivityKit payload.
+        currentSIMSignals = self.agents.contains(where: \.isCurrent) ? nil : currentSignals
     }
 }
 
@@ -150,7 +157,9 @@ enum LiveActivityStateBuilder {
                 bluetoothOnline: agent?.bluetoothOnline,
                 cloudOnline: agent?.cloudOnline,
                 agents: agent?.agents,
-                agentPage: agent?.page
+                agentPage: agent?.page,
+                agentsArePage: agent == nil ? nil : true,
+                agentSIMSignals: agent?.currentSIMSignals
             )
         }
         // Calls are managed exclusively by CallKit; the Live Activity is an Agent-status
@@ -177,7 +186,9 @@ enum LiveActivityStateBuilder {
             bluetoothOnline: agent?.bluetoothOnline,
             cloudOnline: agent?.cloudOnline,
             agents: agent?.agents,
-            agentPage: agent?.page
+            agentPage: agent?.page,
+            agentsArePage: agent == nil ? nil : true,
+            agentSIMSignals: agent?.currentSIMSignals
         )
     }
 }

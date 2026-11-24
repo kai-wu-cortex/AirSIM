@@ -14,5 +14,5 @@ prefs = (root/'AirSIM/ConnectionModePreference.swift').read_text()
 models += prefs[prefs.index('enum AndroidAgentBindingPreference'):prefs.index('struct ConnectionModeRuntimePolicy')]
 (out/'Models.swift').write_text('import Foundation\nimport CryptoKit\n' + models)
 PY
-xcrun swiftc "$OUT/Models.swift" "$ROOT/AirSIM/LocalHistoryStore.swift" "$ROOT/Shared/WatchCallPayload.swift" "$ROOT/SMSIdentitySmoke/main.swift" -o "$OUT/checks"
+xcrun swiftc "$ROOT/Shared/CallerNumber.swift" "$OUT/Models.swift" "$ROOT/AirSIM/LocalHistoryStore.swift" "$ROOT/Shared/WatchCallPayload.swift" "$ROOT/SMSIdentitySmoke/main.swift" -o "$OUT/checks"
 "$OUT/checks"

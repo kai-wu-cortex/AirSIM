@@ -258,6 +258,16 @@ struct VoWLANPairingRecord: Codable, Equatable, Identifiable, Sendable {
             tls = endpoint.usesTLS ? true : nil
         }
 
+        var hostKey: String {
+            host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        }
+        func sameHost(as other: Self) -> Bool {
+            hostKey == other.hostKey && (tls == true) == (other.tls == true)
+        }
+        func matches(_ other: Self) -> Bool {
+            sameHost(as: other) && controlPort == other.controlPort && pcmPort == other.pcmPort
+        }
+
         var endpoint: VoWLANEndpoint? {
             try? VoWLANEndpoint(host: host, controlPort: controlPort, pcmPort: pcmPort, usesTLS: tls == true)
         }
@@ -274,12 +284,15 @@ struct VoWLANPairingRecord: Codable, Equatable, Identifiable, Sendable {
 enum VoWLANPairingRecordStore {
     private static let key = "airsim.vowlan.pairing-records.v1"
     private static let maxEndpoints = 4
+    private static let excludedKey = "airsim.vowlan.excluded-endpoints.v1"
+    private static let recordsLock = NSRecursiveLock()
 
-    static func pairingID(for credential: VoWLANCredential) -> String {
-        SHA256.hash(data: credential.secret).map { String(format: "%02x", $0) }.joined()
+    static func pairingID(for credential: VoWLANCredential, agentID: String) -> String {
+        SHA256.hash(data: Data("AIRSIM-PAIRING-RECORD1\n\(agentID)\n".utf8) + credential.secret).map { String(format: "%02x", $0) }.joined()
     }
 
     static func records(defaults: UserDefaults = .standard) -> [VoWLANPairingRecord] {
+        recordsLock.lock(); defer { recordsLock.unlock() }
         guard let data = defaults.data(forKey: key),
               let values = try? JSONDecoder().decode([VoWLANPairingRecord].self, from: data) else {
             return []
@@ -295,22 +308,30 @@ enum VoWLANPairingRecordStore {
         endpoint: VoWLANEndpoint?,
         deviceName: String?,
         defaults: UserDefaults = .standard,
-        now: Date = Date()
+        now: Date = Date(),
+        replaceSameHost: Bool = false
     ) {
+        recordsLock.lock(); defer { recordsLock.unlock() }
         guard !agentID.isEmpty else { return }
-        let id = pairingID(for: credential)
+        if let endpoint, isExcluded(agentID: agentID, endpoint: endpoint, defaults: defaults) { return }
+        let id = pairingID(for: credential, agentID: agentID)
         var values = records(defaults: defaults)
         // Keep the previous address history/created time when the same Agent is
         // re-paired with a new secret (secret rotation).
-        let previous = values.first { $0.id == id }
-            ?? values.first { $0.agentID == agentID }
+        // Device identity scopes updates, including legacy records with a secret-only ID.
+        let previous = values.first { $0.agentID == agentID }
         // One iPhone uses one active secret per Agent. Re-pairing replaces the
         // stale record for the same Agent instead of leaving both behind.
-        values.removeAll { $0.agentID == agentID && $0.id != id }
+        values.removeAll { $0.agentID == agentID }
         var endpoints = previous?.endpoints ?? []
         if let endpoint {
             let next = VoWLANPairingRecord.Endpoint(endpoint)
-            endpoints.removeAll { $0 == next }
+            if replaceSameHost {
+                for old in endpoints where old.sameHost(as: next) && !old.matches(next) {
+                    exclude(agentID: agentID, value: old, defaults: defaults)
+                }
+                endpoints.removeAll { $0.sameHost(as: next) }
+            } else { endpoints.removeAll { $0.matches(next) } }
             endpoints.append(next)
             if endpoints.count > maxEndpoints { endpoints.removeFirst(endpoints.count - maxEndpoints) }
         }
@@ -322,19 +343,55 @@ enum VoWLANPairingRecordStore {
             lastSeenAt: now,
             endpoints: endpoints
         )
-        values.removeAll { $0.id == id }
         values.append(record)
         values.sort { $0.lastSeenAt > $1.lastSeenAt }
-        defaults.set(try? JSONEncoder().encode(Array(values.prefix(8))), forKey: key)
+        defaults.set(try? JSONEncoder().encode(values), forKey: key)
+    }
+
+    private static func exclusions(_ defaults: UserDefaults) -> [String: [VoWLANPairingRecord.Endpoint]] {
+        guard let data = defaults.data(forKey: excludedKey) else { return [:] }
+        return (try? JSONDecoder().decode([String: [VoWLANPairingRecord.Endpoint]].self, from: data)) ?? [:]
+    }
+    private static func exclude(agentID: String, value: VoWLANPairingRecord.Endpoint, defaults: UserDefaults) {
+        var values = exclusions(defaults)
+        var entries = values[agentID] ?? []
+        if !entries.contains(where: { $0.matches(value) }) { entries.append(value) }
+        values[agentID] = entries
+        defaults.set(try? JSONEncoder().encode(values), forKey: excludedKey)
+    }
+    static func isExcluded(agentID: String, endpoint: VoWLANEndpoint, defaults: UserDefaults = .standard) -> Bool {
+        recordsLock.lock(); defer { recordsLock.unlock() }
+        let value = VoWLANPairingRecord.Endpoint(endpoint)
+        return (exclusions(defaults)[agentID] ?? []).contains { $0.matches(value) }
+    }
+    /// Only explicit pairing/configuration may re-enable a deleted address.
+    static func allowEndpoint(agentID: String, endpoint: VoWLANEndpoint, defaults: UserDefaults = .standard) {
+        recordsLock.lock(); defer { recordsLock.unlock() }
+        var values = exclusions(defaults)
+        let value = VoWLANPairingRecord.Endpoint(endpoint)
+        values[agentID]?.removeAll { $0.matches(value) }
+        defaults.set(try? JSONEncoder().encode(values), forKey: excludedKey)
+    }
+    static func removeEndpoint(agentID: String, endpoint: VoWLANPairingRecord.Endpoint, defaults: UserDefaults = .standard) {
+        recordsLock.lock(); defer { recordsLock.unlock() }
+        exclude(agentID: agentID, value: endpoint, defaults: defaults)
+        var values = records(defaults: defaults)
+        for index in values.indices where values[index].agentID == agentID {
+            values[index].endpoints.removeAll { $0.matches(endpoint) }
+        }
+        defaults.set(try? JSONEncoder().encode(values), forKey: key)
     }
 
     static func remove(agentID: String, defaults: UserDefaults = .standard) {
+        recordsLock.lock(); defer { recordsLock.unlock() }
         let values = records(defaults: defaults).filter { $0.agentID != agentID }
         defaults.set(try? JSONEncoder().encode(values), forKey: key)
     }
 
     static func removeAll(defaults: UserDefaults = .standard) {
+        recordsLock.lock(); defer { recordsLock.unlock() }
         defaults.removeObject(forKey: key)
+        defaults.removeObject(forKey: excludedKey)
     }
 }
 
