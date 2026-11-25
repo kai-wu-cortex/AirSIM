@@ -132,6 +132,79 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertTrue(service.commands.isEmpty)
     }
 
+    func testSystemAnswerRetiresWatchRingingBeforeMediaIsReady() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.cloud)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in service }, callKitController: controller)
+        defer { model.stop() }
+        let uuid = UUID(), id = UUID().uuidString
+        controller.setEnabled(true)
+        let reported = expectation(description: "push reported")
+        controller.reportIncomingPush(.init(bluetoothCallID: id, uuid: uuid,
+            generation: 4, number: nil, agentID: "A"),
+            systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, uuid)
+        // Same order as CallKitController.performAnswer. This push carries no cloud media,
+        // so the backend answer fails right after the signal: the Watch must not depend
+        // on the answer succeeding or ACTIVE arriving.
+        model.callKitAnswerAccepted(uuid: uuid)
+        try? await model.callKitAnswer(uuid: uuid, origin: .system)
+        let signal = try XCTUnwrap(WatchCallCoordinator.shared.lastPayload)
+        XCTAssertEqual(signal.phase, .connecting)
+        XCTAssertTrue(signal.answeredOnPhone, "The Watch learns of the iPhone answer before any media exists")
+        XCTAssertEqual(signal.callUUID, uuid)
+        XCTAssertEqual(signal.callID, id)
+        XCTAssertTrue(service.commands.isEmpty, "Announcing the answer sends no Android command")
+    }
+
+    func testAnswerThatBypassesCallKitSendsNoWatchSignal() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.cloud)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in service }, callKitController: controller)
+        defer { model.stop() }
+        let uuid = UUID(), id = UUID().uuidString
+        controller.setEnabled(true)
+        let reported = expectation(description: "push reported")
+        controller.reportIncomingPush(.init(bluetoothCallID: id, uuid: uuid,
+            generation: 4, number: nil, agentID: "A"),
+            systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        // An in-app answer that never became a CallKit answer can return to ringing.
+        try? await model.callKitAnswer(uuid: uuid, origin: .app)
+        let last = WatchCallCoordinator.shared.lastPayload
+        XCTAssertFalse(last?.callUUID == uuid && last?.answeredOnPhone == true,
+                       "Only a CallKit-accepted answer retires the Watch")
+    }
+
+    func testColdLaunchAnswerSignalsTheWatchAndEndsOnlyTheAnnouncedCall() {
+        let coordinator = WatchCallCoordinator()
+        let announcer = ColdLaunchWatchAnswerAnnouncer(coordinator: coordinator)
+        let uuid = UUID(), id = UUID().uuidString
+        let call = IncomingVoIPCall(bluetoothCallID: id, uuid: uuid, generation: 1, number: nil, agentID: "A")
+        announcer.ended()
+        XCTAssertNil(coordinator.lastPayload, "Nothing was announced, so nothing ends")
+        announcer.accepted(call, uuid: UUID())
+        XCTAssertNil(coordinator.lastPayload, "Another CallKit call is not this push")
+        announcer.accepted(nil, uuid: uuid)
+        XCTAssertNil(coordinator.lastPayload, "No push, no signal")
+        announcer.accepted(call, uuid: uuid)
+        XCTAssertEqual(coordinator.lastPayload?.phase, .connecting)
+        XCTAssertEqual(coordinator.lastPayload?.answeredOnPhone, true)
+        XCTAssertEqual(coordinator.lastPayload?.callUUID, uuid)
+        XCTAssertEqual(coordinator.lastPayload?.callID, id)
+        announcer.ended()
+        XCTAssertEqual(coordinator.lastPayload?.phase, .ended)
+        XCTAssertEqual(coordinator.lastPayload?.callUUID, uuid)
+        XCTAssertEqual(coordinator.lastPayload?.answeredOnPhone, false)
+    }
+
     func testPushFirstAdoptionKeepsUUIDAndLifecycleThroughAnswerAndEnd() async throws {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
         defer { ConnectionModePreference.set(old) }

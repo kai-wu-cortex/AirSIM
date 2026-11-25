@@ -4435,6 +4435,93 @@ final class AirSIMTests: XCTestCase {
         )
     }
 
+    func testAutomaticAnswerSkipsLocalWaitOnlyWhenNoLocalRouteCanAppear() {
+        func wait(_ mode: AirSIMConnectionMode = .automatic, cloud: Bool = true,
+                  wifi: Bool? = false, candidate: Bool = false) -> Bool {
+            IncomingLocalRouteWaitPolicy.shouldWait(mode: mode, cloudAnswerAvailable: cloud,
+                wifiPathAvailable: wifi, offWiFiCandidate: candidate)
+        }
+        XCTAssertFalse(wait(), "Off Wi-Fi without a direct candidate: answer over the cloud at once")
+        XCTAssertTrue(wait(wifi: true), "On Wi-Fi, Bonjour may still find the phone")
+        XCTAssertTrue(wait(wifi: nil), "Before the first Wi-Fi path report the old wait stays")
+        XCTAssertTrue(wait(candidate: true), "A TLS, tailnet or VPN route can work off Wi-Fi")
+        XCTAssertTrue(wait(cloud: false), "Without cloud media the local route is the only way")
+        XCTAssertTrue(wait(.vowlan), "Explicit VoWLAN never falls back to the cloud")
+        XCTAssertTrue(wait(.localDual), "Explicit local dual never falls back to the cloud")
+    }
+
+    func testOffWiFiCandidatesKeepTheLocalWait() throws {
+        let vpn = try XCTUnwrap(NetworkRoutePreferences.parse("10.8.0.0/24"))
+        func reachable(_ host: String, tls: Bool = false, verified: Set<String> = []) -> Bool {
+            IncomingLocalRouteWaitPolicy.reachableOffWiFi(host: host, tls: tls, custom: [vpn],
+                                                          verifiedOffWiFi: verified)
+        }
+        XCTAssertTrue(reachable("nas.example.com", tls: true), "Self-hosted TLS domain")
+        XCTAssertTrue(reachable("100.64.1.2"), "Tailscale/CGNAT overlay")
+        XCTAssertTrue(reachable("10.8.0.7"), "Inside a user-declared VPN prefix")
+        XCTAssertTrue(reachable("nas.example.com"), "An unparsed host stays a candidate")
+        XCTAssertFalse(reachable("192.168.1.20"), "A home LAN address needs that Wi-Fi")
+        XCTAssertFalse(reachable("172.16.12.239"), "A home LAN address needs that Wi-Fi")
+        XCTAssertFalse(reachable("10.9.0.7"), "Outside the declared VPN prefix")
+        XCTAssertTrue(reachable("10.9.0.7", verified: ["10.9.0.7"]),
+                      "A private address once verified off Wi-Fi is a VPN route")
+        XCTAssertFalse(reachable("192.168.1.20", verified: ["10.9.0.7"]), "Only the verified address counts")
+    }
+
+    func testOffWiFiVerifiedHostsAreRememberedOnceAndBounded() throws {
+        let suite = "off-wifi-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertTrue(VoWLANOffWiFiRouteStore.hosts(defaults: defaults).isEmpty)
+        VoWLANOffWiFiRouteStore.remember(host: "10.9.0.7", defaults: defaults)
+        VoWLANOffWiFiRouteStore.remember(host: "10.9.0.7", defaults: defaults)
+        XCTAssertEqual(VoWLANOffWiFiRouteStore.hosts(defaults: defaults), ["10.9.0.7"])
+        for index in 0..<40 { VoWLANOffWiFiRouteStore.remember(host: "10.10.0.\(index)", defaults: defaults) }
+        let kept = VoWLANOffWiFiRouteStore.hosts(defaults: defaults)
+        XCTAssertEqual(kept.count, VoWLANOffWiFiRouteStore.limit)
+        XCTAssertTrue(kept.contains("10.10.0.39"))
+        XCTAssertFalse(kept.contains("10.9.0.7"), "The oldest entries are dropped first")
+    }
+
+    func testWiFiPathStatusIsUnknownUntilTheMonitorReports() {
+        var gate = VoWLANNetworkPathGate()
+        XCTAssertNil(gate.available)
+        _ = gate.observe(available: false, route: "")
+        XCTAssertEqual(gate.available, false)
+        _ = gate.observe(available: true, route: "0:en0")
+        XCTAssertEqual(gate.available, true)
+    }
+
+    @MainActor
+    func testIncomingLocalRouteWaitStopsAsSoonAsWaitingCannotHelp() async {
+        var readyCalls = 0
+        let started = Date()
+        let none: Int? = await IncomingLocalRouteWait.run(attempts: 20, interval: .seconds(1),
+            ready: { readyCalls += 1; return nil }, keepWaiting: { false })
+        XCTAssertNil(none)
+        XCTAssertEqual(readyCalls, 1, "An already ready route is still taken on the first look")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.3, "No sleep when waiting cannot help")
+
+        readyCalls = 0
+        let third: Int? = await IncomingLocalRouteWait.run(attempts: 20, interval: .milliseconds(1),
+            ready: { readyCalls += 1; return readyCalls == 3 ? 7 : nil }, keepWaiting: { true })
+        XCTAssertEqual(third, 7)
+        XCTAssertEqual(readyCalls, 3)
+
+        readyCalls = 0
+        let exhausted: Int? = await IncomingLocalRouteWait.run(attempts: 5, interval: .milliseconds(1),
+            ready: { readyCalls += 1; return nil }, keepWaiting: { true })
+        XCTAssertNil(exhausted)
+        XCTAssertEqual(readyCalls, 5, "Waiting that can help keeps the full budget")
+
+        readyCalls = 0
+        var asked = 0
+        let learned: Int? = await IncomingLocalRouteWait.run(attempts: 20, interval: .milliseconds(1),
+            ready: { readyCalls += 1; return nil }, keepWaiting: { asked += 1; return asked < 2 })
+        XCTAssertNil(learned)
+        XCTAssertEqual(readyCalls, 2, "Stops once the Wi-Fi status turns out unavailable mid-wait")
+    }
+
     func testCloudSelfTestReportOnlyPassesWhenEveryStagePasses() {
         var report = CloudSelfTestReport.initial
         XCTAssertFalse(report.allPassed)

@@ -230,6 +230,44 @@ enum CallAnswerCompletionCoordinator {
     }
 }
 
+// MARK: Incoming local route wait
+
+/// Answering may wait briefly for a LAN route because a cold CallKit launch can answer
+/// before Bonjour finishes. Without Wi-Fi there is no Bonjour, so an automatic-mode answer
+/// that can use the cloud waits only while a saved route could still work off Wi-Fi.
+enum IncomingLocalRouteWaitPolicy {
+    static func shouldWait(mode: AirSIMConnectionMode, cloudAnswerAvailable: Bool,
+                           wifiPathAvailable: Bool?, offWiFiCandidate: Bool) -> Bool {
+        guard mode == .automatic, cloudAnswerAvailable, wifiPathAvailable == false else { return true }
+        return offWiFiCandidate
+    }
+
+    /// TLS domains, tailnet/CGNAT peers, user-declared prefixes and private addresses that
+    /// have already passed a signed check without Wi-Fi (a VPN route) can be reached off
+    /// Wi-Fi; any other private address is a LAN route. Unparsed hosts stay candidates.
+    static func reachableOffWiFi(host: String, tls: Bool, custom: [NetworkRoutePreferences.Prefix],
+                                 verifiedOffWiFi: Set<String>) -> Bool {
+        if tls || VoWLANNetworkRoutePolicy.isOverlayHost(host) || verifiedOffWiFi.contains(host) { return true }
+        guard let address = NetworkRoutePreferences.parseIPv4(host) else { return true }
+        return custom.contains { $0.contains(address) }
+    }
+}
+
+enum IncomingLocalRouteWait {
+    /// Looks for a ready route first on every attempt, then stops as soon as waiting
+    /// cannot help; the last attempt does not sleep.
+    @MainActor
+    static func run<Route>(attempts: Int = 20, interval: Duration = .milliseconds(400),
+                           ready: () async -> Route?, keepWaiting: () -> Bool) async -> Route? {
+        for attempt in 0..<attempts {
+            if let route = await ready() { return route }
+            guard keepWaiting() else { return nil }
+            if attempt < attempts - 1 { try? await Task.sleep(for: interval) }
+        }
+        return nil
+    }
+}
+
 enum AgentEventPollingPolicy {
     static func timeout(hasActiveCall: Bool) -> TimeInterval {
         hasActiveCall ? 3 : 15
@@ -4177,18 +4215,40 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func waitForLocalIncomingRoute() async -> (AirSIMAPI, PCMRoute)? {
+    private func waitForLocalIncomingRoute(mode: AirSIMConnectionMode,
+                                           cloudAnswerAvailable: Bool) async -> (AirSIMAPI, PCMRoute)? {
         // Cold launch from CallKit can answer before Bonjour/VoWLAN discovery has
         // completed. Retry briefly instead of failing the call immediately.
-        for attempt in 0..<20 {
-            if let route = await readyVoWLANRoute(waitForProbe: false) { return route }
-            // A cloud media URL in the APNs payload does not mean the local
-            // route is ready. Keep waiting unless another call already owns
-            // the local presentation.
-            if activeCall != nil { return nil }
-            if attempt < 19 { try? await Task.sleep(for: .milliseconds(400)) }
+        await IncomingLocalRouteWait.run(
+            ready: { await readyVoWLANRoute(waitForProbe: false) },
+            keepWaiting: {
+                // A cloud media URL in the APNs payload does not mean the local
+                // route is ready. Keep waiting unless another call already owns
+                // the local presentation, or no local route can appear at all.
+                activeCall == nil && IncomingLocalRouteWaitPolicy.shouldWait(
+                    mode: mode,
+                    cloudAnswerAvailable: cloudAnswerAvailable,
+                    wifiPathAvailable: vowlan.wifiPathAvailable,
+                    offWiFiCandidate: hasOffWiFiLocalRouteCandidate)
+            })
+    }
+
+    /// A saved or still-known route that could answer without Wi-Fi (TLS domain, tailnet
+    /// peer, user-declared prefix, or a private address already proven over a VPN).
+    /// Bonjour LAN addresses do not count.
+    private var hasOffWiFiLocalRouteCandidate: Bool {
+        let custom = NetworkRoutePreferences.stored()
+        let verified = VoWLANOffWiFiRouteStore.hosts()
+        if VoWLANManualRouteStore.routes().contains(where: {
+            IncomingLocalRouteWaitPolicy.reachableOffWiFi(host: $0.host, tls: $0.isRemote,
+                custom: custom, verifiedOffWiFi: verified)
+        }) { return true }
+        return vowlan.discoveredAgents.contains { agent in
+            [agent.endpoint, agent.alternateEndpoint].compactMap { $0 }.contains {
+                IncomingLocalRouteWaitPolicy.reachableOffWiFi(host: $0.host, tls: $0.usesTLS,
+                    custom: custom, verifiedOffWiFi: verified)
+            }
         }
-        return nil
     }
 
     func readyVoWLANRoute(waitForProbe: Bool = true) async -> (AirSIMAPI, PCMRoute)? {
@@ -4305,7 +4365,7 @@ final class AppModel: ObservableObject {
     }
     private func publishWatchLifecycle(
         _ event: CallLifecycleEvent, phase: WatchCallPhase,
-        previous: CallLifecycleSnapshot
+        previous: CallLifecycleSnapshot, answeredOnPhone: Bool = false
     ) {
         if let incoming = callKit.currentIncomingPush {
             let continuesPushedCall = incoming.uuid == event.callUUID
@@ -4318,7 +4378,8 @@ final class AppModel: ObservableObject {
                 WatchCallCoordinator.shared.publish(
                     callID: incoming.callID, callUUID: incoming.uuid, aliases: aliases, phase: phase,
                     number: incoming.number, callerName: incoming.callerName,
-                    transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan"
+                    transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan",
+                    answeredOnPhone: answeredOnPhone
                 )
                 return
             }
@@ -4327,8 +4388,24 @@ final class AppModel: ObservableObject {
         WatchCallCoordinator.shared.publish(
             callID: event.callID, callUUID: event.callUUID, phase: phase,
             number: record?.number, callerName: record.map { contacts.displayName(for: $0.number) },
-            transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan"
+            transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan",
+            answeredOnPhone: answeredOnPhone
         )
+    }
+
+    /// Tells the Watch the moment CallKit accepts this iPhone's answer, before any route
+    /// or media work: a cloud answer reaches ACTIVE seconds later, or never if it fails
+    /// (a failed CallKit answer ends the call, which publishes .ended). In-app answers that
+    /// bypass CallKit can return to ringing, so they do not signal. A Watch that is itself
+    /// answering ignores the signal.
+    private func publishWatchAnswerAccepted(uuid: UUID) {
+        let snapshot = callLifecycleSnapshot
+        guard snapshot.callUUID == uuid, snapshot.state == .ringing,
+              let callID = snapshot.callID else { return }
+        publishWatchLifecycle(CallLifecycleEvent(callID: callID, callUUID: uuid,
+            generation: snapshot.generation, state: .connecting, source: .callKit,
+            timestamp: Date(), traceID: nil, failure: nil),
+            phase: .connecting, previous: snapshot, answeredOnPhone: true)
     }
 
 
@@ -4826,6 +4903,10 @@ enum CallKitAudioPreparationCoordinator {
 }
 
 extension AppModel: CallKitActionHandling {
+    func callKitAnswerAccepted(uuid: UUID) {
+        publishWatchAnswerAccepted(uuid: uuid)
+    }
+
     func callKitAnswer(uuid: UUID, origin: CallAnswerOrigin) async throws {
         if let route = deviceCallRouter.route(for: uuid) {
             audio.stopCallTone(deactivateSession: false)
@@ -5139,7 +5220,8 @@ extension AppModel: CallKitActionHandling {
             // while the in-app answer button is pressed later. Wait for the
             // local route in every non-cloud mode before choosing media.
             if vowlanRoute == nil, selectedMode != .cloud {
-                vowlanRoute = await waitForLocalIncomingRoute()
+                vowlanRoute = await waitForLocalIncomingRoute(mode: selectedMode,
+                    cloudAnswerAvailable: pushedCall?.authenticatedMediaURL != nil && cloudMediaEnabled)
             }
             guard isCurrent() else { throw CancellationError() }
             let transport = CallTransportPolicy.preferred(

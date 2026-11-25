@@ -27,6 +27,8 @@ protocol CallKitActionHandling: AnyObject {
     func callKitDidFail(_ message: String)
     func callKitDidReceiveIncoming(_ call: IncomingVoIPCall)
     func callKitCallDidEnd()
+    /// CallKit accepted CXAnswerCallAction for this call, before any backend work.
+    func callKitAnswerAccepted(uuid: UUID)
 }
 
 enum CallAnswerOrigin: Equatable, Sendable {
@@ -67,6 +69,7 @@ extension CallKitActionHandling {
     func callKitPrepareAudioSession() throws {}
     func callKitDidReceiveIncoming(_ call: IncomingVoIPCall) {}
     func callKitCallDidEnd() {}
+    func callKitAnswerAccepted(uuid: UUID) {}
 }
 
 /// 挂断后 PushKit、本地长轮询与系统回调可能乱序到达。短期保留已经结束的
@@ -694,6 +697,8 @@ final class CallKitController: NSObject {
             }
             acceptedAnswerUUID = action.callUUID
             action.fulfill()
+            // Other ringing surfaces (Watch) retire now, not when media reaches ACTIVE.
+            handler.callKitAnswerAccepted(uuid: action.callUUID)
             do {
                 try await handler.callKitAnswer(uuid: action.callUUID, origin: origin)
                 guard currentUUID == action.callUUID else { return }

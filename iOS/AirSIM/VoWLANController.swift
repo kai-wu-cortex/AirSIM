@@ -107,6 +107,24 @@ enum VoWLANManualRouteStore {
     }
 }
 
+/// Hosts whose signed health check passed while the iPhone had no Wi-Fi, i.e. over a
+/// VPN. A private address is ambiguous (home LAN or VPN); this is the evidence that an
+/// answer off Wi-Fi may still wait for it. Bounded; newest entries are kept.
+enum VoWLANOffWiFiRouteStore {
+    static let key = "airsim.vowlan-off-wifi-hosts.v1"
+    static let limit = 32
+
+    static func hosts(defaults: UserDefaults = .standard) -> Set<String> {
+        Set(defaults.stringArray(forKey: key) ?? [])
+    }
+
+    static func remember(host: String, defaults: UserDefaults = .standard) {
+        var values = (defaults.stringArray(forKey: key) ?? []).filter { $0 != host }
+        values.append(host)
+        defaults.set(Array(values.suffix(limit)), forKey: key)
+    }
+}
+
 struct VoWLANDiscoveredAgent: Equatable, Identifiable, Sendable {
     let id: String
     let endpoint: VoWLANEndpoint
@@ -530,6 +548,9 @@ struct VoWLANNetworkPathGate {
         previousRoute = route
         return changed
     }
+
+    /// The latest Wi-Fi path status; nil until the monitor has reported once.
+    var available: Bool? { observed ? previousAvailable : nil }
 }
 
 struct VoWLANNetworkRecoveryPlan {
@@ -600,6 +621,8 @@ final class VoWLANController: ObservableObject {
     private var networkRecoveryTask: Task<Void, Never>?
     private var networkRecoveryPlan = VoWLANNetworkRecoveryPlan()
     private var networkPathGate = VoWLANNetworkPathGate()
+    /// Latest Wi-Fi path status from NWPathMonitor; nil before its first report.
+    var wifiPathAvailable: Bool? { networkPathGate.available }
     private var samePathProbeTask: Task<Void, Never>?
     private var verificationWatchdogTask: Task<Void, Never>?
     private var verificationWatchdogAttempts = 0
@@ -1263,6 +1286,7 @@ final class VoWLANController: ObservableObject {
             endpointFailures.removeValue(forKey: endpoint)
             preferredVerifiedEndpoint = endpoint
             availability = .verified(endpoint, at: Date())
+            if networkPathGate.available == false { VoWLANOffWiFiRouteStore.remember(host: endpoint.host) }
             await AgentVerboseTraceRecorder.shared.recordEvent(
                 source: "ios", category: "vowlan", phase: "verified",
                 title: "VoWLAN 签名健康检查通过",
