@@ -530,6 +530,9 @@ struct VoWLANNetworkPathGate {
         previousRoute = route
         return changed
     }
+
+    /// The latest Wi-Fi path status; nil until the monitor has reported once.
+    var available: Bool? { observed ? previousAvailable : nil }
 }
 
 struct VoWLANNetworkRecoveryPlan {
@@ -600,6 +603,8 @@ final class VoWLANController: ObservableObject {
     private var networkRecoveryTask: Task<Void, Never>?
     private var networkRecoveryPlan = VoWLANNetworkRecoveryPlan()
     private var networkPathGate = VoWLANNetworkPathGate()
+    /// Latest Wi-Fi path status from NWPathMonitor; nil before its first report.
+    var wifiPathAvailable: Bool? { networkPathGate.available }
     private var samePathProbeTask: Task<Void, Never>?
     private var verificationWatchdogTask: Task<Void, Never>?
     private var verificationWatchdogAttempts = 0
