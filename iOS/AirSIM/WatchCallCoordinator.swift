@@ -136,12 +136,13 @@ final class WatchCallCoordinator: NSObject, WCSessionDelegate {
     func publish(
         callID: String, callUUID: UUID?, aliases: [String] = [], phase: WatchCallPhase,
         number: String?, callerName: String?, transport: String? = nil,
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(), answeredOnPhone: Bool = false
     ) {
         start()
         publish(WatchCallPayload(
             callID: callID, callUUID: callUUID, aliases: aliases, phase: phase,
-            number: number, callerName: callerName, transport: transport, updatedAt: updatedAt
+            number: number, callerName: callerName, transport: transport, updatedAt: updatedAt,
+            answeredOnPhone: answeredOnPhone
         ))
     }
 

@@ -132,6 +132,33 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertTrue(service.commands.isEmpty)
     }
 
+    func testSystemAnswerRetiresWatchRingingBeforeMediaIsReady() async throws {
+        let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.cloud)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        let service = DeviceBackendProbe(id: "A")
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            deviceBackend: { _, _ in service }, callKitController: controller)
+        defer { model.stop() }
+        let uuid = UUID(), id = UUID().uuidString
+        controller.setEnabled(true)
+        let reported = expectation(description: "push reported")
+        controller.reportIncomingPush(.init(bluetoothCallID: id, uuid: uuid,
+            generation: 4, number: nil, agentID: "A"),
+            systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, uuid)
+        // This push carries no cloud media, so the backend answer fails right after the
+        // signal: the Watch must not depend on the answer succeeding or ACTIVE arriving.
+        try? await model.callKitAnswer(uuid: uuid, origin: .system)
+        let signal = try XCTUnwrap(WatchCallCoordinator.shared.lastPayload)
+        XCTAssertEqual(signal.phase, .connecting)
+        XCTAssertTrue(signal.answeredOnPhone, "The Watch learns of the iPhone answer before any media exists")
+        XCTAssertEqual(signal.callUUID, uuid)
+        XCTAssertEqual(signal.callID, id)
+        XCTAssertTrue(service.commands.isEmpty, "Announcing the answer sends no Android command")
+    }
+
     func testPushFirstAdoptionKeepsUUIDAndLifecycleThroughAnswerAndEnd() async throws {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
         defer { ConnectionModePreference.set(old) }

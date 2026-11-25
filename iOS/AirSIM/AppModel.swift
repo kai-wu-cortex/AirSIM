@@ -4359,7 +4359,7 @@ final class AppModel: ObservableObject {
     }
     private func publishWatchLifecycle(
         _ event: CallLifecycleEvent, phase: WatchCallPhase,
-        previous: CallLifecycleSnapshot
+        previous: CallLifecycleSnapshot, answeredOnPhone: Bool = false
     ) {
         if let incoming = callKit.currentIncomingPush {
             let continuesPushedCall = incoming.uuid == event.callUUID
@@ -4372,7 +4372,8 @@ final class AppModel: ObservableObject {
                 WatchCallCoordinator.shared.publish(
                     callID: incoming.callID, callUUID: incoming.uuid, aliases: aliases, phase: phase,
                     number: incoming.number, callerName: incoming.callerName,
-                    transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan"
+                    transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan",
+                    answeredOnPhone: answeredOnPhone
                 )
                 return
             }
@@ -4381,8 +4382,22 @@ final class AppModel: ObservableObject {
         WatchCallCoordinator.shared.publish(
             callID: event.callID, callUUID: event.callUUID, phase: phase,
             number: record?.number, callerName: record.map { contacts.displayName(for: $0.number) },
-            transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan"
+            transport: currentCallTransport == .bluetooth ? "bluetooth" : "vowlan",
+            answeredOnPhone: answeredOnPhone
         )
+    }
+
+    /// Tells the Watch the moment this iPhone accepts an answer, before any route or
+    /// media work: a cloud answer reaches ACTIVE seconds later, or never if it fails.
+    /// A Watch that is itself answering ignores the signal.
+    private func publishWatchAnswerAccepted(uuid: UUID) {
+        let snapshot = callLifecycleSnapshot
+        guard snapshot.callUUID == uuid, snapshot.state == .ringing,
+              let callID = snapshot.callID else { return }
+        publishWatchLifecycle(CallLifecycleEvent(callID: callID, callUUID: uuid,
+            generation: snapshot.generation, state: .connecting, source: .callKit,
+            timestamp: Date(), traceID: nil, failure: nil),
+            phase: .connecting, previous: snapshot, answeredOnPhone: true)
     }
 
 
@@ -4881,6 +4896,7 @@ enum CallKitAudioPreparationCoordinator {
 
 extension AppModel: CallKitActionHandling {
     func callKitAnswer(uuid: UUID, origin: CallAnswerOrigin) async throws {
+        publishWatchAnswerAccepted(uuid: uuid)
         if let route = deviceCallRouter.route(for: uuid) {
             audio.stopCallTone(deactivateSession: false)
             backgroundStandby.suspendForCall()
