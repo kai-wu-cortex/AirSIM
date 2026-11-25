@@ -388,6 +388,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var pendingOutgoingCall: CallRecord?
     @Published private(set) var callPresentationSurface: CallPresentationSurface?
     @Published private(set) var cloudCallAudioState: CloudCallAudioState = .idle
+    /// Progress of a cloud answer from CallKit acceptance to voice; nil otherwise.
+    @Published private(set) var cloudAnswerProgress: CloudAnswerProgress?
     @Published private(set) var callLifecycleSnapshot: CallLifecycleSnapshot = .idle
     private var outgoingAttemptID = UUID()
     private var outgoingIntentGate = OutgoingDialIntentGate()
@@ -1945,6 +1947,9 @@ final class AppModel: ObservableObject {
         WatchCallCoordinator.shared.start()
         IPhoneCloudCallSession.shared.onAudioEngineStarted = { [weak self] in
             self?.audio.retryRequestedSpeakerRoute()
+        }
+        IPhoneCloudCallSession.shared.onAnswerProgress = { [weak self] progress in
+            self?.cloudAnswerProgress = progress
         }
         IPhoneCloudCallSession.shared.onAudioStateChange = { [weak self] state in
             self?.cloudCallAudioState = state
@@ -4905,10 +4910,17 @@ enum CallKitAudioPreparationCoordinator {
 extension AppModel: CallKitActionHandling {
     func callKitAnswerAccepted(uuid: UUID) {
         publishWatchAnswerAccepted(uuid: uuid)
+        // Cloud answers show their progress from this moment; a local route that wins
+        // later cancels it (no progress for Bluetooth-mode answers).
+        if ConnectionModePreference.selected() != .bluetooth,
+           let pushed = callKit.currentIncomingPush, pushed.uuid == uuid {
+            IPhoneCloudCallSession.shared.beginAnswerProgress(for: pushed)
+        }
     }
 
     func callKitAnswer(uuid: UUID, origin: CallAnswerOrigin) async throws {
         if let route = deviceCallRouter.route(for: uuid) {
+            IPhoneCloudCallSession.shared.cancelAnswerProgress()
             audio.stopCallTone(deactivateSession: false)
             backgroundStandby.suspendForCall()
             callPresentationSurface = origin == .app ? .app : .system
@@ -5188,6 +5200,7 @@ extension AppModel: CallKitActionHandling {
         if origin == .system { _ = IncomingCallPresentationRequest.consume() }
         do {
             if currentCallTransport == .bluetooth {
+                IPhoneCloudCallSession.shared.cancelAnswerProgress()
                 try await vobleCalls.answer()
                 guard isCurrent() else { throw CancellationError() }
                 currentCallTransport = .bluetooth
@@ -5230,6 +5243,8 @@ extension AppModel: CallKitActionHandling {
                 cloudMediaAvailable: pushedCall?.authenticatedMediaURL != nil,
                 cloudMediaEnabled: cloudMediaEnabled
             )
+            // Progress describes cloud answers only; a local winner never counts.
+            if transport != .cloud { IPhoneCloudCallSession.shared.cancelAnswerProgress() }
             switch transport {
             case .vowlan:
                 guard let (vowlanAPI, pcmRoute) = vowlanRoute else {

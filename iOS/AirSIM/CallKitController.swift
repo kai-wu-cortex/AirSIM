@@ -119,6 +119,7 @@ final class CallKitController: NSObject {
     private var currentAgentID: String?
     private var currentState: String?
     private var currentNumber: String?
+    private var answerProgressUUID: UUID?
     private var currentDirection: String?
     private var incomingReportRequested = false
     private var incomingReportFailed = false
@@ -210,6 +211,33 @@ final class CallKitController: NSObject {
     /// 配对设备接管同一通电话后，立即结束本机 CallKit，避免双端同时响铃或抢占媒体。
     func reportCurrentCallEnded(reason: CXCallEndedReason) {
         finishCurrentCall(previous: nil, reason: reason)
+    }
+
+    /// Test seam for name-line writes; nil reports through the CXProvider.
+    var displayNameReporter: ((UUID, String) -> Void)?
+
+    /// Cloud answer progress owns the name line (progress text only, never a contact
+    /// name) until `restoreAnswerDisplayNumber`.
+    func showAnswerProgress(_ text: String, for uuid: UUID) {
+        guard currentUUID == uuid, systemCallReported else { return }
+        answerProgressUUID = uuid
+        reportDisplayName(text, for: uuid)
+    }
+
+    /// CallKit cannot hand a written name back to iOS contact matching, so the name line
+    /// becomes the number. Runs before any end report so Recents keeps the number.
+    func restoreAnswerDisplayNumber() {
+        guard let uuid = answerProgressUUID else { return }
+        answerProgressUUID = nil
+        guard currentUUID == uuid else { return }
+        reportDisplayName(CallKitNumberPresentation.handle(number: currentNumber).value, for: uuid)
+    }
+
+    private func reportDisplayName(_ text: String, for uuid: UUID) {
+        if let displayNameReporter { displayNameReporter(uuid, text); return }
+        let update = CXCallUpdate()
+        update.localizedCallerName = text
+        provider.reportCall(with: uuid, updated: update)
     }
     func withdrawLocalPresentation(uuid: UUID, reason: CXCallEndedReason = .unanswered) {
         guard currentUUID == uuid, currentState == "incoming" else { return }
@@ -570,6 +598,7 @@ final class CallKitController: NSObject {
                 ]
             )
         }
+        restoreAnswerDisplayNumber()
         if systemCallReported, !endActionFulfilled {
             let reason = explicitReason ?? endedReason(for: previous)
             provider.reportCall(with: uuid, endedAt: previous?.endedAt ?? Date(), reason: reason)
@@ -656,6 +685,7 @@ final class CallKitController: NSObject {
             finishIncomingReport(CallKitBridgeError.staleSystemCall)
         }
         currentUUID = nil
+        answerProgressUUID = nil
         currentBackendID = nil
         currentAgentID = nil
         currentState = nil
@@ -792,6 +822,7 @@ final class CallKitController: NSObject {
         // is cleanup, not a new user hangup whose missing transport needs an alert.
         let systemCallWasCurrent = currentUUID == action.callUUID
         guard systemCallWasCurrent else { action.fulfill(); return }
+        restoreAnswerDisplayNumber()
         endActionFulfilled = true
         action.fulfill()
         var backendError: Error?

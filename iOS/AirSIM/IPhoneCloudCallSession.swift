@@ -2,6 +2,7 @@ import AVFoundation
 import CallKit
 import Foundation
 import UIKit
+import UserNotifications
 
 enum IPhoneCloudCallError: LocalizedError {
     case mediaUnavailable
@@ -790,6 +791,130 @@ enum CloudCallControlClient {
     }
 }
 
+/// Drives one cloud answer's progress into the CallKit name line and the app. The name
+/// line only ever shows progress, then the number: CallKit cannot hand a written name
+/// back to iOS contact matching.
+@MainActor
+final class CloudAnswerProgressCoordinator {
+    var onProgress: ((CloudAnswerProgress?) -> Void)?
+    /// Called once per failed answer, after the failure has been visible for `failureHold`.
+    var onFailure: ((CloudAnswerFailure) -> Void)?
+    private let callKit: CallKitController
+    private let history: UserDefaults
+    private let failureHold: Duration
+    private(set) var progress: CloudAnswerProgress?
+    private var call: IncomingVoIPCall?
+    private var ticker: Task<Void, Never>?
+    private var lastNameLine: String?
+
+    init(callKit: CallKitController = .shared, history: UserDefaults = .standard,
+         failureHold: Duration = .seconds(2)) {
+        self.callKit = callKit
+        self.history = history
+        self.failureHold = failureHold
+    }
+
+    /// Starts when CallKit accepts a cloud answer.
+    func begin(for call: IncomingVoIPCall, at now: Date = Date()) {
+        guard call.authenticatedMediaURL != nil, !call.isVirtual else { return }
+        stopTicker()
+        self.call = call
+        progress = CloudAnswerProgress(startedAt: now)
+        lastNameLine = nil
+        publish(at: now)
+        ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, self.call?.uuid == call.uuid else { return }
+                self.tick(at: Date())
+            }
+        }
+    }
+
+    /// Another transport won or the call is over: drop the progress without recording it.
+    func cancel() {
+        guard call != nil else { return }
+        finish()
+    }
+
+    func apply(_ signal: CloudAnswerSignal, for uuid: UUID?, at now: Date = Date()) {
+        guard var current = progress, !current.isFinished, uuid == nil || uuid == call?.uuid else { return }
+        current.apply(signal, at: now)
+        progress = current
+        resolve(at: now)
+    }
+
+    func tick(at now: Date) {
+        guard var current = progress, !current.isFinished, let call else { return }
+        // The system call can end without the cloud session hearing of it (for example
+        // a failed CallKit answer); never time out a call that no longer exists.
+        guard callKit.currentSystemCallUUID == call.uuid else { finish(); return }
+        current.tick(at: now)
+        progress = current
+        resolve(at: now)
+    }
+
+    private func resolve(at now: Date) {
+        guard let current = progress, let call else { return }
+        if let connectedAt = current.connectedAt {
+            CloudAnswerDurationHistory.record(connectedAt.timeIntervalSince(current.startedAt), defaults: history)
+            finish()
+        } else if let failure = current.failure {
+            stopTicker()
+            // Ownership changes already end the call in the session; only clear the line.
+            if failure == .answeredElsewhere { finish(); return }
+            publish(at: now)
+            let hold = failureHold
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: hold)
+                guard let self, self.call?.uuid == call.uuid else { return }
+                self.finish()
+                self.onFailure?(failure)
+            }
+        } else {
+            publish(at: now)
+        }
+    }
+
+    private func publish(at now: Date) {
+        guard let current = progress, let call else { return }
+        onProgress?(current)
+        let line = current.nameLine(at: now)
+        // Unchanged text is not rewritten: no flicker and no repeated VoiceOver reading.
+        guard line != lastNameLine else { return }
+        lastNameLine = line
+        callKit.showAnswerProgress(line, for: call.uuid)
+    }
+
+    private func finish() {
+        stopTicker()
+        callKit.restoreAnswerDisplayNumber()
+        progress = nil
+        call = nil
+        lastNameLine = nil
+        onProgress?(nil)
+    }
+
+    private func stopTicker() {
+        ticker?.cancel()
+        ticker = nil
+    }
+}
+
+/// Tells the user why a cloud answer failed once the system call screen is gone.
+enum CloudAnswerFailureNotifier {
+    static let identifier = "airsim.cloud-answer-failure"
+
+    static func post(_ failure: CloudAnswerFailure) {
+        let content = UNMutableNotificationContent()
+        content.title = "通话未接通"
+        content.body = failure.advice.map { "\(failure.title)：\($0)" } ?? failure.title
+        content.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+    }
+}
+
 /// iPhone 的公网 PCM 回退会话。PushKit 媒体密钥只保存在内存中；
 /// CallKit 激活 AVAudioSession 后才启动麦克风和播放，控制 WebSocket 可提前接听模块来电。
 @MainActor
@@ -831,6 +956,12 @@ final class IPhoneCloudCallSession {
     var earlyMediaAudible: Bool { isReceivingEarlyMedia && media.isAudioRunning && media.hasReceivedDownlink }
     var onEarlyPlayback: (() -> Void)?
     var onAudioEngineStarted: (() -> Void)?
+    /// Progress of the cloud answer CallKit accepted, for the name line and the app.
+    let answerProgress: CloudAnswerProgressCoordinator
+    var onAnswerProgress: ((CloudAnswerProgress?) -> Void)? {
+        get { answerProgress.onProgress }
+        set { answerProgress.onProgress = newValue }
+    }
 
     var isPrepared: Bool { call != nil && media.isConnected }
     var hasActiveCall: Bool { call != nil && answered && lifecycleState == .active }
@@ -842,6 +973,10 @@ final class IPhoneCloudCallSession {
     var isAudioRunning: Bool { media.isAudioRunning }
 
     private init() {
+        answerProgress = CloudAnswerProgressCoordinator()
+        answerProgress.onFailure = { failure in
+            IPhoneCloudCallSession.shared.finishFailedAnswer(failure)
+        }
         media.onConnectionLost = { connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
@@ -867,6 +1002,7 @@ final class IPhoneCloudCallSession {
                 // The trace await can outlive hangup or even the next call.
                 guard let call = session.call, session.media.isCurrentConnection(connection),
                       control.matches(callID: call.callID, uuid: call.uuid, generation: call.generation) else { return }
+                session.answerProgress.apply(.control(status: status, role: control.role), for: call.uuid)
                 switch status {
                 case "early_media", "early_media_ready_v1":
                     // New capability requires all identity fields (legacy controls
@@ -928,6 +1064,10 @@ final class IPhoneCloudCallSession {
                 }
                 if session.media.isCurrentConnection(connection), session.hasActiveCall, session.media.isAudioRunning {
                     session.audioState = .connected
+                }
+                // Voice arriving is proof of connection even if ACTIVE was lost in a reconnect.
+                if session.media.isCurrentConnection(connection), let call = session.call {
+                    session.answerProgress.apply(.downlinkAudio, for: call.uuid)
                 }
             }
         }
@@ -997,6 +1137,29 @@ final class IPhoneCloudCallSession {
         }
         guard call?.uuid == incoming.uuid, answered else { return }
         scheduleAnswerConfirmation(for: incoming)
+    }
+
+    /// CallKit accepted the answer of this cloud push: show progress until voice or failure.
+    func beginAnswerProgress(for call: IncomingVoIPCall) {
+        answerProgress.begin(for: call)
+    }
+
+    /// VoWLAN or Bluetooth won the answer: drop the progress without counting it.
+    func cancelAnswerProgress() {
+        answerProgress.cancel()
+    }
+
+    /// Ends a failed cloud answer. Android ends the carrier call only when the failure
+    /// says so (a refused call keeps ringing; another device's answer is never ended).
+    private func finishFailedAnswer(_ failure: CloudAnswerFailure) {
+        let envelope = failure.endsAndroidCall
+            ? call.flatMap { media.controlEnvelope(action: answered ? "end" : "reject", call: $0) } : nil
+        let credentials = envelope == nil ? nil : VoIPPushController.shared.cloudCallControlCredentials()
+        emitLifecycle(.failed, source: .agent, failure: failure.title)
+        CallKitController.shared.reportCurrentCallEnded(reason: .failed)
+        stop()
+        if let envelope, let credentials { submitPersistentControl(envelope, credentials: credentials) }
+        if failure.notifies { CloudAnswerFailureNotifier.post(failure) }
     }
 
     func reject(_ incoming: IncomingVoIPCall) async throws {
@@ -1315,6 +1478,7 @@ final class IPhoneCloudCallSession {
     }
 
     func stop() {
+        answerProgress.cancel()
         answerRetryGeneration &+= 1
         answerRetryTask?.cancel()
         answerRetryTask = nil
@@ -1351,6 +1515,8 @@ final class IPhoneCloudCallSession {
                     envelope: envelope, credentials: credentials
                 )
                 guard self.call?.uuid == incoming.uuid, self.answered else { return }
+                self.answerProgress.apply(.earlyReceipt(agentConnected: receipt.agentConnected == true),
+                                          for: incoming.uuid)
                 await self.tracePersistentControl(
                     envelope,
                     phase: receipt.agentConnected == true ? "early_forwarded" : "early_persisted",
@@ -1358,6 +1524,9 @@ final class IPhoneCloudCallSession {
                 )
             } catch {
                 guard self.call?.uuid == incoming.uuid, self.answered else { return }
+                if case .relayUnavailable = error as? CloudCallControlClientError {
+                    self.answerProgress.apply(.relayUnavailable, for: incoming.uuid)
+                }
                 await self.tracePersistentControl(
                     envelope, phase: "early_failed",
                     detail: error.localizedDescription, isFailure: true

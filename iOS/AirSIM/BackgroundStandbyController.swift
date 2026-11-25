@@ -437,7 +437,11 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
     private let watchAnswers = ColdLaunchWatchAnswerAnnouncer()
 
     func callKitAnswerAccepted(uuid: UUID) {
-        watchAnswers.accepted(CallKitController.shared.currentIncomingPush, uuid: uuid)
+        let pushed = CallKitController.shared.currentIncomingPush
+        watchAnswers.accepted(pushed, uuid: uuid)
+        if ConnectionModePreference.selected() != .bluetooth, let pushed, pushed.uuid == uuid {
+            IPhoneCloudCallSession.shared.beginAnswerProgress(for: pushed)
+        }
     }
     func callKitCallDidEnd() { watchAnswers.ended() }
 

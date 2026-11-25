@@ -205,6 +205,86 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertEqual(coordinator.lastPayload?.answeredOnPhone, false)
     }
 
+    private func reportedCloudPush(on controller: CallKitController) async throws -> IncomingVoIPCall {
+        let uuid = UUID()
+        let push = try IncomingVoIPCall(userInfo: ["event": "incoming_call", "call_id": UUID().uuidString,
+            "call_uuid": uuid.uuidString, "agent_id": "A", "generation": 4, "number": "13800138000",
+            "call_secret": String(repeating: "x", count: 32),
+            "media_url": "wss://relay.example/v1/calls/\(uuid.uuidString.lowercased())/connect"])
+        controller.setEnabled(true)
+        let reported = expectation(description: "push reported")
+        controller.reportIncomingPush(push, systemReport: { _, _, done in done(nil) }) { _ in reported.fulfill() }
+        await fulfillment(of: [reported], timeout: 2)
+        return push
+    }
+
+    func testAnswerProgressShowsOnlyProgressThenTheNumber() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        var names: [String] = []
+        controller.displayNameReporter = { _, text in names.append(text) }
+        let suite = "answer-progress-\(UUID().uuidString)"
+        let history = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { history.removePersistentDomain(forName: suite) }
+        let coordinator = CloudAnswerProgressCoordinator(callKit: controller, history: history)
+        var published: [CloudAnswerProgress?] = []
+        coordinator.onProgress = { published.append($0) }
+        let push = try await reportedCloudPush(on: controller)
+        coordinator.begin(for: push)
+        XCTAssertEqual(names.first, "连接云端 0 秒", "The name line shows progress, never a contact name")
+        coordinator.apply(.control(status: "answer_ok", role: nil), for: push.uuid)
+        XCTAssertEqual(names.last?.hasPrefix("接通语音中"), true)
+        coordinator.apply(.control(status: "active", role: nil), for: push.uuid)
+        XCTAssertEqual(names.last, CallKitNumberPresentation.handle(number: push.number).value)
+        XCTAssertNil(published.last ?? nil, "The app stops showing progress once connected")
+        XCTAssertEqual((history.array(forKey: CloudAnswerDurationHistory.key) ?? []).count, 1)
+    }
+
+    func testEndingRestoresTheNumberFirst() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        var names: [String] = []
+        controller.displayNameReporter = { _, text in names.append(text) }
+        let push = try await reportedCloudPush(on: controller)
+        controller.showAnswerProgress("等待安卓端 3 秒", for: push.uuid)
+        controller.reportCurrentCallEnded(reason: .remoteEnded)
+        XCTAssertEqual(names, ["等待安卓端 3 秒", CallKitNumberPresentation.handle(number: push.number).value],
+                       "Recents must keep the number, not the progress text")
+        XCTAssertNil(controller.currentSystemCallUUID)
+    }
+
+    func testVoWLANWinCancelsProgress() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        var names: [String] = []
+        controller.displayNameReporter = { _, text in names.append(text) }
+        let suite = "answer-progress-\(UUID().uuidString)"
+        let history = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { history.removePersistentDomain(forName: suite) }
+        let coordinator = CloudAnswerProgressCoordinator(callKit: controller, history: history)
+        let push = try await reportedCloudPush(on: controller)
+        coordinator.begin(for: push)
+        coordinator.cancel()
+        XCTAssertEqual(names.last, CallKitNumberPresentation.handle(number: push.number).value)
+        coordinator.apply(.control(status: "active", role: nil), for: push.uuid)
+        XCTAssertNil(history.array(forKey: CloudAnswerDurationHistory.key), "A VoWLAN answer never counts")
+    }
+
+    func testFailedAnswerShowsFailureThenEndsOnce() async throws {
+        let controller = CallKitController(observesSystemCallbacks: false); controller.setEnabled(false)
+        var names: [String] = []
+        controller.displayNameReporter = { _, text in names.append(text) }
+        let coordinator = CloudAnswerProgressCoordinator(callKit: controller, failureHold: .zero)
+        let failed = expectation(description: "failure handed over")
+        var failures: [CloudAnswerFailure] = []
+        coordinator.onFailure = { failures.append($0); failed.fulfill() }
+        let push = try await reportedCloudPush(on: controller)
+        coordinator.begin(for: push)
+        coordinator.apply(.control(status: "answer_unavailable", role: nil), for: push.uuid)
+        coordinator.apply(.control(status: "action_error", role: nil), for: push.uuid)
+        XCTAssertEqual(names.last, "接听失败")
+        await fulfillment(of: [failed], timeout: 2)
+        XCTAssertEqual(failures, [.androidNoAudio(callAnswered: false)], "One failure, decided by the first signal")
+        XCTAssertEqual(names.last, CallKitNumberPresentation.handle(number: push.number).value)
+    }
+
     func testPushFirstAdoptionKeepsUUIDAndLifecycleThroughAnswerAndEnd() async throws {
         let old = ConnectionModePreference.selected(); ConnectionModePreference.set(.vowlan)
         defer { ConnectionModePreference.set(old) }
