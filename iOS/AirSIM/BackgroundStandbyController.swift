@@ -405,10 +405,41 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
     }
 }
 
+/// A PushKit cold launch answers without AppModel's lifecycle. It still tells the Watch
+/// that this iPhone accepted the answer, and later that this announced call ended, so
+/// the Watch neither keeps ringing nor keeps showing the call as connecting.
+@MainActor
+final class ColdLaunchWatchAnswerAnnouncer {
+    private let coordinator: WatchCallCoordinator
+    private var announced: IncomingVoIPCall?
+
+    init(coordinator: WatchCallCoordinator = .shared) { self.coordinator = coordinator }
+
+    func accepted(_ call: IncomingVoIPCall?, uuid: UUID) {
+        guard let call, call.uuid == uuid else { return }
+        announced = call
+        coordinator.publish(callID: call.callID, callUUID: call.uuid, phase: .connecting,
+                            number: call.number, callerName: call.callerName, answeredOnPhone: true)
+    }
+
+    func ended() {
+        guard let call = announced else { return }
+        announced = nil
+        coordinator.publish(callID: call.callID, callUUID: call.uuid, phase: .ended,
+                            number: call.number, callerName: call.callerName)
+    }
+}
+
 /// SwiftUI 状态中心尚未建立时也能响应系统接听/拒接；AppModel 启动后会接管 handler。
 @MainActor
 private final class ColdLaunchCallKitHandler: CallKitActionHandling {
     private let vowlan = VoWLANController()
+    private let watchAnswers = ColdLaunchWatchAnswerAnnouncer()
+
+    func callKitAnswerAccepted(uuid: UUID) {
+        watchAnswers.accepted(CallKitController.shared.currentIncomingPush, uuid: uuid)
+    }
+    func callKitCallDidEnd() { watchAnswers.ended() }
 
     init() { vowlan.startBrowsing() }
     func stop() { vowlan.stopBrowsing() }

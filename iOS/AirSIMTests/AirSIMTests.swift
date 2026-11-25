@@ -4452,8 +4452,9 @@ final class AirSIMTests: XCTestCase {
 
     func testOffWiFiCandidatesKeepTheLocalWait() throws {
         let vpn = try XCTUnwrap(NetworkRoutePreferences.parse("10.8.0.0/24"))
-        func reachable(_ host: String, tls: Bool = false) -> Bool {
-            IncomingLocalRouteWaitPolicy.reachableOffWiFi(host: host, tls: tls, custom: [vpn])
+        func reachable(_ host: String, tls: Bool = false, verified: Set<String> = []) -> Bool {
+            IncomingLocalRouteWaitPolicy.reachableOffWiFi(host: host, tls: tls, custom: [vpn],
+                                                          verifiedOffWiFi: verified)
         }
         XCTAssertTrue(reachable("nas.example.com", tls: true), "Self-hosted TLS domain")
         XCTAssertTrue(reachable("100.64.1.2"), "Tailscale/CGNAT overlay")
@@ -4462,6 +4463,24 @@ final class AirSIMTests: XCTestCase {
         XCTAssertFalse(reachable("192.168.1.20"), "A home LAN address needs that Wi-Fi")
         XCTAssertFalse(reachable("172.16.12.239"), "A home LAN address needs that Wi-Fi")
         XCTAssertFalse(reachable("10.9.0.7"), "Outside the declared VPN prefix")
+        XCTAssertTrue(reachable("10.9.0.7", verified: ["10.9.0.7"]),
+                      "A private address once verified off Wi-Fi is a VPN route")
+        XCTAssertFalse(reachable("192.168.1.20", verified: ["10.9.0.7"]), "Only the verified address counts")
+    }
+
+    func testOffWiFiVerifiedHostsAreRememberedOnceAndBounded() throws {
+        let suite = "off-wifi-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertTrue(VoWLANOffWiFiRouteStore.hosts(defaults: defaults).isEmpty)
+        VoWLANOffWiFiRouteStore.remember(host: "10.9.0.7", defaults: defaults)
+        VoWLANOffWiFiRouteStore.remember(host: "10.9.0.7", defaults: defaults)
+        XCTAssertEqual(VoWLANOffWiFiRouteStore.hosts(defaults: defaults), ["10.9.0.7"])
+        for index in 0..<40 { VoWLANOffWiFiRouteStore.remember(host: "10.10.0.\(index)", defaults: defaults) }
+        let kept = VoWLANOffWiFiRouteStore.hosts(defaults: defaults)
+        XCTAssertEqual(kept.count, VoWLANOffWiFiRouteStore.limit)
+        XCTAssertTrue(kept.contains("10.10.0.39"))
+        XCTAssertFalse(kept.contains("10.9.0.7"), "The oldest entries are dropped first")
     }
 
     func testWiFiPathStatusIsUnknownUntilTheMonitorReports() {
@@ -4494,6 +4513,13 @@ final class AirSIMTests: XCTestCase {
             ready: { readyCalls += 1; return nil }, keepWaiting: { true })
         XCTAssertNil(exhausted)
         XCTAssertEqual(readyCalls, 5, "Waiting that can help keeps the full budget")
+
+        readyCalls = 0
+        var asked = 0
+        let learned: Int? = await IncomingLocalRouteWait.run(attempts: 20, interval: .milliseconds(1),
+            ready: { readyCalls += 1; return nil }, keepWaiting: { asked += 1; return asked < 2 })
+        XCTAssertNil(learned)
+        XCTAssertEqual(readyCalls, 2, "Stops once the Wi-Fi status turns out unavailable mid-wait")
     }
 
     func testCloudSelfTestReportOnlyPassesWhenEveryStagePasses() {

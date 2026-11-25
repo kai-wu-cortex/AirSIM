@@ -471,7 +471,8 @@ final class WatchCallSession: NSObject, ObservableObject {
             guard let ownCall = self.voIPCall else {
                 // The iPhone's answer signal tombstones like ACTIVE: a Watch VoIP push for
                 // this call arriving later must be retired, not ring again.
-                if payload.phase == .active || payload.phase == .ended || payload.answeredOnPhone {
+                if payload.phase == .active || payload.phase == .ended
+                    || (payload.phase == .connecting && payload.answeredOnPhone) {
                     self.recordEnded(payload.callID, uuid: payload.callUUID, aliases: payload.aliases)
                 }
                 self.call = payload
