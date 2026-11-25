@@ -435,7 +435,8 @@ final class WatchCallSession: NSObject, ObservableObject {
             let ended = WatchCallMirrorPolicy.isTombstoned(
                 payload, endedCallIDs: self.endedCallIDs, endedCallUUIDs: self.endedCallUUIDs
             )
-            if ended && !WatchCallMirrorPolicy.acceptsTerminalForDisplay(payload, current: self.call) { return }
+            if ended && !WatchCallMirrorPolicy.acceptsTerminalForDisplay(payload, current: self.call)
+                && !WatchCallMirrorPolicy.acceptsPhoneOwnedProgress(payload, current: self.call) { return }
             let age = Date().timeIntervalSince(payload.updatedAt)
 
             if payload.phase == .incoming, self.voIPCall == nil,
@@ -468,7 +469,9 @@ final class WatchCallSession: NSObject, ObservableObject {
             }
 
             guard let ownCall = self.voIPCall else {
-                if payload.phase == .active || payload.phase == .ended {
+                // The iPhone's answer signal tombstones like ACTIVE: a Watch VoIP push for
+                // this call arriving later must be retired, not ring again.
+                if payload.phase == .active || payload.phase == .ended || payload.answeredOnPhone {
                     self.recordEnded(payload.callID, uuid: payload.callUUID, aliases: payload.aliases)
                 }
                 self.call = payload
@@ -483,18 +486,22 @@ final class WatchCallSession: NSObject, ObservableObject {
                 self.call = payload
                 return
             }
-            if payload.phase == .active, !ownCall.isOutgoing, !self.answered, !self.answering {
+            switch WatchReliabilityPolicy.ringingResolution(mirror: payload, outgoing: ownCall.isOutgoing,
+                                                            answered: self.answered, answering: self.answering) {
+            case .answeredElsewhere:
                 self.recordEnded(ownCall.callID, uuid: ownCall.uuid, aliases: payload.aliases)
                 self.provider.reportCall(with: ownCall.uuid, endedAt: Date(), reason: .answeredElsewhere)
                 self.media.stop()
                 self.voIPCall = nil
                 self.resetAnswerState()
-            } else if payload.phase == .ended {
+            case .ended:
                 self.recordEnded(ownCall.callID, uuid: ownCall.uuid, aliases: payload.aliases)
                 self.provider.reportCall(with: ownCall.uuid, endedAt: Date(), reason: .remoteEnded)
                 self.media.stop()
                 self.voIPCall = nil
                 self.resetAnswerState()
+            case nil:
+                break
             }
             if self.voIPCall == nil { self.call = payload }
         }
@@ -1941,6 +1948,18 @@ enum WatchReliabilityPolicy {
         case "ended", "failed", "disconnected": return .ended
         default: return nil
         }
+    }
+
+    /// An iPhone mirror for this Watch's own call. ACTIVE or the iPhone's answer signal
+    /// retire an unanswered incoming call; the Watch's own answer in progress always wins.
+    static func ringingResolution(mirror payload: WatchCallPayload, outgoing: Bool,
+                                  answered: Bool, answering: Bool) -> RingingResolution? {
+        if payload.phase == .ended { return .ended }
+        guard !outgoing, !answered, !answering else { return nil }
+        if payload.phase == .active || (payload.phase == .connecting && payload.answeredOnPhone) {
+            return .answeredElsewhere
+        }
+        return nil
     }
 
     static func acceptsMediaCallback(currentUUID: UUID?, callbackUUID: UUID) -> Bool {

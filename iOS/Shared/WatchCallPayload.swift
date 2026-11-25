@@ -17,6 +17,10 @@ struct WatchCallPayload: Equatable, Sendable {
     let callerName: String?
     let transport: String?
     let updatedAt: Date
+    /// The iPhone accepted the answer (CXAnswerCallAction) for this call. Sent with
+    /// `.connecting` before any network work, so other ringing surfaces retire now
+    /// instead of waiting for Android ACTIVE. Optional on the wire: older Watches ignore it.
+    let answeredOnPhone: Bool
 
     var dictionary: [String: Any] {
         var value: [String: Any] = [
@@ -30,6 +34,7 @@ struct WatchCallPayload: Equatable, Sendable {
         if let number, !number.isEmpty { value["number"] = number }
         if let callerName, !callerName.isEmpty { value["caller_name"] = callerName }
         if let transport, !transport.isEmpty { value["transport"] = transport }
+        if answeredOnPhone { value["answered_on_phone"] = true }
         return value
     }
 
@@ -41,7 +46,8 @@ struct WatchCallPayload: Equatable, Sendable {
         number: String?,
         callerName: String?,
         transport: String? = nil,
-        updatedAt: Date
+        updatedAt: Date,
+        answeredOnPhone: Bool = false
     ) {
         self.callID = callID
         self.callUUID = callUUID
@@ -51,6 +57,7 @@ struct WatchCallPayload: Equatable, Sendable {
         self.callerName = callerName
         self.transport = transport
         self.updatedAt = updatedAt
+        self.answeredOnPhone = answeredOnPhone
     }
 
     /// Identity and presentation fields, excluding the timestamp used only for
@@ -64,6 +71,7 @@ struct WatchCallPayload: Equatable, Sendable {
             && number == other.number
             && callerName == other.callerName
             && transport == other.transport
+            && answeredOnPhone == other.answeredOnPhone
     }
 
     func matches(callID: String?, callUUID: UUID?) -> Bool {
@@ -90,7 +98,8 @@ struct WatchCallPayload: Equatable, Sendable {
             number: dictionary["number"] as? String,
             callerName: dictionary["caller_name"] as? String,
             transport: dictionary["transport"] as? String,
-            updatedAt: Date(timeIntervalSince1970: updatedAt)
+            updatedAt: Date(timeIntervalSince1970: updatedAt),
+            answeredOnPhone: dictionary["answered_on_phone"] as? Bool ?? false
         )
     }
 }
@@ -449,6 +458,14 @@ extension WatchCallMirrorPolicy {
     /// incoming pushes; its matching terminal mirror must still clear display.
     static func acceptsTerminalForDisplay(_ incoming: WatchCallPayload, current: WatchCallPayload) -> Bool {
         incoming.phase == .ended && incoming.matches(callID: current.callID, callUUID: current.callUUID)
+    }
+
+    /// The iPhone's answer signal tombstones the call (a late Watch VoIP push must not
+    /// ring again), yet the call is still being connected on the iPhone. Let exactly that
+    /// call's ACTIVE through once so the Watch shows it in progress rather than connecting.
+    static func acceptsPhoneOwnedProgress(_ incoming: WatchCallPayload, current: WatchCallPayload) -> Bool {
+        current.answeredOnPhone && incoming.phase == .active
+            && incoming.matches(callID: current.callID, callUUID: current.callUUID)
     }
 }
 

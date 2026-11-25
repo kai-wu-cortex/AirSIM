@@ -306,4 +306,50 @@ do {
         status: { reads += 1; return reads >= 4 ? "ended" : "active" }, pause: {})
     check(delayed && sends == 2, "Delayed carrier hangup retries only the same scoped request")
 }
+
+// The iPhone accepted an answer: the Watch retires its ringing at once instead of
+// waiting for Android ACTIVE, which a cloud answer may reach seconds later or never.
+do {
+    let uuid = UUID()
+    let accepted = WatchCallPayload(callID: "android-1", callUUID: uuid, phase: .connecting,
+        number: nil, callerName: nil, updatedAt: Date(), answeredOnPhone: true)
+    check(accepted.dictionary["answered_on_phone"] as? Bool == true, "The answer signal is on the wire")
+    check(WatchCallPayload(dictionary: accepted.dictionary)?.answeredOnPhone == true, "The answer signal survives decoding")
+    let plain = WatchCallPayload(callID: "android-1", callUUID: uuid, phase: .connecting,
+        number: nil, callerName: nil, updatedAt: Date())
+    check(plain.dictionary["answered_on_phone"] == nil, "Ordinary payloads keep the old wire format")
+    check(WatchCallPayload(dictionary: plain.dictionary)?.answeredOnPhone == false, "A missing key is not an answer signal")
+    check(!plain.isSamePresentation(as: accepted), "Publishing the signal after a plain connecting state is not deduplicated")
+
+    func resolution(_ payload: WatchCallPayload, outgoing: Bool = false, answered: Bool = false,
+                    answering: Bool = false) -> WatchReliabilityPolicy.RingingResolution? {
+        WatchReliabilityPolicy.ringingResolution(mirror: payload, outgoing: outgoing,
+                                                 answered: answered, answering: answering)
+    }
+    check(resolution(accepted) == .answeredElsewhere, "An iPhone answer retires Watch ringing")
+    check(resolution(plain) == nil, "A connecting record that is not an iPhone answer keeps the Watch ringing")
+    check(resolution(accepted, answering: true) == nil, "The Watch's own answer in progress wins")
+    check(resolution(accepted, answered: true) == nil, "A call the Watch already answered is not retired")
+    check(resolution(accepted, outgoing: true) == nil, "An outgoing call is never answered elsewhere")
+    let active = WatchCallPayload(callID: "android-1", callUUID: uuid, phase: .active,
+        number: nil, callerName: nil, updatedAt: Date())
+    check(resolution(active) == .answeredElsewhere, "ACTIVE still retires ringing")
+    check(resolution(active, answering: true) == nil, "ACTIVE does not cancel the Watch's own answer")
+    let ended = WatchCallPayload(callID: "android-1", callUUID: uuid, phase: .ended,
+        number: nil, callerName: nil, updatedAt: Date())
+    check(resolution(ended) == .ended && resolution(ended, answered: true) == .ended
+          && resolution(ended, answering: true) == .ended, "A terminal always ends the Watch call")
+    let incoming = WatchCallPayload(callID: "android-1", callUUID: uuid, phase: .incoming,
+        number: nil, callerName: nil, updatedAt: Date())
+    check(resolution(incoming) == nil, "Ringing keeps ringing")
+
+    // After the signal retires the call, the iPhone's later ACTIVE may still update the display.
+    check(WatchCallMirrorPolicy.acceptsPhoneOwnedProgress(active, current: accepted),
+          "ACTIVE of the call the iPhone answered updates the display")
+    let other = WatchCallPayload(callID: "android-2", callUUID: UUID(), phase: .active,
+        number: nil, callerName: nil, updatedAt: Date())
+    check(!WatchCallMirrorPolicy.acceptsPhoneOwnedProgress(other, current: accepted), "Another call cannot pass the tombstone")
+    check(!WatchCallMirrorPolicy.acceptsPhoneOwnedProgress(active, current: plain), "Only an iPhone answer opens the display update")
+    check(!WatchCallMirrorPolicy.acceptsPhoneOwnedProgress(incoming, current: accepted), "A late ringing state cannot reopen the call")
+}
 print("Watch reliability checks passed: \(assertionCount) assertions")
