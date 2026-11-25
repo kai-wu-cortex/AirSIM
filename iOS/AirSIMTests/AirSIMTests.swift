@@ -4522,6 +4522,25 @@ final class AirSIMTests: XCTestCase {
         XCTAssertEqual(readyCalls, 2, "Stops once the Wi-Fi status turns out unavailable mid-wait")
     }
 
+    func testPeerConnectedCarriesItsRole() throws {
+        let peer = try XCTUnwrap(CloudPCMControlMessage.decode(#"{"event":"peer_connected","role":"agent"}"#))
+        XCTAssertEqual(peer.status, "peer_connected")
+        XCTAssertEqual(peer.role, "agent")
+        XCTAssertNil(try XCTUnwrap(CloudPCMControlMessage.decode(#"{"status":"answer_ok","call_id":"x"}"#)).role)
+    }
+
+    func testRelayCapacityFailureIsDistinguishable() {
+        guard case let .relayUnavailable(status, detail) = CloudCallControlClientError.from(
+            statusCode: 503, detail: "relay_capacity_exhausted") else { return XCTFail("503 is a Relay failure") }
+        XCTAssertEqual(status, 503)
+        XCTAssertEqual(detail, "relay_capacity_exhausted")
+        XCTAssertEqual(CloudCallControlClientError.from(statusCode: 429, detail: nil).errorDescription,
+                       "Relay 拒绝了通话控制（HTTP 429）", "The visible message is unchanged")
+        guard case .rejected("bad") = CloudCallControlClientError.from(statusCode: 400, detail: "bad") else {
+            return XCTFail("400 stays a rejection")
+        }
+    }
+
     func testCloudSelfTestReportOnlyPassesWhenEveryStagePasses() {
         var report = CloudSelfTestReport.initial
         XCTAssertFalse(report.allPassed)

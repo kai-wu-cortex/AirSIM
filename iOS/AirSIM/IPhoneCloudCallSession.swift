@@ -503,10 +503,13 @@ struct CloudPCMControlMessage: Equatable, Sendable {
     let downlinkBytes: UInt64?
     let downlinkFrames: UInt64?
     let downlinkPeak: UInt64?
+    /// Which side a Relay `peer_connected` event is about ("agent" is Android).
+    var role: String? = nil
 
     private struct Payload: Decodable {
         let status: String?
         let event: String?
+        let role: String?
         let message: String?
         let action: String?
         let callID: String?
@@ -519,7 +522,7 @@ struct CloudPCMControlMessage: Equatable, Sendable {
         let downlinkPeak: UInt64?
 
         enum CodingKeys: String, CodingKey {
-            case status, event, message
+            case status, event, message, role
             case action, generation
             case callID = "call_id"
             case callUUID = "call_uuid"
@@ -546,7 +549,8 @@ struct CloudPCMControlMessage: Equatable, Sendable {
             traceID: payload.traceID,
             downlinkBytes: payload.downlinkBytes,
             downlinkFrames: payload.downlinkFrames,
-            downlinkPeak: payload.downlinkPeak
+            downlinkPeak: payload.downlinkPeak,
+            role: payload.role
         )
     }
 
@@ -645,6 +649,17 @@ enum CloudCallControlClientError: LocalizedError {
     case invalidResponse
     case rejected(String)
     case timeout
+    /// HTTP 429 or 5xx: the Relay itself is out of capacity or failing, not this request.
+    case relayUnavailable(status: Int, detail: String?)
+
+    static func from(statusCode: Int, detail: String?) -> CloudCallControlClientError {
+        if statusCode == 429 || statusCode >= 500 { return .relayUnavailable(status: statusCode, detail: detail) }
+        return .rejected(detail ?? rejectionMessage(statusCode))
+    }
+
+    private static func rejectionMessage(_ statusCode: Int) -> String {
+        "Relay 拒绝了通话控制（HTTP \(statusCode)）"
+    }
 
     var errorDescription: String? {
         switch self {
@@ -652,6 +667,7 @@ enum CloudCallControlClientError: LocalizedError {
         case .invalidResponse: return "Relay 返回了无效的通话控制响应"
         case let .rejected(message): return message
         case .timeout: return "等待 Agent 确认通话控制超时"
+        case let .relayUnavailable(status, detail): return detail ?? Self.rejectionMessage(status)
         }
     }
 }
@@ -764,7 +780,7 @@ enum CloudCallControlClient {
         }
         guard acceptedStatusCodes.contains(http.statusCode) else {
             let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw CloudCallControlClientError.rejected(detail ?? "Relay 拒绝了通话控制（HTTP \(http.statusCode)）")
+            throw CloudCallControlClientError.from(statusCode: http.statusCode, detail: detail)
         }
         do {
             return try JSONDecoder().decode(T.self, from: data)
@@ -1687,7 +1703,10 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
                 stopped = false
                 relayLease = lease
                 connectionID = UUID()
-                let socket = URLSession(configuration: .ephemeral).webSocketTask(with: url)
+                // Bound each attempt: the default 60 s handshake timeout kept a dead
+                // Relay looking like "connecting" for minutes.
+                let socket = URLSession(configuration: .ephemeral)
+                    .webSocketTask(with: URLRequest(url: url, timeoutInterval: 8))
                 webSocket = socket
                 socket.resume()
                 receiveNext(socket)
