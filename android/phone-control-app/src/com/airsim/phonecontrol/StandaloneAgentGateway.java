@@ -37,6 +37,22 @@ final class StandaloneAgentGateway {
     private volatile long simRevision;
     private final Map<String, String> commandResults = new LinkedHashMap<>();
     private final Map<String, AnswerAttempt> answerAttempts = new LinkedHashMap<>();
+    /** Whether the Shizuku audio bridge accepts connections; replaced in tests. */
+    private java.util.function.BooleanSupplier audioBridgeReady = StandaloneAgentGateway::probeAudioBridge;
+
+    /**
+     * A cloud answer must not pick up a carrier call that cannot carry voice: the caller
+     * would hear silence. Same 500 ms TCP probe as the VoWLAN gateway; never sends PCM.
+     */
+    static boolean probeAudioBridge() {
+        try (java.net.Socket socket = new java.net.Socket()) {
+            socket.connect(new java.net.InetSocketAddress("127.0.0.1", 7580), 500);
+            return true;
+        } catch (Exception error) {
+            BridgeLog.debug("audio_bridge_probe_failed error=" + error.getClass().getSimpleName());
+            return false;
+        }
+    }
 
     private static final class AnswerAttempt {
         final String identity;
@@ -387,6 +403,9 @@ final class StandaloneAgentGateway {
         if (attempt.confirmed) return answerFailure(id, "call_not_ready");
         if (attempt.result != null) return new JSONObject(attempt.result);
         if (state != android.telecom.Call.STATE_RINGING) return answerFailure(id, "call_not_ready");
+        // Refuse before reserving the attempt: the same queued answer may succeed once
+        // the bridge is back, and the call keeps ringing instead of connecting silently.
+        if (!audioBridgeReady.getAsBoolean()) return answerFailure(id, "audio_bridge_unavailable");
         // Reserve before dispatch; an exception is also an unknown outcome.
         attempt.result = answerFailure(id, "answer_result_unknown").toString();
         AgentCommandDispatcher.Result result = execute(new AgentCommand(id, "answer", target.androidID(), "", "", ""));

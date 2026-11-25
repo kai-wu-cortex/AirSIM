@@ -27,6 +27,8 @@ public final class CloudCallManagerTests {
         answerIdentityExpiryAndTerminalAreRechecked();
         incomingAnswerDoesNotRepeatUnknownSideEffect();
         incomingAnswerSuccessIsDeduplicated();
+        incomingAnswerWaitsForTheAudioBridge();
+        audioBridgeRefusalReachesTheIPhoneAsAnswerUnavailable();
         answerSocketReplayDoesNotRestartMedia();
         cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
@@ -136,6 +138,47 @@ public final class CloudCallManagerTests {
         } finally { CallRepository.remove(call); }
     }
 
+    private static void incomingAnswerWaitsForTheAudioBridge() throws Exception {
+        int[] answers = {0};
+        var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
+            @Override public void answer(int videoState) { answers[0]++; super.answer(videoState); }
+        };
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            set(f.descriptor, "direction", "incoming");
+            set(g.gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> false);
+            var command = answerCommand();
+            var refused = g.gateway.executeCloudCommand(command);
+            check("failed".equals(refused.optString("status"))
+                    && "audio_bridge_unavailable".equals(refused.optString("error")) && answers[0] == 0,
+                    "no audio bridge: refuse without answering the carrier call");
+            set(g.gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> true);
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")) && answers[0] == 1,
+                    "refusal is not cached: the same queued answer works once the bridge is up");
+        } finally { CallRepository.remove(call); }
+    }
+
+    private static void audioBridgeRefusalReachesTheIPhoneAsAnswerUnavailable() throws Exception {
+        int[] answers = {0};
+        var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
+            @Override public void answer(int videoState) { answers[0]++; super.answer(videoState); }
+        };
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            set(f.descriptor, "direction", "incoming");
+            set(g.gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> false);
+            var executor = new QueuedExecutor(); set(f.manager, "sessions", executor);
+            Object session = f.active();
+            var socket = controlSocket(mediaAnswer(answerCommand())); set(session, "webSocket", socket);
+            readControl(session, socket);
+            check(socket.text.stream().anyMatch(v -> v.contains("\"answer_unavailable\"")
+                    && v.contains("audio_bridge_unavailable")), "the iPhone learns why Android refused");
+            check(socket.text.stream().noneMatch(v -> v.contains("action_error") || v.contains("answer_ok")),
+                    "no generic error and no answer ACK");
+            check(answers[0] == 0 && executor.tasks == 0, "no carrier answer and no PCM loop");
+        } finally { CallRepository.remove(call); }
+    }
+
     private static void incomingAnswerDoesNotRepeatUnknownSideEffect() throws Exception {
         int[] answers = {0};
         var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
@@ -216,6 +259,8 @@ public final class CloudCallManagerTests {
             context.setSystemService(android.app.role.RoleManager.class, new android.app.role.RoleManager());
             var ctor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class); ctor.setAccessible(true);
             gateway = ctor.newInstance(context);
+            // Tests never reach the real 127.0.0.1:7580 bridge; individual cases turn it off.
+            set(gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> true);
             mediaSingleton.set(null, f.manager); gatewaySingleton.set(null, gateway);
         }
         public void close() throws Exception {
