@@ -51,7 +51,7 @@
 
 ## 未发布修复：手机接听后同步 Watch 撤铃
 
-iPhone 在 CallKit 生命周期进入 `active` 或终止状态时，经 WatchConnectivity 发布同一通 APNs 来电的状态；本地展示 ID 作为别名，Watch 同时按 ID 与 UUID 匹配。WatchConnectivity 激活完成后会重发最新待发送状态，Watch 会记录已结束的 ID／UUID，迟到的 `incoming` 不会重新拉起铃声。模拟器定向 XCTest 通过；iPhone／Apple Watch 真机、锁屏 APNs 和不同到达顺序仍需验收。
+CallKit 接受 iPhone 的接听动作时（含 PushKit 冷启动），立即经 WatchConnectivity 发布带 `answered_on_phone` 的 `connecting`，Watch 据此收起尚未接听的来电，不再等云端 ACTIVE（见 [docs/fixes/2026-11-25-cloud-answer-watch-dismiss.md](../docs/fixes/2026-11-25-cloud-answer-watch-dismiss.md)）。iPhone 在 CallKit 生命周期进入 `active` 或终止状态时，经 WatchConnectivity 发布同一通 APNs 来电的状态；本地展示 ID 作为别名，Watch 同时按 ID 与 UUID 匹配。WatchConnectivity 激活完成后会重发最新待发送状态，Watch 会记录已结束的 ID／UUID，迟到的 `incoming` 不会重新拉起铃声。模拟器定向 XCTest 通过；iPhone／Apple Watch 真机、锁屏 APNs 和不同到达顺序仍需验收。
 
 ## 未发布功能：原生风格短信会话
 
