@@ -130,9 +130,10 @@
 
 - 通过 `CXProvider.reportCall(with:updated:)` 更新 `localizedCallerName`，格式为「<原名字> · <短状态> <N> 秒」。阶段变化时立即更新，计时每秒更新一次。
 - 原名字在接受接听时保存。接通、失败、通话结束时，先恢复原名，再报告接通或结束，保证通话记录里留下的是原名。
-- **联系人名字（待用户决定）：** 对标准手机号来电，App 现在不设名字，由 iOS 按号码匹配通讯录，显示出「张三」（`CallKitNumberPresentation.update`）。Standalone 推送里也不带名字。一旦写过名字行，`CXCallUpdate` 无法把名字清空交还给 iOS 匹配，只能写成一个具体的字符串。
-  - App 有通讯录权限时，可以用 `ContactStore.displayName(for:)` 查到同一个名字，接通后写回，显示与 iOS 一致。
-  - 没有权限或查不到时，接通后只能写号码，这通电话剩下的时间里，iOS 原本会显示的联系人名字会变成号码。这种情况是否会影响最近通话，没有真机无法确认。
+- **联系人名字（用户已决定：只在查得到时显示）：** 对标准手机号来电，App 现在不设名字，由 iOS 按号码匹配通讯录，显示出「张三」（`CallKitNumberPresentation.update`）。Standalone 推送里也不带名字。一旦写过名字行，`CXCallUpdate` 无法把名字清空交还给 iOS 匹配，只能写成一个具体的字符串。因此名字行进度只在 App 确知名字时启用：
+  - 推送带了名字，或者号码属于 App 本来就把号码写进名字行的那类（generic handle）；
+  - App 有通讯录权限，并用 `ContactStore.displayName(for:)` 查到了联系人：接通后写回这个名字。
+  - 其余情况（没有权限、没查到联系人）都不碰名字行，只在 App 内页面显示进度，失败时照样发通知。这样不会把 iOS 原本能显示的联系人名字变成号码。
 - 原名字很长时，保留短状态，截断原名字，不截断状态。
 - 冷启动路径（`ColdLaunchCallKitHandler`）同样更新名字行。因此进度模型与名字行更新放在 AppModel 与冷启动都能用到的位置，例如 `IPhoneCloudCallSession` 旁边，不放在 AppModel 里。
 
