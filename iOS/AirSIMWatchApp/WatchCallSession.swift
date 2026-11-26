@@ -372,9 +372,10 @@ final class WatchCallSession: NSObject, ObservableObject {
             publishLocalPhase(WatchReliabilityPolicy.phaseAfterMediaReady(call.phase))
         case "active", "answer_ok":
             if cloudMediaAllowed { publishLocalPhase(.active) }
-        case "local_failed":
-            audioStatus = "手表无法连接安卓音频"
-            errorMessage = "VoWLAN 音频连接失败，请检查手表与安卓的网络"
+        case "local_failed", "answer_unavailable":
+            guard let failure = WatchReliabilityPolicy.mediaFailure(status) else { break }
+            audioStatus = failure.audio
+            errorMessage = failure.error
             if let current = voIPCall {
                 if !current.isOutgoing, call.phase != .active {
                     provider.reportCall(with: current.uuid, endedAt: Date(), reason: .failed)
@@ -1947,6 +1948,16 @@ enum WatchReliabilityPolicy {
         switch state {
         case "active", "held": return .answeredElsewhere
         case "ended", "failed", "disconnected": return .ended
+        default: return nil
+        }
+    }
+
+    /// The Watch's own media attempt failed: what to show and the error to keep. Android
+    /// refuses a cloud answer (`answer_unavailable`) when it could not carry voice.
+    static func mediaFailure(_ status: String) -> (audio: String, error: String)? {
+        switch status {
+        case "local_failed": return ("手表无法连接安卓音频", "VoWLAN 音频连接失败，请检查手表与安卓的网络")
+        case "answer_unavailable": return ("安卓端无法传送语音", "安卓端无法传送语音，请在安卓端启动 Shizuku")
         default: return nil
         }
     }

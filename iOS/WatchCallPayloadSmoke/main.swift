@@ -352,4 +352,14 @@ do {
     check(!WatchCallMirrorPolicy.acceptsPhoneOwnedProgress(active, current: plain), "Only an iPhone answer opens the display update")
     check(!WatchCallMirrorPolicy.acceptsPhoneOwnedProgress(incoming, current: accepted), "A late ringing state cannot reopen the call")
 }
+// Android refuses a cloud answer it cannot carry voice for: the Watch ends its attempt.
+do {
+    let refused = WatchReliabilityPolicy.mediaFailure("answer_unavailable")
+    check(refused?.audio == "安卓端无法传送语音"
+          && refused?.error == "安卓端无法传送语音，请在安卓端启动 Shizuku", "Android refused the Watch's answer")
+    let local = WatchReliabilityPolicy.mediaFailure("local_failed")
+    check(local?.audio == "手表无法连接安卓音频"
+          && local?.error == "VoWLAN 音频连接失败，请检查手表与安卓的网络", "Existing local failure copy is unchanged")
+    check(WatchReliabilityPolicy.mediaFailure("active") == nil, "Success is not a failure")
+}
 print("Watch reliability checks passed: \(assertionCount) assertions")
