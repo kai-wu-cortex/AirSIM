@@ -219,7 +219,9 @@ final class CallKitController: NSObject {
     /// Cloud answer progress owns the name line (progress text only, never a contact
     /// name) until `restoreAnswerDisplayNumber`.
     func showAnswerProgress(_ text: String, for uuid: UUID) {
-        guard currentUUID == uuid, systemCallReported else { return }
+        guard CloudAnswerProgressPolicy.mayWriteNameLine(
+            isCurrentCall: currentUUID == uuid, systemCallReported: systemCallReported,
+            endAccepted: endActionFulfilled) else { return }
         answerProgressUUID = uuid
         reportDisplayName(text, for: uuid)
     }

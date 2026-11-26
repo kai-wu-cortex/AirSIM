@@ -232,6 +232,13 @@ enum CloudAnswerProgressPolicy {
     static func mayEnd(failed: UUID, systemCall: UUID?, sessionCall: UUID?) -> Bool {
         systemCall == failed && (sessionCall == nil || sessionCall == failed)
     }
+
+    /// Whether progress text may be written to the CallKit name line. Once the user's
+    /// hang-up is accepted the number has been written back for Recents; the call stays
+    /// current while the backend ends it, and a late tick must not overwrite the number.
+    static func mayWriteNameLine(isCurrentCall: Bool, systemCallReported: Bool, endAccepted: Bool) -> Bool {
+        isCurrentCall && systemCallReported && !endAccepted
+    }
 }
 
 /// Seconds from CallKit accepting a cloud answer to voice, kept only on this iPhone.

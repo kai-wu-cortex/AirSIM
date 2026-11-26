@@ -806,6 +806,9 @@ final class CloudAnswerProgressCoordinator {
     /// Called once per failed answer with its call, after the failure has been visible
     /// for `failureHold`.
     var onFailure: ((CloudAnswerFailure, UUID) -> Void)?
+    /// Called the moment a failure is decided, before `failureHold`: the iPhone has
+    /// given up, so nothing may ask Android to pick up any more.
+    var onFailureDecided: ((CloudAnswerFailure, UUID) -> Void)?
     private let callKit: CallKitController
     private let history: UserDefaults
     private let failureHold: Duration
@@ -870,6 +873,7 @@ final class CloudAnswerProgressCoordinator {
             stopTicker()
             // Ownership changes already end the call in the session; only clear the line.
             if failure == .answeredElsewhere { finish(); return }
+            onFailureDecided?(failure, call.uuid)
             publish(at: now)
             let hold = failureHold
             Task { @MainActor [weak self] in
@@ -911,14 +915,26 @@ final class CloudAnswerProgressCoordinator {
 /// Tells the user why a cloud answer failed once the system call screen is gone.
 enum CloudAnswerFailureNotifier {
     static let identifier = "airsim.cloud-answer-failure"
+    static let event = "cloud_answer_failed"
 
-    static func post(_ failure: CloudAnswerFailure) {
+    static func content(for failure: CloudAnswerFailure) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = "通话未接通"
         content.body = failure.advice.map { "\(failure.title)：\($0)" } ?? failure.title
         content.sound = .default
+        content.userInfo = ["event": event]
+        return content
+    }
+
+    /// The app hides notifications it does not know while it is open. This one carries
+    /// the reason and the advice, which the call screen no longer shows by then.
+    static func presentsInForeground(_ userInfo: [AnyHashable: Any]) -> Bool {
+        userInfo["event"] as? String == event
+    }
+
+    static func post(_ failure: CloudAnswerFailure) {
         UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
+            UNNotificationRequest(identifier: identifier, content: content(for: failure), trigger: nil))
     }
 }
 
@@ -954,6 +970,8 @@ final class IPhoneCloudCallSession {
     private var answerRetryTask: Task<Void, Never>?
     private var answerRetryGeneration = 0
     private var answerAcknowledged = false
+    /// Set once the answer's failure is decided; no retry or replay may follow.
+    private var answerAbandoned = false
     private var earlyAnswerEnvelope: CloudCallControlEnvelope?
     private var carrierEarlyMediaEnabled = true
     private var earlyMediaReady = false
@@ -983,6 +1001,9 @@ final class IPhoneCloudCallSession {
         answerProgress = CloudAnswerProgressCoordinator()
         answerProgress.onFailure = { failure, uuid in
             IPhoneCloudCallSession.shared.finishFailedAnswer(failure, for: uuid)
+        }
+        answerProgress.onFailureDecided = { _, uuid in
+            IPhoneCloudCallSession.shared.abandonAnswer(for: uuid)
         }
         media.onConnectionLost = { connection in
             Task { @MainActor in
@@ -1517,6 +1538,7 @@ final class IPhoneCloudCallSession {
         earlyMediaReady = false
         earlyPlaybackNotified = false; earlyMediaUnavailable = false
         answerAcknowledged = false
+        answerAbandoned = false
         earlyAnswerEnvelope = nil
         audioState = .idle
         mediaHealthTracker = nil
@@ -1558,6 +1580,8 @@ final class IPhoneCloudCallSession {
     }
 
     private func scheduleAnswerConfirmation(for incoming: IncomingVoIPCall) {
+        // A media reconnect during the failure hold must not start asking again.
+        guard !answerAbandoned else { return }
         answerRetryGeneration &+= 1
         let generation = answerRetryGeneration
         answerRetryTask?.cancel()
@@ -1588,8 +1612,19 @@ final class IPhoneCloudCallSession {
     }
 
     private func replayAnswerIfNeeded() {
-        guard answered, !answerAcknowledged, let call else { return }
+        guard answered, !answerAcknowledged, !answerAbandoned, let call else { return }
         media.sendControl("answer", call: call)
+    }
+
+    /// The answer failed and the failure is on screen: stop asking Android to pick up.
+    /// A retry that succeeded now (for example once Shizuku is back) would connect the
+    /// caller to nobody.
+    private func abandonAnswer(for uuid: UUID) {
+        guard call?.uuid == uuid else { return }
+        answerAbandoned = true
+        answerRetryGeneration &+= 1
+        answerRetryTask?.cancel()
+        answerRetryTask = nil
     }
 
     private func confirmAnswer() {

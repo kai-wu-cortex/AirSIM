@@ -136,6 +136,14 @@ do {
     check(!mayEnd(system: other, session: nil), "Never end the next call's system screen")
     check(!mayEnd(system: nil, session: failed), "The system call already ended")
     check(!mayEnd(system: failed, session: other), "Never stop another call's media")
+
+    func mayWrite(current: Bool = true, reported: Bool = true, ended: Bool = false) -> Bool {
+        CloudAnswerProgressPolicy.mayWriteNameLine(isCurrentCall: current, systemCallReported: reported,
+                                                   endAccepted: ended)
+    }
+    check(mayWrite(), "The reported current call shows progress")
+    check(!mayWrite(ended: true), "Once the user hung up, a late tick never rewrites the number")
+    check(!mayWrite(current: false) && !mayWrite(reported: false), "Only the reported current call")
 }
 
 // Stage time limits.

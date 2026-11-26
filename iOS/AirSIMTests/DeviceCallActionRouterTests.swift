@@ -275,10 +275,14 @@ final class DeviceCallActionRouterTests: XCTestCase {
         let failed = expectation(description: "failure handed over")
         var failures: [CloudAnswerFailure] = []
         var failedCalls: [UUID] = []
+        var decided: [CloudAnswerFailure] = []
         coordinator.onFailure = { failures.append($0); failedCalls.append($1); failed.fulfill() }
+        coordinator.onFailureDecided = { failure, _ in decided.append(failure) }
         let push = try await reportedCloudPush(on: controller)
         coordinator.begin(for: push)
         coordinator.apply(.control(status: "answer_unavailable", role: nil), for: push.uuid)
+        XCTAssertEqual(decided, [.androidNoAudio(callAnswered: false)], "Retries stop before the failure hold")
+        XCTAssertTrue(failures.isEmpty, "The call ends only after the failure was visible")
         coordinator.apply(.control(status: "action_error", role: nil), for: push.uuid)
         XCTAssertEqual(names.last, "接听失败")
         await fulfillment(of: [failed], timeout: 2)

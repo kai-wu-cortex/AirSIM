@@ -265,6 +265,9 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
         if notification.request.content.userInfo["event"] as? String == "other_android_incoming" {
             completionHandler([.banner, .list]); return
         }
+        if CloudAnswerFailureNotifier.presentsInForeground(info) {
+            completionHandler([.banner, .list]); return
+        }
         guard notification.request.content.userInfo["event"] as? String == "incoming_sms" else {
             completionHandler([])
             return

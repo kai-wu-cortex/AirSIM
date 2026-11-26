@@ -4556,6 +4556,15 @@ final class AirSIMTests: XCTestCase {
             #"{"status":"action_error","call_id":"c1","call_uuid":"6f9619ff-8b86-d011-b42d-00c04fc964ff","generation":1}"#))
     }
 
+    func testCloudAnswerFailureNotificationShowsWhileTheAppIsOpen() {
+        let content = CloudAnswerFailureNotifier.content(for: .androidNoAudio(callAnswered: false))
+        XCTAssertEqual(content.title, "通话未接通")
+        XCTAssertEqual(content.body, "安卓端无法传送语音：在安卓端启动 Shizuku 后回拨")
+        XCTAssertTrue(CloudAnswerFailureNotifier.presentsInForeground(content.userInfo))
+        XCTAssertFalse(CloudAnswerFailureNotifier.presentsInForeground(["event": "incoming_sms"]))
+        XCTAssertEqual(CloudAnswerFailureNotifier.content(for: .answeredElsewhere).body, "已在其他设备接听")
+    }
+
     func testCloudSelfTestReportOnlyPassesWhenEveryStagePasses() {
         var report = CloudSelfTestReport.initial
         XCTAssertFalse(report.allPassed)
