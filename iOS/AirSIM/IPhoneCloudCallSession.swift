@@ -488,6 +488,12 @@ struct CloudPCMControlMessage: Equatable, Sendable {
         self.callID == callID && self.callUUID?.lowercased() == uuid.uuidString.lowercased()
             && self.generation == generation
     }
+    /// Whether a failure status is about this call's answer: full identity, and no other
+    /// action. The AVF agent answers Relay events it cannot attribute with an
+    /// identity-less `action_error`, which must not fail the answer.
+    func identifiesAnswer(callID: String, uuid: UUID, generation: UInt64) -> Bool {
+        exactlyMatches(callID: callID, uuid: uuid, generation: generation) && (action == nil || action == "answer")
+    }
     func matches(callID: String, uuid: UUID, generation: UInt64) -> Bool {
         (self.callID == nil || self.callID == callID)
             && (callUUID == nil || callUUID?.lowercased() == uuid.uuidString.lowercased())
@@ -1002,7 +1008,10 @@ final class IPhoneCloudCallSession {
                 // The trace await can outlive hangup or even the next call.
                 guard let call = session.call, session.media.isCurrentConnection(connection),
                       control.matches(callID: call.callID, uuid: call.uuid, generation: call.generation) else { return }
-                session.answerProgress.apply(.control(status: status, role: control.role), for: call.uuid)
+                session.answerProgress.apply(.control(
+                    status: status, role: control.role,
+                    identified: control.identifiesAnswer(callID: call.callID, uuid: call.uuid, generation: call.generation)
+                ), for: call.uuid)
                 switch status {
                 case "early_media", "early_media_ready_v1":
                     // New capability requires all identity fields (legacy controls

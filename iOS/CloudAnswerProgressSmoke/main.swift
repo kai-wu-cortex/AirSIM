@@ -62,6 +62,15 @@ do {
     check(failure(after: ["answer_ok", "action_error"]) == .androidNoAudio(callAnswered: true), "Voice failed after answering")
     check(failure(after: ["action_forwarded", "action_error"]) == .androidAnswerFailed, "Android could not answer")
     check(failure(after: ["ownership_lost"]) == .answeredElsewhere, "Another device answered")
+    // AVF answers every Relay event (peer_connected, owner_claimed) with an
+    // identity-less action_error; it is not about this answer.
+    var unattributed = CloudAnswerProgress(startedAt: start)
+    unattributed.apply(.control(status: "action_error", role: nil, identified: false), at: at(1))
+    unattributed.apply(.control(status: "answer_ok", role: nil), at: at(2))
+    unattributed.apply(.control(status: "action_error", role: nil, identified: false), at: at(3))
+    unattributed.apply(.control(status: "answer_unavailable", role: nil, identified: false), at: at(4))
+    check(unattributed.failure == nil && unattributed.stage == .connectingVoice,
+          "Errors without this call's identity never fail the answer")
     var relay = CloudAnswerProgress(startedAt: start)
     relay.apply(.relayUnavailable, at: at(1))
     check(relay.failure == .cloudUnavailable, "Relay capacity or server failure")

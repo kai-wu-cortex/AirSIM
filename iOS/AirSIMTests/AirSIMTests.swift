@@ -4541,6 +4541,21 @@ final class AirSIMTests: XCTestCase {
         }
     }
 
+    func testOnlyErrorsNamingThisAnswerCanFailIt() throws {
+        let uuid = try XCTUnwrap(UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FF"))
+        func identifies(_ json: String) throws -> Bool {
+            try XCTUnwrap(CloudPCMControlMessage.decode(json)).identifiesAnswer(callID: "c1", uuid: uuid, generation: 2)
+        }
+        let id = #""call_id":"c1","call_uuid":"6f9619ff-8b86-d011-b42d-00c04fc964ff","generation":2"#
+        XCTAssertTrue(try identifies(#"{"status":"action_error",\#(id)}"#), "Standalone: identity, no action")
+        XCTAssertTrue(try identifies(#"{"status":"action_error","action":"answer",\#(id)}"#), "AVF answer error")
+        // AVF answers Relay events (peer_connected, owner_claimed) with this exact reply.
+        XCTAssertFalse(try identifies(#"{"status":"action_error","message":"公网控制不属于当前通话"}"#))
+        XCTAssertFalse(try identifies(#"{"status":"action_error","action":"end",\#(id)}"#), "Another action's error")
+        XCTAssertFalse(try identifies(
+            #"{"status":"action_error","call_id":"c1","call_uuid":"6f9619ff-8b86-d011-b42d-00c04fc964ff","generation":1}"#))
+    }
+
     func testCloudSelfTestReportOnlyPassesWhenEveryStagePasses() {
         var report = CloudSelfTestReport.initial
         XCTAssertFalse(report.allPassed)

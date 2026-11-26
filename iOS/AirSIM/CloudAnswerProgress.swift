@@ -95,8 +95,11 @@ enum CloudAnswerSignal: Equatable, Sendable {
     case earlyReceipt(agentConnected: Bool)
     /// The Relay answered HTTP 429 or 5xx (for example capacity exhausted).
     case relayUnavailable
-    /// A Relay or Android status from the media connection, already identity-checked.
-    case control(status: String, role: String?)
+    /// A Relay or Android status from the media connection. `identified` says the
+    /// status names this call in full and is about the answer; a failure status counts
+    /// only then. The AVF agent replies to every Relay event it cannot attribute
+    /// (`peer_connected`, `owner_claimed`) with an identity-less `action_error`.
+    case control(status: String, role: String?, identified: Bool = true)
     /// The first downlink voice frame: connected even when ACTIVE was lost.
     case downlinkAudio
 }
@@ -127,7 +130,7 @@ struct CloudAnswerProgress: Equatable, Sendable {
             failure = .cloudUnavailable
         case .downlinkAudio:
             connectedAt = now
-        case let .control(status, role):
+        case let .control(status, role, identified):
             switch status {
             case "action_queued": advance(to: .waitingForAndroid, at: now)
             case "action_forwarded": advance(to: .androidAnswering, at: now)
@@ -135,8 +138,8 @@ struct CloudAnswerProgress: Equatable, Sendable {
                 if role == "agent", stage == .waitingForAndroid { advance(to: .androidAnswering, at: now) }
             case "answer_ok": advance(to: .connectingVoice, at: now)
             case "active", "pcm_first_frame": connectedAt = now
-            case "answer_unavailable": failure = .androidNoAudio(callAnswered: false)
-            case "action_error":
+            case "answer_unavailable" where identified: failure = .androidNoAudio(callAnswered: false)
+            case "action_error" where identified:
                 failure = stage == .connectingVoice ? .androidNoAudio(callAnswered: true) : .androidAnswerFailed
             case "ownership_lost": failure = .answeredElsewhere
             default: break
