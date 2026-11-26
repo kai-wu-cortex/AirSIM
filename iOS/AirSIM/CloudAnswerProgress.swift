@@ -77,14 +77,16 @@ enum CloudAnswerFailure: Equatable, Sendable {
         }
     }
 
-    /// Whether the iPhone tells Android to end the carrier call. A queued answer could
-    /// otherwise pick up a call nobody is on; a refused call keeps ringing; the device
-    /// that answered elsewhere must never be hung up.
+    /// Whether the iPhone tells Android to end the carrier call. A queued answer, or one
+    /// whose outcome Android could not confirm, could otherwise pick up a call nobody
+    /// is on; a refused call keeps ringing; the device that answered elsewhere must
+    /// never be hung up.
     var endsAndroidCall: Bool {
         switch self {
-        case .cloudUnreachable, .cloudUnavailable, .androidOffline, .androidUnresponsive: return true
+        case .cloudUnreachable, .cloudUnavailable, .androidOffline, .androidUnresponsive,
+             .androidAnswerFailed: return true
         case let .androidNoAudio(callAnswered): return callAnswered
-        case .androidAnswerFailed, .answeredElsewhere: return false
+        case .answeredElsewhere: return false
         }
     }
 
@@ -92,6 +94,8 @@ enum CloudAnswerFailure: Equatable, Sendable {
 }
 
 enum CloudAnswerSignal: Equatable, Sendable {
+    /// The cloud answer itself began; a local route may have been tried first.
+    case cloudAnswerStarted
     case earlyReceipt(agentConnected: Bool)
     /// The Relay answered HTTP 429 or 5xx (for example capacity exhausted).
     case relayUnavailable
@@ -113,6 +117,11 @@ struct CloudAnswerProgress: Equatable, Sendable {
     private(set) var stageEnteredAt: Date
     private(set) var connectedAt: Date?
     private(set) var failure: CloudAnswerFailure?
+    private var cloudAnswerStarted = false
+    /// When Android first reported that the answer failed before picking up.
+    private var answerErrorAt: Date?
+    /// How long an answer error may be undone by a retry that picks up.
+    static let answerErrorGrace: TimeInterval = 5
 
     var isFinished: Bool { connectedAt != nil || failure != nil }
 
@@ -124,10 +133,17 @@ struct CloudAnswerProgress: Equatable, Sendable {
     mutating func apply(_ signal: CloudAnswerSignal, at now: Date) {
         guard !isFinished else { return }
         switch signal {
+        case .cloudAnswerStarted:
+            // Time spent trying a local route first is not time the cloud had. Only the
+            // first start counts, so a replayed answer never extends the limit.
+            if !cloudAnswerStarted, stage == .connectingCloud { stageEnteredAt = now }
+            cloudAnswerStarted = true
         case let .earlyReceipt(agentConnected):
             advance(to: agentConnected ? .androidAnswering : .waitingForAndroid, at: now)
         case .relayUnavailable:
-            failure = .cloudUnavailable
+            // The HTTP early answer is best effort. Once the media connection has shown
+            // any progress it is the one that counts, and a late HTTP failure is not final.
+            if stage == .connectingCloud { failure = .cloudUnavailable }
         case .downlinkAudio:
             connectedAt = now
         case let .control(status, role, identified):
@@ -140,16 +156,31 @@ struct CloudAnswerProgress: Equatable, Sendable {
             case "active", "pcm_first_frame": connectedAt = now
             case "answer_unavailable" where identified: failure = .androidNoAudio(callAnswered: false)
             case "action_error" where identified:
-                failure = stage == .connectingVoice ? .androidNoAudio(callAnswered: true) : .androidAnswerFailed
+                if stage == .connectingVoice {
+                    failure = .androidNoAudio(callAnswered: true)
+                } else if answerErrorAt == nil {
+                    // Not final yet: the call may not have been ready, and the next
+                    // answer retry (three seconds later) can still pick up.
+                    answerErrorAt = now
+                }
             case "ownership_lost": failure = .answeredElsewhere
             default: break
             }
         }
     }
 
-    /// Fails the answer once the current stage has lasted its time limit.
+    /// Fails the answer once the current stage has lasted its time limit, or once an
+    /// answer error Android reported has outlasted the retry.
     mutating func tick(at now: Date) {
-        guard !isFinished, now.timeIntervalSince(stageEnteredAt) >= stage.timeout else { return }
+        guard !isFinished else { return }
+        let stageExpired = now.timeIntervalSince(stageEnteredAt) >= stage.timeout
+        if stage < .connectingVoice, let answerErrorAt {
+            if stageExpired || now.timeIntervalSince(answerErrorAt) >= Self.answerErrorGrace {
+                failure = .androidAnswerFailed
+            }
+            return
+        }
+        guard stageExpired else { return }
         switch stage {
         case .connectingCloud: failure = .cloudUnreachable
         case .waitingForAndroid: failure = .androidOffline

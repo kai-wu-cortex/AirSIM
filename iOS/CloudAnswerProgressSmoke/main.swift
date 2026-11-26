@@ -60,8 +60,30 @@ do {
     }
     check(failure(after: ["answer_unavailable"]) == .androidNoAudio(callAnswered: false), "Android refused to answer")
     check(failure(after: ["answer_ok", "action_error"]) == .androidNoAudio(callAnswered: true), "Voice failed after answering")
-    check(failure(after: ["action_forwarded", "action_error"]) == .androidAnswerFailed, "Android could not answer")
     check(failure(after: ["ownership_lost"]) == .answeredElsewhere, "Another device answered")
+
+    // An answer error before pickup can be transient (the call was not ready yet) or
+    // of unknown outcome: the retry gets five seconds, then Android is told to end.
+    var retried = CloudAnswerProgress(startedAt: start)
+    retried.apply(.control(status: "action_forwarded", role: nil), at: at(1))
+    retried.apply(.control(status: "action_error", role: nil), at: at(2))
+    check(retried.failure == nil, "One failed attempt is not final")
+    retried.apply(.control(status: "answer_ok", role: nil), at: at(5))
+    retried.tick(at: at(12))
+    check(retried.failure == nil && retried.stage == .connectingVoice, "A retry that picks up clears the error")
+    var persisted = CloudAnswerProgress(startedAt: start)
+    persisted.apply(.control(status: "action_forwarded", role: nil), at: at(1))
+    persisted.apply(.control(status: "action_error", role: nil), at: at(2))
+    persisted.apply(.control(status: "action_error", role: nil), at: at(5))
+    persisted.tick(at: at(6.9))
+    check(persisted.failure == nil, "The retry gets five seconds from the first error")
+    persisted.tick(at: at(7))
+    check(persisted.failure == .androidAnswerFailed, "Still failing after the retry")
+    var slowError = CloudAnswerProgress(startedAt: start)
+    slowError.apply(.control(status: "action_forwarded", role: nil), at: at(1))
+    slowError.apply(.control(status: "action_error", role: nil), at: at(9))
+    slowError.tick(at: at(11))
+    check(slowError.failure == .androidAnswerFailed, "The stage limit names the reported error, not silence")
     // AVF answers every Relay event (peer_connected, owner_claimed) with an
     // identity-less action_error; it is not about this answer.
     var unattributed = CloudAnswerProgress(startedAt: start)
@@ -75,6 +97,10 @@ do {
     relay.apply(.relayUnavailable, at: at(1))
     check(relay.failure == .cloudUnavailable, "Relay capacity or server failure")
     check(relay.nameLine(at: at(1)) == "接听失败", "Failure name line")
+    var lateRelay = CloudAnswerProgress(startedAt: start)
+    lateRelay.apply(.control(status: "action_forwarded", role: nil), at: at(1))
+    lateRelay.apply(.relayUnavailable, at: at(2))
+    check(lateRelay.failure == nil, "The media path already works: a late HTTP failure is not final")
 
     check(!CloudAnswerFailure.androidNoAudio(callAnswered: false).endsAndroidCall, "A refused call keeps ringing on Android")
     check(CloudAnswerFailure.androidNoAudio(callAnswered: true).endsAndroidCall, "A silent answered call is hung up")
@@ -82,7 +108,8 @@ do {
           "A queued answer must not pick up the call later")
     check(CloudAnswerFailure.cloudUnreachable.endsAndroidCall && CloudAnswerFailure.cloudUnavailable.endsAndroidCall,
           "Cloud failures end on a best-effort basis")
-    check(!CloudAnswerFailure.androidAnswerFailed.endsAndroidCall, "An unanswered failure sends nothing")
+    check(CloudAnswerFailure.androidAnswerFailed.endsAndroidCall,
+          "An answer of unknown outcome must not leave a picked-up call with nobody on it")
     check(!CloudAnswerFailure.answeredElsewhere.endsAndroidCall, "Never hang up the device that answered")
     check(!CloudAnswerFailure.answeredElsewhere.notifies && CloudAnswerFailure.cloudUnavailable.notifies,
           "Only real failures notify")
@@ -134,6 +161,25 @@ do {
     check(voice.failure == nil, "Voice gets fifteen seconds")
     voice.tick(at: at(16))
     check(voice.failure == .androidNoAudio(callAnswered: true), "Fifteen seconds without voice fails")
+
+    // The cloud's ten seconds start with the cloud answer, not while a local route is
+    // tried first; the shown wait still counts from accepting.
+    var late = CloudAnswerProgress(startedAt: start)
+    late.apply(.cloudAnswerStarted, at: at(7.6))
+    late.tick(at: at(17.5))
+    check(late.failure == nil, "Time spent trying a local route is not the cloud's")
+    check(late.nameLine(at: at(17.5)) == "连接云端 17 秒", "The shown wait counts from accepting")
+    late.tick(at: at(17.6))
+    check(late.failure == .cloudUnreachable, "Ten seconds after the cloud answer started")
+    var replayed = CloudAnswerProgress(startedAt: start)
+    replayed.apply(.cloudAnswerStarted, at: at(1))
+    replayed.apply(.cloudAnswerStarted, at: at(9))
+    replayed.tick(at: at(11))
+    check(replayed.failure == .cloudUnreachable, "A replayed answer never extends the limit")
+    var advanced = CloudAnswerProgress(startedAt: start)
+    advanced.apply(.control(status: "action_queued", role: nil), at: at(1))
+    advanced.apply(.cloudAnswerStarted, at: at(5))
+    check(advanced.stageEnteredAt == at(1), "Later stages keep their own clock")
 }
 
 // A finished answer ignores every late signal.

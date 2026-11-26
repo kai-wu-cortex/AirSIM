@@ -1127,6 +1127,8 @@ final class IPhoneCloudCallSession {
             mediaHealthTracker?.recordRoute(media.audioRouteDescription)
             publishMediaHealth()
         }
+        // The cloud's time limit starts here, not while a local route was tried first.
+        answerProgress.apply(.cloudAnswerStarted, for: incoming.uuid)
         // Submitting answer must not wait for the media WebSocket. Relay can
         // forward the answer while the PCM socket is still connecting; otherwise
         // CallKit sits with an active audio session for tens of seconds and iOS
