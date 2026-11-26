@@ -88,6 +88,29 @@ do {
           "Only real failures notify")
 }
 
+// Progress is for cloud answers only, and a failure ends only its own call.
+do {
+    func shows(bluetooth: Bool = false, cloud: Bool = true, media: Bool = true, virtual: Bool = false) -> Bool {
+        CloudAnswerProgressPolicy.shows(bluetoothMode: bluetooth, cloudEnabled: cloud,
+                                        hasCloudMedia: media, isVirtual: virtual)
+    }
+    check(shows(), "A cloud answer shows progress")
+    check(!shows(cloud: false), "Cloud switched off: the push still carries media but the answer goes local")
+    check(!shows(bluetooth: true), "Bluetooth mode never answers through the cloud")
+    check(!shows(media: false), "A push without cloud media cannot be answered through the cloud")
+    check(!shows(virtual: true), "Virtual calls show no progress")
+
+    let failed = UUID(), other = UUID()
+    func mayEnd(system: UUID?, session: UUID?) -> Bool {
+        CloudAnswerProgressPolicy.mayEnd(failed: failed, systemCall: system, sessionCall: session)
+    }
+    check(mayEnd(system: failed, session: failed), "The failed answer ends its own call")
+    check(mayEnd(system: failed, session: nil), "A cloud answer that never started still ends its system call")
+    check(!mayEnd(system: other, session: nil), "Never end the next call's system screen")
+    check(!mayEnd(system: nil, session: failed), "The system call already ended")
+    check(!mayEnd(system: failed, session: other), "Never stop another call's media")
+}
+
 // Stage time limits.
 do {
     var cloud = CloudAnswerProgress(startedAt: start)

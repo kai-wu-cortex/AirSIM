@@ -274,7 +274,8 @@ final class DeviceCallActionRouterTests: XCTestCase {
         let coordinator = CloudAnswerProgressCoordinator(callKit: controller, failureHold: .zero)
         let failed = expectation(description: "failure handed over")
         var failures: [CloudAnswerFailure] = []
-        coordinator.onFailure = { failures.append($0); failed.fulfill() }
+        var failedCalls: [UUID] = []
+        coordinator.onFailure = { failures.append($0); failedCalls.append($1); failed.fulfill() }
         let push = try await reportedCloudPush(on: controller)
         coordinator.begin(for: push)
         coordinator.apply(.control(status: "answer_unavailable", role: nil), for: push.uuid)
@@ -282,6 +283,7 @@ final class DeviceCallActionRouterTests: XCTestCase {
         XCTAssertEqual(names.last, "接听失败")
         await fulfillment(of: [failed], timeout: 2)
         XCTAssertEqual(failures, [.androidNoAudio(callAnswered: false)], "One failure, decided by the first signal")
+        XCTAssertEqual(failedCalls, [push.uuid], "The failure names the call it belongs to")
         XCTAssertEqual(names.last, CallKitNumberPresentation.handle(number: push.number).value)
     }
 

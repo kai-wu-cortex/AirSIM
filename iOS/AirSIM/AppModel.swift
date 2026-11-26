@@ -4910,10 +4910,10 @@ enum CallKitAudioPreparationCoordinator {
 extension AppModel: CallKitActionHandling {
     func callKitAnswerAccepted(uuid: UUID) {
         publishWatchAnswerAccepted(uuid: uuid)
-        // Cloud answers show their progress from this moment; a local route that wins
-        // later cancels it (no progress for Bluetooth-mode answers).
-        if ConnectionModePreference.selected() != .bluetooth,
-           let pushed = callKit.currentIncomingPush, pushed.uuid == uuid {
+        // Cloud answers show their progress from this moment (the session shows none
+        // when this answer cannot go through the cloud); a local route that wins later
+        // cancels it.
+        if let pushed = callKit.currentIncomingPush, pushed.uuid == uuid {
             IPhoneCloudCallSession.shared.beginAnswerProgress(for: pushed)
         }
     }

@@ -187,6 +187,22 @@ struct CloudAnswerProgress: Equatable, Sendable {
     }
 }
 
+enum CloudAnswerProgressPolicy {
+    /// Progress describes cloud answers only. A push carries cloud media even with the
+    /// cloud switched off; that answer goes local, and a "cloud unreachable" timeout
+    /// would end a call that is connecting over VoWLAN.
+    static func shows(bluetoothMode: Bool, cloudEnabled: Bool, hasCloudMedia: Bool, isVirtual: Bool) -> Bool {
+        !bluetoothMode && cloudEnabled && hasCloudMedia && !isVirtual
+    }
+
+    /// Whether the failed answer may end the system call and the session's call. The
+    /// failure stays on screen for a moment first, which can outlive the call: never
+    /// end the next call's screen or stop another call's media.
+    static func mayEnd(failed: UUID, systemCall: UUID?, sessionCall: UUID?) -> Bool {
+        systemCall == failed && (sessionCall == nil || sessionCall == failed)
+    }
+}
+
 /// Seconds from CallKit accepting a cloud answer to voice, kept only on this iPhone.
 enum CloudAnswerDurationHistory {
     static let key = "airsim.cloud-answer-durations.v1"

@@ -803,8 +803,9 @@ enum CloudCallControlClient {
 @MainActor
 final class CloudAnswerProgressCoordinator {
     var onProgress: ((CloudAnswerProgress?) -> Void)?
-    /// Called once per failed answer, after the failure has been visible for `failureHold`.
-    var onFailure: ((CloudAnswerFailure) -> Void)?
+    /// Called once per failed answer with its call, after the failure has been visible
+    /// for `failureHold`.
+    var onFailure: ((CloudAnswerFailure, UUID) -> Void)?
     private let callKit: CallKitController
     private let history: UserDefaults
     private let failureHold: Duration
@@ -875,7 +876,7 @@ final class CloudAnswerProgressCoordinator {
                 try? await Task.sleep(for: hold)
                 guard let self, self.call?.uuid == call.uuid else { return }
                 self.finish()
-                self.onFailure?(failure)
+                self.onFailure?(failure, call.uuid)
             }
         } else {
             publish(at: now)
@@ -980,8 +981,8 @@ final class IPhoneCloudCallSession {
 
     private init() {
         answerProgress = CloudAnswerProgressCoordinator()
-        answerProgress.onFailure = { failure in
-            IPhoneCloudCallSession.shared.finishFailedAnswer(failure)
+        answerProgress.onFailure = { failure, uuid in
+            IPhoneCloudCallSession.shared.finishFailedAnswer(failure, for: uuid)
         }
         media.onConnectionLost = { connection in
             Task { @MainActor in
@@ -1148,8 +1149,13 @@ final class IPhoneCloudCallSession {
         scheduleAnswerConfirmation(for: incoming)
     }
 
-    /// CallKit accepted the answer of this cloud push: show progress until voice or failure.
+    /// CallKit accepted the answer of this push: show progress until voice or failure,
+    /// but only for an answer that will go through the cloud.
     func beginAnswerProgress(for call: IncomingVoIPCall) {
+        guard CloudAnswerProgressPolicy.shows(
+            bluetoothMode: ConnectionModePreference.selected() == .bluetooth,
+            cloudEnabled: CloudModePreference.isEnabled(),
+            hasCloudMedia: call.authenticatedMediaURL != nil, isVirtual: call.isVirtual) else { return }
         answerProgress.begin(for: call)
     }
 
@@ -1160,12 +1166,17 @@ final class IPhoneCloudCallSession {
 
     /// Ends a failed cloud answer. Android ends the carrier call only when the failure
     /// says so (a refused call keeps ringing; another device's answer is never ended).
-    private func finishFailedAnswer(_ failure: CloudAnswerFailure) {
+    private func finishFailedAnswer(_ failure: CloudAnswerFailure, for uuid: UUID) {
+        let callKit = CallKitController.shared
+        guard CloudAnswerProgressPolicy.mayEnd(failed: uuid, systemCall: callKit.currentSystemCallUUID,
+                                               sessionCall: call?.uuid) else { return }
+        // The cloud answer may not have started; the accepted push still names the call.
+        let failed = call ?? callKit.currentIncomingPush.flatMap { $0.uuid == uuid ? $0 : nil }
         let envelope = failure.endsAndroidCall
-            ? call.flatMap { media.controlEnvelope(action: answered ? "end" : "reject", call: $0) } : nil
+            ? failed.flatMap { media.controlEnvelope(action: answered ? "end" : "reject", call: $0) } : nil
         let credentials = envelope == nil ? nil : VoIPPushController.shared.cloudCallControlCredentials()
         emitLifecycle(.failed, source: .agent, failure: failure.title)
-        CallKitController.shared.reportCurrentCallEnded(reason: .failed)
+        callKit.reportCurrentCallEnded(reason: .failed)
         stop()
         if let envelope, let credentials { submitPersistentControl(envelope, credentials: credentials) }
         if failure.notifies { CloudAnswerFailureNotifier.post(failure) }

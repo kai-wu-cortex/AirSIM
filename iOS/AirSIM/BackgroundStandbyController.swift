@@ -439,7 +439,8 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
     func callKitAnswerAccepted(uuid: UUID) {
         let pushed = CallKitController.shared.currentIncomingPush
         watchAnswers.accepted(pushed, uuid: uuid)
-        if ConnectionModePreference.selected() != .bluetooth, let pushed, pushed.uuid == uuid {
+        // The session shows no progress when this answer cannot go through the cloud.
+        if let pushed, pushed.uuid == uuid {
             IPhoneCloudCallSession.shared.beginAnswerProgress(for: pushed)
         }
     }
@@ -519,6 +520,8 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
                   pushedCall.authenticatedMediaURL != nil {
             try await IPhoneCloudCallSession.shared.answer(pushedCall)
         } else if let api = await availableSamsungAPI() {
+            // VoWLAN answers this call: a cloud timeout must never end it.
+            IPhoneCloudCallSession.shared.cancelAnswerProgress()
             try await api.answerCall()
         } else {
             throw CallKitBridgeError.noReachableTransport
