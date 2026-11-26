@@ -53,6 +53,12 @@
 
 CallKit 接受 iPhone 的接听动作时（含 PushKit 冷启动），立即经 WatchConnectivity 发布带 `answered_on_phone` 的 `connecting`，Watch 据此收起尚未接听的来电，不再等云端 ACTIVE（见 [docs/fixes/2026-11-25-cloud-answer-watch-dismiss.md](../docs/fixes/2026-11-25-cloud-answer-watch-dismiss.md)）。iPhone 在 CallKit 生命周期进入 `active` 或终止状态时，经 WatchConnectivity 发布同一通 APNs 来电的状态；本地展示 ID 作为别名，Watch 同时按 ID 与 UUID 匹配。WatchConnectivity 激活完成后会重发最新待发送状态，Watch 会记录已结束的 ID／UUID，迟到的 `incoming` 不会重新拉起铃声。模拟器定向 XCTest 通过；iPhone／Apple Watch 真机、锁屏 APNs 和不同到达顺序仍需验收。
 
+## 未发布功能：纯云端接听进度
+
+只有云端连接时，CallKit 接受接听后，系统通话界面的名字行只显示进度：连接云端、等待安卓端、安卓端接听中、接通语音中，后面带已等待秒数。接通、失败或结束时，名字行改写为号码。App 内通话页显示四步进度，以及「已等待 N 秒 · 平均约 M 秒」，平均值取本机最近 10 次成功接通。
+
+失败时显示原因与建议，例如「安卓端无法传送语音／在安卓端启动 Shizuku 后回拨」，并发本地通知。安卓端在音频桥不可用时不接起电话，回 `answer_unavailable`。完整规则见 [docs/fixes/2026-11-25-cloud-answer-progress.md](../docs/fixes/2026-11-25-cloud-answer-progress.md)。尚未经 Xcode 编译与真机验收。
+
 ## 未发布功能：原生风格短信会话
 
 会话消息列表改用 UIKit 复用单元与只读原生文本视图：接收消息左对齐、发送消息使用系统绿色，保留 SIM 来源和真实的已发送状态。首条、跨自然日及相邻间隔至少五分钟时显示本地化日期时间；连续同方向消息紧凑排列，组尾显示气泡尾部。五分钟是 AirSIM 的分组规则，不是 Apple 公布的阈值。
