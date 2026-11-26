@@ -29,6 +29,7 @@ public final class CloudCallManagerTests {
         incomingAnswerSuccessIsDeduplicated();
         incomingAnswerWaitsForTheAudioBridge();
         audioBridgeRefusalReachesTheIPhoneAsAnswerUnavailable();
+        audioBridgeProbeOutlastsAListenerRestart();
         answerSocketReplayDoesNotRestartMedia();
         cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
@@ -177,6 +178,20 @@ public final class CloudCallManagerTests {
                     "no generic error and no answer ACK");
             check(answers[0] == 0 && executor.tasks == 0, "no carrier answer and no PCM loop");
         } finally { CallRepository.remove(call); }
+    }
+
+    /** The bridge listener restarts with a 250 ms backoff; one failed probe is not a dead bridge. */
+    private static void audioBridgeProbeOutlastsAListenerRestart() {
+        int[] probes = {0};
+        check(StandaloneAgentGateway.probeWithRetries(() -> ++probes[0] == 3, 3, 1) && probes[0] == 3,
+                "a listener back on the third probe is ready");
+        probes[0] = 0;
+        check(!StandaloneAgentGateway.probeWithRetries(() -> { probes[0]++; return false; }, 3, 1) && probes[0] == 3,
+                "a dead bridge is refused after three probes");
+        probes[0] = 0;
+        long started = System.nanoTime();
+        check(StandaloneAgentGateway.probeWithRetries(() -> { probes[0]++; return true; }, 3, 5_000) && probes[0] == 1
+                && System.nanoTime() - started < 1_000_000_000L, "a ready bridge is probed once and never waits");
     }
 
     private static void incomingAnswerDoesNotRepeatUnknownSideEffect() throws Exception {

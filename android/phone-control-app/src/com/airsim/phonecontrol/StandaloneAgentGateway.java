@@ -38,7 +38,27 @@ final class StandaloneAgentGateway {
     private final Map<String, String> commandResults = new LinkedHashMap<>();
     private final Map<String, AnswerAttempt> answerAttempts = new LinkedHashMap<>();
     /** Whether the Shizuku audio bridge accepts connections; replaced in tests. */
-    private java.util.function.BooleanSupplier audioBridgeReady = StandaloneAgentGateway::probeAudioBridge;
+    private java.util.function.BooleanSupplier audioBridgeReady =
+            () -> probeWithRetries(StandaloneAgentGateway::probeAudioBridge, 3, 300);
+
+    /**
+     * The iPhone treats a refusal as final, and the bridge listener restarts with a
+     * 250 ms backoff: one failed probe is not a dead bridge. A ready bridge returns on
+     * the first probe; a dead one costs two short waits.
+     */
+    static boolean probeWithRetries(java.util.function.BooleanSupplier probe, int attempts, long gapMillis) {
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            if (probe.getAsBoolean()) return true;
+            if (attempt == attempts) break;
+            try {
+                Thread.sleep(gapMillis);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
 
     /**
      * A cloud answer must not pick up a carrier call that cannot carry voice: the caller
