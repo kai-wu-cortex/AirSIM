@@ -4435,6 +4435,49 @@ final class AirSIMTests: XCTestCase {
         )
     }
 
+    func testPeerConnectedCarriesItsRole() throws {
+        let peer = try XCTUnwrap(CloudPCMControlMessage.decode(#"{"event":"peer_connected","role":"agent"}"#))
+        XCTAssertEqual(peer.status, "peer_connected")
+        XCTAssertEqual(peer.role, "agent")
+        XCTAssertNil(try XCTUnwrap(CloudPCMControlMessage.decode(#"{"status":"answer_ok","call_id":"x"}"#)).role)
+    }
+
+    func testRelayCapacityFailureIsDistinguishable() {
+        guard case let .relayUnavailable(status, detail) = CloudCallControlClientError.from(
+            statusCode: 503, detail: "relay_capacity_exhausted") else { return XCTFail("503 is a Relay failure") }
+        XCTAssertEqual(status, 503)
+        XCTAssertEqual(detail, "relay_capacity_exhausted")
+        XCTAssertEqual(CloudCallControlClientError.from(statusCode: 429, detail: nil).errorDescription,
+                       "Relay 拒绝了通话控制（HTTP 429）", "The visible message is unchanged")
+        guard case .rejected("bad") = CloudCallControlClientError.from(statusCode: 400, detail: "bad") else {
+            return XCTFail("400 stays a rejection")
+        }
+    }
+
+    func testOnlyErrorsNamingThisAnswerCanFailIt() throws {
+        let uuid = try XCTUnwrap(UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FF"))
+        func identifies(_ json: String) throws -> Bool {
+            try XCTUnwrap(CloudPCMControlMessage.decode(json)).identifiesAnswer(callID: "c1", uuid: uuid, generation: 2)
+        }
+        let id = #""call_id":"c1","call_uuid":"6f9619ff-8b86-d011-b42d-00c04fc964ff","generation":2"#
+        XCTAssertTrue(try identifies(#"{"status":"action_error",\#(id)}"#), "Standalone: identity, no action")
+        XCTAssertTrue(try identifies(#"{"status":"action_error","action":"answer",\#(id)}"#), "AVF answer error")
+        // AVF answers Relay events (peer_connected, owner_claimed) with this exact reply.
+        XCTAssertFalse(try identifies(#"{"status":"action_error","message":"公网控制不属于当前通话"}"#))
+        XCTAssertFalse(try identifies(#"{"status":"action_error","action":"end",\#(id)}"#), "Another action's error")
+        XCTAssertFalse(try identifies(
+            #"{"status":"action_error","call_id":"c1","call_uuid":"6f9619ff-8b86-d011-b42d-00c04fc964ff","generation":1}"#))
+    }
+
+    func testCloudAnswerFailureNotificationShowsWhileTheAppIsOpen() {
+        let content = CloudAnswerFailureNotifier.content(for: .androidNoAudio(callAnswered: false))
+        XCTAssertEqual(content.title, "通话未接通")
+        XCTAssertEqual(content.body, "设备无法传送语音：检查设备的音频桥服务与权限后重试")
+        XCTAssertTrue(CloudAnswerFailureNotifier.presentsInForeground(content.userInfo))
+        XCTAssertFalse(CloudAnswerFailureNotifier.presentsInForeground(["event": "incoming_sms"]))
+        XCTAssertEqual(CloudAnswerFailureNotifier.content(for: .answeredElsewhere).body, "已在其他设备接听")
+    }
+
     func testCloudSelfTestReportOnlyPassesWhenEveryStagePasses() {
         var report = CloudSelfTestReport.initial
         XCTAssertFalse(report.allPassed)

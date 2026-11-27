@@ -37,6 +37,42 @@ final class StandaloneAgentGateway {
     private volatile long simRevision;
     private final Map<String, String> commandResults = new LinkedHashMap<>();
     private final Map<String, AnswerAttempt> answerAttempts = new LinkedHashMap<>();
+    /** Whether the privileged audio bridge accepts connections; replaced in tests. */
+    private java.util.function.BooleanSupplier audioBridgeReady =
+            () -> probeWithRetries(StandaloneAgentGateway::probeAudioBridge, 3, 300);
+
+    /**
+     * The iPhone treats a refusal as final, and the bridge listener restarts with a
+     * 250 ms backoff: one failed probe is not a dead bridge. A ready bridge returns on
+     * the first probe; a dead one costs two short waits.
+     */
+    static boolean probeWithRetries(java.util.function.BooleanSupplier probe, int attempts, long gapMillis) {
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            if (probe.getAsBoolean()) return true;
+            if (attempt == attempts) break;
+            try {
+                Thread.sleep(gapMillis);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A cloud answer must not pick up a carrier call that cannot carry voice: the caller
+     * would hear silence. Same 500 ms TCP probe as the VoWLAN gateway; never sends PCM.
+     */
+    static boolean probeAudioBridge() {
+        try (java.net.Socket socket = new java.net.Socket()) {
+            socket.connect(new java.net.InetSocketAddress("127.0.0.1", 7580), 500);
+            return true;
+        } catch (Exception error) {
+            BridgeLog.debug("audio_bridge_probe_failed error=" + error.getClass().getSimpleName());
+            return false;
+        }
+    }
 
     private static final class AnswerAttempt {
         final String identity;
@@ -387,6 +423,28 @@ final class StandaloneAgentGateway {
         if (attempt.confirmed) return answerFailure(id, "call_not_ready");
         if (attempt.result != null) return new JSONObject(attempt.result);
         if (state != android.telecom.Call.STATE_RINGING) return answerFailure(id, "call_not_ready");
+        // Refuse before reserving the attempt: the same queued answer may succeed once
+        // the bridge is back, and the call keeps ringing instead of connecting silently.
+        if (!audioBridgeReady.getAsBoolean()) return answerFailure(id, "audio_bridge_unavailable");
+        // Probing can wait through a bridge restart. Revalidate the authorization and
+        // exact Telecom call after that wait, before any answer side effect.
+        if (attempt.expiresAt != null && !Instant.now().isBefore(attempt.expiresAt))
+            return answerFailure(id, "command_expired");
+        if (!stillCurrent.getAsBoolean()) return answerFailure(id, "command_configuration_changed");
+        var refreshed = StandaloneCloudMediaManager.get(context).cloudAnswerTarget(call);
+        if (refreshed == null || !target.androidID().equals(refreshed.androidID()))
+            return answerFailure(id, "call_mismatch");
+        state = refreshed.state();
+        if (state < 0 || state == android.telecom.Call.STATE_DISCONNECTING
+                || state == android.telecom.Call.STATE_DISCONNECTED) return answerFailure(id, "call_ended");
+        if (state == android.telecom.Call.STATE_ACTIVE || state == android.telecom.Call.STATE_HOLDING) {
+            attempt.confirmed = true;
+            attempt.result = new JSONObject().put("command_id", id).put("status", "completed")
+                    .put("result", new JSONObject().put("answered", true).put("android_confirmed", true)).toString();
+            return new JSONObject(attempt.result);
+        }
+        if (refreshed.waitingForTelecom() || state != android.telecom.Call.STATE_RINGING)
+            return answerFailure(id, "call_not_ready");
         // Reserve before dispatch; an exception is also an unknown outcome.
         attempt.result = answerFailure(id, "answer_result_unknown").toString();
         AgentCommandDispatcher.Result result = execute(new AgentCommand(id, "answer", target.androidID(), "", "", ""));

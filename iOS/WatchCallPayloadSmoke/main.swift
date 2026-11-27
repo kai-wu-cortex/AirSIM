@@ -306,4 +306,34 @@ do {
         status: { reads += 1; return reads >= 4 ? "ended" : "active" }, pause: {})
     check(delayed && sends == 2, "Delayed carrier hangup retries only the same scoped request")
 }
+do {
+    let now = Date()
+    let uuid = UUID()
+    let call = try WatchVoIPCall(userInfo: [
+        "event": "incoming_call", "call_id": "answer-a", "call_uuid": uuid.uuidString,
+        "number": "10086", "generation": 4,
+        "expires_at": ISO8601DateFormatter().string(from: now.addingTimeInterval(45))
+    ], now: now)
+    let refusal: [String: Any] = ["status": "answer_unavailable", "call_id": "answer-a",
+        "call_uuid": uuid.uuidString, "generation": 4]
+    check(WatchReliabilityPolicy.matchesAnswerFailure(refusal, call: call), "Matching refusal is scoped to this answer")
+    for field in ["call_id", "call_uuid", "generation"] {
+        var missing = refusal; missing.removeValue(forKey: field)
+        check(!WatchReliabilityPolicy.matchesAnswerFailure(missing, call: call), "Missing \(field) cannot fail an answer")
+        var stale = refusal
+        stale[field] = field == "generation" ? 3 : "other-call"
+        check(!WatchReliabilityPolicy.matchesAnswerFailure(stale, call: call), "Stale \(field) cannot fail an answer")
+    }
+    var unrelated = refusal; unrelated["action"] = "end"
+    check(!WatchReliabilityPolicy.matchesAnswerFailure(unrelated, call: call), "Other command error must not fail answer")
+    unrelated["action"] = "answer"
+    check(WatchReliabilityPolicy.matchesAnswerFailure(unrelated, call: call), "Explicit answer identity accepted")
+    check(WatchReliabilityPolicy.mediaFailure("answer_unavailable", phase: .incoming)?.error.contains("音频桥") == true,
+          "A refused incoming answer gets a generic device hint")
+    check(WatchReliabilityPolicy.mediaFailure("answer_unavailable", phase: .active) == nil,
+          "Late refusal must not hang up an active Watch call")
+    check(WatchReliabilityPolicy.mediaFailure("local_failed", phase: .active) != nil,
+          "Existing local media failure handling is retained")
+    check(WatchReliabilityPolicy.mediaFailure("active", phase: .incoming) == nil, "Successful status is not a failure")
+} catch { fatalError("Watch answer refusal fixture failed: \(error)") }
 print("Watch reliability checks passed: \(assertionCount) assertions")

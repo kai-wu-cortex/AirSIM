@@ -372,9 +372,10 @@ final class WatchCallSession: NSObject, ObservableObject {
             publishLocalPhase(WatchReliabilityPolicy.phaseAfterMediaReady(call.phase))
         case "active", "answer_ok":
             if cloudMediaAllowed { publishLocalPhase(.active) }
-        case "local_failed":
-            audioStatus = "手表无法连接安卓音频"
-            errorMessage = "VoWLAN 音频连接失败，请检查手表与安卓的网络"
+        case "local_failed", "answer_unavailable":
+            guard let failure = WatchReliabilityPolicy.mediaFailure(status, phase: call.phase) else { break }
+            audioStatus = failure.audio
+            errorMessage = failure.error
             if let current = voIPCall {
                 if !current.isOutgoing, call.phase != .active {
                     provider.reportCall(with: current.uuid, endedAt: Date(), reason: .failed)
@@ -1355,6 +1356,7 @@ private final class WatchCallMediaBridge: @unchecked Sendable {
     private var stopped = true
     private var mediaGeneration = UUID()
     private var callUUID: UUID?
+    private var answeringCall: WatchVoIPCall? // Media queue; used only for scoped refusal messages.
 
     func prepareForCallKit() throws {
         try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .voiceChat)
@@ -1371,6 +1373,7 @@ private final class WatchCallMediaBridge: @unchecked Sendable {
             guard let self else { return }
             stopped = false
             self.callUUID = callUUID
+            answeringCall = nil
             mediaGeneration = UUID()
             let generation = mediaGeneration
             switch media {
@@ -1426,7 +1429,11 @@ private final class WatchCallMediaBridge: @unchecked Sendable {
     func sendControl(_ action: String, call: WatchVoIPCall) {
         guard let data = try? JSONSerialization.data(withJSONObject: call.controlMessage(action: action)),
               let text = String(data: data, encoding: .utf8) else { return }
-        queue.async { [weak self] in self?.webSocket?.send(.string(text)) { _ in } }
+        queue.async { [weak self] in
+            guard let self else { return }
+            if action == "answer", !self.stopped, self.callUUID == call.uuid { self.answeringCall = call }
+            self.webSocket?.send(.string(text)) { _ in }
+        }
     }
 
     func setMuted(_ muted: Bool) {
@@ -1479,6 +1486,7 @@ private final class WatchCallMediaBridge: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             stopped = true
+            answeringCall = nil
             mediaGeneration = UUID()
             webSocket?.cancel(with: .normalClosure, reason: nil)
             webSocket = nil
@@ -1517,7 +1525,12 @@ private final class WatchCallMediaBridge: @unchecked Sendable {
     private func consumeControl(_ text: String) {
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        if let status = object["status"] as? String ?? object["event"] as? String { if let uuid = callUUID { onStatus?(uuid, status) } }
+        guard let status = object["status"] as? String ?? object["event"] as? String, let uuid = callUUID else { return }
+        if status == "answer_unavailable" {
+            guard let answeringCall,
+                  WatchReliabilityPolicy.matchesAnswerFailure(object, call: answeringCall) else { return }
+        }
+        onStatus?(uuid, status)
     }
 
     private func enqueueUplink(_ data: Data) {
@@ -1941,6 +1954,26 @@ enum WatchReliabilityPolicy {
         case "ended", "failed", "disconnected": return .ended
         default: return nil
         }
+    }
+
+    /// The Watch's own media attempt failed: what to show and the error to keep. Android
+    /// refuses a cloud answer (`answer_unavailable`) when it could not carry voice.
+    static func mediaFailure(_ status: String, phase: WatchCallPhase) -> (audio: String, error: String)? {
+        // A late refusal of an earlier answer retry cannot end an active call.
+        if status == "answer_unavailable", phase == .active { return nil }
+        switch status {
+        case "local_failed": return ("手表无法连接安卓音频", "VoWLAN 音频连接失败，请检查手表与安卓的网络")
+        case "answer_unavailable": return ("设备无法传送语音", "设备无法传送语音，请检查设备的音频桥服务与权限")
+        default: return nil
+        }
+    }
+
+    static func matchesAnswerFailure(_ payload: [String: Any], call: WatchVoIPCall) -> Bool {
+        guard payload["call_id"] as? String == call.callID,
+              (payload["call_uuid"] as? String).flatMap(UUID.init(uuidString:)) == call.uuid,
+              (payload["generation"] as? NSNumber)?.uint64Value == call.generation else { return false }
+        let action = payload["action"] as? String
+        return action == nil || action == "answer"
     }
 
     static func acceptsMediaCallback(currentUUID: UUID?, callbackUUID: UUID) -> Bool {

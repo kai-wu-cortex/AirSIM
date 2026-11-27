@@ -27,6 +27,10 @@ public final class CloudCallManagerTests {
         answerIdentityExpiryAndTerminalAreRechecked();
         incomingAnswerDoesNotRepeatUnknownSideEffect();
         incomingAnswerSuccessIsDeduplicated();
+        incomingAnswerWaitsForTheAudioBridge();
+        audioBridgeRefusalReachesTheIPhoneAsAnswerUnavailable();
+        audioBridgeProbeOutlastsAListenerRestart();
+        incomingAnswerRechecksAfterAudioProbe();
         answerSocketReplayDoesNotRestartMedia();
         cloudEarlyMediaTransitionsOnlyOnTelecomActive();
         System.out.println("CloudCallManagerTests passed");
@@ -136,6 +140,103 @@ public final class CloudCallManagerTests {
         } finally { CallRepository.remove(call); }
     }
 
+    private static void incomingAnswerWaitsForTheAudioBridge() throws Exception {
+        int[] answers = {0};
+        var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
+            @Override public void answer(int videoState) { answers[0]++; super.answer(videoState); }
+        };
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            set(f.descriptor, "direction", "incoming");
+            set(g.gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> false);
+            var command = answerCommand();
+            var refused = g.gateway.executeCloudCommand(command);
+            check("failed".equals(refused.optString("status"))
+                    && "audio_bridge_unavailable".equals(refused.optString("error")) && answers[0] == 0,
+                    "no audio bridge: refuse without answering the carrier call");
+            set(g.gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> true);
+            check("completed".equals(g.gateway.executeCloudCommand(command).optString("status")) && answers[0] == 1,
+                    "refusal is not cached: the same queued answer works once the bridge is up");
+        } finally { CallRepository.remove(call); }
+    }
+
+    private static void audioBridgeRefusalReachesTheIPhoneAsAnswerUnavailable() throws Exception {
+        int[] answers = {0};
+        var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
+            @Override public void answer(int videoState) { answers[0]++; super.answer(videoState); }
+        };
+        String id = CallRepository.add(call);
+        try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+            set(f.descriptor, "direction", "incoming");
+            set(g.gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> false);
+            var executor = new QueuedExecutor(); set(f.manager, "sessions", executor);
+            Object session = f.active();
+            var socket = controlSocket(mediaAnswer(answerCommand())); set(session, "webSocket", socket);
+            readControl(session, socket);
+            check(socket.text.stream().anyMatch(v -> v.contains("\"answer_unavailable\"")
+                    && v.contains("audio_bridge_unavailable")), "the iPhone learns why Android refused");
+            check(socket.text.stream().noneMatch(v -> v.contains("action_error") || v.contains("answer_ok")),
+                    "no generic error and no answer ACK");
+            check(answers[0] == 0 && executor.tasks == 0, "no carrier answer and no PCM loop");
+        } finally { CallRepository.remove(call); }
+    }
+
+    /** The bridge listener restarts with a 250 ms backoff; one failed probe is not a dead bridge. */
+    private static void audioBridgeProbeOutlastsAListenerRestart() {
+        int[] probes = {0};
+        check(StandaloneAgentGateway.probeWithRetries(() -> ++probes[0] == 3, 3, 1) && probes[0] == 3,
+                "a listener back on the third probe is ready");
+        probes[0] = 0;
+        check(!StandaloneAgentGateway.probeWithRetries(() -> { probes[0]++; return false; }, 3, 1) && probes[0] == 3,
+                "a dead bridge is refused after three probes");
+        probes[0] = 0;
+        long started = System.nanoTime();
+        check(StandaloneAgentGateway.probeWithRetries(() -> { probes[0]++; return true; }, 3, 5_000) && probes[0] == 1
+                && System.nanoTime() - started < 1_000_000_000L, "a ready bridge is probed once and never waits");
+    }
+
+    private static void incomingAnswerRechecksAfterAudioProbe() throws Exception {
+        for (String change : new String[]{"expired", "configuration", "ended", "active", "replaced"}) {
+            int[] answers = {0};
+            boolean[] current = {true};
+            var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
+                @Override public void answer(int videoState) { answers[0]++; super.answer(videoState); }
+            };
+            String id = CallRepository.add(call);
+            try (var f = new Fixture(id); var g = new GatewayFixture(f)) {
+                set(f.descriptor, "direction", "incoming");
+                var command = answerCommand();
+                set(g.gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> {
+                    try {
+                        switch (change) {
+                            case "expired" -> {
+                                var attempts = (java.util.Map<?, ?>)field(g.gateway, "answerAttempts");
+                                set(attempts.get(command.getString("command_id")), "expiresAt", java.time.Instant.now().minusSeconds(1));
+                            }
+                            case "configuration" -> current[0] = false;
+                            case "ended" -> call.setStateForTest(android.telecom.Call.STATE_DISCONNECTED);
+                            case "active" -> call.setStateForTest(android.telecom.Call.STATE_ACTIVE);
+                            case "replaced" -> set(f.descriptor, "generation", 2L);
+                        }
+                        return true;
+                    } catch (Exception error) { throw new AssertionError(error); }
+                });
+                var result = g.gateway.executeCloudCommand(command, () -> current[0]);
+                String expected = switch (change) {
+                    case "expired" -> "command_expired";
+                    case "configuration" -> "command_configuration_changed";
+                    case "ended" -> "call_ended";
+                    case "replaced" -> "call_mismatch";
+                    default -> "";
+                };
+                check(expected.equals(result.optString("error")) && answers[0] == 0,
+                        "must recheck " + change + " after waiting for the bridge, without another answer");
+                if (change.equals("active")) check("completed".equals(result.optString("status")),
+                        "an already active call confirms without answering again");
+            } finally { CallRepository.remove(call); }
+        }
+    }
+
     private static void incomingAnswerDoesNotRepeatUnknownSideEffect() throws Exception {
         int[] answers = {0};
         var call = new android.telecom.Call(android.telecom.Call.STATE_RINGING, 0, "5550100") {
@@ -216,6 +317,8 @@ public final class CloudCallManagerTests {
             context.setSystemService(android.app.role.RoleManager.class, new android.app.role.RoleManager());
             var ctor = StandaloneAgentGateway.class.getDeclaredConstructor(android.content.Context.class); ctor.setAccessible(true);
             gateway = ctor.newInstance(context);
+            // Tests never reach the real 127.0.0.1:7580 bridge; individual cases turn it off.
+            set(gateway, "audioBridgeReady", (java.util.function.BooleanSupplier) () -> true);
             mediaSingleton.set(null, f.manager); gatewaySingleton.set(null, gateway);
         }
         public void close() throws Exception {

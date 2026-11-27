@@ -2605,15 +2605,19 @@ struct ActiveCallView: View {
                     Text("正在呼叫 · 尚未接通")
                         .font(.subheadline).foregroundStyle(.white.opacity(0.68))
                 }
-                if content.showsDuration {
-                    TimelineView(.periodic(from: .now, by: 1)) { context in
-                        Text(durationText(at: context.date))
-                            .font(.title2.weight(.medium).monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.82))
-                            .contentTransition(.numericText())
+                if let progress = model.cloudAnswerProgress {
+                    CloudAnswerProgressPanel(progress: progress)
+                } else {
+                    if content.showsDuration {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(durationText(at: context.date))
+                                .font(.title2.weight(.medium).monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.82))
+                                .contentTransition(.numericText())
+                        }
                     }
+                    audioStatusBadge
                 }
-                audioStatusBadge
                 if let error = model.audio.errorMessage, !error.isEmpty {
                     Text(error).font(.caption).foregroundStyle(.red)
                         .multilineTextAlignment(.center)
@@ -2749,6 +2753,49 @@ struct ActiveCallView: View {
             state: call.state,
             speakerEnabled: model.audio.speakerEnabled
         )
+    }
+}
+
+/// Four cloud answer steps with the waited time, or the failure and what to do.
+private struct CloudAnswerProgressPanel: View {
+    let progress: CloudAnswerProgress
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let average = CloudAnswerDurationHistory.average()
+            VStack(alignment: .leading, spacing: 8) {
+                if let failure = progress.failure {
+                    Text(failure.title).font(.headline).foregroundStyle(.red)
+                    if let advice = failure.advice {
+                        Text(advice).font(.subheadline).foregroundStyle(.white.opacity(0.82))
+                    }
+                } else {
+                    ForEach(CloudAnswerStage.allCases, id: \.self) { stage in
+                        HStack(spacing: 8) {
+                            if stage < progress.stage {
+                                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                            } else if stage == progress.stage {
+                                ProgressView().controlSize(.small).tint(.white)
+                            } else {
+                                Image(systemName: "circle").foregroundStyle(.white.opacity(0.35))
+                            }
+                            Text(stage.title)
+                                .font(.subheadline.weight(stage == progress.stage ? .semibold : .regular))
+                                .foregroundStyle(.white.opacity(stage > progress.stage ? 0.45 : 0.9))
+                        }
+                    }
+                    Text(progress.detail(at: context.date, average: average))
+                        .font(.footnote).foregroundStyle(.white.opacity(0.75))
+                    Text(progress.waitedText(at: context.date, average: average))
+                        .font(.footnote.monospacedDigit()).foregroundStyle(.white.opacity(0.75))
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: 360, alignment: .leading)
+            .background((progress.failure == nil ? Color.white : Color.red).opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .accessibilityElement(children: .combine)
+        }
     }
 }
 

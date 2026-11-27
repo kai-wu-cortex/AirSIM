@@ -893,3 +893,134 @@ private final class DeviceBackendProbe: DeviceCallBackend {
     }
     func dtmf(_ digits: String, callID: String, generation: UInt64?) async throws { commands.append("dtmf:\(callID):\(digits)") }
 }
+
+@MainActor
+final class CloudAnswerProgressIntegrationTests: XCTestCase {
+    private func incoming(uuid: UUID = UUID(), generation: UInt64 = 1, agent: String = "A") throws -> IncomingVoIPCall {
+        try IncomingVoIPCall(userInfo: ["event": "incoming_call", "call_id": "call-a",
+            "call_uuid": uuid.uuidString, "agent_id": agent, "generation": generation,
+            "number": "13800138000", "call_secret": String(repeating: "x", count: 32),
+            "media_url": "wss://relay.example/v1/calls/\(uuid.uuidString.lowercased())/connect"])
+    }
+
+    func testHTTPFailureThenWebSocketAnswerWaitsForRealPlayback() throws {
+        let call = try incoming(), start = Date()
+        let coordinator = CloudAnswerProgressCoordinator()
+        defer { coordinator.cancel() }
+        coordinator.begin(for: call, at: start)
+        coordinator.apply(.relayUnavailable, for: call, at: start.addingTimeInterval(0.1))
+        coordinator.apply(.control(status: "answer_ok", role: nil), for: call, at: start.addingTimeInterval(0.2))
+        coordinator.apply(.control(status: "active", role: nil), for: call, at: start.addingTimeInterval(0.3))
+        XCTAssertNil(coordinator.progress?.failure)
+        XCTAssertEqual(coordinator.progress?.stage, .connectingVoice)
+        coordinator.apply(.downlinkAudio, for: call, at: start.addingTimeInterval(0.4))
+        XCTAssertNil(coordinator.progress)
+    }
+
+    func testNoCloudAttemptMeansNoCloudTimeout() {
+        var value = CloudAnswerProgress(startedAt: Date(timeIntervalSince1970: 0))
+        value.tick(at: Date(timeIntervalSince1970: 120))
+        XCTAssertNil(value.failure)
+        XCTAssertFalse(CloudAnswerProgressPolicy.mayEnd(failed: UUID(), systemCall: nil, sessionCall: nil))
+    }
+
+    func testActiveWithoutPlaybackStillTimesOut() throws {
+        let call = try incoming(), start = Date()
+        let coordinator = CloudAnswerProgressCoordinator()
+        defer { coordinator.cancel() }
+        coordinator.begin(for: call, at: start)
+        coordinator.apply(.control(status: "active", role: nil), for: call, at: start.addingTimeInterval(1))
+        coordinator.apply(.control(status: "pcm_first_frame", role: nil), for: call, at: start.addingTimeInterval(2))
+        coordinator.tick(at: start.addingTimeInterval(16))
+        XCTAssertEqual(coordinator.progress?.failure, .androidNoAudio(callAnswered: true))
+    }
+
+    func testFailureHoldCancelledOnSessionReplacement() async throws {
+        let old = try incoming(), next = try incoming()
+        let coordinator = CloudAnswerProgressCoordinator(failureHold: .milliseconds(10))
+        defer { coordinator.cancel() }
+        var failures = 0
+        coordinator.onFailure = { _, _ in failures += 1 }
+        coordinator.begin(for: old)
+        coordinator.apply(.control(status: "answer_unavailable", role: nil), for: old)
+        coordinator.begin(for: next)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(failures, 0)
+        XCTAssertEqual(coordinator.progress?.stage, .connectingCloud)
+        XCTAssertNil(coordinator.progress?.failure)
+    }
+
+    func testSameUUIDWithDifferentGenerationOrDeviceCannotFinishProgress() throws {
+        let call = try incoming()
+        let coordinator = CloudAnswerProgressCoordinator()
+        defer { coordinator.cancel() }
+        coordinator.begin(for: call)
+        coordinator.apply(.downlinkAudio, for: try incoming(uuid: call.uuid, generation: 2))
+        coordinator.apply(.downlinkAudio, for: try incoming(uuid: call.uuid, agent: "B"))
+        XCTAssertNotNil(coordinator.progress)
+        coordinator.apply(.downlinkAudio, for: call)
+        XCTAssertNil(coordinator.progress)
+    }
+
+    func testFailureRequiresCurrentSessionAndFiresOnlyOnce() async throws {
+        let call = try incoming()
+        let coordinator = CloudAnswerProgressCoordinator(failureHold: .zero)
+        defer { coordinator.cancel() }
+        let done = expectation(description: "one failure")
+        var failures = 0
+        coordinator.onFailure = { failure, received in
+            XCTAssertEqual(failure, .androidNoAudio(callAnswered: false))
+            XCTAssertTrue(CloudAnswerProgressCoordinator.sameAttempt(received, call))
+            failures += 1; done.fulfill()
+        }
+        coordinator.begin(for: call)
+        coordinator.apply(.control(status: "answer_unavailable", role: nil), for: call)
+        coordinator.apply(.control(status: "action_error", role: nil), for: call)
+        await fulfillment(of: [done], timeout: 1)
+        XCTAssertEqual(failures, 1)
+        coordinator.begin(for: call)
+        XCTAssertNil(coordinator.progress, "A duplicate accepted action cannot restart a completed attempt")
+    }
+
+    func testExpiredOwnerCannotDispatchDelayedFailure() async throws {
+        let call = try incoming()
+        let coordinator = CloudAnswerProgressCoordinator(failureHold: .milliseconds(10))
+        defer { coordinator.cancel() }
+        var current = true, failures = 0
+        coordinator.isCurrent = { _ in current }
+        coordinator.onFailure = { _, _ in failures += 1 }
+        coordinator.begin(for: call)
+        coordinator.apply(.control(status: "answer_unavailable", role: nil), for: call)
+        current = false
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(failures, 0)
+    }
+
+    func testDuplicateBeginDoesNotRenewDeadlineOrDoubleCountHistory() throws {
+        let call = try incoming(), start = Date()
+        let suite = "cloud-answer-test-\(UUID().uuidString)"
+        let history = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { history.removePersistentDomain(forName: suite) }
+        let coordinator = CloudAnswerProgressCoordinator(history: history)
+        defer { coordinator.cancel() }
+        coordinator.begin(for: call, at: start)
+        coordinator.begin(for: call, at: start.addingTimeInterval(9))
+        XCTAssertEqual(coordinator.progress?.startedAt, start)
+        coordinator.apply(.downlinkAudio, for: call, at: start.addingTimeInterval(2))
+        coordinator.begin(for: call)
+        XCTAssertNil(coordinator.progress)
+        XCTAssertEqual((history.array(forKey: CloudAnswerDurationHistory.key) ?? []).count, 1)
+    }
+
+    func testProgressPublishesWithoutCallKitOrCallerNameWrites() throws {
+        let coordinator = CloudAnswerProgressCoordinator()
+        defer { coordinator.cancel() }
+        var published: [CloudAnswerStage] = []
+        coordinator.onProgress = { if let value = $0 { published.append(value.stage) } }
+        let call = try incoming()
+        coordinator.begin(for: call)
+        coordinator.apply(.earlyReceipt(agentConnected: false), for: call)
+        coordinator.apply(.control(status: "answer_ok", role: nil), for: call)
+        XCTAssertEqual(published, [.connectingCloud, .waitingForAndroid, .connectingVoice])
+    }
+}

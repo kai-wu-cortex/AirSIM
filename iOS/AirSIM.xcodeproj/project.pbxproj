@@ -85,6 +85,7 @@
 		A10000000000000000000021 /* AirSIMWatchApp.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* AirSIMWatchApp.app */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		A10000000000000000000023 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000019 /* AppIcon.icon */; };
 		A10000000000000000000024 /* IPhoneCloudCallSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000024 /* IPhoneCloudCallSession.swift */; };
+		A1CA00000000000000000001 /* CloudAnswerProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1CA00000000000000000001 /* CloudAnswerProgress.swift */; };
 		A10000000000000000000025 /* VirtualCallTTSController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000025 /* VirtualCallTTSController.swift */; };
 		A10000000000000000000029 /* AgentVerboseTrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000029 /* AgentVerboseTrace.swift */; };
 		A1000000000000000000002A /* AgentVerboseTraceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002A /* AgentVerboseTraceView.swift */; };
@@ -244,6 +245,7 @@
 		B10000000000000000000022 /* AirSIMWatchApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AirSIMWatchApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B10000000000000000000023 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B10000000000000000000024 /* IPhoneCloudCallSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPhoneCloudCallSession.swift; sourceTree = "<group>"; };
+		B1CA00000000000000000001 /* CloudAnswerProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudAnswerProgress.swift; sourceTree = "<group>"; };
 		B1000000000000000000002B /* CallLifecycleStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallLifecycleStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000025 /* VirtualCallTTSController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VirtualCallTTSController.swift; sourceTree = "<group>"; };
 		B10000000000000000000029 /* AgentVerboseTrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentVerboseTrace.swift; sourceTree = "<group>"; };
@@ -352,6 +354,7 @@
 				B10000000000000000000010 /* CallKitController.swift */,
 				B1000000000000000000001B /* VoIPPushController.swift */,
 				B10000000000000000000024 /* IPhoneCloudCallSession.swift */,
+				B1CA00000000000000000001 /* CloudAnswerProgress.swift */,
 				B1000000000000000000002B /* CallLifecycleStore.swift */,
 				B10000000000000000000025 /* VirtualCallTTSController.swift */,
 				B10000000000000000000029 /* AgentVerboseTrace.swift */,
@@ -677,6 +680,7 @@
                 AC4010000000000000000001 /* VoIPPushDelivery.swift in Sources */,
 				A1000000000000000000001A /* VoIPPushController.swift in Sources */,
 				A10000000000000000000024 /* IPhoneCloudCallSession.swift in Sources */,
+				A1CA00000000000000000001 /* CloudAnswerProgress.swift in Sources */,
 				A1000000000000000000002B /* CallLifecycleStore.swift in Sources */,
 				A10000000000000000000025 /* VirtualCallTTSController.swift in Sources */,
 				A10000000000000000000029 /* AgentVerboseTrace.swift in Sources */,

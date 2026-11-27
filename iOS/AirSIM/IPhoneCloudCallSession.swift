@@ -2,6 +2,7 @@ import AVFoundation
 import CallKit
 import Foundation
 import UIKit
+import UserNotifications
 
 enum IPhoneCloudCallError: LocalizedError {
     case mediaUnavailable
@@ -494,6 +495,12 @@ struct CloudPCMControlMessage: Equatable, Sendable {
         self.callID == callID && self.callUUID?.lowercased() == uuid.uuidString.lowercased()
             && self.generation == generation
     }
+    /// Whether a failure status is about this call's answer: full identity, and no other
+    /// action. The AVF agent answers Relay events it cannot attribute with an
+    /// identity-less `action_error`, which must not fail the answer.
+    func identifiesAnswer(callID: String, uuid: UUID, generation: UInt64) -> Bool {
+        exactlyMatches(callID: callID, uuid: uuid, generation: generation) && (action == nil || action == "answer")
+    }
     func matches(callID: String, uuid: UUID, generation: UInt64) -> Bool {
         (self.callID == nil || self.callID == callID)
             && (callUUID == nil || callUUID?.lowercased() == uuid.uuidString.lowercased())
@@ -510,10 +517,13 @@ struct CloudPCMControlMessage: Equatable, Sendable {
     let downlinkBytes: UInt64?
     let downlinkFrames: UInt64?
     let downlinkPeak: UInt64?
+    /// Which side a Relay `peer_connected` event is about ("agent" is Android).
+    var role: String? = nil
 
     private struct Payload: Decodable {
         let status: String?
         let event: String?
+        let role: String?
         let message: String?
         let action: String?
         let callID: String?
@@ -526,7 +536,7 @@ struct CloudPCMControlMessage: Equatable, Sendable {
         let downlinkPeak: UInt64?
 
         enum CodingKeys: String, CodingKey {
-            case status, event, message
+            case status, event, message, role
             case action, generation
             case callID = "call_id"
             case callUUID = "call_uuid"
@@ -553,7 +563,8 @@ struct CloudPCMControlMessage: Equatable, Sendable {
             traceID: payload.traceID,
             downlinkBytes: payload.downlinkBytes,
             downlinkFrames: payload.downlinkFrames,
-            downlinkPeak: payload.downlinkPeak
+            downlinkPeak: payload.downlinkPeak,
+            role: payload.role
         )
     }
 
@@ -652,6 +663,17 @@ enum CloudCallControlClientError: LocalizedError {
     case invalidResponse
     case rejected(String)
     case timeout
+    /// HTTP 429 or 5xx: the Relay itself is out of capacity or failing, not this request.
+    case relayUnavailable(status: Int, detail: String?)
+
+    static func from(statusCode: Int, detail: String?) -> CloudCallControlClientError {
+        if statusCode == 429 || statusCode >= 500 { return .relayUnavailable(status: statusCode, detail: detail) }
+        return .rejected(detail ?? rejectionMessage(statusCode))
+    }
+
+    private static func rejectionMessage(_ statusCode: Int) -> String {
+        "Relay 拒绝了通话控制（HTTP \(statusCode)）"
+    }
 
     var errorDescription: String? {
         switch self {
@@ -659,6 +681,7 @@ enum CloudCallControlClientError: LocalizedError {
         case .invalidResponse: return "Relay 返回了无效的通话控制响应"
         case let .rejected(message): return message
         case .timeout: return "等待 Agent 确认通话控制超时"
+        case let .relayUnavailable(status, detail): return detail ?? Self.rejectionMessage(status)
         }
     }
 }
@@ -771,13 +794,142 @@ enum CloudCallControlClient {
         }
         guard acceptedStatusCodes.contains(http.statusCode) else {
             let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw CloudCallControlClientError.rejected(detail ?? "Relay 拒绝了通话控制（HTTP \(http.statusCode)）")
+            throw CloudCallControlClientError.from(statusCode: http.statusCode, detail: detail)
         }
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw CloudCallControlClientError.invalidResponse
         }
+    }
+}
+
+/// Progress belongs to an actual cloud session, not to a CallKit presentation.
+/// It never rewrites caller names and fences all callbacks by the complete attempt.
+@MainActor
+final class CloudAnswerProgressCoordinator {
+    var onProgress: ((CloudAnswerProgress?) -> Void)?
+    var onFailure: ((CloudAnswerFailure, IncomingVoIPCall) -> Void)?
+    var onFailureDecided: ((CloudAnswerFailure, IncomingVoIPCall) -> Void)?
+    var isCurrent: (IncomingVoIPCall) -> Bool = { _ in true }
+    private let history: UserDefaults
+    private let failureHold: Duration
+    private(set) var progress: CloudAnswerProgress?
+    private var call: IncomingVoIPCall?
+    private var lastAttempt: IncomingVoIPCall?
+    private var ticker: Task<Void, Never>?
+    private var failureTask: Task<Void, Never>?
+    private var operationID = UUID()
+
+    init(history: UserDefaults = .standard, failureHold: Duration = .seconds(2)) {
+        self.history = history
+        self.failureHold = failureHold
+    }
+
+    static func sameAttempt(_ left: IncomingVoIPCall, _ right: IncomingVoIPCall) -> Bool {
+        left.uuid == right.uuid && left.callID == right.callID
+            && left.generation == right.generation && left.agentID == right.agentID
+    }
+
+    /// Called only after IPhoneCloudCallSession owns an incoming cloud answer.
+    func begin(for incoming: IncomingVoIPCall, at now: Date = Date()) {
+        guard incoming.authenticatedMediaURL != nil, !incoming.isVirtual, !incoming.isOutgoing,
+              isCurrent(incoming) else { return }
+        if let lastAttempt, Self.sameAttempt(lastAttempt, incoming) { return }
+        cancel()
+        lastAttempt = incoming
+        call = incoming
+        var value = CloudAnswerProgress(startedAt: now)
+        value.apply(.cloudAnswerStarted, at: now)
+        progress = value
+        onProgress?(value)
+        let operation = operationID
+        ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self, self.operationID == operation else { return }
+                self.tick(at: Date())
+            }
+        }
+    }
+
+    func cancel() {
+        clear()
+        lastAttempt = nil
+    }
+
+    func apply(_ signal: CloudAnswerSignal, for incoming: IncomingVoIPCall, at now: Date = Date()) {
+        guard let call, Self.sameAttempt(call, incoming), isCurrent(call),
+              var value = progress, !value.isFinished else { return }
+        value.apply(signal, at: now)
+        progress = value
+        resolve(at: now)
+    }
+
+    func tick(at now: Date) {
+        guard let call, var value = progress, !value.isFinished else { return }
+        guard isCurrent(call) else { cancel(); return }
+        value.tick(at: now)
+        progress = value
+        resolve(at: now)
+    }
+
+    private func resolve(at now: Date) {
+        guard let value = progress, let call else { return }
+        if let connectedAt = value.connectedAt {
+            CloudAnswerDurationHistory.record(connectedAt.timeIntervalSince(value.startedAt), defaults: history)
+            clear()
+        } else if let failure = value.failure {
+            ticker?.cancel(); ticker = nil
+            if failure == .answeredElsewhere { clear(); return }
+            onFailureDecided?(failure, call)
+            onProgress?(value)
+            let operation = operationID
+            failureTask = Task { @MainActor [weak self, failureHold] in
+                try? await Task.sleep(for: failureHold)
+                guard !Task.isCancelled, let self, self.operationID == operation,
+                      self.isCurrent(call) else { return }
+                self.clear()
+                self.onFailure?(failure, call)
+            }
+        } else {
+            onProgress?(value)
+        }
+    }
+
+    private func clear() {
+        operationID = UUID()
+        ticker?.cancel(); ticker = nil
+        failureTask?.cancel(); failureTask = nil
+        progress = nil
+        call = nil
+        onProgress?(nil)
+    }
+}
+
+/// Tells the user why a cloud answer failed once the system call screen is gone.
+enum CloudAnswerFailureNotifier {
+    static let identifier = "airsim.cloud-answer-failure"
+    static let event = "cloud_answer_failed"
+
+    static func content(for failure: CloudAnswerFailure) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = "通话未接通"
+        content.body = failure.advice.map { "\(failure.title)：\($0)" } ?? failure.title
+        content.sound = .default
+        content.userInfo = ["event": event]
+        return content
+    }
+
+    /// The app hides notifications it does not know while it is open. This one carries
+    /// the reason and the advice, which the call screen no longer shows by then.
+    static func presentsInForeground(_ userInfo: [AnyHashable: Any]) -> Bool {
+        userInfo["event"] as? String == event
+    }
+
+    static func post(_ failure: CloudAnswerFailure) {
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: identifier, content: content(for: failure), trigger: nil))
     }
 }
 
@@ -813,6 +965,8 @@ final class IPhoneCloudCallSession {
     private var answerRetryTask: Task<Void, Never>?
     private var answerRetryGeneration = 0
     private var answerAcknowledged = false
+    /// Set once the answer's failure is decided; no retry or replay may follow.
+    private var answerAbandoned = false
     private var earlyAnswerEnvelope: CloudCallControlEnvelope?
     private var carrierEarlyMediaEnabled = true
     private var earlyMediaReady = false
@@ -822,6 +976,12 @@ final class IPhoneCloudCallSession {
     var earlyMediaAudible: Bool { isReceivingEarlyMedia && media.isAudioRunning && media.hasReceivedDownlink }
     var onEarlyPlayback: (() -> Void)?
     var onAudioEngineStarted: (() -> Void)?
+    /// Progress after selecting the cloud route, presented inside the app.
+    let answerProgress: CloudAnswerProgressCoordinator
+    var onAnswerProgress: ((CloudAnswerProgress?) -> Void)? {
+        get { answerProgress.onProgress }
+        set { answerProgress.onProgress = newValue }
+    }
 
     var isPrepared: Bool { call != nil && media.isConnected }
     var hasActiveCall: Bool { call != nil && answered && lifecycleState == .active }
@@ -833,6 +993,17 @@ final class IPhoneCloudCallSession {
     var isAudioRunning: Bool { media.isAudioRunning }
 
     private init() {
+        answerProgress = CloudAnswerProgressCoordinator()
+        answerProgress.isCurrent = { [weak self] incoming in
+            guard let self, let call = self.call, self.answered else { return false }
+            return CloudAnswerProgressCoordinator.sameAttempt(call, incoming)
+        }
+        answerProgress.onFailure = { [weak self] failure, incoming in
+            self?.finishFailedAnswer(failure, for: incoming)
+        }
+        answerProgress.onFailureDecided = { [weak self] _, incoming in
+            self?.abandonAnswer(for: incoming.uuid)
+        }
         media.onConnectionLost = { connection in
             Task { @MainActor in
                 let session = IPhoneCloudCallSession.shared
@@ -858,6 +1029,10 @@ final class IPhoneCloudCallSession {
                 // The trace await can outlive hangup or even the next call.
                 guard let call = session.call, session.media.isCurrentConnection(connection),
                       control.matches(callID: call.callID, uuid: call.uuid, generation: call.generation) else { return }
+                session.answerProgress.apply(.control(
+                    status: status, role: control.role,
+                    identified: control.identifiesAnswer(callID: call.callID, uuid: call.uuid, generation: call.generation)
+                ), for: call)
                 switch status {
                 case "early_media", "early_media_ready_v1":
                     // New capability requires all identity fields (legacy controls
@@ -920,6 +1095,10 @@ final class IPhoneCloudCallSession {
                 if session.media.isCurrentConnection(connection), session.hasActiveCall, session.media.isAudioRunning {
                     session.audioState = .connected
                 }
+                // Voice arriving is proof of connection even if ACTIVE was lost in a reconnect.
+                if session.media.isCurrentConnection(connection), let call = session.call {
+                    session.answerProgress.apply(.downlinkAudio, for: call)
+                }
             }
         }
         media.onDownlinkFrame = { bytes, peak, jitterBufferFrames, droppedFrames, connection in
@@ -969,6 +1148,8 @@ final class IPhoneCloudCallSession {
             mediaHealthTracker?.recordRoute(media.audioRouteDescription)
             publishMediaHealth()
         }
+        // The cloud's time limit starts here, not while a local route was tried first.
+        answerProgress.begin(for: incoming)
         // Submitting answer must not wait for the media WebSocket. Relay can
         // forward the answer while the PCM socket is still connecting; otherwise
         // CallKit sits with an active audio session for tens of seconds and iOS
@@ -989,6 +1170,23 @@ final class IPhoneCloudCallSession {
         }
         guard call?.uuid == incoming.uuid, answered else { return }
         scheduleAnswerConfirmation(for: incoming)
+    }
+
+    /// Ends a failed cloud answer. Android ends the carrier call only when the failure
+    /// says so (a refused call keeps ringing; another device's answer is never ended).
+    private func finishFailedAnswer(_ failure: CloudAnswerFailure, for incoming: IncomingVoIPCall) {
+        let uuid = incoming.uuid
+        guard let call, answered, CloudAnswerProgressCoordinator.sameAttempt(call, incoming) else { return }
+        let callKit = CallKitController.shared
+        guard CloudAnswerProgressPolicy.mayEnd(failed: uuid, systemCall: callKit.currentSystemCallUUID,
+                                               sessionCall: call.uuid) else { return }
+        let envelope = failure.endsAndroidCall ? media.controlEnvelope(action: "end", call: call) : nil
+        let credentials = envelope == nil ? nil : VoIPPushController.shared.cloudCallControlCredentials()
+        emitLifecycle(.failed, source: .agent, failure: failure.title)
+        if callKit.currentSystemCallUUID == uuid { callKit.reportCurrentCallEnded(reason: .failed) }
+        stop()
+        if let envelope, let credentials { submitPersistentControl(envelope, credentials: credentials) }
+        if failure.notifies { CloudAnswerFailureNotifier.post(failure) }
     }
 
     func reject(_ incoming: IncomingVoIPCall) async throws {
@@ -1310,6 +1508,7 @@ final class IPhoneCloudCallSession {
     }
 
     func stop() {
+        answerProgress.cancel()
         answerRetryGeneration &+= 1
         answerRetryTask?.cancel()
         answerRetryTask = nil
@@ -1326,6 +1525,7 @@ final class IPhoneCloudCallSession {
         earlyMediaReady = false
         earlyPlaybackNotified = false; earlyMediaUnavailable = false
         answerAcknowledged = false
+        answerAbandoned = false
         earlyAnswerEnvelope = nil
         audioState = .idle
         mediaHealthTracker = nil
@@ -1346,6 +1546,8 @@ final class IPhoneCloudCallSession {
                     envelope: envelope, credentials: credentials
                 )
                 guard self.call?.uuid == incoming.uuid, self.answered else { return }
+                self.answerProgress.apply(.earlyReceipt(agentConnected: receipt.agentConnected == true),
+                                          for: incoming)
                 await self.tracePersistentControl(
                     envelope,
                     phase: receipt.agentConnected == true ? "early_forwarded" : "early_persisted",
@@ -1353,6 +1555,9 @@ final class IPhoneCloudCallSession {
                 )
             } catch {
                 guard self.call?.uuid == incoming.uuid, self.answered else { return }
+                if case .relayUnavailable = error as? CloudCallControlClientError {
+                    self.answerProgress.apply(.relayUnavailable, for: incoming)
+                }
                 await self.tracePersistentControl(
                     envelope, phase: "early_failed",
                     detail: error.localizedDescription, isFailure: true
@@ -1362,6 +1567,8 @@ final class IPhoneCloudCallSession {
     }
 
     private func scheduleAnswerConfirmation(for incoming: IncomingVoIPCall) {
+        // A media reconnect during the failure hold must not start asking again.
+        guard !answerAbandoned else { return }
         answerRetryGeneration &+= 1
         let generation = answerRetryGeneration
         answerRetryTask?.cancel()
@@ -1392,8 +1599,19 @@ final class IPhoneCloudCallSession {
     }
 
     private func replayAnswerIfNeeded() {
-        guard answered, !answerAcknowledged, let call else { return }
+        guard answered, !answerAcknowledged, !answerAbandoned, let call else { return }
         media.sendControl("answer", call: call)
+    }
+
+    /// The answer failed and the failure is on screen: stop asking Android to pick up.
+    /// A retry that succeeded now (for example once Shizuku is back) would connect the
+    /// caller to nobody.
+    private func abandonAnswer(for uuid: UUID) {
+        guard call?.uuid == uuid else { return }
+        answerAbandoned = true
+        answerRetryGeneration &+= 1
+        answerRetryTask?.cancel()
+        answerRetryTask = nil
     }
 
     private func confirmAnswer() {
@@ -1703,7 +1921,10 @@ private final class IPhoneCloudCallMediaBridge: @unchecked Sendable {
                 stopped = false
                 relayLease = lease
                 connectionID = UUID()
-                let socket = URLSession(configuration: .ephemeral).webSocketTask(with: url)
+                // Bound each attempt: the default 60 s handshake timeout kept a dead
+                // Relay looking like "connecting" for minutes.
+                let socket = URLSession(configuration: .ephemeral)
+                    .webSocketTask(with: URLRequest(url: url, timeoutInterval: 8))
                 webSocket = socket
                 socket.resume()
                 receiveNext(socket)

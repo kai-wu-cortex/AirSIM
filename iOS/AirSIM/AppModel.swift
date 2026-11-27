@@ -351,6 +351,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var pendingOutgoingCall: CallRecord?
     @Published private(set) var callPresentationSurface: CallPresentationSurface?
     @Published private(set) var cloudCallAudioState: CloudCallAudioState = .idle
+    @Published private(set) var cloudAnswerProgress: CloudAnswerProgress?
     @Published private(set) var callLifecycleSnapshot: CallLifecycleSnapshot = .idle
     private var outgoingAttemptID = UUID()
     private var outgoingIntentGate = OutgoingDialIntentGate()
@@ -1928,6 +1929,10 @@ final class AppModel: ObservableObject {
         WatchCallCoordinator.shared.start()
         IPhoneCloudCallSession.shared.onAudioEngineStarted = { [weak self] in
             self?.audio.retryRequestedSpeakerRoute()
+        }
+        cloudAnswerProgress = IPhoneCloudCallSession.shared.answerProgress.progress
+        IPhoneCloudCallSession.shared.onAnswerProgress = { [weak self] progress in
+            self?.cloudAnswerProgress = progress
         }
         IPhoneCloudCallSession.shared.onAudioStateChange = { [weak self] state in
             self?.cloudCallAudioState = state

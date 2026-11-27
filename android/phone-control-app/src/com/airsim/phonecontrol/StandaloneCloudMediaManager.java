@@ -423,6 +423,11 @@ final class StandaloneCloudMediaManager implements Closeable {
                                 .put("generation", descriptor.generation));
                 JSONObject result = StandaloneAgentGateway.get(context).executeCloudCommand(command);
                 if (!"completed".equals(result.optString("status"))) {
+                    // A specific refusal tells the iPhone why; the call keeps ringing here.
+                    if ("audio_bridge_unavailable".equals(result.optString("error"))) {
+                        owner.writeText(status("answer_unavailable", "audio_bridge_unavailable"));
+                        continue;
+                    }
                     owner.writeText(status("action_error", result.optString("error", "Telecom command failed")));
                     continue;
                 }
