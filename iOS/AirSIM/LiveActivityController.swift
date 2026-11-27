@@ -95,9 +95,10 @@ struct LiveActivityAgentSnapshot: Equatable {
         vowlanOnline = current?.vowlanOnline == true
         bluetoothOnline = current?.bluetoothOnline == true
         cloudOnline = current?.cloudOnline == true
+        let now = Date()
         let currentSignals: [SIMSignalSummary]? = current.flatMap { signals[$0.id] }?.map { sim in
             .init(id: sim.id, title: sim.title,
-                  signal: sim.signal?.freshLevel(at: Date()) != nil ? sim.signal : nil,
+                  signal: sim.signal?.freshLevel(at: now) != nil ? sim.signal : nil,
                   phoneNumber: sim.phoneNumber)
         }
         self.page = LiveActivityAgentPaging.pageIndex(page, for: agents.count)
@@ -113,7 +114,7 @@ struct LiveActivityAgentSnapshot: Equatable {
                 cloudOnline: value.cloudOnline,
                 isCurrent: value.id == current?.id,
                 simSignals: signals[value.id]?.map { sim in
-                    sim.signal?.freshLevel(at: Date()) == nil ? sim.withoutSignal : sim
+                    sim.signal?.freshLevel(at: now) == nil ? sim.withoutSignal : sim
                 }
             )
         }
@@ -131,6 +132,7 @@ enum LiveActivityStateBuilder {
         cloudOnline: Bool = false,
         transport: AirSIMCallActivityAttributes.ContentState.Transport? = nil,
         radio: ModemStatus?,
+        radioObservedAt: Date? = nil,
         agent: LiveActivityAgentSnapshot? = nil,
         idleStartedAt: Date,
         downloadBytesPerSecond: Double? = nil,
@@ -172,7 +174,8 @@ enum LiveActivityStateBuilder {
             phase: cloudOnly ? .cloudStandby : .standby,
             startedAt: idleStartedAt,
             transport: cloudOnly ? .cloud : transport,
-            signalDBM: radio?.signalDBM,
+            signalDBM: cloudOnly ? nil : radio?.signalDBM,
+            signalObservedAt: cloudOnly || radio?.signalDBM == nil ? nil : radioObservedAt,
             operatorName: radio?.operatorName,
             networkMode: radio?.networkMode,
             radioBand: radio?.radioBand,
@@ -217,7 +220,9 @@ final class SystemLiveActivityStore: LiveActivityStore {
     private var handles: [String: Activity<AirSIMCallActivityAttributes>] = [:]
     private var observation: Task<Void, Never>?
     var available: Bool {
-        UIDevice.current.userInterfaceIdiom == .phone && ActivityAuthorizationInfo().areActivitiesEnabled
+        UIApplication.shared.applicationState == .active
+            && UIDevice.current.userInterfaceIdiom == .phone
+            && ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
     init() {
@@ -307,6 +312,7 @@ final class LiveActivityController {
         cloudOnline: Bool = false,
         transport: AirSIMCallActivityAttributes.ContentState.Transport? = nil,
         radio: ModemStatus?,
+        radioObservedAt: Date? = nil,
         agent: LiveActivityAgentSnapshot? = nil,
         appIsActive: Bool,
         downloadBytesPerSecond: Double? = nil,
@@ -314,11 +320,11 @@ final class LiveActivityController {
         force: Bool = false
     ) async {
         guard enabled else { return }
-        desired = Request(state: LiveActivityStateBuilder.make(
+        let state = LiveActivityStateBuilder.make(
             call: call, callerName: callerName, moduleOnline: moduleOnline, cloudOnline: cloudOnline,
-            transport: transport, radio: radio, agent: agent, idleStartedAt: idleStartedAt,
-            downloadBytesPerSecond: downloadBytesPerSecond, uploadBytesPerSecond: uploadBytesPerSecond),
-            appIsActive: appIsActive, force: force)
+            transport: transport, radio: radio, radioObservedAt: radioObservedAt, agent: agent, idleStartedAt: idleStartedAt,
+            downloadBytesPerSecond: downloadBytesPerSecond, uploadBytesPerSecond: uploadBytesPerSecond)
+        desired = Request(state: state, appIsActive: appIsActive, force: force)
         revision &+= 1
         needsSync = true
         await drain()
@@ -358,6 +364,9 @@ final class LiveActivityController {
                 }
                 continue
             }
+            let state = request.state.applyingSIMVisibility(
+                showNumbers: LiveActivitySIMNumberPreference.isEnabled,
+                showSignals: LiveActivitySIMSignalPreference.isEnabled)
             let running = entries.filter(\.isRunning).sorted { $0.id < $1.id }
             let selected = running.first { $0.id == selectedID } ?? running.first
             selectedID = selected?.id
@@ -371,11 +380,11 @@ final class LiveActivityController {
             if let selected {
                 // Compare actual ActivityKit content, not a cache of our last write:
                 // a remote update or a recovered handle may have changed it.
-                if request.force || selected.state != request.state {
-                    await store.update(selected.id, state: request.state)
+                if request.force || selected.state != state {
+                    await store.update(selected.id, state: state)
                 }
             } else if request.appIsActive, store.available {
-                do { selectedID = try store.create(request.state) }
+                do { selectedID = try store.create(state) }
                 catch {
 #if DEBUG
                     print("[AirSIM LiveActivity] create_failed error=\(error)")

@@ -581,6 +581,25 @@ enum PushDeviceIdentity {
     }
 }
 
+/// Prefer a verified local route, without delaying an answer that already has
+/// authenticated cloud media. Discovery may still run in the background.
+@MainActor
+enum IncomingAnswerRouteResolver {
+    static func localRoute<Route>(
+        mode: AirSIMConnectionMode,
+        cloudMediaAvailable: Bool,
+        cloudMediaEnabled: Bool,
+        readyLocal: () async -> Route?,
+        waitLocal: () async -> Route?
+    ) async -> Route? {
+        guard !Task.isCancelled, mode != .cloud, mode != .bluetooth else { return nil }
+        if let route = await readyLocal() { return route }
+        guard !Task.isCancelled else { return nil }
+        if mode == .automatic, cloudMediaEnabled, cloudMediaAvailable { return nil }
+        return await waitLocal()
+    }
+}
+
 enum CallTransportPolicy {
     static func preferred(
         mode: AirSIMConnectionMode,

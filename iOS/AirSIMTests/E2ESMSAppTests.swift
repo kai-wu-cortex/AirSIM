@@ -3,6 +3,126 @@ import Network
 import XCTest
 @testable import AirSIM
 
+final class SMSNotificationReadTests: XCTestCase {
+    private func withHistory(_ body: (LocalHistoryStore, URL) throws -> Void) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try body(LocalHistoryStore(directoryURL: directory), directory)
+    }
+
+    private func localMessage(agent: String = "android-A", delivery: String = "one") -> SMSMessage {
+        SMSMessage(sender: "10086", content: "通知测试", code: nil,
+                   timestamp: Date(timeIntervalSince1970: 1_793_692_800),
+                   deliveryID: delivery, direction: .incoming, sourceAgentID: agent)
+    }
+
+    func testLocalNotificationOpensExactStoredMessageAndPersistsReadAcrossRestart() throws {
+        try withHistory { store, directory in
+            let opened = localMessage()
+            let otherDevice = localMessage(agent: "android-B")
+            let newer = localMessage(delivery: "two")
+            XCTAssertTrue(store.saveMessages([opened, otherDevice, newer]))
+            let info = IncomingSMSNotificationTarget.localUserInfo(for: opened)
+            XCTAssertNil(info["content"], "Metadata references history rather than duplicating SMS bodies")
+            let target = try XCTUnwrap(IncomingSMSNotificationTarget.resolve(
+                userInfo: info, requestIdentifier: "local", isRemote: false,
+                storedMessages: store.loadMessages(), keyStore: E2ESMSFixture.store()))
+            XCTAssertEqual(target.message.id, opened.id)
+            XCTAssertNil(target.remoteSMS, "Local notifications must not downgrade E2E push validation")
+            XCTAssertTrue(target.recordOpened(in: store, legacySourceAgentID: nil))
+            let reopened = LocalHistoryStore(directoryURL: directory)
+            XCTAssertEqual(reopened.unreadMessageIDs(in: reopened.loadMessages()), [otherDevice.id, newer.id])
+        }
+    }
+
+    func testPreviouslyDeliveredLocalNotificationWithoutMetadataResolvesByScopedIdentifier() throws {
+        let a = localMessage()
+        let b = localMessage(agent: "android-B")
+        let identifier = SMSNotificationCoordinator.localIdentifier(agentID: a.sourceAgentID, deliveryID: a.deliveryID)
+        let target = IncomingSMSNotificationTarget.resolve(userInfo: [:], requestIdentifier: identifier,
+            isRemote: false, storedMessages: [a, b], keyStore: MemoryE2EKeyStore())
+        XCTAssertEqual(target?.message.id, a.id)
+        XCTAssertNil(IncomingSMSNotificationTarget.resolve(userInfo: [:], requestIdentifier: "unrelated",
+            isRemote: false, storedMessages: [a, b], keyStore: MemoryE2EKeyStore()))
+    }
+
+    func testDeletedLocalMessageDoesNotOpenAnotherMessageWithSameSender() {
+        let deleted = localMessage()
+        XCTAssertNil(IncomingSMSNotificationTarget.resolve(
+            userInfo: IncomingSMSNotificationTarget.localUserInfo(for: deleted), requestIdentifier: "local",
+            isRemote: false, storedMessages: [localMessage(delivery: "new")], keyStore: MemoryE2EKeyStore()))
+    }
+
+    func testEncryptedPushOpenedOnColdLaunchStaysReadAfterAgentSync() throws {
+        try withHistory { store, directory in
+            let target = try XCTUnwrap(IncomingSMSNotificationTarget.resolve(
+                userInfo: E2ESMSFixture.push(), requestIdentifier: "apns", isRemote: true,
+                storedMessages: [], keyStore: E2ESMSFixture.store()))
+            XCTAssertTrue(target.recordOpened(in: store, legacySourceAgentID: nil))
+            XCTAssertEqual(store.loadMessages().map(\.id), [target.message.id])
+            var synced = target.message; synced.simSlot = "SIM 2"
+            XCTAssertNotNil(store.ingestMessages([synced], legacySourceAgentID: nil))
+            let reopened = LocalHistoryStore(directoryURL: directory)
+            XCTAssertTrue(reopened.unreadMessageIDs(in: reopened.loadMessages()).isEmpty)
+            XCTAssertEqual(reopened.loadMessages().first?.simSlot, "SIM 2")
+        }
+    }
+
+    func testTruncatedPushReadBeforeFullBodyArrivesDoesNotStorePreviewOrMarkOtherDeviceRead() throws {
+        try withHistory { store, _ in
+            let info = try E2ESMSFixture.sealedPush(#"{"sender":"95588","content":"通知预览…","timestamp":"2026-11-03T08:00:00Z","truncated":true}"#)
+            let target = try XCTUnwrap(IncomingSMSNotificationTarget.resolve(userInfo: info,
+                requestIdentifier: "apns", isRemote: true, storedMessages: [], keyStore: E2ESMSFixture.store()))
+            XCTAssertTrue(target.recordOpened(in: store, legacySourceAgentID: nil))
+            XCTAssertTrue(store.loadMessages().isEmpty)
+            let complete = SMSMessage(sender: target.message.sender, content: "完整正文", code: nil,
+                timestamp: target.message.timestamp, deliveryID: target.message.deliveryID,
+                direction: .incoming, sourceAgentID: target.message.sourceAgentID)
+            var otherDevice = complete; otherDevice.sourceAgentID = "android-B"
+            XCTAssertNotNil(store.ingestMessages([complete, otherDevice], legacySourceAgentID: nil))
+            XCTAssertEqual(store.unreadMessageIDs(in: store.loadMessages()), [otherDevice.id])
+            XCTAssertFalse(store.loadMessages().contains { $0.content == "通知预览…" })
+        }
+    }
+
+    func testLegacyCloudPushReadSurvivesUniqueDeviceScoping() throws {
+        try withHistory { store, _ in
+            let target = try XCTUnwrap(IncomingSMSNotificationTarget.resolve(
+                userInfo: E2ESMSFixture.plaintextPush(agentID: nil), requestIdentifier: "apns", isRemote: true,
+                storedMessages: [], keyStore: MemoryE2EKeyStore()))
+            XCTAssertTrue(target.recordOpened(in: store, legacySourceAgentID: "android-A"))
+            XCTAssertNil(store.loadMessages().first?.sourceAgentID)
+            var authenticated = target.message; authenticated.sourceAgentID = "android-A"
+            XCTAssertNotNil(store.ingestMessages([authenticated], legacySourceAgentID: "android-A"))
+            XCTAssertEqual(store.loadMessages().first?.sourceAgentID, "android-A")
+            XCTAssertTrue(store.unreadMessageIDs(in: store.loadMessages()).isEmpty)
+        }
+    }
+
+    func testAmbiguousLegacyNotificationDoesNotMarkEitherDeviceCopyRead() throws {
+        try withHistory { store, _ in
+            let target = try XCTUnwrap(IncomingSMSNotificationTarget.resolve(
+                userInfo: E2ESMSFixture.plaintextPush(agentID: nil), requestIdentifier: "apns", isRemote: true,
+                storedMessages: [], keyStore: MemoryE2EKeyStore()))
+            XCTAssertTrue(target.recordOpened(in: store, legacySourceAgentID: nil))
+            var a = target.message; a.sourceAgentID = "android-A"
+            var b = target.message; b.sourceAgentID = "android-B"
+            XCTAssertNotNil(store.ingestMessages([a, b], legacySourceAgentID: nil))
+            XCTAssertEqual(store.unreadMessageIDs(in: store.loadMessages()), [a.id, b.id])
+        }
+    }
+
+    func testUntrustedCloudPushCannotUseLocalReferenceOrPlaintextFallback() throws {
+        let stored = localMessage()
+        var forged = E2ESMSFixture.plaintextPush(agentID: "android-A")
+        forged[IncomingSMSNotificationTarget.localMessageIDKey] = stored.id
+        XCTAssertNil(IncomingSMSNotificationTarget.resolve(userInfo: forged, requestIdentifier: "apns",
+            isRemote: true, storedMessages: [stored], keyStore: E2ESMSFixture.store()))
+        XCTAssertNil(try IncomingSMSNotificationTarget.resolve(userInfo: E2ESMSFixture.push(), requestIdentifier: "apns",
+            isRemote: true, storedMessages: [stored], keyStore: MemoryE2EKeyStore(failure: .locked)))
+    }
+}
+
 /// App-side end-to-end encrypted SMS (issue #24): pairing negotiation and SMS push handling.
 final class E2ESMSAppTests: XCTestCase {
     func testTXTAdvertisesE2E() throws {

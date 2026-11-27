@@ -1017,7 +1017,7 @@ struct SMSConversationListToolbar: ToolbarContent {
     @Binding var state: SMSConversationListState
 
     var body: some ToolbarContent {
-        phoneMorphingToolbarItem(placement: .topBarLeading, id: "top-action-leading-more") {
+        ToolbarItem(id: "sms-navigation-leading", placement: .topBarLeading) {
             SMSCompactActionsMenu(menu: actionsMenu)
                 .frame(width: 44, height: 44)
 
@@ -1078,6 +1078,70 @@ private struct SMSCompactActionsMenu: UIViewRepresentable {
     func updateUIView(_ button: UIButton, context: Context) { button.menu = menu }
 }
 
+private extension View {
+    @ViewBuilder
+    func smsInboxScrollEdge() -> some View {
+        if #available(iOS 26.0, *) {
+            scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            self
+        }
+    }
+}
+
+private struct SMSInboxHeader: View {
+    @Binding var searchText: String
+    @ScaledMetric(relativeTo: .body) private var searchHeight = 44.0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.t("短信"))
+                .font(.largeTitle.bold())
+                .accessibilityAddTraits(.isHeader)
+                .padding(.horizontal, 8)
+            SMSInboxSearchField(text: $searchText)
+                .frame(height: searchHeight)
+        }
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+    }
+}
+
+private struct SMSInboxSearchField: UIViewRepresentable {
+    @Binding var text: String
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    func makeUIView(context: Context) -> UISearchBar {
+        let searchBar = UISearchBar()
+        searchBar.searchBarStyle = .minimal
+        searchBar.delegate = context.coordinator
+        searchBar.searchTextField.adjustsFontForContentSizeCategory = true
+        return searchBar
+    }
+
+    func updateUIView(_ searchBar: UISearchBar, context: Context) {
+        context.coordinator.text = $text
+        let prompt = L10n.t("搜索姓名、号码或短信内容")
+        if searchBar.placeholder != prompt { searchBar.placeholder = prompt }
+        if searchBar.text != text { searchBar.text = text }
+    }
+
+    final class Coordinator: NSObject, UISearchBarDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) { self.text = text }
+
+        func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+            text.wrappedValue = searchText
+        }
+
+        func searchBarSearchButtonClicked(_ searchBar: UISearchBar) {
+            searchBar.resignFirstResponder()
+        }
+    }
+}
+
 struct MessagesView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var contacts: ContactStore
@@ -1092,13 +1156,22 @@ struct MessagesView: View {
                 PhoneContentSearch.smsMatches(sender: sender, contactName: contacts.contact(for: sender)?.name,
                     messages: messages, query: state.searchText)
             }
-            .sorted { ($0.messages.last?.timestamp ?? .distantPast) > ($1.messages.last?.timestamp ?? .distantPast) }
+            .sorted { lhs, rhs in
+                let lhsDate = lhs.messages.last?.timestamp ?? .distantPast
+                let rhsDate = rhs.messages.last?.timestamp ?? .distantPast
+                return lhsDate == rhsDate ? lhs.sender < rhs.sender : lhsDate > rhsDate
+            }
     }
 
     var body: some View {
+        let conversations = conversations
         Group {
             // Outside explicit deletion mode, row taps belong to navigation, not selection.
             List(selection: state.editMode.isEditing ? $state.selectedConversations : nil) {
+                SMSInboxHeader(searchText: $state.searchText)
+                    .listRowInsets(.init(top: 0, leading: 12, bottom: 0, trailing: 12))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
                 if conversations.isEmpty {
                     EmptyStateView(title: state.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ? L10n.t("暂无短信") : L10n.t("未找到匹配的短信"), systemImage: "message")
@@ -1143,16 +1216,14 @@ struct MessagesView: View {
                 }
             }
             .listStyle(.plain)
-            .searchable(text: $state.searchText, placement: .navigationBarDrawer(displayMode: .always),
-                        prompt: L10n.t("搜索姓名、号码或短信内容"))
+            .smsInboxScrollEdge()
+            .scrollDismissesKeyboard(.interactively)
             .onChange(of: state.searchText) { _ in state.selectedConversations = [] }
             .environment(\.editMode, $state.editMode)
             .scrollContentBackground(.hidden)
             .environment(\.defaultMinListRowHeight, PhoneListMetrics.rowHeight)
 
             .background(PhoneBackdrop())
-            .searchable(text: $state.searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索联系人、号码或内容")
-            .onChange(of: state.searchText) { _ in state.selectedConversations = [] }
             .task { await contacts.loadIfAuthorized() }
             .task {
                 await model.loadMessagesFromAgent(silently: true)
@@ -1247,11 +1318,19 @@ struct MessagesView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                Text(previewMessage?.timestamp ?? .now, style: .time)
-                    .font(.subheadline)
+                if let message = previewMessage {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(message.timestamp, format: .dateTime.month(.abbreviated).day())
+                            .font(.subheadline)
+                        Text(message.timestamp, style: .time)
+                            .font(.caption2)
+                    }
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .frame(width: PhoneListMetrics.timeColumnWidth, alignment: .trailing)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(message.timestamp, format: .dateTime.year().month().day().hour().minute()))
+                }
             }
             .frame(minHeight: PhoneListMetrics.rowHeight)
         }
@@ -1289,9 +1368,20 @@ struct MessageThreadView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showingConversationInfo = false
     @State private var isVisible = false
     let sender: String
+    var usesSystemBack = true
+    var returnMotion: SMSReturnMotion? = nil
+    let onBack: () -> Void
+    @ScaledMetric(relativeTo: .headline) private var headerClearance: CGFloat = 58
+    private static let avatarSize: CGFloat = 60
+    @State private var bottomOverlayHeight: CGFloat = 64
+    @StateObject private var scrollEdges = SMSScrollEdgeSource()
     @State private var reply = ""
+    @State private var sendingReply = false
+    @State private var feedbackClock = Date()
     @State private var pendingDeletion: Set<String> = []
     @State private var showingDeleteConfirmation = false
     @State private var selection = SMSMessageSelection()
@@ -1316,87 +1406,190 @@ struct MessageThreadView: View {
         reply.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var replyFeedback: SMSSubmissionFeedback? {
+        model.smsSubmissionFeedback(for: sender, at: feedbackClock)
+    }
+
     private var replyBar: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            TextField(L10n.t("短信"), text: $reply, axis: .vertical)
-                .accessibilityIdentifier("sms.reply")
-                .focused($composerFocused)
-                .textFieldStyle(.plain)
-                .lineLimit(1...5)
-                .padding(.leading, 14)
-                .padding(.trailing, trimmedReply.isEmpty ? 14 : 2)
-                .padding(.vertical, 8)
-            if !trimmedReply.isEmpty {
-                Button(action: sendReply) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
-                        .background(Circle().fill(Color.accentColor))
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+        VStack(spacing: 6) {
+            if let feedback = replyFeedback {
+                SMSSubmissionFeedbackLabel(feedback: feedback, date: feedbackClock)
+            }
+            replyInputBar
+        }
+        .modifier(SMSProtectionClock(deadline: replyFeedback?.retryAfter, date: $feedbackClock))
+    }
+
+    private var replyInputBar: some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            Menu {
+                Button { showingConversationInfo = true } label: {
+                    Label("发送线路与联系人", systemImage: "simcard")
                 }
-                .buttonStyle(.plain)
-                .padding(.trailing, 5)
-                .padding(.bottom, 3)
-                .accessibilityLabel(L10n.t("发送"))
+                Button {
+                    if let text = UIPasteboard.general.string { reply += text }
+                    composerFocused = true
+                } label: {
+                    Label("粘贴", systemImage: "doc.on.clipboard")
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 25, weight: .regular))
+                    .foregroundStyle(.primary)
+                    .frame(width: 44, height: 44)
+                    .smsComposerGlass()
+            }
+            .tint(.primary)
+            .accessibilityLabel("短信操作")
+            .accessibilityIdentifier("sms.actions")
+
+            HStack(alignment: .bottom, spacing: 0) {
+                TextField(L10n.t("信息 · 短信"), text: $reply, axis: .vertical)
+                    .accessibilityIdentifier("sms.reply")
+                    .focused($composerFocused)
+                    .textFieldStyle(.plain)
+                    .font(.body)
+                    .lineLimit(1...5)
+                    .padding(.leading, 16)
+                    .padding(.vertical, 11)
+                if !trimmedReply.isEmpty {
+                    Button(action: sendReply) {
+                        Group {
+                            if sendingReply { ProgressView().tint(.white) }
+                            else { Image(systemName: "arrow.up") }
+                        }
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(.green, in: Circle())
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.t(sendingReply ? "正在发送" : "发送"))
+                    .disabled(sendingReply || (replyFeedback?.remainingSeconds(at: feedbackClock) ?? 0) > 0)
+                    .opacity((replyFeedback?.remainingSeconds(at: feedbackClock) ?? 0) > 0 ? 0.4 : 1)
+                } else {
+                    // SMS has no audio-message transport. This opens the system
+                    // keyboard, where the user can also use system dictation.
+                    Button { composerFocused = true } label: {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("打开短信输入键盘")
+                }
+            }
+            .padding(.trailing, 4)
+            .smsComposerGlass()
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+    }
+
+    private var conversationHeader: some View {
+        VStack(spacing: 1) {
+            conversationAvatar.accessibilityHidden(true)
+            Button { showingConversationInfo = true } label: {
+                HStack(spacing: 5) {
+                    Text(model.contacts.displayName(for: sender))
+                        .font(.headline)
+                        .lineLimit(1).minimumScaleFactor(0.8)
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .smsComposerGlass()
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("联系人与发送线路，\(model.contacts.displayName(for: sender))")
+            .accessibilityIdentifier("sms.conversationInfo")
+        }
+        .frame(maxWidth: 280)
+    }
+
+    @ViewBuilder
+    private var conversationAvatar: some View {
+        if let contact = model.contacts.contact(for: sender) {
+            InitialAvatar(name: contact.name, photoData: contact.photoData, size: Self.avatarSize)
+        } else {
+            Circle()
+                .fill(LinearGradient(colors: [Color(red: 0.36, green: 0.34, blue: 0.45),
+                                               Color(red: 0.28, green: 0.25, blue: 0.38)],
+                                     startPoint: .top, endPoint: .bottom))
+                .overlay {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 50))
+                        .foregroundStyle(.white)
+                        .offset(y: 7)
+                }
+                .frame(width: Self.avatarSize, height: Self.avatarSize)
+                .clipShape(Circle())
+        }
+    }
+
+    private var conversationInfo: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("联系人", value: model.contacts.displayName(for: sender))
+                    LabeledContent("号码", value: sender)
+                        .textSelection(.enabled)
+                }
+                Section("发送线路") { SMSAccountPicker(recipient: sender) }
+            }
+            .navigationTitle("联系人与发送线路")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { showingConversationInfo = false }
+                }
             }
         }
-        .smsComposerGlass()
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(uiColor: .systemBackground))
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     private func sendReply() {
         let body = trimmedReply
-        guard !body.isEmpty else { return }
-        reply = ""
-        Task { _ = await model.sendSMS(to: sender, content: body) }
+        guard !body.isEmpty, !sendingReply,
+              (replyFeedback?.remainingSeconds(at: Date()) ?? 0) == 0 else { return }
+        let draft = reply
+        sendingReply = true
+        Task {
+            let sent = await model.sendSMS(to: sender, content: body)
+            if sent, reply == draft { reply = "" }
+            sendingReply = false
+        }
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            SMSConversationTimelineView(
-                messages: messages,
-                selection: selection,
-                locale: dateLocale,
-                onBeginSelection: { id in
-                    composerFocused = false
-                    selection.begin(with: id)
-                },
-                onToggleSelection: { selection.toggle($0) },
-                onBeginTextSelection: { composerFocused = false }
-            )
+        conversationChrome(timeline)
+        .overlay(alignment: .top) {
+            // Align the avatar with the native back control without fitting it into the toolbar.
+            conversationHeader.padding(.top, -40)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(PhoneBackdrop())
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if selection.isSelecting { selectionBar } else { replyBar }
-        }
+        .sheet(isPresented: $showingConversationInfo) { conversationInfo }
+
         .onChange(of: messages) { selection.reconcile(with: $0); acknowledgeVisibleMessages() }
-        .onAppear { isVisible = true; acknowledgeVisibleMessages() }
         .onDisappear { isVisible = false }
         .onChange(of: scenePhase) { _ in acknowledgeVisibleMessages() }
         .onChange(of: model.inAppPresentedCall?.id) { _ in acknowledgeVisibleMessages() }
-        .navigationTitle(model.contacts.displayName(for: sender))
+        .navigationBarBackButtonHidden(!usesSystemBack)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 2) {
-                    Text(model.contacts.displayName(for: sender)).font(.headline).lineLimit(1)
-                    SMSAccountPicker(recipient: sender)
-                }
+            if !usesSystemBack {
+                ToolbarItem(placement: .topBarLeading) { backButton }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                if selection.isSelecting {
-                    Button {
-                        selection.cancel()
-                        composerFocused = false
-                    } label: {
-                        Image(systemName: "xmark")
-                    }
-                    .accessibilityLabel(L10n.t("取消选择"))
+            if selection.isSelecting {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(L10n.t("取消选择")) { selection.cancel(); composerFocused = false }
                 }
             }
         }
@@ -1416,6 +1609,113 @@ struct MessageThreadView: View {
             }
             Button(L10n.t("取消"), role: .cancel) { pendingDeletion = [] }
         } message: { Text(L10n.t("仅删除此 iPhone 上 AirSIM 内的记录，不删除安卓系统短信。")) }
+    }
+
+    private func closeConversation() {
+        composerFocused = false
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) { onBack() }
+    }
+
+    private var backButton: some View {
+        Button(action: closeConversation) {
+            HStack(spacing: 7) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 22, weight: .medium))
+                if !model.unreadMessageIDs.isEmpty {
+                    Text(model.unreadMessageIDs.count.formatted())
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .foregroundStyle(Color.black.opacity(0.65))
+                        .background(.white, in: Capsule())
+                }
+            }
+            .foregroundStyle(.primary)
+            .frame(minWidth: 44, minHeight: 44)
+        }
+        .buttonStyle(.automatic)
+        .accessibilityLabel("返回短信")
+        .accessibilityIdentifier("sms.back")
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+
+    private var timeline: some View {
+            SMSConversationTimelineView(
+                messages: messages,
+                selection: selection,
+                locale: dateLocale,
+                topOverlayHeight: headerClearance,
+                bottomOverlayHeight: bottomOverlayHeight + 8,
+                scrollEdges: scrollEdges,
+                onBeginSelection: { id in
+                    composerFocused = false
+                    selection.begin(with: id)
+                },
+                onToggleSelection: { selection.toggle($0) },
+                onBeginTextSelection: { composerFocused = false },
+                onDidAppear: {
+                    isVisible = true
+                    acknowledgeVisibleMessages()
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(uiColor: .systemBackground))
+    }
+
+    private var composer: some View {
+        VStack(spacing: 0) {
+            if selection.isSelecting { selectionBar } else { replyBar }
+        }
+    }
+
+    @ViewBuilder
+    private func conversationChrome<Content: View>(_ content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            // Extend only the scrolling surface beneath system bars. Keep the
+            // overlay controls in the safe area and continue avoiding keyboards.
+            // Otherwise UIKit clips its edge effect at the navigation bar seam.
+            GeometryReader { _ in
+                content.ignoresSafeArea(.container, edges: .vertical)
+            }
+                .overlay(alignment: .bottom) {
+                    SMSNativeEdgeContainer(source: scrollEdges, edge: .bottom,
+                        returnMotion: returnMotion,
+                        content: composer.environmentObject(model).environmentObject(settings))
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: SMSComposerHeightKey.self, value: geometry.size.height)
+                        })
+                }
+                .onPreferenceChange(SMSComposerHeightKey.self) { height in
+                    if height > 0, abs(bottomOverlayHeight - height) > 0.5 {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) { bottomOverlayHeight = height }
+                    }
+                }
+                .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
+        } else {
+            content
+                .overlay(alignment: .bottom) {
+                    composer
+                        .background {
+                            SMSScrollEdgeBlur(edge: .bottom)
+                                .padding(.top, -32)
+                                .ignoresSafeArea(edges: .bottom)
+                                .allowsHitTesting(false)
+                        }
+                        .background(GeometryReader { geometry in
+                            Color.clear.preference(key: SMSComposerHeightKey.self, value: geometry.size.height)
+                        })
+                }
+                .onPreferenceChange(SMSComposerHeightKey.self) { height in
+                    if height > 0, abs(bottomOverlayHeight - height) > 0.5 {
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) { bottomOverlayHeight = height }
+                    }
+                }
+        }
     }
 
     private func acknowledgeVisibleMessages() {
@@ -1450,7 +1750,6 @@ struct MessageThreadView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(.bar)
     }
 }
 
@@ -1540,6 +1839,7 @@ private struct MessageComposer: View {
     @State private var recipient: String
     @State private var content = ""
     @State private var sending = false
+    @State private var feedbackClock = Date()
     @State private var showingContacts = false
 
     init(initialRecipient: String) { _recipient = State(initialValue: initialRecipient) }
@@ -1559,10 +1859,15 @@ private struct MessageComposer: View {
         }.prefix(5))
     }
 
+    private var feedback: SMSSubmissionFeedback? {
+        model.smsSubmissionFeedback(for: recipient, at: feedbackClock)
+    }
+
     private var canSend: Bool {
         !recipient.trimmingCharacters(in: .whitespaces).isEmpty
             && !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !sending
+            && (feedback?.remainingSeconds(at: feedbackClock) ?? 0) == 0
     }
 
     var body: some View {
@@ -1584,6 +1889,9 @@ private struct MessageComposer: View {
                 Divider()
                 Spacer(minLength: 0)
                 Divider()
+                if let feedback {
+                    SMSSubmissionFeedbackLabel(feedback: feedback, date: feedbackClock)
+                }
                 messageInputBar
             }
             .background(PhoneBackdrop())
@@ -1598,6 +1906,7 @@ private struct MessageComposer: View {
                         .disabled(!canSend)
                 }
             }
+            .modifier(SMSProtectionClock(deadline: feedback?.retryAfter, date: $feedbackClock))
             .task { await model.contacts.loadIfAuthorized(force: true) }
             .sheet(isPresented: $showingContacts) {
                 MessageContactPicker { phone in
@@ -1718,9 +2027,12 @@ private struct MessageComposer: View {
 
     private func sendNow() {
         guard canSend else { return }
+        let submittedRecipient = recipient
+        let submittedContent = content
         sending = true
         Task {
-            if await model.sendSMS(to: recipient, content: content) { dismiss() }
+            if await model.sendSMS(to: submittedRecipient, content: submittedContent),
+               recipient == submittedRecipient, content == submittedContent { dismiss() }
             sending = false
         }
     }
@@ -2827,5 +3139,121 @@ enum PhoneRegionLookup {
         let slot = slotIndex.flatMap { $0 >= 0 ? "SIM \($0 + 1)" : nil }
         if let region { return [slot, region].compactMap { $0 }.joined(separator: " · ") }
         return fallbackSIM ?? slot
+    }
+}
+
+// Tick only during a known protection window; stop on expiry or when the view leaves.
+private struct SMSProtectionClock: ViewModifier {
+    let deadline: Date?
+    @Binding var date: Date
+
+    func body(content: Content) -> some View {
+        content.task(id: deadline) {
+            date = Date()
+            guard let deadline else { return }
+            while date < deadline, !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                catch { return }
+                date = Date()
+            }
+        }
+    }
+}
+
+private struct SMSSubmissionFeedbackLabel: View {
+    let feedback: SMSSubmissionFeedback
+    let date: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(feedback.message)
+            if feedback.remainingSeconds(at: date) > 0 {
+                Text("暂缓发送 · 还需等待 \(feedback.remainingSeconds(at: date)) 秒")
+                    .monospacedDigit()
+            }
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct SMSComposerHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// A native backdrop blur with a graded mask. No private variable-blur filters,
+/// scroll-driven snapshots or per-frame SwiftUI state updates are required.
+private struct SMSScrollEdgeBlur: UIViewRepresentable {
+    enum Edge { case top, bottom }
+    let edge: Edge
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func makeUIView(context: Context) -> Backdrop { Backdrop() }
+    func updateUIView(_ view: Backdrop, context: Context) {
+        view.effect = reduceTransparency ? nil : UIBlurEffect(style: .systemMaterial)
+        view.backgroundColor = reduceTransparency ? .systemBackground : .clear
+        view.fade.startPoint = CGPoint(x: 0.5, y: edge == .top ? 0 : 1)
+        view.fade.endPoint = CGPoint(x: 0.5, y: edge == .top ? 1 : 0)
+    }
+
+    final class Backdrop: UIVisualEffectView {
+        let fade = CAGradientLayer()
+        init() {
+            super.init(effect: nil)
+            isUserInteractionEnabled = false
+            accessibilityElementsHidden = true
+            fade.colors = [1.0, 1.0, 0.85, 0.35, 0.0].map { UIColor.black.withAlphaComponent($0).cgColor }
+            fade.locations = [0, 0.35, 0.65, 0.85, 1]
+            layer.mask = fade
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            fade.frame = bounds
+            CATransaction.commit()
+        }
+    }
+}
+
+/// Register the actual chrome host with UIKit, so the collection view receives
+/// the same system soft-edge treatment as native list/navigation bars.
+@available(iOS 26.0, *)
+private struct SMSNativeEdgeContainer<Content: View>: UIViewControllerRepresentable {
+    @ObservedObject var source: SMSScrollEdgeSource
+    let edge: UIRectEdge
+    let returnMotion: SMSReturnMotion?
+    let content: Content
+
+    func makeUIViewController(context: Context) -> Host {
+        let host = Host(rootView: content)
+        host.sizingOptions = .intrinsicContentSize
+        host.loadViewIfNeeded()
+        host.view.backgroundColor = .clear
+        host.edgeInteraction.edge = edge
+        host.edgeInteraction.scrollView = source.scrollView
+        host.view.addInteraction(host.edgeInteraction)
+        returnMotion?.composerView = host.view
+        return host
+    }
+
+    func updateUIViewController(_ host: Host, context: Context) {
+        host.rootView = content
+        host.edgeInteraction.scrollView = source.scrollView
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: Host, context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0 else { return nil }
+        return uiViewController.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude))
+    }
+
+    final class Host: UIHostingController<Content> {
+        let edgeInteraction = UIScrollEdgeElementContainerInteraction()
     }
 }

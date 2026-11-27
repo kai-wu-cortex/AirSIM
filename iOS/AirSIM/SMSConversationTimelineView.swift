@@ -1,13 +1,22 @@
 import SwiftUI
 import UIKit
 
+@MainActor
+final class SMSScrollEdgeSource: ObservableObject {
+    @Published var scrollView: UIScrollView?
+}
+
 struct SMSConversationTimelineView: UIViewControllerRepresentable {
     let messages: [SMSMessage]
     let selection: SMSMessageSelection
     let locale: Locale
+    var topOverlayHeight: CGFloat = 0
+    var bottomOverlayHeight: CGFloat = 0
+    var scrollEdges: SMSScrollEdgeSource? = nil
     let onBeginSelection: (String) -> Void
     let onToggleSelection: (String) -> Void
     let onBeginTextSelection: () -> Void
+    var onDidAppear: () -> Void = {}
 
     func makeUIViewController(context: Context) -> SMSConversationTimelineController {
         SMSConversationTimelineController(presentation: self)
@@ -40,6 +49,7 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
     private enum MenuAction { case text(String), more(String) }
     private var pendingMenuAction: MenuAction?
     private var outsideTap: UITapGestureRecognizer?
+    private var hasAppeared = false
     private var initializedPosition = false
     private var previousCollectionSize: CGSize = .zero
     private var applyingGeometryChange = false
@@ -67,6 +77,15 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
         layout.minimumInteritemSpacing = 0
         collection = UICollectionView(frame: .zero, collectionViewLayout: layout)
         collection.backgroundColor = .systemBackground
+        collection.accessibilityIdentifier = "sms.timeline"
+        if #available(iOS 26.0, *) {
+            collection.topEdgeEffect.style = .soft
+            collection.bottomEdgeEffect.style = .soft
+        }
+        collection.contentInset.bottom = presentation.bottomOverlayHeight
+        collection.verticalScrollIndicatorInsets.bottom = presentation.bottomOverlayHeight
+        collection.contentInset.top = presentation.topOverlayHeight
+        collection.verticalScrollIndicatorInsets.top = presentation.topOverlayHeight
         collection.alwaysBounceVertical = true
         collection.keyboardDismissMode = .interactive
         collection.allowsSelection = false
@@ -78,8 +97,8 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
         NSLayoutConstraint.activate([
             collection.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             collection.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            collection.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            collection.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor)
+            collection.topAnchor.constraint(equalTo: view.topAnchor),
+            collection.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
         let tap = UITapGestureRecognizer(target: self, action: #selector(tappedElsewhere(_:)))
         tap.cancelsTouchesInView = false
@@ -106,15 +125,27 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
             })
         }
         rebuildItems()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.presentation.scrollEdges?.scrollView = self.collection
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        hasAppeared = true
         if let outsideTap { view.window?.addGestureRecognizer(outsideTap) }
+        // Acknowledging messages publishes list and tab badge updates. Wait for
+        // the navigation transition to finish before changing those views.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.hasAppeared else { return }
+            self.presentation.onDidAppear()
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        hasAppeared = false
         endTextSelection()
         if let outsideTap { outsideTap.view?.removeGestureRecognizer(outsideTap) }
     }
@@ -125,6 +156,14 @@ final class SMSConversationTimelineController: UIViewController, UICollectionVie
         let old = presentation
         presentation = value
         guard isViewLoaded else { return }
+        if old.topOverlayHeight != value.topOverlayHeight || old.bottomOverlayHeight != value.bottomOverlayHeight {
+            let anchor = captureAnchor()
+            collection.contentInset.bottom = value.bottomOverlayHeight
+            collection.verticalScrollIndicatorInsets.bottom = value.bottomOverlayHeight
+            collection.contentInset.top = value.topOverlayHeight
+            collection.verticalScrollIndicatorInsets.top = value.topOverlayHeight
+            restore(anchor)
+        }
         let contentChanged = old.messages != value.messages
         let localeChanged = old.locale != value.locale
         let selectionChanged = old.selection != value.selection
@@ -607,7 +646,7 @@ private final class SMSConversationCell: UICollectionViewCell, UIEditMenuInterac
     }
 
     private static func bubbleWidth(for text: String, width: CGFloat, selecting: Bool) -> CGFloat {
-        let maximum = max(40, min(width * 0.80, width - (selecting ? 72 : 40)))
+        let maximum = max(40, min(width * 0.70, 420, width - (selecting ? 72 : 40)))
         let font = UIFont.preferredFont(forTextStyle: .body)
         let rect = (text as NSString).boundingRect(with: CGSize(width: maximum - 28, height: .greatestFiniteMagnitude),
                                                   options: [.usesLineFragmentOrigin, .usesFontLeading],

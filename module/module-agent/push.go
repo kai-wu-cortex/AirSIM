@@ -124,6 +124,7 @@ type agentHeartbeatSnapshot struct {
 	CellularRecovery     string
 	ECMCarrier           string
 	SignalDBM            *int
+	SignalObservedAtMS   int64
 }
 
 type agentHeartbeatEvent struct {
@@ -145,6 +146,7 @@ type agentHeartbeatEvent struct {
 	CellularRecovery      string                 `json:"cellular_recovery,omitempty"`
 	ECMCarrier            string                 `json:"ecm_carrier,omitempty"`
 	SignalDBM             *int                   `json:"signal_dbm,omitempty"`
+	SignalObservedAtMS    int64                  `json:"signal_observed_at_ms,omitempty"`
 }
 
 type pushManager struct {
@@ -623,7 +625,7 @@ func (p *pushManager) sendSMS(message smsMessage) (bool, error) {
 
 	payload := incomingSMSPushEvent{
 		AgentID: registration.AndroidAgentID,
-		Event: "incoming_sms", DeviceID: registration.DeviceID,
+		Event:   "incoming_sms", DeviceID: registration.DeviceID,
 		DeviceSecret: registration.DeviceSecret, DeliveryID: message.DeliveryID,
 		Sender: message.Sender, Content: message.Content, Code: message.Code,
 		Timestamp: message.Timestamp.UTC().Format(time.RFC3339Nano),
@@ -745,7 +747,7 @@ func (p *pushManager) sendHeartbeatRequired(snapshot agentHeartbeatSnapshot, req
 		ATOK: snapshot.ATOK, CellularState: snapshot.CellularState,
 		CellularRegistration: snapshot.CellularRegistration,
 		CellularRecovery:     snapshot.CellularRecovery, ECMCarrier: snapshot.ECMCarrier,
-		SignalDBM: snapshot.SignalDBM,
+		SignalDBM: snapshot.SignalDBM, SignalObservedAtMS: snapshot.SignalObservedAtMS,
 	})
 }
 
@@ -947,6 +949,7 @@ func (a *agent) pushHeartbeat(response http.ResponseWriter, request *http.Reques
 	snapshot := agentHeartbeatSnapshot{
 		CellularState: a.modem.CellularState, CellularRegistration: a.modem.RegistrationText,
 		CellularRecovery: a.modem.RecoveryState, SignalDBM: a.modem.SignalDBM,
+		SignalObservedAtMS: a.modem.SignalObservedAtMS,
 	}
 	a.mu.RUnlock()
 	snapshot.Battery = a.android.batterySnapshot(time.Now())

@@ -39,6 +39,7 @@ final class LocalDeviceDirectory: ObservableObject {
     typealias HealthTransport = @Sendable (URLRequest) async throws -> WiredHTTPResponse
     private let credentials: any LocalDeviceCredentialStoring
     private let healthTransport: HealthTransport
+    private let telemetryInterval: Duration
     private let legacyBinding: () -> String?
     private let bluetoothReady: (String) -> Bool
     private let apiFactory: @Sendable (LocalAgentRoute) -> AirSIMAPI
@@ -49,6 +50,12 @@ final class LocalDeviceDirectory: ObservableObject {
         let credential: VoWLANCredential
         let epoch: UInt64
         var metadata: VoWLANHealthIdentity
+        var simSlotsReceivedAt = Date()
+        var telemetry: Task<Void, Never>?
+        func cancelPolling() {
+            poll?.cancel(); poll = nil
+            telemetry?.cancel(); telemetry = nil
+        }
         var verified = true
         var lastObservation = Date()
         var revision: UInt64 = AgentEventCursor.initial
@@ -75,6 +82,7 @@ final class LocalDeviceDirectory: ObservableObject {
          bluetoothReady: @escaping (String) -> Bool = { _ in false },
          apiFactory: @escaping @Sendable (LocalAgentRoute) -> AirSIMAPI = { AirSIMAPI(route: $0) },
          e2eKeys: any E2EKeyStoring = KeychainE2EKeyStore.shared,
+         telemetryInterval: Duration = .seconds(60),
          healthTransport: @escaping HealthTransport = { request in
              try await WiredHTTPTransport().send(request)
          }) {
@@ -82,11 +90,16 @@ final class LocalDeviceDirectory: ObservableObject {
         self.bluetoothReady = bluetoothReady; self.healthTransport = healthTransport
         self.apiFactory = apiFactory
         self.e2eKeys = e2eKeys
+        self.telemetryInterval = telemetryInterval
     }
     var agentIDs: [String] { Array(peers.keys).sorted() }
     func lastObservation(for agentID: String) -> Date? { peers[agentID]?.lastObservation }
     func transportEpoch(for agentID: String) -> UInt64 { peers[agentID]?.epoch ?? 0 }
     func metadata(for agentID: String) -> VoWLANHealthIdentity? { peers[agentID]?.verified == true ? peers[agentID]?.metadata : nil }
+    func simTelemetry(for agentID: String) -> (slots: [AndroidSIMSlot], receivedAt: Date)? {
+        guard let peer = peers[agentID], peer.verified, let slots = peer.metadata.simSlots else { return nil }
+        return (slots, peer.simSlotsReceivedAt)
+    }
     func routes(for agentID: String) -> LocalDeviceRoutes? {
         let bluetooth = bluetoothReady(agentID)
         guard peers[agentID] != nil || bluetooth else { return nil }
@@ -195,12 +208,13 @@ final class LocalDeviceDirectory: ObservableObject {
             // The address can stay identical across VPN -> Wi-Fi. A successful
             // new proof must supersede the old path's long poll as well, or its
             // delayed failure can mark this freshly verified peer offline.
-            old.poll?.cancel(); old.poll = nil
+            old.cancelPolling()
             old.revision = AgentEventCursor.initial
             old.metadata = identity; old.verified = true
+            old.simSlotsReceivedAt = Date()
             old.lastObservation = Date()
         } else {
-            peers[agentID]?.poll?.cancel()
+            peers[agentID]?.cancelPolling()
             epoch &+= 1
             peers[agentID] = Peer(endpoint: endpoint,
                 api: apiFactory(.vowlan(endpoint: endpoint, credential: credential)),
@@ -213,14 +227,14 @@ final class LocalDeviceDirectory: ObservableObject {
     func invalidateEndpoint(agentID: String, endpoint: VoWLANEndpoint) {
         verification[agentID] = UUID()
         if peers[agentID]?.endpoint == endpoint {
-            peers.removeValue(forKey: agentID)?.poll?.cancel()
+            peers.removeValue(forKey: agentID)?.cancelPolling()
             objectWillChange.send()
         }
     }
     func invalidateRemoteRoute(agentID: String) {
         verification[agentID] = UUID()
         if peers[agentID]?.endpoint.usesTLS == true {
-            peers.removeValue(forKey: agentID)?.poll?.cancel()
+            peers.removeValue(forKey: agentID)?.cancelPolling()
             objectWillChange.send()
         }
     }
@@ -228,7 +242,7 @@ final class LocalDeviceDirectory: ObservableObject {
     func forget(agentID: String) async throws {
         forgotten.insert(agentID)
         verification[agentID] = UUID()
-        peers.removeValue(forKey: agentID)?.poll?.cancel()
+        peers.removeValue(forKey: agentID)?.cancelPolling()
         pendingCredentials.removeValue(forKey: agentID)
         pendingE2E.removeValue(forKey: agentID)
         let store = credentials
@@ -241,7 +255,7 @@ final class LocalDeviceDirectory: ObservableObject {
     }
     func stop(except agentID: String? = nil) {
         enabled = false
-        for (id, peer) in peers where id != agentID { peer.poll?.cancel(); peer.poll = nil }
+        for (id, peer) in peers where id != agentID { peer.cancelPolling() }
     }
 
     /// Do not wait for a suspended long poll or its exponential backoff on wake.
@@ -250,8 +264,7 @@ final class LocalDeviceDirectory: ObservableObject {
     func refreshAfterForeground() {
         guard enabled else { return }
         for (id, peer) in peers {
-            peer.poll?.cancel()
-            peer.poll = nil
+            peer.cancelPolling()
             peer.revision = AgentEventCursor.initial
             subscribe(agentID: id)
         }
@@ -264,8 +277,7 @@ final class LocalDeviceDirectory: ObservableObject {
         guard enabled else { return }
         for (id, peer) in peers {
             verification[id] = UUID()
-            peer.poll?.cancel()
-            peer.poll = nil
+            peer.cancelPolling()
             peer.verified = false
             peer.revision = AgentEventCursor.initial
             subscribe(agentID: id)
@@ -279,8 +291,36 @@ final class LocalDeviceDirectory: ObservableObject {
             credential: credential, transport: healthTransport)
     }
 
+    /// Supplementary telemetry never waits in the call-event loop. A timeout does
+    /// not declare an otherwise responsive call connection offline.
+    func refreshSIMTelemetry(agentID: String) async {
+        guard let peer = peers[agentID], peer.verified else { return }
+        let generation = verification[agentID]
+        let requestedAt = Date()
+        do {
+            let identity = try await authenticatedHealth(agentID: agentID,
+                endpoint: peer.endpoint, credential: peer.credential)
+            guard !Task.isCancelled, peers[agentID] === peer, peer.verified,
+                  verification[agentID] == generation,
+                  requestedAt.timeIntervalSinceReferenceDate >= peer.simSlotsReceivedAt.timeIntervalSinceReferenceDate,
+                  let slots = identity.simSlots else { return }
+            // nil means unsupported; [] is an authenticated SIM removal.
+            peer.metadata.simSlots = slots
+            peer.simSlotsReceivedAt = requestedAt
+            objectWillChange.send()
+        } catch { /* Preserve the last sample's original expiry; retry on the next tick. */ }
+    }
+
     private func subscribe(agentID: String) {
         guard let peer = peers[agentID], peer.poll == nil else { return }
+        let telemetryInterval = self.telemetryInterval
+        peer.telemetry = Task { [weak self, weak peer] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: telemetryInterval) } catch { return }
+                guard let self, let peer, self.peers[agentID] === peer else { return }
+                await self.refreshSIMTelemetry(agentID: agentID)
+            }
+        }
         peer.poll = Task { [weak self, weak peer] in
             guard let peer else { return }
             var legacy = false
@@ -295,6 +335,7 @@ final class LocalDeviceDirectory: ObservableObject {
                             endpoint: peer.endpoint, credential: peer.credential)
                         guard self.peers[agentID] === peer, !Task.isCancelled else { return }
                         peer.metadata = identity; peer.verified = true
+                        peer.simSlotsReceivedAt = Date()
                         peer.lastObservation = Date()
                         peer.revision = AgentEventCursor.initial
                         self.objectWillChange.send()

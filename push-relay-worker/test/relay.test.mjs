@@ -2047,3 +2047,32 @@ test("SIM signal sanitizer preserves distinct and zero levels, rejects malformed
     assert.deepEqual(simSlots([{id:androidSIM,label:"SIM 1",signal}]), [{id:androidSIM,label:"SIM 1"}]);
   }
 });
+
+
+test("cloud module signal preserves observation time per Agent without renewing old samples", async () => {
+  const env = testEnvironment(); env.STATUS = new MemoryStatusNamespace();
+  await worker.fetch(post("/v1/devices/register", registration), env);
+  const auth = {device_id: registration.device_id, device_secret: registration.device_secret};
+  const heartbeat = {...auth, event:"agent_heartbeat", agent_id:"module-A", at_ok:true, cellular_state:"registered"};
+  const send = body => worker.fetch(post("/v1/events/heartbeat", body), env);
+  const status = async () => (await (await worker.fetch(post("/v1/devices/status", auth), env)).json()).agents;
+  const observed = Date.now() - 600_000;
+  const sample = {...heartbeat, signal_dbm:-73, signal_observed_at_ms:observed};
+  assert.equal((await send(sample)).status, 202);
+  await send(sample);
+  await send({...sample, agent_id:"module-B", signal_dbm:-105});
+  assert.equal((await status()).find(a=>a.agent_id==="module-A").signal_observed_at_ms, observed);
+  assert.equal((await status()).find(a=>a.agent_id==="module-B").signal_dbm, -105);
+  assert.equal((await send({...sample, device_secret:"wrong", signal_dbm:-60})).status,401);
+  assert.equal((await status()).find(a=>a.agent_id==="module-A").signal_dbm,-73);
+  for (const invalid of [0, -1, "123", 1.5, Date.now()+120_000]) {
+    await send({...sample, signal_observed_at_ms:invalid});
+    assert.equal((await status()).find(a=>a.agent_id==="module-A").signal_observed_at_ms, undefined);
+  }
+  await send({...heartbeat, signal_dbm:-75});
+  assert.equal((await status()).find(a=>a.agent_id==="module-A").signal_observed_at_ms, undefined);
+  await send({...sample, signal_dbm:99});
+  assert.equal((await status()).find(a=>a.agent_id==="module-A").signal_dbm, undefined);
+  await send(heartbeat);
+  assert.equal((await status()).find(a=>a.agent_id==="module-A").signal_observed_at_ms, undefined);
+});

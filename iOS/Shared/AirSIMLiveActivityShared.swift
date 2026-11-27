@@ -35,7 +35,8 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         let startedAt: Date
         let transport: Transport?
         /// 模块 SIM 的蜂窝状态；只在待机状态显示，离线与通话状态不携带旧快照。
-        let signalDBM: Int?
+        var signalDBM: Int?
+        let signalObservedAt: Date?
         let operatorName: String?
         let networkMode: String?
         let radioBand: String?
@@ -44,7 +45,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         /// 当前用于拨号和媒体路由的 Android Agent。字段保持可选，以兼容旧版 Relay
         /// 推送的 ContentState，并避免升级时让已存在的 Live Activity 解码失败。
         let agentDeviceName: String?
-        let agentPhoneNumber: String?
+        var agentPhoneNumber: String?
         let agentKind: String?
         let pairedAgentCount: Int?
         let vowlanOnline: Bool?
@@ -60,7 +61,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
         struct AgentSummary: Codable, Hashable, Identifiable {
             let id: String
             let name: String
-            let phoneNumber: String?
+            var phoneNumber: String?
             let agentKind: String?
             let vowlanOnline: Bool
             let bluetoothOnline: Bool
@@ -84,6 +85,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             startedAt: Date,
             transport: Transport? = nil,
             signalDBM: Int? = nil,
+            signalObservedAt: Date? = nil,
             operatorName: String? = nil,
             networkMode: String? = nil,
             radioBand: String? = nil,
@@ -108,6 +110,7 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
             self.startedAt = startedAt
             self.transport = transport
             self.signalDBM = signalDBM
+            self.signalObservedAt = signalObservedAt
             self.operatorName = operatorName
             self.networkMode = networkMode
             self.radioBand = radioBand
@@ -152,23 +155,66 @@ struct AirSIMCallActivityAttributes: ActivityAttributes {
 
 extension AirSIMCallActivityAttributes.ContentState {
     var simSignalExpirationDate: Date? {
-        agents?.flatMap { $0.simSignals ?? [] }.compactMap { $0.signal?.expiresAt }.min()
+        let rows = (agentSIMSignals ?? []) + (agents ?? []).flatMap { $0.simSignals ?? [] }
+        let radioExpiry = signalDBM == nil ? nil : signalObservedAt?.addingTimeInterval(60)
+        return (rows.compactMap { $0.signal?.expiresAt } + [radioExpiry].compactMap { $0 }).min()
     }
 
-    /// ActivityKit 的 stale 只表示主 App 暂时没有提交新内容，不能证明 Agent 离线。
-    /// 模块离线由主 App 的真实 HTTP 探测失败显式写入 `.offline`。
-    func liveActivityDisplayState(isStale: Bool) -> Self {
-        // CallKit exclusively owns in-call UI. Even an activity created by an older
-        // build must never render a call phase, timer or hangup button.
+    func freshSignalDBM(at date: Date) -> Int? {
+        guard let signalDBM, (-140 ... -20).contains(signalDBM), let signalObservedAt,
+              (0..<60).contains(date.timeIntervalSince(signalObservedAt)) else { return nil }
+        return signalDBM
+    }
+
+    func hidingPhoneNumbers() -> Self {
         var display = self
-        if isStale {
-            display.agentSIMSignals = agentSIMSignals?.map(\.withoutSignal)
-            display.agents = agents?.map { agent in
-                var copy = agent
-                copy.simSignals = agent.simSignals?.map(\.withoutSignal)
-                return copy
+        display.agentPhoneNumber = nil
+        display.agentSIMSignals = agentSIMSignals?.map { sim in
+            .init(id: sim.id, title: sim.title, signal: sim.signal)
+        }
+        display.agents = agents?.map { agent in
+            var row = agent
+            row.phoneNumber = nil
+            row.simSignals = agent.simSignals?.map { sim in
+                .init(id: sim.id, title: sim.title, signal: sim.signal)
+            }
+            return row
+        }
+        return display
+    }
+
+    func applyingSIMVisibility(showNumbers: Bool, showSignals: Bool) -> Self {
+        var display = showNumbers ? self : hidingPhoneNumbers()
+        if !showSignals {
+            display.signalDBM = nil
+            display.agentSIMSignals = display.agentSIMSignals?.map { sim in
+                .init(id: sim.id, title: sim.title, signal: nil, phoneNumber: sim.phoneNumber)
+            }
+            display.agents = display.agents?.map { agent in
+                var row = agent
+                row.simSignals = agent.simSignals?.map { sim in
+                    .init(id: sim.id, title: sim.title, signal: nil, phoneNumber: sim.phoneNumber)
+                }
+                return row
             }
         }
+        return display
+    }
+
+    /// The card may become stale when the first SIM sample expires. Evaluate each
+    /// reading independently so another SIM or device can keep its fresh reading.
+    func liveActivityDisplayState(isStale: Bool, at date: Date = Date()) -> Self {
+        var display = self
+        display.signalDBM = freshSignalDBM(at: date)
+        if isStale {
+            display.agentSIMSignals = agentSIMSignals?.map { $0.signal?.freshLevel(at: date) == nil ? $0.withoutSignal : $0 }
+            display.agents = agents?.map { agent in
+                var row = agent
+                row.simSignals = agent.simSignals?.map { $0.signal?.freshLevel(at: date) == nil ? $0.withoutSignal : $0 }
+                return row
+            }
+        }
+        // CallKit owns the in-call UI, including activities restored from older builds.
         guard phase == .incoming || phase == .active || phase == .held else { return display }
         return Self(
             callID: "",
@@ -177,9 +223,9 @@ extension AirSIMCallActivityAttributes.ContentState {
             phase: .standby,
             startedAt: startedAt,
             transport: transport,
-            agentDeviceName: agentDeviceName,
-            agentPhoneNumber: agentPhoneNumber,
-            agentKind: agentKind,
+            agentDeviceName: display.agentDeviceName,
+            agentPhoneNumber: display.agentPhoneNumber,
+            agentKind: display.agentKind,
             pairedAgentCount: pairedAgentCount,
             vowlanOnline: vowlanOnline,
             bluetoothOnline: bluetoothOnline,
@@ -187,9 +233,7 @@ extension AirSIMCallActivityAttributes.ContentState {
             agents: display.agents,
             agentPage: agentPage,
             agentsArePage: agentsArePage,
-            agentSIMSignals: isStale ? agentSIMSignals?.map {
-                .init(id: $0.id, title: $0.title, signal: nil, phoneNumber: $0.phoneNumber)
-            } : agentSIMSignals
+            agentSIMSignals: display.agentSIMSignals
         )
     }
 }
@@ -221,6 +265,27 @@ enum LiveActivityVisualPolicy {
         case .standby, .cloudStandby, .incoming, .active, .held, .offline:
             return true
         }
+    }
+}
+
+enum LiveActivitySIMNumberPreference {
+    static let key = "airsim.live-activity-show-sim-numbers"
+
+    static let defaults: UserDefaults = {
+        guard let group = Bundle.main.object(forInfoDictionaryKey: "AirSIMWidgetAppGroup") as? String,
+              group.hasPrefix("group."), !group.contains("$("),
+              let shared = UserDefaults(suiteName: group) else { return .standard }
+        return shared
+    }()
+
+    static var isEnabled: Bool { defaults.bool(forKey: key) }
+}
+
+enum LiveActivitySIMSignalPreference {
+    static let key = "airsim.live-activity-show-sim-signals"
+
+    static var isEnabled: Bool {
+        LiveActivitySIMNumberPreference.defaults.object(forKey: key) as? Bool ?? true
     }
 }
 

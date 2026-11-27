@@ -31,6 +31,13 @@ enum CloudCallAudioState: Equatable, Sendable {
 }
 
 enum CloudCallAudioStartupPolicy {
+    static func shouldMonitorMedia(answered: Bool, lifecycleState: CallLifecycleState,
+                                   isOutgoing: Bool) -> Bool {
+        // An accepted incoming call can lose its active ACK along with PCM.
+        // Keep bounded recovery alive; outgoing early media may legitimately be absent.
+        answered && (lifecycleState == .active || (!isOutgoing && lifecycleState == .connecting))
+    }
+
     static func shouldStart(
         answered: Bool,
         mediaPrepared: Bool,
@@ -953,7 +960,8 @@ final class IPhoneCloudCallSession {
         if callChanged { media.configureAudioBuffer(CloudAudioBufferPolicy.current()) }
         call = incoming
         answered = true
-        lifecycleState = .connecting
+        emitLifecycle(.connecting, source: .callKit)
+        audioState = .connecting(attempt: 1, maximumAttempts: CloudCallRetryPolicy.audioDelays.count)
         answerAcknowledged = false
         if callChanged { carrierEarlyMediaEnabled = CarrierRingbackPreference.isEnabled(); earlyMediaReady = false; earlyPlaybackNotified = false; earlyMediaUnavailable = false }
         if callChanged || mediaHealthTracker == nil {
@@ -1198,7 +1206,10 @@ final class IPhoneCloudCallSession {
         guard canAttemptAudio else { return }
         if call?.isOutgoing == true && lifecycleState == .connecting && (!carrierEarlyMediaEnabled || !earlyMediaReady) { return }
         if media.isAudioRunning {
-            audioState = .connected
+            // An engine can run with zero received PCM. Do not erase a pending
+            // answer failure or claim connected merely because the graph exists.
+            if media.hasReceivedDownlink { audioState = .connected }
+            startMediaHealthMonitoring()
             traceAudio(phase: "already_running", title: "iPhone 云端音频已在运行")
             return
         }
@@ -1408,6 +1419,11 @@ final class IPhoneCloudCallSession {
         recoverConnectionIfNeeded()
     }
 
+    private var shouldMonitorMedia: Bool {
+        CloudCallAudioStartupPolicy.shouldMonitorMedia(answered: answered,
+            lifecycleState: lifecycleState, isOutgoing: call?.isOutgoing == true)
+    }
+
     private func startMediaHealthMonitoring() {
         guard mediaHealthTask == nil else { return }
         let id = UUID()
@@ -1415,9 +1431,9 @@ final class IPhoneCloudCallSession {
         mediaHealthTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { if mediaHealthID == id { mediaHealthTask = nil } }
-            while !Task.isCancelled, hasActiveCall, media.isAudioRunning {
+            while !Task.isCancelled, shouldMonitorMedia, media.isAudioRunning {
                 try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled, hasActiveCall, media.isAudioRunning,
+                guard !Task.isCancelled, shouldMonitorMedia, media.isAudioRunning,
                       let decision = mediaHealthTracker?.evaluate(at: Date()) else { continue }
                 switch decision {
                 case .none:

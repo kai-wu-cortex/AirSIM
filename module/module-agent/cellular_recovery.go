@@ -208,6 +208,7 @@ func (a *agent) cloudHeartbeatLoop() {
 		registration := a.modem.RegistrationText
 		recovery := a.modem.RecoveryState
 		signal := a.modem.SignalDBM
+		signalObservedAtMS := a.modem.SignalObservedAtMS
 		a.mu.RUnlock()
 		if state == "" {
 			state = "unregistered"
@@ -218,6 +219,7 @@ func (a *agent) cloudHeartbeatLoop() {
 			ATOK:    atHealth.ConsecutiveFailures < 3, CellularState: state,
 			CellularRegistration: registration, CellularRecovery: recovery,
 			ECMCarrier: readDebugFile(usbCarrierPath), SignalDBM: signal,
+			SignalObservedAtMS: signalObservedAtMS,
 		})
 		if err != nil {
 			a.debug.add("cloud", "heartbeat", "Agent 云端心跳失败", err.Error(), nil)

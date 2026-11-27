@@ -57,6 +57,27 @@ type cloudCallAction struct {
 	MediaProtocol string `json:"media_protocol,omitempty"`
 }
 
+// Relay broadcasts peer/ownership notifications on the same socket as commands.
+// Only recognize the exact status envelope: additional fields must still pass
+// command identity validation, never silently bypass it as a notification.
+func isCloudRelayNotification(data []byte) bool {
+	var value map[string]string
+	if err := json.Unmarshal(data, &value); err != nil || len(value) != 2 {
+		return false
+	}
+	switch value["event"] {
+	case "peer_connected", "peer_disconnected", "owner_claimed":
+	default:
+		return false
+	}
+	switch value["role"] {
+	case "agent", "iphone", "watch":
+		return true
+	default:
+		return false
+	}
+}
+
 func decodeCloudCallAction(data []byte, expectedCallID string) (cloudCallAction, error) {
 	return decodeCloudCallActionForDescriptor(data, cloudCallDescriptor{
 		CallID: expectedCallID, Generation: 1,
@@ -477,6 +498,9 @@ func (a *agent) serveCloudCall(
 				_ = bridge.write(payload)
 			}
 		case cloudOpcodeText:
+			if isCloudRelayNotification(payload) {
+				continue
+			}
 			control, err := decodeCloudCallActionForDescriptor(payload, descriptor)
 			if err != nil {
 				_ = socket.WriteText(cloudStatus("action_error", err.Error()))

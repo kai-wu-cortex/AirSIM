@@ -6187,7 +6187,8 @@ final class SIMSignalDisplayTests: XCTestCase {
         let state = AirSIMCallActivityAttributes.ContentState(callID:"",number:"",displayName:"Phone",phase:.standby,
             startedAt:Date(),transport:.bluetooth,agents:[agent])
         XCTAssertEqual(state.simSignalExpirationDate?.timeIntervalSince1970, 1795150300)
-        let stale = state.liveActivityDisplayState(isStale:true)
+        let stale = state.liveActivityDisplayState(isStale: true,
+            at: Date(timeIntervalSince1970: 1795150300))
         XCTAssertEqual(stale.phase, .standby)
         XCTAssertEqual(stale.agents?.first?.bluetoothOnline, true)
         XCTAssertNil(stale.agents?.first?.simSignals?.first?.signal)
@@ -6273,5 +6274,100 @@ final class VoWLANLANFirstIntegrationTests: XCTestCase {
         XCTAssertEqual(VoWLANRouteCandidates.alternateManualRoute([other, vpn], agentID: "peer", failed: lan), vpn)
         XCTAssertNil(VoWLANRouteCandidates.alternateManualRoute([other, vpn], agentID: "peer", failed: lan,
             attempted: [try XCTUnwrap(vpn.endpoint)]))
+    }
+}
+
+final class ColdCloudAudioHandoffTests: XCTestCase {
+    func testColdAnswerStartsForEitherActivationOrderButNotBeforeBothReady() {
+        func canStart(prepared: Bool, activated: Bool, state: CallLifecycleState = .connecting) -> Bool {
+            CloudCallAudioStartupPolicy.shouldStart(answered: true, mediaPrepared: prepared,
+                lifecycleState: state, isOutgoing: false, managedByCallKit: true,
+                callKitAudioSessionActive: activated)
+        }
+        XCTAssertFalse(canStart(prepared: false, activated: true))
+        XCTAssertFalse(canStart(prepared: true, activated: false))
+        XCTAssertTrue(canStart(prepared: true, activated: true))
+        XCTAssertFalse(canStart(prepared: true, activated: true, state: .ended))
+        XCTAssertFalse(canStart(prepared: true, activated: true, state: .ringing))
+    }
+
+    func testMissingIncomingActiveAcknowledgementStillHasBoundedMediaRecovery() {
+        XCTAssertTrue(CloudCallAudioStartupPolicy.shouldMonitorMedia(answered: true,
+            lifecycleState: .connecting, isOutgoing: false))
+        XCTAssertFalse(CloudCallAudioStartupPolicy.shouldMonitorMedia(answered: false,
+            lifecycleState: .ringing, isOutgoing: false))
+        XCTAssertFalse(CloudCallAudioStartupPolicy.shouldMonitorMedia(answered: true,
+            lifecycleState: .connecting, isOutgoing: true))
+        XCTAssertFalse(CloudCallAudioStartupPolicy.shouldMonitorMedia(answered: true,
+            lifecycleState: .ending, isOutgoing: false))
+        var health = CloudMediaHealthTracker(startedAt: Date(timeIntervalSince1970: 0), maximumRebuilds: 3)
+        for attempt in 1...3 {
+            let now = Date(timeIntervalSince1970: Double(attempt) * 30)
+            XCTAssertEqual(health.evaluate(at: now), .rebuild(.downlinkStalled))
+            XCTAssertTrue(health.beginRebuild(for: .downlinkStalled, at: now))
+        }
+        XCTAssertEqual(health.evaluate(at: Date(timeIntervalSince1970: 120)), .failed(.downlinkStalled))
+    }
+}
+
+@MainActor
+final class IncomingAnswerRouteResolverTests: XCTestCase {
+    func testAutomaticColdAnswerUsesAvailableCloudWithoutWaitingForDiscovery() async {
+        var probes = 0
+        let route: String? = await IncomingAnswerRouteResolver.localRoute(
+            mode: .automatic, cloudMediaAvailable: true, cloudMediaEnabled: true,
+            readyLocal: { probes += 1; return nil },
+            waitLocal: { XCTFail("Authenticated cloud answer must not wait for standby discovery"); return "late-local" })
+        XCTAssertNil(route)
+        XCTAssertEqual(probes, 1)
+        XCTAssertEqual(CallTransportPolicy.preferred(mode: .automatic, vowlanReady: route != nil,
+            cloudMediaAvailable: true, cloudMediaEnabled: true), .cloud)
+    }
+
+    func testAutomaticAnswerStillPrefersVerifiedLocalRoute() async {
+        let route = await IncomingAnswerRouteResolver.localRoute(
+            mode: .automatic, cloudMediaAvailable: true, cloudMediaEnabled: true,
+            readyLocal: { "verified-local" },
+            waitLocal: { XCTFail("Already ready"); return "late-local" })
+        XCTAssertEqual(route, "verified-local")
+        XCTAssertEqual(CallTransportPolicy.preferred(mode: .automatic, vowlanReady: route != nil,
+            cloudMediaAvailable: true), .vowlan)
+    }
+
+    func testLocalOnlyAndUnavailableCloudStillWaitForLocalRecovery() async {
+        let cases: [(AirSIMConnectionMode, Bool, Bool)] = [
+            (.vowlan, true, true), (.localDual, true, true),
+            (.automatic, false, true), (.automatic, true, false)
+        ]
+        for (mode, available, enabled) in cases {
+            var waits = 0
+            let route: String? = await IncomingAnswerRouteResolver.localRoute(
+                mode: mode, cloudMediaAvailable: available, cloudMediaEnabled: enabled,
+                readyLocal: { nil }, waitLocal: { waits += 1; return "recovered-local" })
+            XCTAssertEqual(route, "recovered-local")
+            XCTAssertEqual(waits, 1)
+        }
+    }
+
+    func testExplicitCloudAndBluetoothDoNotProbeLocalNetwork() async {
+        for mode: AirSIMConnectionMode in [.cloud, .bluetooth] {
+            let route: String? = await IncomingAnswerRouteResolver.localRoute(
+                mode: mode, cloudMediaAvailable: true, cloudMediaEnabled: true,
+                readyLocal: { XCTFail("Must respect explicit mode"); return "local" },
+                waitLocal: { XCTFail("Must respect explicit mode"); return "local" })
+            XCTAssertNil(route)
+        }
+    }
+
+    func testCancelledLocalProbeDoesNotStartRecoveryWait() async {
+        let task = Task { () -> String? in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await IncomingAnswerRouteResolver.localRoute(
+                mode: .vowlan, cloudMediaAvailable: false, cloudMediaEnabled: false,
+                readyLocal: { XCTFail("Cancelled answer must not probe"); return "local" },
+                waitLocal: { XCTFail("Cancelled answer must not wait"); return "local" })
+        }
+        let route = await task.value
+        XCTAssertNil(route)
     }
 }

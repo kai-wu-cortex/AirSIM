@@ -246,6 +246,7 @@ final class SMSNavigationUITests: XCTestCase {
         XCTAssertTrue(selector.label.contains("SIM 1"))
         app.buttons["取消"].tap()
         app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "sms-navigation-fixture")).firstMatch.tap()
+        app.buttons["sms.conversationInfo"].tap()
         XCTAssertTrue(selector.waitForExistence(timeout: 5))
         selector.tap()
         app.buttons["SIM 1"].tap()
@@ -293,6 +294,86 @@ final class SMSNavigationUITests: XCTestCase {
     }
 
     @MainActor
+    func testThreadBackWithKeyboardAndEdgeOverlays() {
+        continueAfterFailure = false
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN", "-airsim.appearance", "dark"]
+        app.launchEnvironment["AIRSIM_UI_FIXTURE"] = "sms-navigation"
+        app.launchEnvironment["AIRSIM_UI_MESSAGES_DESIGN"] = "1"
+        app.launchEnvironment["AIRSIM_UI_SMS_EDGES"] = "1"
+        app.launchEnvironment["AIRSIM_UI_INBOX_EDGES"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        for attempt in 0..<3 {
+            let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "10010")).firstMatch
+            XCTAssertTrue(row.waitForExistence(timeout: 10))
+            let rowY = row.frame.minY
+            if attempt == 0 {
+                XCTAssertEqual(app.searchFields.count, 1)
+                XCTAssertTrue(app.descendants(matching: .any)["smsConversation.unread.10010"].firstMatch.exists)
+            }
+            row.tap()
+            let back = app.navigationBars.buttons.element(boundBy: 0)
+            XCTAssertTrue(back.waitForExistence(timeout: 5))
+            XCTAssertTrue(back.isHittable, "Blur layers must not intercept navigation")
+            let header = app.buttons["sms.conversationInfo"]
+            XCTAssertTrue(header.isHittable, "The full-size number below the avatar must open conversation info")
+            XCTAssertGreaterThanOrEqual(header.frame.height, 30)
+            XCTAssertFalse(app.tabBars.buttons["短信"].isHittable, "Conversation chrome must cover the tabs")
+            if attempt == 0 {
+                let timeline = app.collectionViews["sms.timeline"]
+                timeline.swipeDown(velocity: .slow)
+                XCTAssertLessThanOrEqual(timeline.frame.minY, app.frame.minY + 1,
+                    "Content must extend under the navigation/status bars, not start at a hard seam")
+                XCTAssertGreaterThanOrEqual(timeline.frame.maxY, app.frame.maxY - 1,
+                    "Content must extend through the bottom container safe area")
+                let image = XCTAttachment(screenshot: app.screenshot())
+                image.name = "sms-top-bottom-blur"; image.lifetime = .keepAlways; add(image)
+            } else if attempt == 1 {
+                let reply = app.descendants(matching: .any).matching(identifier: "sms.reply").firstMatch
+                reply.tap()
+                reply.typeText("draft only")
+                XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            }
+            if attempt == 0 {
+                let timeline = app.collectionViews["sms.timeline"]
+                let edge = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.5))
+                let reply = app.descendants(matching: .any).matching(identifier: "sms.reply").firstMatch
+                let composerFrame = reply.frame
+                // A slow short drag must cancel; a longer drag must complete.
+                edge.press(forDuration: 0.05,
+                    thenDragTo: timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.14, dy: 0.5)),
+                    withVelocity: .slow, thenHoldForDuration: 1.5)
+                XCTAssertTrue(app.buttons["sms.conversationInfo"].exists)
+                XCTAssertTrue(reply.isHittable)
+                XCTAssertEqual(reply.frame.minY, composerFrame.minY, accuracy: 2,
+                    "Cancelling the return must restore the composer's position")
+                XCTAssertFalse(app.tabBars.buttons["短信"].isHittable, "Cancelling a return must hide the tabs again")
+                edge.press(forDuration: 0.05,
+                    thenDragTo: timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.5)),
+                    withVelocity: .slow, thenHoldForDuration: 1.5)
+            } else {
+                back.tap()
+            }
+            XCTAssertTrue(app.buttons["sms-compose"].waitForExistence(timeout: 5))
+            XCTAssertFalse(app.buttons["sms.conversationInfo"].exists)
+            XCTAssertTrue(app.tabBars.buttons["短信"].isHittable, "The tabs must return with the list")
+            XCTAssertTrue(app.buttons["sms-list-actions"].isHittable)
+            if attempt == 0 {
+                XCTAssertEqual(row.frame.minY, rowY, accuracy: 2, "Returning must preserve the selected row's vertical position")
+                XCTAssertFalse(app.descendants(matching: .any)["smsConversation.unread.10010"].firstMatch.exists)
+            }
+        }
+        // Scroll content beneath the actual native navigation buttons. This
+        // attachment catches a hard toolbar seam that top-of-list shots miss.
+        app.collectionViews.firstMatch.swipeUp(velocity: .slow)
+        XCTAssertTrue(app.buttons["sms-list-actions"].isHittable)
+        let inbox = XCTAttachment(screenshot: app.screenshot())
+        inbox.name = "sms-inbox-soft-top-edge"; inbox.lifetime = .keepAlways; add(inbox)
+    }
+
+    @MainActor
     func testConversationReopensAfterSwitchingTabsAndReturning() throws {
         continueAfterFailure = false
         let app = XCUIApplication()
@@ -317,8 +398,8 @@ final class SMSNavigationUITests: XCTestCase {
             let row = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "sms-navigation-fixture")).firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 5))
             row.tap()
-            let navigation = app.navigationBars["sms-navigation-fixture"]
-            XCTAssertTrue(navigation.waitForExistence(timeout: 5))
+            let header = app.buttons["sms.conversationInfo"]
+            XCTAssertTrue(header.waitForExistence(timeout: 5))
             if compose.exists && compose.isHittable {
                 // Expanded Duo/iPad keeps the conversation beside the list and
                 // preserves tabs. Verify distinct columns, not just visible chrome.
@@ -329,13 +410,8 @@ final class SMSNavigationUITests: XCTestCase {
                     "expanded conversation must occupy a separate detail column")
                 XCTAssertTrue(app.buttons["短信"].isHittable)
             } else {
-                XCTAssertFalse(app.buttons["短信"].isHittable, "compact conversation must cover the root tabs")
-                let systemBack = app.buttons["BackButton"]
-                if systemBack.exists {
-                    systemBack.tap()
-                } else {
-                    navigation.buttons.firstMatch.tap()
-                }
+                XCTAssertFalse(app.tabBars.buttons["短信"].isHittable, "compact conversation must cover the root tabs")
+                app.navigationBars.buttons.element(boundBy: 0).tap()
             }
             XCTAssertTrue(compose.waitForExistence(timeout: 5))
             XCTAssertTrue(app.buttons["短信"].isHittable)

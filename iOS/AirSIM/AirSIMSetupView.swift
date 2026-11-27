@@ -494,14 +494,16 @@ struct AirSIMSettingsHomeSnapshot: Equatable {
 private struct AndroidDeviceBatteryLabel: View {
     let reading: AndroidBatteryReading?
     var body: some View {
-        Label {
+        // A nested Label adopts Form's automatic row style inside LabeledContent,
+        // which can expand the value into a second, oversized row.
+        HStack(spacing: 6) {
+            Image(systemName: reading?.symbol ?? "battery.0percent")
+                .foregroundStyle(reading.map { $0.charging ? Color.green : $0.percent <= 20 ? .red : .secondary } ?? .secondary)
             if let reading {
                 Text("\(reading.percent)%\(reading.charging ? " · 正在充电" : "")")
             } else { Text("电量待刷新") }
-        } icon: {
-            Image(systemName: reading?.symbol ?? "battery.0percent")
-                .foregroundStyle(reading.map { $0.charging ? Color.green : $0.percent <= 20 ? .red : .secondary } ?? .secondary)
         }
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityLabel(reading.map { "安卓电量 \($0.percent)%，\($0.charging ? "正在充电" : "未充电")" } ?? "安卓电量待刷新")
     }
 }
@@ -604,6 +606,10 @@ struct AirSIMSettingsView: View {
     @AppStorage(CloudAudioBufferPolicy.millisecondsKey) private var cloudAudioBufferMilliseconds = 720
     @AppStorage(BackgroundStandbyPreference.key) private var backgroundStandbyEnabled = false
     @AppStorage(LiveActivityVisibilityPreference.key) private var liveActivityEnabled = true
+    @AppStorage(LiveActivitySIMNumberPreference.key, store: LiveActivitySIMNumberPreference.defaults)
+    private var liveActivitySIMNumbersEnabled = false
+    @AppStorage(LiveActivitySIMSignalPreference.key, store: LiveActivitySIMNumberPreference.defaults)
+    private var liveActivitySIMSignalsEnabled = true
     @AppStorage(SMSVerificationCodeClipboard.enabledKey) private var autoCopySMSCode = true
     @AppStorage(FeedbackUploader.descriptionKey) private var feedbackDescription = ""
     @AppStorage(FeedbackUploader.remarkKey) private var feedbackRemark = ""
@@ -766,7 +772,10 @@ struct AirSIMSettingsView: View {
                 Text("安卓离线时不能确认跨端策略已同步，重连后请核对安卓状态。")
             }
         case .connections:
-            Section { link(.mode, "arrow.triangle.branch", detail: selectedMode.title) }
+            Section {
+                link(.mode, "arrow.triangle.branch", detail: selectedMode.title)
+                link(.relay, "cloud", detail: "服务器地址与音频缓冲")
+            }
             deviceListSection
             Section { link(.status, "waveform.path.ecg") }
         case .mode:
@@ -1272,10 +1281,22 @@ struct AirSIMSettingsView: View {
             .onChange(of: liveActivityEnabled) { enabled in
                 model.setLiveActivityEnabled(enabled)
             }
+            Toggle(isOn: $liveActivitySIMNumbersEnabled) {
+                Label("显示手机号", systemImage: "simcard")
+            }
+            .onChange(of: liveActivitySIMNumbersEnabled) { _ in
+                Task { await model.refreshLiveActivityIdle() }
+            }
+            Toggle(isOn: $liveActivitySIMSignalsEnabled) {
+                Label("显示信号", systemImage: "cellularbars")
+            }
+            .onChange(of: liveActivitySIMSignalsEnabled) { _ in
+                Task { await model.refreshLiveActivityIdle() }
+            }
         } header: {
             Text("灵动岛与实时活动")
         } footer: {
-            Text("关闭后结束 AirSIM 的灵动岛与锁屏实时活动；通话和短信仍可正常使用。")
+            Text("分别控制灵动岛和锁屏实时活动中的手机号与 SIM 信号。手机号默认隐藏，信号默认显示；开启手机号后，截图可能包含号码。")
         }
     }
 

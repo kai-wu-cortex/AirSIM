@@ -144,6 +144,8 @@ struct AgentHealth: Codable, Sendable {
 
 /// Relay 最近一次收到的 Agent 心跳。该对象只包含可展示状态，不包含设备密钥。
 struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
+    var signalDBM: Int? = nil
+    var signalObservedAtMS: Double? = nil
     var simSlots: [AndroidSIMSlot]? = nil
     var battery: AndroidBatteryReading? = nil
     var commandRoutingVersion: Int? = nil
@@ -159,6 +161,8 @@ struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
     var id: String { agentID }
 
     enum CodingKeys: String, CodingKey {
+        case signalDBM = "signal_dbm"
+        case signalObservedAtMS = "signal_observed_at_ms"
         case battery
         case simSlots = "sim_slots"
         case agentID = "agent_id"
@@ -170,6 +174,19 @@ struct CloudAndroidAgent: Codable, Equatable, Sendable, Identifiable {
         case cloudOnline = "cloud_online"
         case commandRoutingVersion = "command_routing_version"
     }
+    /// Legacy modules expose one radio, not a physical SIM-slot roster. Do not
+    /// assign that reading to SIM 1/2 or borrow the newest other Agent's radio.
+    func signalSummaries(at now: Date = Date()) -> [SIMSignalSummary]? {
+        if let simSlots { return AndroidSIMSlot.signalSummaries(simSlots) }
+        guard let dbm = signalDBM, (-140 ... -20).contains(dbm),
+              let observedAt = signalObservedAtMS else { return nil }
+        let level = dbm >= -79 ? 4 : dbm >= -89 ? 3 : dbm >= -99 ? 2 : dbm >= -109 ? 1 : 0
+        let reading = AndroidSIMSignal(level: level, observedAtMS: observedAt)
+        let number = phoneNumber?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return [.init(id: 0, title: "蜂窝", signal: cloudOnline && reading.freshLevel(at: now) != nil ? reading : nil,
+                      phoneNumber: number.flatMap { $0.isEmpty ? nil : String($0.prefix(32)) })]
+    }
+
 }
 
 struct CloudAgentStatus: Decodable, Equatable, Sendable {

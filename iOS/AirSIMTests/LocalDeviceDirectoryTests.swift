@@ -8,6 +8,121 @@ import WatchConnectivity
 @MainActor
 final class LocalDeviceDirectoryTests: XCTestCase {
 
+    func testPeriodicSIMTelemetryUpdatesEveryPeerWithoutDelayingCalls() async throws {
+        let aID = "signal-a-" + UUID().uuidString, bID = "signal-b-" + UUID().uuidString
+        let a = try AuthenticatedHealthPeer(agentID: aID, secret: aSecret)
+        let b = try AuthenticatedHealthPeer(agentID: bID, secret: aSecret)
+        defer {
+            a.stop(); b.stop()
+            VoWLANPairingRecordStore.remove(agentID: aID); VoWLANPairingRecordStore.remove(agentID: bID)
+        }
+        a.setSIMLevel(1); b.setSIMLevel(2)
+        let ae = try await a.start(), be = try await b.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
+            telemetryInterval: .milliseconds(30), healthTransport: AuthenticatedHealthPeer.transport)
+        let credential = try VoWLANCredential(secret: aSecret)
+        try await directory.verifyPairing(agentID: aID, endpoint: ae, credential: credential)
+        try await directory.verifyPairing(agentID: bID, endpoint: be, credential: credential)
+        a.setSIMLevel(3); b.setSIMLevel(4)
+        var callers = Set<String>()
+        directory.onCallEvent = { callers.insert($0.agentID) }
+        directory.start(); defer { directory.stop() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while ContinuousClock.now < deadline {
+            if directory.simTelemetry(for: aID)?.slots.first?.signal?.level == 3,
+               directory.simTelemetry(for: bID)?.slots.first?.signal?.level == 4,
+               callers == Set([aID, bID]) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(directory.simTelemetry(for: aID)?.slots.first?.signal?.level, 3)
+        XCTAssertEqual(directory.simTelemetry(for: bID)?.slots.first?.signal?.level, 4)
+        XCTAssertEqual(callers, Set([aID, bID]))
+    }
+
+    func testSlowSIMTelemetryDoesNotBlockCallEventsAndStopsWithDirectory() async throws {
+        let id = "signal-call-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: aSecret)
+        defer { peer.stop(); VoWLANPairingRecordStore.remove(agentID: id) }
+        peer.setCallState(nil); peer.setSIMLevel(1)
+        let endpoint = try await peer.start(), boundary = TelemetryHealthBoundary()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            apiFactory: { AirSIMAPI(route: $0, transport: PeerHTTPTransport()) },
+            telemetryInterval: .milliseconds(30), healthTransport: { try await boundary.send($0) })
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        let held = expectation(description: "telemetry blocked"), incoming = expectation(description: "call delivered")
+        let gate = ResponseGate()
+        boundary.holdNext(held, gate: gate)
+        peer.setSIMLevel(4)
+        var delivered = false
+        directory.onCallEvent = { event in
+            if event.state == .ringing && !delivered { delivered = true; incoming.fulfill() }
+        }
+        directory.start(); defer { directory.stop() }
+        await fulfillment(of: [held], timeout: 2)
+        peer.setCallState("incoming")
+        await fulfillment(of: [incoming], timeout: 2)
+        directory.stop()
+        await gate.release()
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(directory.simTelemetry(for: id)?.slots.first?.signal?.level, 1,
+            "A cancelled telemetry request cannot publish after shutdown")
+    }
+
+    func testSIMTelemetryDistinguishesRemovalFromUnsupportedAndFailure() async throws {
+        let id = "signal-removal-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: aSecret)
+        defer { peer.stop(); VoWLANPairingRecordStore.remove(agentID: id) }
+        peer.setSIMLevel(3)
+        let endpoint = try await peer.start()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            healthTransport: AuthenticatedHealthPeer.transport)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: VoWLANCredential(secret: aSecret))
+        peer.setSIMSlots([])
+        await directory.refreshSIMTelemetry(agentID: id)
+        XCTAssertEqual(directory.simTelemetry(for: id)?.slots.count, 0)
+        let receivedAt = directory.simTelemetry(for: id)?.receivedAt
+        peer.setSIMSlots(nil)
+        await directory.refreshSIMTelemetry(agentID: id)
+        XCTAssertEqual(directory.simTelemetry(for: id)?.receivedAt, receivedAt)
+        await peer.stopAndWait()
+        await directory.refreshSIMTelemetry(agentID: id)
+        XCTAssertEqual(directory.simTelemetry(for: id)?.receivedAt, receivedAt)
+        XCTAssertNotNil(directory.api(for: id), "A supplemental telemetry failure cannot drop the call route")
+    }
+
+    func testLateSIMTelemetryCannotOverwriteReverificationOrRestoreForgottenDevice() async throws {
+        let id = "signal-late-" + UUID().uuidString
+        let peer = try AuthenticatedHealthPeer(agentID: id, secret: aSecret)
+        defer { peer.stop(); VoWLANPairingRecordStore.remove(agentID: id) }
+        peer.setSIMLevel(1)
+        let endpoint = try await peer.start()
+        let boundary = TelemetryHealthBoundary()
+        let directory = LocalDeviceDirectory(credentials: MemoryWLANCredentials(),
+            healthTransport: { try await boundary.send($0) })
+        let credential = try VoWLANCredential(secret: aSecret)
+        try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: credential)
+        for forget in [false, true] {
+            let held = expectation(description: "old telemetry held"), gate = ResponseGate()
+            boundary.holdNext(held, gate: gate)
+            let pending = Task { await directory.refreshSIMTelemetry(agentID: id) }
+            await fulfillment(of: [held], timeout: 2)
+            if forget {
+                try await directory.forget(agentID: id)
+            } else {
+                peer.setSIMLevel(4)
+                try await directory.verifyPairing(agentID: id, endpoint: endpoint, credential: credential)
+            }
+            await gate.release()
+            await pending.value
+            if forget {
+                XCTAssertNil(directory.simTelemetry(for: id)); XCTAssertNil(directory.api(for: id))
+            } else {
+                XCTAssertEqual(directory.simTelemetry(for: id)?.slots.first?.signal?.level, 4)
+            }
+        }
+    }
+
     func testPushAnswerCannotTargetAnotherCallOnSameAndroid() async throws {
         let mode = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
         ConnectionModePreference.set(.vowlan); AndroidAgentBindingPreference.set("A")
@@ -441,6 +556,53 @@ final class LocalDeviceDirectoryTests: XCTestCase {
         XCTAssertFalse(peer.commands.contains { ["/api/calls/hangup", "/api/calls/reject"].contains($0.path) })
     }
 
+    func testAcceptedCloudHandoffRetainsIdentityAndWaitsForAgentBeforeActive() async throws {
+        let old = ConnectionModePreference.selected()
+        ConnectionModePreference.set(.automatic)
+        defer { ConnectionModePreference.set(old) }
+        let controller = CallKitController(observesSystemCallbacks: false)
+        controller.setEnabled(true)
+        let push = IncomingVoIPCall(bluetoothCallID: "cloud-handoff", uuid: UUID(),
+                                   generation: 7, number: nil, agentID: "A")
+        let reported = expectation(description: "cold push")
+        controller.reportIncomingPush(push, systemReport: { _, _, done in done(nil) }) { error in
+            XCTAssertNil(error); reported.fulfill()
+        }
+        await fulfillment(of: [reported], timeout: 2)
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let model = AppModel(audioController: AudioSessionController(toneOutput: FixtureToneOutput()),
+            localDirectory: LocalDeviceDirectory(credentials: MemoryWLANCredentials()),
+            callKitController: controller, historyStore: LocalHistoryStore(directoryURL: path))
+        defer { model.stop() }
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .ringing)
+        let waiting = CloudCallAudioState.connecting(attempt: 1, maximumAttempts: 5)
+        XCTAssertTrue(model.reconcileAcceptedCloudCall(push, state: .connecting, audioState: waiting))
+        model.presentCurrentCallInApp()
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting)
+        XCTAssertEqual(model.remoteCall?.state, "dialing")
+        XCTAssertNil(model.callConnectedAt, "CallKit UI acceptance is not Agent confirmation")
+        XCTAssertEqual(model.callLifecycleSnapshot.callUUID, push.uuid)
+        XCTAssertEqual(model.callLifecycleSnapshot.generation, 7)
+        XCTAssertEqual(model.callPresentationSurface, .app)
+        _ = model.receiveDeviceCallEvent(.init(agentID: "A", callID: push.callID,
+            state: .ringing, transport: .vowlan, transportEpoch: 1))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .connecting, "Late LAN discovery cannot restore accept UI")
+        XCTAssertTrue(model.reconcileAcceptedCloudCall(push, state: .active, audioState: .connected, source: .agent))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .active)
+        XCTAssertNotNil(model.callConnectedAt)
+        XCTAssertTrue(model.reconcileAcceptedCloudCall(push, state: .connecting, audioState: waiting))
+        XCTAssertEqual(model.callLifecycleSnapshot.state, .active, "A delayed snapshot cannot regress active")
+        let stale = IncomingVoIPCall(bluetoothCallID: push.callID, uuid: push.uuid,
+                                    generation: 6, number: nil, agentID: "A")
+        XCTAssertFalse(model.reconcileAcceptedCloudCall(stale, state: .connecting, audioState: waiting))
+        let other = IncomingVoIPCall(bluetoothCallID: push.callID, uuid: UUID(),
+                                    generation: 7, number: nil, agentID: "A")
+        XCTAssertFalse(model.reconcileAcceptedCloudCall(other, state: .active, audioState: .connected))
+        controller.reportCurrentCallEnded(reason: .remoteEnded)
+        XCTAssertFalse(model.reconcileAcceptedCloudCall(push, state: .active, audioState: .connected))
+    }
+
     func testColdLaunchPushIsAdoptedBeforeVoWLANAnswer() async throws {
         let old = ConnectionModePreference.selected(), binding = AndroidAgentBindingPreference.selected()
         ConnectionModePreference.set(.automatic); AndroidAgentBindingPreference.set("A")
@@ -774,8 +936,18 @@ final class LocalDeviceDirectoryTests: XCTestCase {
                 XCTAssertEqual(value["ok"] as? Bool, true); ended.fulfill()
             }
         await fulfillment(of: [ended], timeout: 3)
+        // The Watch reply acknowledges admission before the captured HTTP
+        // hangup finishes. Observe backend completion before stopping the fixture.
+        let endDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while (model.deviceCallRouter.hasPendingTermination
+            || !a.commands.contains { $0.path == "/api/calls/hangup" && $0.callID == "backend-A" }),
+              ContinuousClock.now < endDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertNil(model.deviceCalls.active)
+        XCTAssertFalse(model.deviceCallRouter.hasPendingTermination)
         XCTAssertTrue(a.commands.contains { $0.path == "/api/calls/hangup" && $0.callID == "backend-A" })
+        XCTAssertFalse(b.commands.contains { $0.path == "/api/calls/hangup" })
         model.stop()
     }
 
@@ -1297,6 +1469,12 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
     var emptyStatus = false
     var cloudIdentity: IncomingVoIPCall?
     private var callState: String? = "incoming"
+    private var simSlots: [[String: Any]]?
+    func setSIMSlots(_ slots: [[String: Any]]?) { lock.withLock { simSlots = slots } }
+    func setSIMLevel(_ level: Int) {
+        setSIMSlots([["id":"SIM-1", "label":"SIM 1", "slot_index":0,
+            "signal":["level":level, "observed_at_ms":Date().timeIntervalSince1970 * 1000]]])
+    }
     private let lock = NSLock()
     private var requestCount = 0
     private var nonces = Set<String>()
@@ -1375,6 +1553,7 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
         }
         var json: [String: Any] = ["ok": valid, "agent_id": agentID, "canonical_call_ids": true]
         json["device_name"] = deviceName
+        json["sim_slots"] = lock.withLock { simSlots }
         if includeProof { json["identity_proof"] = mac("AIRSIM-HEALTH1\n\(nonce)\n\(agentID)") }
         if path == "/api/calls/dial" {
             let input = (try? JSONSerialization.jsonObject(with: Data(rawBody.utf8))) as? [String: String] ?? [:]
@@ -1441,5 +1620,19 @@ private final class AuthenticatedHealthPeer: @unchecked Sendable {
         guard shouldStop else { return }
         listener.cancel()
         lock.withLock { connections.forEach { $0.cancel() }; connections.removeAll() }
+    }
+}
+
+private final class TelemetryHealthBoundary: @unchecked Sendable {
+    private let lock = NSLock()
+    private var next: (XCTestExpectation, ResponseGate)?
+    func holdNext(_ expectation: XCTestExpectation, gate: ResponseGate) {
+        lock.withLock { next = (expectation, gate) }
+    }
+    func send(_ request: URLRequest) async throws -> WiredHTTPResponse {
+        let held = lock.withLock { let value = next; next = nil; return value }
+        let response = try await AuthenticatedHealthPeer.transport(request)
+        if let held { held.0.fulfill(); await held.1.wait() }
+        return response
     }
 }

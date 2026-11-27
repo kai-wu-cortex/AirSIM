@@ -570,7 +570,12 @@ final class VoWLANController: ObservableObject {
     var onAvailabilityChange: ((VoWLANAvailability) -> Void)?
     private var verifiedIdentity: (endpoint: VoWLANEndpoint, agentID: String)?
     func authenticatedAgentID(for endpoint: VoWLANEndpoint) -> String? {
-        guard availability.isReady(), availability.endpoint == endpoint,
+        guard availability.isReady() else { return nil }
+        return verifiedAgentIDForDisplay(at: endpoint)
+    }
+
+    func verifiedAgentIDForDisplay(at endpoint: VoWLANEndpoint) -> String? {
+        guard availability.isOnlineForDisplay, availability.endpoint == endpoint,
               verifiedIdentity?.endpoint == endpoint else { return nil }
         return verifiedIdentity?.agentID
     }

@@ -1563,7 +1563,12 @@ async function receiveAgentHeartbeat(request, env) {
     cellular_registration: stringValue(heartbeat.cellular_registration),
     cellular_recovery: stringValue(heartbeat.cellular_recovery),
     ecm_carrier: stringValue(heartbeat.ecm_carrier),
-    ...(Number.isFinite(heartbeat.signal_dbm) ? { signal_dbm: heartbeat.signal_dbm } : {}),
+    ...(Number.isInteger(heartbeat.signal_dbm) && heartbeat.signal_dbm >= -140 && heartbeat.signal_dbm <= -20
+      ? { signal_dbm: heartbeat.signal_dbm,
+          ...(Number.isSafeInteger(heartbeat.signal_observed_at_ms) && heartbeat.signal_observed_at_ms > 0 &&
+              heartbeat.signal_observed_at_ms <= Date.now() + 60_000
+            ? { signal_observed_at_ms: heartbeat.signal_observed_at_ms } : {}) }
+      : {}),
   };
   // Heartbeat must stay on the Durable Object path. KV has a free daily
   // put() limit; writing every heartbeat there exhausts it and breaks online

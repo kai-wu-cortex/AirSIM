@@ -526,27 +526,55 @@ struct SIMSignalStrip: View {
     let date: Date
     var available = true
     var compact = false
+    var usesSlotBadge = false
+    var inline = false
 
-    var body: some View {
-        if compact {
-            strip
-        } else {
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(signals) { sim in
-                    SIMSignalItem(sim: sim,
-                                  level: available ? sim.signal?.freshLevel(at: date) : nil,
-                                  compact: false, showsNumber: true)
-                }
-            }
+    private var visibleSignals: [SIMSignalSummary] {
+        guard usesSlotBadge else { return signals }
+        return signals.filter { sim in
+            (available && sim.signal?.freshLevel(at: date) != nil)
+                || (!compact && sim.phoneNumber?.isEmpty == false)
         }
     }
-    private func item(_ sim: SIMSignalSummary) -> some View {
-        SIMSignalItem(sim: sim, level: available ? sim.signal?.freshLevel(at: date) : nil, compact: compact)
-    }
-    private var strip: some View {
-        HStack(spacing: 4) {
-            ForEach(Array(signals.prefix(2))) { sim in item(sim) }
-            if signals.count > 2 { Text("+\(signals.count - 2)").font(.system(size: 8)) }
+
+    var body: some View {
+        let rows = visibleSignals
+        if compact, usesSlotBadge {
+            HStack(spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(rows.prefix(2)) { sim in
+                        SIMSignalItem(sim: sim,
+                                      level: available ? sim.signal?.freshLevel(at: date) : nil,
+                                      compact: true, usesSlotBadge: true)
+                    }
+                }
+                if rows.count > 2 { Text("+\(rows.count - 2)").font(.system(size: 8)) }
+            }
+        } else if compact {
+            HStack(spacing: 4) {
+                ForEach(rows.prefix(2)) { sim in
+                    SIMSignalItem(sim: sim,
+                                  level: available ? sim.signal?.freshLevel(at: date) : nil,
+                                  compact: true, usesSlotBadge: usesSlotBadge)
+                }
+                if rows.count > 2 { Text("+\(rows.count - 2)").font(.system(size: 8)) }
+            }
+        } else if inline, !rows.isEmpty {
+            HStack(spacing: 6) {
+                ForEach(rows) { sim in
+                    SIMSignalItem(sim: sim,
+                                  level: available ? sim.signal?.freshLevel(at: date) : nil,
+                                  compact: false, showsNumber: true, usesSlotBadge: usesSlotBadge)
+                }
+            }
+        } else if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(rows) { sim in
+                    SIMSignalItem(sim: sim,
+                                  level: available ? sim.signal?.freshLevel(at: date) : nil,
+                                  compact: false, showsNumber: true, usesSlotBadge: usesSlotBadge)
+                }
+            }
         }
     }
 }
@@ -557,30 +585,77 @@ private struct SIMSignalItem: View {
     let level: Int?
     let compact: Bool
     var showsNumber = false
+    var usesSlotBadge = false
+
+    // The summary ID is a row identity, not a physical SIM slot. Use its display label.
+    private var slotBadge: String? {
+        guard sim.title.hasPrefix("SIM "),
+              let number = Int(sim.title.dropFirst(4)), number > 0 else { return sim.title == "蜂窝" ? nil : "?" }
+        return String(number)
+    }
+
+    // Keep the second physical SIM as dots even when SIM 1 has no fresh reading.
+    private var usesSignalDots: Bool { compact && usesSlotBadge && slotBadge == "2" }
+    private var visibleSlotBadge: String? { compact ? nil : slotBadge }
+
     private var spokenLabel: String {
-        let strength = level.map { "信号 \($0)/4 格" } ?? "信号未知或待刷新"
-        return "\(sim.title)，\(showsNumber ? (sim.phoneNumber ?? "号码未提供") + "，" : "")\(strength)"
+        let strength = level.map { "信号 \($0)/4 格" } ?? (usesSlotBadge ? nil : "信号未知或待刷新")
+        let number = showsNumber ? sim.phoneNumber ?? (usesSlotBadge ? nil : "号码未提供") : nil
+        return [sim.title, number, strength].compactMap { $0 }.joined(separator: "，")
     }
     var body: some View {
         HStack(spacing: 3) {
-            Text(sim.title).font(.system(size: compact ? 8 : 10, weight: .medium)).lineLimit(1)
-            if showsNumber {
-                Text(sim.phoneNumber ?? "号码未提供")
+            if usesSlotBadge, level != nil {
+                ZStack(alignment: .bottomLeading) {
+                    signalGlyph
+                        .frame(width: 15, height: usesSignalDots ? 3 : 11)
+                        .padding(.leading, visibleSlotBadge == nil ? 0 : 9)
+                        .padding(.bottom, visibleSlotBadge == nil ? 0 : 5)
+                    if let slotBadge = visibleSlotBadge {
+                        Text(slotBadge)
+                            .font(.system(size: 8, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .fixedSize()
+                    }
+                }
+                .fixedSize()
+                .accessibilityHidden(true)
+            } else {
+                Text(sim.title).font(.system(size: compact ? 8 : 10, weight: .medium)).lineLimit(1)
+            }
+            if showsNumber, let number = sim.phoneNumber ?? (usesSlotBadge ? nil : "号码未提供") {
+                Text(number)
                     .font(.system(size: 10)).monospacedDigit()
                     .lineLimit(1).minimumScaleFactor(0.65).privacySensitive()
             }
-            if let level {
-                HStack(alignment: .bottom, spacing: 1.5) {
-                    ForEach(0..<4, id: \.self) { bar in
-                        Capsule().opacity(bar < level ? 1 : 0.18)
-                            .frame(width: 2.5, height: 3 + CGFloat(bar) * 2.5)
-                    }
-                }.frame(height: 11)
-            } else {
-                Text(compact ? "—" : "信号未知").font(.system(size: compact ? 11 : 9)).foregroundStyle(.secondary)
+            if !usesSlotBadge {
+                signalGlyph
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(spokenLabel)
+    }
+
+    @ViewBuilder
+    private var signalGlyph: some View {
+        if let level, usesSignalDots {
+            HStack(spacing: 1) {
+                ForEach(0..<4, id: \.self) { dot in
+                    Circle().opacity(dot < level ? 1 : 0.18)
+                        .frame(width: 3, height: 3)
+                }
+            }
+        } else if let level {
+            HStack(alignment: .bottom, spacing: 1.5) {
+                ForEach(0..<4, id: \.self) { bar in
+                    Capsule().opacity(bar < level ? 1 : 0.18)
+                        .frame(width: 2.5, height: 3 + CGFloat(bar) * 2.5)
+                }
+            }.frame(height: 11)
+        } else {
+            Text(compact ? "—" : "信号未知")
+                .font(.system(size: compact ? 11 : 9))
+                .foregroundStyle(.secondary)
+        }
     }
 }

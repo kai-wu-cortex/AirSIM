@@ -290,6 +290,20 @@ final class DeviceCallActionRouter {
     func route(for key: DeviceCallKey) -> LockedDeviceCallRoute? { routes[key] }
     func contains(uuid: UUID) -> Bool { routes.values.contains { $0.systemUUID == uuid } }
     func retainedRoute(for uuid: UUID) -> LockedDeviceCallRoute? { routes.values.first { $0.systemUUID == uuid } }
+    /// A cold-launch cloud answer may win after a local ringing alias was bound.
+    /// Release only the unused alias, without sending a hangup or ending Telecom.
+    @discardableResult
+    func releaseIdlePresentation(systemUUID: UUID) -> DeviceCallKey? {
+        guard let route = route(for: systemUUID),
+              context.registry.active != route.key, context.media.owner != route.key,
+              context.registry.latestEvent(for: route.key)?.state == .ringing,
+              !pendingDials.contains(route.key), !pendingTerminations.contains(route.key) else { return nil }
+        // Retain the idle lane under a fresh presentation UUID. Removing it
+        // would let a late Telecom snapshot recreate the old cloud UUID.
+        routes[route.key] = .init(key: route.key, transport: route.transport, systemUUID: UUID())
+        return route.key
+    }
+
     func renewIdlePresentation(for key: DeviceCallKey) throws {
         guard context.registry.active == nil, context.registry.latestEvent(for: key)?.state == .ringing,
               let route = routes[key] else { throw DeviceCallRoutingError.stale }

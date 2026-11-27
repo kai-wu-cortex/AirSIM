@@ -537,9 +537,18 @@ func TestAgentHeartbeatReportsCellularStateWithoutSecrets(t *testing.T) {
 	}
 	if err := manager.sendHeartbeat(agentHeartbeatSnapshot{
 		ATOK: true, CellularState: "searching", CellularRegistration: "搜索中",
-		CellularRecovery: "正在自动选网", ECMCarrier: "1", SignalDBM: intPointer(-91),
+		CellularRecovery: "正在自动选网", ECMCarrier: "1", SignalDBM: intPointer(-91), SignalObservedAtMS: 1795660000000,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if received.SignalObservedAtMS != 1795660000000 {
+		t.Fatal("heartbeat retimestamped signal")
+	}
+	if err := manager.sendHeartbeat(agentHeartbeatSnapshot{ATOK: true, CellularState: "searching", SignalDBM: intPointer(-91), SignalObservedAtMS: 1795660000000}); err != nil {
+		t.Fatal(err)
+	}
+	if received.SignalObservedAtMS != 1795660000000 {
+		t.Fatal("repeated heartbeat renewed signal")
 	}
 	if received.Event != "agent_heartbeat" || received.CellularState != "searching" ||
 		received.DeviceSecret == "" || received.SignalDBM == nil || *received.SignalDBM != -91 {
@@ -629,5 +638,18 @@ func TestSMSAgentIdentitySurvivesReregistrationAndRecovery(t *testing.T) {
 	}
 	if newPushManager(path).config.AndroidAgentID != "explicit-new-agent" {
 		t.Fatal("explicit replacement was ignored")
+	}
+}
+
+func TestModemSignalObservationClearsUnknownSample(t *testing.T) {
+	var status modemStatus
+	observed := time.UnixMilli(1795660000000)
+	status.recordSignal("+CSQ: 29,99\r\nOK", observed)
+	if status.SignalDBM == nil || *status.SignalDBM != -55 || status.SignalObservedAtMS != observed.UnixMilli() {
+		t.Fatal("missing CSQ observation")
+	}
+	status.recordSignal("+CSQ: 99,99\r\nOK", observed.Add(time.Minute))
+	if status.SignalDBM != nil || status.SignalObservedAtMS != 0 {
+		t.Fatal("unknown CSQ retained a signal")
 	}
 }

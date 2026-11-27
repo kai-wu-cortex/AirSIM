@@ -112,6 +112,51 @@ enum IncomingSMSPresentationRequest {
     }
 }
 
+/// Resolve local notifications from durable history, and remote notifications only
+/// after the existing E2E validation. A local history reference is never trusted in APNs.
+struct IncomingSMSNotificationTarget {
+    static let localMessageIDKey = "airsim_local_sms_id"
+    let message: SMSMessage
+    let remoteSMS: IncomingRemoteSMS?
+
+    static func localUserInfo(for message: SMSMessage) -> [AnyHashable: Any] {
+        ["event": "incoming_sms", localMessageIDKey: message.id]
+    }
+
+    static func resolve(userInfo: [AnyHashable: Any], requestIdentifier: String,
+                        isRemote: Bool, storedMessages: [SMSMessage],
+                        keyStore: any E2EKeyStoring = KeychainE2EKeyStore.shared) -> Self? {
+        if isRemote {
+            guard let pushed = try? IncomingRemoteSMS(userInfo: userInfo, keyStore: keyStore) else { return nil }
+            return Self(message: pushed.message, remoteSMS: pushed)
+        }
+        let reference = userInfo[localMessageIDKey] as? String
+        let matches = storedMessages.filter { message in
+            guard !message.isOutgoing else { return false }
+            if let reference { return message.id == reference }
+            // Notifications delivered by older versions contain no userInfo.
+            guard let delivery = message.deliveryID, !delivery.isEmpty else { return false }
+            return requestIdentifier == SMSNotificationCoordinator.localIdentifier(
+                agentID: message.sourceAgentID, deliveryID: delivery)
+        }
+        guard matches.count == 1, let message = matches.first else { return nil }
+        return Self(message: message, remoteSMS: nil)
+    }
+
+    /// Save attention state before navigating, including cold launches and a
+    /// truncated push whose full body will arrive later through another route.
+    @discardableResult
+    func recordOpened(in store: LocalHistoryStore, legacySourceAgentID: String?) -> Bool {
+        if let pushed = remoteSMS, !pushed.contentTruncated,
+           store.ingestMessages([pushed.message], legacySourceAgentID: legacySourceAgentID) == nil {
+            return false
+        }
+        // Let history's authenticated alias migration resolve legacy identities;
+        // the currently selected/only paired device is not itself proof of origin.
+        return store.markMessagesRead([message])
+    }
+}
+
 /// 接收锁屏通知动作，并在系统授予的后台执行时间内直接控制模块通话。
 @MainActor
 final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @preconcurrency UNUserNotificationCenterDelegate {
@@ -288,18 +333,33 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
             NotificationCenter.default.post(name: .airsimOpenOtherAndroidCall, object: nil, userInfo: info)
             completionHandler(); return
         }
-        if response.notification.request.content.userInfo["event"] as? String == "incoming_sms" {
-            let userInfo = response.notification.request.content.userInfo
-            let pushed = try? IncomingRemoteSMS(userInfo: userInfo)
-            if let pushed {
+        let request = response.notification.request
+        let isRemoteSMS = request.trigger is UNPushNotificationTrigger
+        if request.content.userInfo["event"] as? String == "incoming_sms"
+            || (!isRemoteSMS && request.identifier.hasPrefix("airsim.sms.")) {
+            // Delivery, dismissal and unrelated actions are not evidence of reading.
+            guard actionIdentifier == UNNotificationDefaultActionIdentifier else {
+                completionHandler(); return
+            }
+            let target = IncomingSMSNotificationTarget.resolve(
+                userInfo: request.content.userInfo, requestIdentifier: request.identifier,
+                isRemote: isRemoteSMS, storedMessages: historyStore.loadMessages())
+            if let pushed = target?.remoteSMS {
                 SMSNotificationCoordinator.shared.markPush(agentID: pushed.agentID,
                                                             deliveryID: pushed.deliveryID)
-                if persistRemoteSMS(pushed) {
-                    NotificationCenter.default.post(name: .airsimRemoteSMSReceived, object: nil)
-                }
             }
-            // Encrypted pushes carry no plaintext sender; the decrypted one opens the conversation.
-            let sender = pushed?.sender ?? userInfo["sender"] as? String
+            if let target {
+                let saved = PairedAndroidDeviceStore.withSMSIdentitySnapshot { current in
+                    target.recordOpened(in: historyStore, legacySourceAgentID: current.uniqueAgentID)
+                }
+                if saved {
+                    refreshSMSWidgetSnapshot()
+                }
+                // Also reload an existing scene when the message was already stored/read.
+                NotificationCenter.default.post(name: .airsimRemoteSMSReceived, object: nil)
+            }
+            // Invalid/locked encrypted pushes may open the inbox, never a plaintext fallback sender.
+            let sender = target?.message.sender
             if let sender { IncomingSMSPresentationRequest.markPending(sender: sender) }
             NotificationCenter.default.post(
                 name: .airsimOpenSMSConversation,
@@ -379,6 +439,11 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
             historyStore.ingestMessages([pushed.message], legacySourceAgentID: current.uniqueAgentID)
         }
         guard let saved, saved.changed else { return false }
+        refreshSMSWidgetSnapshot()
+        return true
+    }
+
+    private func refreshSMSWidgetSnapshot() {
         // A background notification need not create a SwiftUI scene/AppModel.
         // Refresh counts from durable state without starting any connection.
         let store = AirSIMWidgetStore()
@@ -401,7 +466,6 @@ final class AirSIMNotificationDelegate: NSObject, UIApplicationDelegate, @precon
             }
         }
         if store.save(snapshot) { WidgetCenter.shared.reloadTimelines(ofKind: AirSIMWidgetSnapshot.kind) }
-        return true
     }
 }
 
@@ -483,6 +547,8 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
                   let pushedCall = CallKitController.shared.currentIncomingPush,
                   pushedCall.authenticatedMediaURL != nil {
             try await IPhoneCloudCallSession.shared.answer(pushedCall)
+            // didActivate can arrive before the media WebSocket is ready.
+            startAcceptedCloudAudioIfReady()
         } else if let api = await availableSamsungAPI() {
             try await api.answerCall()
         } else {
@@ -543,9 +609,20 @@ private final class ColdLaunchCallKitHandler: CallKitActionHandling {
     func callKitAudioSessionDidActivate() async {
         if VirtualCallTTSController.shared.isPrepared {
             VirtualCallTTSController.shared.start()
-        } else if IPhoneCloudCallSession.shared.hasActiveCall {
-            IPhoneCloudCallSession.shared.startAudioWithRetry()
+        } else {
+            startAcceptedCloudAudioIfReady()
         }
+    }
+    private func startAcceptedCloudAudioIfReady() {
+        let session = IPhoneCloudCallSession.shared
+        guard let incoming = session.call,
+              CallKitController.shared.matchesCurrentCall(callID: incoming.callID, uuid: incoming.uuid,
+                  agentID: incoming.agentID, generation: incoming.generation),
+              CloudCallAudioStartupPolicy.shouldStart(answered: session.answered,
+                  mediaPrepared: session.isPrepared, lifecycleState: session.lifecycleState,
+                  isOutgoing: incoming.isOutgoing, managedByCallKit: true,
+                  callKitAudioSessionActive: CallKitController.shared.audioSessionIsActive) else { return }
+        session.startAudioWithRetry()
     }
     func callKitAudioSessionDidDeactivate() {
         if VirtualCallTTSController.shared.isPrepared { VirtualCallTTSController.shared.stop() }
@@ -950,6 +1027,10 @@ final class SMSNotificationCoordinator {
     }
 
     func key(agentID: String?, deliveryID: String?) -> String {
+        Self.deliveryKey(agentID: agentID, deliveryID: deliveryID)
+    }
+
+    nonisolated private static func deliveryKey(agentID: String?, deliveryID: String?) -> String {
         let agent = agentID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let delivery = deliveryID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let raw = "\(agent)\u{0}\(delivery)"
@@ -958,6 +1039,10 @@ final class SMSNotificationCoordinator {
 
     func identifier(for key: String) -> String {
         "airsim.sms.\(key.prefix(40))"
+    }
+
+    nonisolated static func localIdentifier(agentID: String?, deliveryID: String?) -> String {
+        "airsim.sms.\(deliveryKey(agentID: agentID, deliveryID: deliveryID).prefix(40))"
     }
 
     func markPush(agentID: String?, deliveryID: String?) {
@@ -1070,6 +1155,7 @@ final class IncomingSMSNotifier {
         content.body = message.content
         content.sound = .default
         content.interruptionLevel = .active
+        content.userInfo = IncomingSMSNotificationTarget.localUserInfo(for: message)
         let request = UNNotificationRequest(
             identifier: claim.identifier,
             content: content,

@@ -3,6 +3,27 @@ import XCTest
 
 @MainActor
 final class DeviceCallActionRouterTests: XCTestCase {
+    func testCloudHandoffReleasesOnlyIdleAliasWithoutEndingAndroidCall() async throws {
+        let context = DeviceCallContext(), backend = DeviceBackendProbe(id: "A")
+        let router = DeviceCallActionRouter(context: context) { _, _ in backend }
+        let event = DeviceCallEvent(agentID: "A", callID: "handoff", state: .ringing,
+            transport: .vowlan, transportEpoch: backend.epoch)
+        let uuid = UUID()
+        let idle = try router.adoptIncoming(event, systemUUID: uuid, service: backend)
+        XCTAssertEqual(router.releaseIdlePresentation(systemUUID: uuid), idle.key)
+        XCTAssertFalse(router.contains(uuid: uuid))
+        _ = router.ingest(event, mode: .automatic)
+        XCTAssertNil(router.route(for: uuid), "A late local snapshot cannot reclaim the cloud system UUID")
+        XCTAssertNotNil(router.route(for: idle.key))
+        XCTAssertEqual(context.registry.latestEvent(for: idle.key)?.state, .ringing)
+        XCTAssertTrue(backend.commands.isEmpty, "Changing presentation ownership must not end the physical call")
+        let owned = try router.adoptIncoming(event, systemUUID: uuid, service: backend)
+        try await router.answer(owned.key)
+        XCTAssertNil(router.releaseIdlePresentation(systemUUID: uuid), "Never steal a local answer already in flight")
+        XCTAssertEqual(router.route(for: uuid)?.key, owned.key)
+        XCTAssertEqual(context.media.owner, owned.key)
+    }
+
     func testBluetoothPushMatchRequiresAuthenticatedExactIdentityAndLiveRing() {
         let push = IncomingVoIPCall(bluetoothCallID: "telecom", uuid: UUID(), generation: 1,
                                    number: "same-number", agentID: "A")
@@ -32,7 +53,10 @@ final class DeviceCallActionRouterTests: XCTestCase {
     func testBLEPushAdoptionPreservesPresentationAndUsesOnlyBLEBackend() async throws {
         let context = DeviceCallContext(), backend = DeviceBackendProbe(id: "A")
         let router = DeviceCallActionRouter(context: context) { agent, transport in
-            guard agent == "A", transport == .bluetooth else { XCTFail("wrong answer lane"); return nil }
+            guard agent == "A" else { XCTFail("wrong device"); return nil }
+            // The factory is also queried for route availability; nil means
+            // no WLAN service. Only actual backend commands establish the lane.
+            guard transport == .bluetooth else { return nil }
             return backend
         }
         let id = UUID()

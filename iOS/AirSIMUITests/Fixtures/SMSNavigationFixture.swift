@@ -49,11 +49,33 @@ struct SMSNavigationFixture {
             ? "【AirSIM测试】验证码：123456，5分钟内有效。请勿泄露。" : "test message"
         history.saveMessages([SMSMessage(sender: "sms-navigation-fixture", content: content,
             code: nil, timestamp: Date(timeIntervalSince1970: 1_790_000_000), deliveryID: "navigation-fixture")])
+        if ProcessInfo.processInfo.environment["AIRSIM_UI_MESSAGES_DESIGN"] == "1" {
+            let samples = [
+                "【天气提醒】未来三天可能出现强降雨，请留意当地天气预警，出行注意安全。如需了解更多信息，请访问 https://example.com/weather 。",
+                "【账单提醒】本月账单已生成。套餐、通话及短信明细可通过服务页面查询。客服电话 10010。",
+                "【安全提示】请保护个人信息，不向陌生人提供短信验证码。遇到可疑链接，请先通过官方渠道核实。",
+                "【服务通知】您的业务已办理成功。您可以在服务页面查看办理进度和详细说明，感谢使用。"
+            ]
+            let edgeSamples = ProcessInfo.processInfo.environment["AIRSIM_UI_SMS_EDGES"] == "1"
+                ? (0..<16).map { samples[$0 % samples.count] + samples[($0 + 1) % samples.count] }
+                : samples
+            history.saveMessages(edgeSamples.enumerated().map { index, text in
+                SMSMessage(sender: "10010", content: text, code: nil,
+                           timestamp: Date(timeIntervalSince1970: 1_790_000_000 + Double(index) * 86400))
+            })
+        }
         if ProcessInfo.processInfo.environment["AIRSIM_UI_SEARCH"] == "1" {
             history.saveMessages([
                 SMSMessage(sender: "2025550100", content: "pickup-token 123456", code: nil, timestamp: Date(timeIntervalSince1970: 100)),
                 SMSMessage(sender: "2025550100", content: "latest-only", code: nil, timestamp: Date(timeIntervalSince1970: 200)),
                 SMSMessage(sender: "3035550123", content: "travel-plan", code: nil, timestamp: Date(timeIntervalSince1970: 300))])
+        }
+        if ProcessInfo.processInfo.environment["AIRSIM_UI_INBOX_EDGES"] == "1" {
+            let rows = (0..<24).map { index in
+                SMSMessage(sender: "inbox-edge-\(index)", content: "滚动边缘测试 \(index)", code: nil,
+                           timestamp: Date(timeIntervalSince1970: 1_780_000_000 - Double(index) * 60))
+            }
+            history.saveMessages(history.loadMessages() + rows)
         }
         let contactCache = ContactCacheStore(fileURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("AirSIM-UI-contacts-\(UUID().uuidString).json"))

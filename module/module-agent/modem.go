@@ -9,20 +9,21 @@ import (
 
 // modemStatus 只暴露 iPad 客户端需要的稳定字段，原始 AT 响应不会写入日志或网络。
 type modemStatus struct {
-	IMEI             string `json:"imei,omitempty"`
-	Firmware         string `json:"firmware,omitempty"`
-	ICCID            string `json:"iccid,omitempty"`
-	IMSI             string `json:"imsi,omitempty"`
-	Operator         string `json:"operator,omitempty"`
-	SIMInserted      bool   `json:"sim_inserted"`
-	SignalDBM        *int   `json:"signal_dbm"`
-	NetworkMode      string `json:"network_mode,omitempty"`
-	RadioBand        string `json:"radio_band,omitempty"`
-	RegistrationText string `json:"reg_status_text,omitempty"`
-	CellularState    string `json:"cellular_state,omitempty"`
-	RecoveryState    string `json:"cellular_recovery,omitempty"`
-	LastRegisteredAt string `json:"last_registered_at,omitempty"`
-	LastError        string `json:"-"`
+	IMEI               string `json:"imei,omitempty"`
+	Firmware           string `json:"firmware,omitempty"`
+	ICCID              string `json:"iccid,omitempty"`
+	IMSI               string `json:"imsi,omitempty"`
+	Operator           string `json:"operator,omitempty"`
+	SIMInserted        bool   `json:"sim_inserted"`
+	SignalDBM          *int   `json:"signal_dbm"`
+	SignalObservedAtMS int64  `json:"signal_observed_at_ms,omitempty"`
+	NetworkMode        string `json:"network_mode,omitempty"`
+	RadioBand          string `json:"radio_band,omitempty"`
+	RegistrationText   string `json:"reg_status_text,omitempty"`
+	CellularState      string `json:"cellular_state,omitempty"`
+	RecoveryState      string `json:"cellular_recovery,omitempty"`
+	LastRegisteredAt   string `json:"last_registered_at,omitempty"`
+	LastError          string `json:"-"`
 }
 
 var (
@@ -91,6 +92,7 @@ func (a *agent) refreshModemDynamic() {
 	cpin, cpinOK := run("AT+CPIN?")
 	operator, operatorOK := run("AT+COPS?")
 	signal, signalOK := run("AT+CSQ")
+	signalObservedAt := time.Now()
 	network, networkOK := run("AT+QNWINFO")
 	registrationResponse, registrationOK := run("AT+CEREG?")
 	registration := parseRegistration(registrationResponse)
@@ -107,7 +109,7 @@ func (a *agent) refreshModemDynamic() {
 		a.modem.Operator = normalizeOperator(parseOperator(operator))
 	}
 	if signalOK {
-		a.modem.SignalDBM = parseSignalDBM(signal)
+		a.modem.recordSignal(signal, signalObservedAt)
 	}
 	if networkOK {
 		a.modem.NetworkMode, a.modem.RadioBand = parseNetworkInfo(network)
@@ -123,6 +125,16 @@ func (a *agent) refreshModemDynamic() {
 	a.mu.Unlock()
 	if registrationOK {
 		a.observeCellularRegistration(registration, "poll")
+	}
+}
+
+// Timestamp the actual CSQ observation, never the heartbeat or UI refresh.
+// A failed command leaves the previous sample to expire; CSQ 99 clears it.
+func (m *modemStatus) recordSignal(response string, observedAt time.Time) {
+	m.SignalDBM = parseSignalDBM(response)
+	m.SignalObservedAtMS = 0
+	if m.SignalDBM != nil {
+		m.SignalObservedAtMS = observedAt.UnixMilli()
 	}
 }
 

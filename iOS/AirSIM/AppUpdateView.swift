@@ -13,6 +13,12 @@ enum AppReleaseNotes {
     // Bundled: showing installed-version notes never needs GitHub, Relay or pairing.
     // Keep this summary in sync with the candidate's source and docs when publishing.
     static let items = [
+        "短信列表增加日期与时间；点通知进入会话后同步已读状态，返回列表和小组件不再保留该条未读标记。",
+        "短信会话采用连续的页面过渡、随手势返回和上下渐进模糊；优化输入栏与底部标签切换，减少跳动。",
+        "发送结果待确认时使用中文说明并保留编辑内容，不自动重复发送；发送成功后显示发信记录。",
+        "灵动岛可分别开关手机号与信号；紧凑双卡使用上方信号柱和下方圆点，不显示卡号数字。",
+        "完善锁屏云端接听、返回 App 的通话接管及音频启动；恢复连接与设备中的 Relay 地址配置入口。",
+        "云端模块信号按设备和实际采样时间展示，需要配套更新 Relay 与模块 Agent；过期或未知信号不冒充零格。",
         "新增已保存端点管理，可单独删除失效地址；同一设备、同一主机和传输类型的新端口验证成功后替换旧端口。",
         "号码不再因信号未知或过期而消失，按 SIM 显示已有号码和各卡信号；修复双卡信号采样混用。",
         "移除配对设备和小组件设备目录的数量限制；灵动岛仍按页展示。",
@@ -21,7 +27,7 @@ enum AppReleaseNotes {
         "恢复熟悉的拨号、最近通话、短信头像与通话界面；保留通话、短信和连接修复。",
         "修复 iPhone 与 Watch 已确认的 PushKit 来电上报崩溃路径；仍需真实锁屏来电回归。",
         "完善 Root 短信逐段系统回执与安全回退；修复云端 SIM 标识兼容和呼出接通状态处理。",
-        "灵动岛与桌面小组件展示各张 SIM 的信号；需要新版安卓上报，无可靠采样时显示未知。",
+        "灵动岛与桌面小组件展示各张 SIM 的有效信号；需要兼容安卓上报，无可靠采样时隐藏信号。",
         "蓝牙来电会等待已配对设备恢复认证，再沿蓝牙链路接听；固定蓝牙模式不改用云端接听。",
         "优化蓝牙运营商接通前语音的合包与传输节奏；保留只接收音频、不提前计时和不开启麦克风。",
         "修复部分安卓短信 SIM 映射与发送回执，发送结果不确定时不重复发送；确认成功后保留 iPhone 发信记录。",
@@ -116,6 +122,24 @@ private struct NewFeaturePage: Identifiable {
 private enum NewFeatureCatalog {
     static let pages: [NewFeaturePage] = [
         NewFeaturePage(
+            id: 16, kicker: "短信阅读与交互",
+            title: "何时收到，\n是否已读，一眼清楚",
+            body: "列表同时显示日期和时间。点通知进入会话后同步已读；滑动返回与输入栏过渡更连贯，顶部和底部以渐进模糊衔接。",
+            symbol: "message", accent: .green, demo: .smsReading
+        ),
+        NewFeaturePage(
+            id: 17, kicker: "灵动岛双卡与隐私",
+            title: "两张卡的信号，\n更紧凑地看",
+            body: "紧凑态上方为 SIM 1 信号柱，下方为 SIM 2 圆点，不显示数字角标。手机号与信号可分别开关；无可靠采样时隐藏信号，不影响已有号码。",
+            symbol: "cellularbars", accent: .cyan, demo: .simPrivacy
+        ),
+        NewFeaturePage(
+            id: 18, kicker: "云端接听与设置",
+            title: "锁屏接听，\n返回仍是同一通电话",
+            body: "优化系统接听后的通话状态与音频接管。Relay 地址入口恢复到连接与设备；模块云端信号还需配套更新 Relay 和 Agent。",
+            symbol: "phone.connection", accent: .blue, demo: .connectionModes
+        ),
+        NewFeaturePage(
             id: 14, kicker: "端点管理",
             title: "清理旧地址，\n保留设备配对",
             body: "在地址与配对信息中删除失效端点。相同主机的新端口验证成功后替换旧端口，不清除短信、通话记录或配对密钥。通话中暂不可删除。",
@@ -130,7 +154,7 @@ private enum NewFeatureCatalog {
         NewFeaturePage(
             id: 12, kicker: "多卡信号与稳定性",
             title: "分卡查看信号，\n确认短信发送结果",
-            body: "灵动岛和小组件显示各张 SIM 的信号，旧端或过期采样显示未知。完善系统短信回执，并修复已确认的 iPhone 与 Watch 来电上报崩溃路径。需配套更新。",
+            body: "灵动岛和小组件显示各张 SIM 的有效信号，未知或过期采样不占用信号位置。完善系统短信回执，并修复已确认的 iPhone 与 Watch 来电上报崩溃路径。需配套更新。",
             symbol: "antenna.radiowaves.left.and.right", accent: .green, demo: .simSignals
         ),
         NewFeaturePage(
@@ -328,7 +352,7 @@ private struct NewFeaturePageView: View {
 
 
 private enum NewFeatureDemo: String {
-    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications, bluetoothRecovery, smsReceipt, simSignals, endpointManagement
+    case u30Air, widgetSummary, publicTLS, unreadBadges, connectionModes, settingsOverview, audioBuffer, carrierAudio, secureNotifications, bluetoothRecovery, smsReceipt, simSignals, endpointManagement, smsReading, simPrivacy
 }
 
 private struct FeatureDemoView: View {
@@ -410,6 +434,8 @@ private enum FeatureDemoHTML {
     static func html(for demo: NewFeatureDemo, animated: Bool) -> String {
         let illustration: String
         switch demo {
+        case .smsReading: illustration = smsReading
+        case .simPrivacy: illustration = simPrivacy
         case .endpointManagement: illustration = endpointManagement
         case .simSignals: illustration = simSignals
         case .bluetoothRecovery: illustration = bluetoothRecovery
@@ -453,6 +479,28 @@ private enum FeatureDemoHTML {
         """
     }
 
+    private static let smsReading = """
+    <rect x="18" y="20" width="324" height="180" rx="26" fill="#152D29"/>
+    <text x="40" y="52" fill="#BDE6CD" font-size="14">短信 · 阅读状态示意</text>
+    <rect x="38" y="67" width="284" height="71" rx="18" fill="#254537"/>
+    <circle cx="64" cy="98" r="16" fill="#6A97AD"/>
+    <text x="91" y="93" fill="white" font-size="16">示例联系人</text>
+    <text x="91" y="117" fill="#BDE6CD" font-size="12">点通知进入会话</text>
+    <text x="300" y="92" text-anchor="end" fill="#D7E9DF" font-size="13">11月27日</text>
+    <text x="300" y="114" text-anchor="end" fill="#A4C1AF" font-size="12">10:21</text>
+    <g class="mode-a"><circle cx="95" cy="165" r="4" fill="#42D985"/><text x="110" y="170" fill="white" font-size="14">未读 → 打开会话</text></g>
+    <g class="mode-b"><path d="M88 163l6 6 12-14" stroke="#42D985" stroke-width="3" fill="none"/><text x="115" y="170" fill="#BDE6CD" font-size="14">已读 · 返回列表已同步</text></g>
+    """
+
+    private static let simPrivacy = """
+    <rect x="18" y="20" width="324" height="180" rx="26" fill="#142535"/>
+    <rect x="84" y="42" width="192" height="66" rx="33" fill="#02080C" stroke="#345970"/>
+    <path d="M105 65q15-13 30 0m-25 5q10-8 20 0m-15 5q5-3 10 0" stroke="#42D985" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <g fill="#42D985"><rect x="223" y="68" width="5" height="7" rx="2"/><rect x="231" y="63" width="5" height="12" rx="2"/><rect x="239" y="58" width="5" height="17" rx="2"/><rect x="247" y="53" width="5" height="22" rx="2"/><circle cx="225.5" cy="84" r="2.5"/><circle cx="233.5" cy="84" r="2.5"/><circle cx="241.5" cy="84" r="2.5"/></g><circle cx="249.5" cy="84" r="2.5" fill="#345044"/>
+    <text x="42" y="142" fill="white" font-size="14">显示手机号</text><rect x="271" y="126" width="43" height="23" rx="12" fill="#435363"/><circle cx="283" cy="137.5" r="9" fill="white"/>
+    <text x="42" y="177" fill="white" font-size="14">显示信号</text><rect x="271" y="161" width="43" height="23" rx="12" fill="#35C96F"/><circle cx="302" cy="172.5" r="9" fill="white"/>
+    """
+
     private static let endpointManagement = """
     <rect x="18" y="20" width="324" height="180" rx="26" fill="#172B33"/>
     <text x="40" y="50" fill="#C3E7F5" font-size="15">同一设备 · 地址与配对信息</text>
@@ -468,7 +516,7 @@ private enum FeatureDemoHTML {
     <text x="30" y="99" fill="white" font-size="13">SIM 1 · 10086</text><text x="30" y="155" fill="white" font-size="13">SIM 2 · 10010</text>
     <g fill="#42D985"><rect x="160" y="88" width="17" height="8" rx="3"/><rect x="184" y="80" width="17" height="16" rx="3"/><rect x="208" y="72" width="17" height="24" rx="3"/><rect x="232" y="64" width="17" height="32" rx="3"/></g>
     <g fill="#6ECBF7"><rect x="160" y="144" width="17" height="8" rx="3"/><rect x="184" y="136" width="17" height="16" rx="3"/></g><g fill="#455962"><rect x="208" y="128" width="17" height="24" rx="3"/><rect x="232" y="120" width="17" height="32" rx="3"/></g>
-    <text class="reveal" x="180" y="184" text-anchor="middle" fill="#C3E7F5" font-size="12">信号过期显示未知 · 已有号码继续保留</text>
+    <text class="reveal" x="180" y="184" text-anchor="middle" fill="#C3E7F5" font-size="12">隐藏过期信号 · 已有号码继续保留</text>
     """
 
     private static let bluetoothRecovery = """

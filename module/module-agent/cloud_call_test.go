@@ -253,3 +253,39 @@ func TestCloudMediaTransportFallsBackUnlessRequestedProtocolIsSupported(t *testi
 		t.Fatalf("强制回退时传输=%q，期望 legacy_pcm", got)
 	}
 }
+
+func TestCloudRelayNotificationsAreNotCallCommands(t *testing.T) {
+	for _, event := range []string{"peer_connected", "owner_claimed", "peer_disconnected"} {
+		for _, role := range []string{"agent", "iphone", "watch"} {
+			if !isCloudRelayNotification([]byte(`{"event":"` + event + `","role":"` + role + `"}`)) {
+				t.Fatalf("Relay notification rejected: %s/%s", event, role)
+			}
+		}
+	}
+}
+
+func TestCloudRelayNotificationCannotHideInvalidControl(t *testing.T) {
+	for _, payload := range []string{
+		`null`, `[]`, `{`,
+		`{"event":"peer_connected"}`,
+		`{"event":"unknown","role":"iphone"}`,
+		`{"event":"peer_connected","role":"unknown"}`,
+		`{"event":"peer_connected","role":42}`,
+		`{"event":"peer_connected","role":"iphone","action":"answer","call_id":"old"}`,
+		`{"event":"owner_claimed","role":"iphone","call_id":"old"}`,
+	} {
+		if isCloudRelayNotification([]byte(payload)) {
+			t.Fatalf("Invalid command was hidden as status: %s", payload)
+		}
+		if _, err := decodeCloudCallAction([]byte(payload), "current"); err == nil {
+			t.Fatalf("Invalid command passed identity validation: %s", payload)
+		}
+	}
+	payload := []byte(`{"event":"owner_claimed","role":"iphone","action":"answer","call_id":"current","owner":"iphone"}`)
+	if isCloudRelayNotification(payload) {
+		t.Fatal("Command must not be swallowed even if it contains a known event")
+	}
+	if action, err := decodeCloudCallAction(payload, "current"); err != nil || action.Action != "answer" {
+		t.Fatalf("Valid bound command must still execute: %v", err)
+	}
+}

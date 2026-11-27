@@ -240,3 +240,44 @@ final class SMSConversationPresentationTests: XCTestCase {
         XCTAssertEqual(selection.selectedMessages(in: [late, tieB, unselected, tieA]), [tieA, tieB, late])
     }
 }
+
+final class SMSSubmissionFeedbackTests: XCTestCase {
+    func testUnknownReceiptKeepsOriginalDeviceWideProtectionDeadline() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let first = SMSSubmissionFeedback.make(
+            detail: "SMS submission not confirmed; check recipient before retrying; no automatic resend",
+            recipient: "10010", startedAt: start, now: start.addingTimeInterval(70))
+        XCTAssertEqual(first.kind, .uncertain)
+        XCTAssertEqual(first.remainingSeconds(at: start.addingTimeInterval(70)), 50)
+        XCTAssertTrue(first.isVisible(for: "10086", at: start.addingTimeInterval(70)))
+        let blocked = SMSSubmissionFeedback.make(
+            detail: "previous SMS outcome unknown; check recipient before retrying after two minutes",
+            recipient: "10010", startedAt: start.addingTimeInterval(80),
+            now: start.addingTimeInterval(81), previous: first)
+        XCTAssertEqual(blocked.retryAfter, first.retryAfter)
+        XCTAssertEqual(first.remainingSeconds(at: start.addingTimeInterval(121)), 0)
+        XCTAssertTrue(first.isVisible(for: "10010", at: start.addingTimeInterval(121)))
+        XCTAssertFalse(first.isVisible(for: "10086", at: start.addingTimeInterval(121)))
+        XCTAssertEqual(first.kind, .uncertain, "Expiry is not evidence of delivery")
+    }
+
+    func testAndroidUncertaintyDoesNotInheritMU300ProtectionPolicy() {
+        let now = Date()
+        let feedback = SMSSubmissionFeedback.make(detail: "短信发送结果尚未确认", recipient: "10010", startedAt: now, now: now)
+        XCTAssertEqual(feedback.kind, .uncertain)
+        XCTAssertNil(feedback.retryAfter)
+        XCTAssertTrue(feedback.message.contains("草稿已保留"))
+    }
+
+    func testOldClientProtectionAndUnknownEnglishErrorsUseChinese() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let protected = SMSSubmissionFeedback.make(
+            detail: "previous SMS outcome unknown; check recipient before retrying after two minutes",
+            recipient: "10010", startedAt: now, now: now)
+        XCTAssertEqual(protected.remainingSeconds(at: now), 120)
+        XCTAssertTrue(protected.message.contains("不会自动重发"))
+        let unknown = SMSSubmissionFeedback.make(detail: "unexpected transport error", recipient: "10010", startedAt: now, now: now)
+        XCTAssertFalse(unknown.message.contains("transport"))
+        XCTAssertNil(unknown.retryAfter)
+    }
+}
