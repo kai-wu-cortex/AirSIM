@@ -4,10 +4,12 @@ import java.io.IOException;
 
 /** One remote-call mute cycle; the backend runs with Shizuku shell/root identity. */
 final class LocalOutputMuteController {
-    enum Strategy { MUTE, MINIMUM_VOLUME, MINIMUM_NONZERO_VOLUME, PRESERVE_VOLUME }
+    enum Strategy { MUTE, MINIMUM_VOLUME, MINIMUM_NONZERO_VOLUME, PRESERVE_VOLUME, ISOLATE_LOCAL }
     static Strategy configuredStrategy(String selection, String manufacturer, String model) {
+        if ("isolate".equals(selection)) return Strategy.ISOLATE_LOCAL;
         if ("preserve".equals(selection)) return Strategy.PRESERVE_VOLUME;
         if ("minimum".equals(selection)) return Strategy.MINIMUM_NONZERO_VOLUME;
+        // Physical isolation is experimental and requires an explicit user selection.
         // Issue #26 reports Pixel 6 specifically. Do not infer other HALs from
         // chipset/vendor alone or detect coupling from a moment of silent PCM.
         if ("google".equalsIgnoreCase(manufacturer) && "pixel 6".equalsIgnoreCase(model))
@@ -15,6 +17,7 @@ final class LocalOutputMuteController {
         return strategyForManufacturer(manufacturer);
     }
     static Strategy wireStrategy(String policy) throws IOException {
+        if ("isolate_local".equals(policy)) return Strategy.ISOLATE_LOCAL;
         if ("preserve_volume".equals(policy)) return Strategy.PRESERVE_VOLUME;
         if ("minimum_nonzero_volume".equals(policy)) return Strategy.MINIMUM_NONZERO_VOLUME;
         throw new IOException("unsupported audio volume policy");
@@ -69,6 +72,7 @@ final class LocalOutputMuteController {
     private boolean requiresUnmutedCapture() { return strategy == Strategy.MINIMUM_NONZERO_VOLUME; }
     static String policyName(Strategy strategy) {
         return switch (strategy) {
+            case ISOLATE_LOCAL -> "isolate_local";
             case PRESERVE_VOLUME -> "preserve_volume";
             case MUTE -> "mute";
             case MINIMUM_VOLUME -> "minimum_volume";
@@ -78,6 +82,8 @@ final class LocalOutputMuteController {
     String policyName() { return policyName(strategy); }
     int targetMinimumVolume() { return targetMinimum; }
     String setMuted(boolean muted) throws Exception {
+        if (strategy == Strategy.ISOLATE_LOCAL)
+            throw new IOException("independent audio isolation requires its dedicated controller");
         if (strategy == Strategy.PRESERVE_VOLUME) {
             started = muted;
             // Neither the initial request, watchdog nor hangup owns the user's

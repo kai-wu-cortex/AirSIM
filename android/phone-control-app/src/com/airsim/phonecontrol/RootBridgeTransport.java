@@ -124,6 +124,10 @@ final class RootBridgeTransport implements PrivilegedBridgeCoordinator.Transport
         return request("audio_snapshot", new JSONObject());
     }
 
+    @Override public void renewIsolationLease() throws Exception {
+        request("renew_isolation", new JSONObject());
+    }
+
     String ensureDialerRole() throws Exception {
         return request("ensure_dialer_role", new JSONObject());
     }

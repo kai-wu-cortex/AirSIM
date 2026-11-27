@@ -41,10 +41,22 @@ public final class ShizukuBridgeUserService extends Binder {
     private boolean standalonePCM;
     private java.lang.Process bridgeProcess;
     private boolean bridgeDesired;
-    private boolean shuttingDown;
+    private volatile boolean shuttingDown;
     private android.net.LocalServerSocket bridgeOwnership;
     private Context serviceContext;
     private volatile LocalOutputMuteController outputMute;
+    private volatile LocalAudioIsolationController localIsolation;
+    private LocalAudioIsolationController.Store isolationStore;
+    private final IsolationLease isolationLease = new IsolationLease();
+    private java.util.function.LongSupplier isolationClock = () -> System.nanoTime() / 1_000_000L;
+    private final java.util.concurrent.ScheduledExecutorService audioRecovery =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "AirSIM-isolation-recovery"); thread.setDaemon(true); return thread;
+            });
+    private java.util.concurrent.ScheduledFuture<?> recoveryTask;
+    private int recoveryFailures;
+    private long nextRecoveryMillis;
+    private final java.util.concurrent.CountDownLatch shutdownComplete = new java.util.concurrent.CountDownLatch(1);
     private volatile String outputStrategy = "vowlan";
     private volatile CallOutputPolicyMute callOutputPolicyMute;
     private final PCMHealthEvidence pcmEvidence = new PCMHealthEvidence();
@@ -84,6 +96,7 @@ public final class ShizukuBridgeUserService extends Binder {
                 }
                 case PrivilegedBridgeProtocol.TRANSACTION_SET_LOCAL_OUTPUT_POLICY ->
                         setLocalOutputMuted(data.readInt() != 0, data.readString(), data.readString());
+                case PrivilegedBridgeProtocol.TRANSACTION_RENEW_ISOLATION_LEASE -> renewIsolationLease();
                 case PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE -> ensureDialerRole();
                 case PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT -> audioSnapshot();
                 case PrivilegedBridgeProtocol.TRANSACTION_SEND_SMS ->
@@ -238,7 +251,7 @@ public final class ShizukuBridgeUserService extends Binder {
         }
     }
 
-    private String ensureBridgeStarted() throws IOException {
+    private synchronized String ensureBridgeStarted() throws IOException {
         synchronized (lock) {
             verifyIdentity();
             if (shuttingDown) throw new IOException("privileged service is stopping");
@@ -256,6 +269,13 @@ public final class ShizukuBridgeUserService extends Binder {
             if (bridgeOwnership == null) {
                 bridgeOwnership = new android.net.LocalServerSocket("airsim-pcm-owner-" + packageName);
             }
+        }
+        // Recovery belongs to the exclusive PCM owner. A second supervisor must
+        // never restore a journal belonging to the first supervisor's live call.
+        // Do not hold lock while acquiring audioLock (shutdown takes them in reverse).
+        try { recoverInterruptedIsolation(); }
+        catch (Exception error) { throw new IOException("上次本机音频隔离尚未恢复，请稍后重试", error); }
+        synchronized (lock) {
             stopStaleAudioBridges();
             List<String> command = new ArrayList<>();
             command.add("/system/bin/app_process");
@@ -370,13 +390,37 @@ public final class ShizukuBridgeUserService extends Binder {
     private String setLocalOutputMuted(boolean muted, String transport, String policy) throws Exception {
         synchronized (audioLock) {
             verifyIdentity();
+            if (muted && shuttingDown) throw new IOException("privileged service is stopping");
             LocalOutputMuteController.Strategy desired = LocalOutputMuteController.wireStrategy(policy);
             outputStrategy = "voble".equals(transport) ? "voble" : "vowlan";
+            if (localIsolation != null && (!muted || desired != LocalOutputMuteController.Strategy.ISOLATE_LOCAL)) {
+                isolationLease.revoke();
+                localIsolation.setIsolated(false);
+                localIsolation = null;
+                if (!muted && outputMute == null) return "local_audio_isolation_restored verified=true";
+            }
             if (!muted) {
                 if (outputMute == null) return "local_output_unchanged";
                 String result = outputMute.setMuted(false);
                 outputMute = null;
                 return result;
+            }
+            if (desired == LocalOutputMuteController.Strategy.ISOLATE_LOCAL) {
+                synchronized (lock) {
+                    if (bridgeOwnership == null)
+                        throw new IOException("experimental isolation requires exclusive PCM ownership");
+                }
+                if (outputMute != null) {
+                    outputMute.setMuted(false);
+                    outputMute = null;
+                }
+                AudioManager audio = shellAudioManager();
+                if (audioOperations.run(audio::getMode) != AudioManager.MODE_IN_CALL)
+                    throw new IOException("physical audio isolation requires an answered carrier call");
+                if (localIsolation == null) localIsolation = new LocalAudioIsolationController(isolationBackend(audio), isolationStore());
+                isolationLease.renew(isolationClock.getAsLong());
+                scheduleAudioRecovery();
+                return localIsolation.setIsolated(true);
             }
             if (outputMute != null && !outputMute.policyName().equals(policy)) {
                 // Restore the previous reduction before preserving user volume.
@@ -389,6 +433,103 @@ public final class ShizukuBridgeUserService extends Binder {
             // obey this separate, user-selected output/capture policy.
             return outputMute.setMuted(true);
         }
+    }
+
+    private LocalAudioIsolationController.Store isolationStore() throws Exception {
+        if (isolationStore == null) isolationStore = IsolationRecoveryJournal.forPackage(packageName);
+        return isolationStore;
+    }
+
+    /** Restore a persisted same-boot snapshot before a restarted bridge accepts new media. */
+    private void recoverInterruptedIsolation() throws Exception {
+        synchronized (audioLock) {
+            if (localIsolation != null) {
+                if (localIsolation.restoring() || isolationLease.expired(isolationClock.getAsLong())) {
+                    localIsolation.setIsolated(false);
+                    localIsolation = null;
+                }
+                return;
+            }
+            if (isolationStore == null && (packageName.isEmpty() || !IsolationRecoveryJournal.hasSavedState(packageName))) return;
+            if (isolationStore().read() == null) return;
+            localIsolation = new LocalAudioIsolationController(isolationBackend(shellAudioManager()), isolationStore());
+            isolationLease.revoke();
+            scheduleAudioRecovery();
+            localIsolation.setIsolated(false);
+            localIsolation = null;
+        }
+    }
+
+    private String renewIsolationLease() throws IOException {
+        synchronized (audioLock) {
+            verifyIdentity();
+            if (shuttingDown) throw new IOException("privileged service is stopping");
+            // Renewal cannot reapply isolation after expiry, failed cleanup, or another call.
+            if (localIsolation != null && !localIsolation.restoring()
+                    && !isolationLease.expired(isolationClock.getAsLong()))
+                isolationLease.renew(isolationClock.getAsLong());
+            return "isolation_lease_checked";
+        }
+    }
+
+    /** Also runs after the App dies; no App callback or successful PCM query is required. */
+    private void scheduleAudioRecovery() {
+        if (recoveryTask == null || recoveryTask.isDone())
+            recoveryTask = audioRecovery.scheduleWithFixedDelay(this::recoverAudioTick, 1, 1, TimeUnit.SECONDS);
+    }
+
+    private void recoverAudioTick() {
+        synchronized (audioLock) {
+            if (isolationClock.getAsLong() < nextRecoveryMillis) return;
+            if (shuttingDown) { finishAudioShutdown(); return; }
+            if (localIsolation == null) {
+                if (recoveryTask != null) recoveryTask.cancel(false);
+                recoveryTask = null;
+                return;
+            }
+            if (!localIsolation.restoring() && !isolationLease.expired(isolationClock.getAsLong())) return;
+            isolationLease.revoke();
+            try {
+                localIsolation.setIsolated(false);
+                localIsolation = null;
+                recoveryFailures = 0;
+                nextRecoveryMillis = 0;
+                Log.i(TAG, "experimental isolation restored after lease loss or failed operation");
+            } catch (Exception error) {
+                // Bounded operations cannot interrupt a late OEM write. Keep the original
+                // snapshot and executor alive so the next tick restores AFTER that write.
+                Log.w(TAG, "experimental isolation restoration pending", error);
+                deferAudioRecovery();
+            }
+        }
+    }
+
+    private void deferAudioRecovery() {
+        // Keep the recoverable snapshot, but do not hammer a failing OEM audio service.
+        long delay = Math.min(10_000L, 1_000L << Math.min(recoveryFailures++, 4));
+        recoveryFailures = Math.min(recoveryFailures, 5);
+        nextRecoveryMillis = isolationClock.getAsLong() + delay;
+    }
+
+    private LocalAudioIsolationController.Api isolationBackend(AudioManager audio) throws Exception {
+        SystemCallOutputPolicy policy = new SystemCallOutputPolicy();
+        return new LocalAudioIsolationController.Api() {
+            public boolean microphoneMuted() throws Exception {
+                return audioOperations.run(audio::isMicrophoneMute);
+            }
+            public void microphoneMuted(boolean muted) throws Exception {
+                audioOperations.run(() -> { audio.setMicrophoneMute(muted); return null; });
+            }
+            public boolean streamMuted() throws Exception {
+                return audioOperations.run(() -> audio.isStreamMute(AudioManager.STREAM_VOICE_CALL));
+            }
+            public int index(int device) throws Exception {
+                return audioOperations.run(() -> policy.index(device));
+            }
+            public void set(int device, int index, boolean muted) throws Exception {
+                audioOperations.run(() -> { policy.set(device, index, muted); return null; });
+            }
+        };
     }
 
     private LocalOutputMuteController.Backend audioBackend() throws Exception {
@@ -456,10 +597,20 @@ public final class ShizukuBridgeUserService extends Binder {
                 + " mode=" + audio.getMode() + " speaker=" + audio.isSpeakerphoneOn()
                 + " pcm=" + pcmRunning + " output_transport=" + outputStrategy + " output_policy="
                 + outputPolicyDiagnostic()
+                + isolationSnapshot(audio)
                 + " " + pcmEvidence.snapshot());
     }
 
+    /** Called inside the bounded read operation; do not nest an audioOperations.run here. */
+    private String isolationSnapshot(AudioManager audio) throws Exception {
+        if (localIsolation == null) return "";
+        SystemCallOutputPolicy policy = new SystemCallOutputPolicy();
+        return " mic_muted=" + audio.isMicrophoneMute()
+                + " earpiece_index=" + policy.index(1) + " speaker_index=" + policy.index(2);
+    }
+
     private String outputPolicyDiagnostic() {
+        if (localIsolation != null) return "isolate_local";
         LocalOutputMuteController current = outputMute;
         if (current != null)
             return current.policyName() + (current.usesMinimumVolume()
@@ -524,9 +675,10 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String statusLocked() {
         return "uid=" + Process.myUid()
-                + " service_revision=12"
+                + " service_revision=14"
                 + " pcm=" + (bridgeProcess != null && bridgeProcess.isAlive() ? "running" : "stopped")
-                + " local_output=" + (outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
+                + " local_output=" + (localIsolation != null && localIsolation.verified() ? "isolated"
+                    : outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
                     : outputMute != null && outputMute.isVerifiedMuted() ? "muted" : "normal")
                 + " output_policy=" + outputPolicyDiagnostic()
                 + " " + pcmEvidence.snapshot();
@@ -540,12 +692,13 @@ public final class ShizukuBridgeUserService extends Binder {
 
     public void destroy() {
         shutdown();
-        System.exit(0);
+        if (shutdownComplete.getCount() == 0) System.exit(0);
+        else new Thread(() -> { awaitShutdown(); System.exit(0); }, "AirSIM-audio-exit").start();
     }
 
     synchronized void shutdown() {
         synchronized (lock) {
-            if (shuttingDown) return;
+            if (shuttingDown) { return; } // Recovery continues independently until verified.
             shuttingDown = true;
             bridgeDesired = false;
             if (bridgeProcess != null) {
@@ -559,15 +712,41 @@ public final class ShizukuBridgeUserService extends Binder {
             }
             bridgeProcess = null;
         }
-        try { setLocalOutputMuted(false); }
-        catch (Throwable error) { Log.w(TAG, "restore output during destroy failed", error); }
-        audioOperations.close();
-        synchronized (lock) {
-            if (bridgeOwnership != null) {
-                try { bridgeOwnership.close(); } catch (IOException ignored) {}
-                bridgeOwnership = null;
-            }
+        synchronized (audioLock) {
+            isolationLease.revoke();
+            finishAudioShutdown();
         }
+    }
+
+    /** Keep both the recovery worker and PCM ownership until the original state is restored. */
+    private void finishAudioShutdown() {
+        if (shutdownComplete.getCount() == 0) return;
+        try {
+            setLocalOutputMuted(false);
+            synchronized (lock) {
+                if (bridgeOwnership != null) {
+                    try { bridgeOwnership.close(); }
+                    catch (IOException error) { Log.w(TAG, "PCM ownership close failed", error); }
+                    bridgeOwnership = null;
+                }
+            }
+            audioOperations.close();
+            audioRecovery.shutdown();
+            shutdownComplete.countDown();
+        } catch (Exception error) {
+            Log.w(TAG, "audio restore pending; retaining recovery worker and snapshot", error);
+            deferAudioRecovery();
+            scheduleAudioRecovery();
+        }
+    }
+
+    void awaitShutdown() {
+        boolean interrupted = false;
+        for (;;) {
+            try { shutdownComplete.await(); break; }
+            catch (InterruptedException error) { interrupted = true; }
+        }
+        if (interrupted) Thread.currentThread().interrupt();
     }
 
     private static String safeMessage(Throwable error) {

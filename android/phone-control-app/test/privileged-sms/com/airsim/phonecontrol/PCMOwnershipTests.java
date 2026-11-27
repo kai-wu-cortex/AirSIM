@@ -9,9 +9,16 @@ public final class PCMOwnershipTests {
     public static void main(String[] args) throws Exception {
         ShizukuBridgeUserService first = configured();
         ShizukuBridgeUserService second = configured();
+        int[] recoveryReads = {0};
+        set(second, "isolationStore", new LocalAudioIsolationController.Store() {
+            public LocalAudioIsolationController.Snapshot read() { recoveryReads[0]++; return null; }
+            public void save(LocalAudioIsolationController.Snapshot value) { }
+            public void clear() { }
+        });
         String firstFailure = startFailure(first);
         check(!firstFailure.contains("ownership already held"), "first owner could not reserve bridge");
         check(startFailure(second).contains("ownership already held"), "second supervisor entered PCM cleanup/start");
+        check(recoveryReads[0] == 0, "second supervisor must not recover a live owner's isolation journal");
         Child child = new Child();
         set(first, "bridgeProcess", child);
         first.shutdown();
@@ -19,6 +26,7 @@ public final class PCMOwnershipTests {
         check(child.stops == 1 && !child.alive, "shutdown did not stop its child exactly once");
         check(startFailure(first).contains("service is stopping"), "late restart resurrected stopped supervisor");
         check(!startFailure(second).contains("ownership already held"), "handover did not release bridge lease");
+        check(recoveryReads[0] == 1, "journal recovery is allowed only after exclusive ownership handover");
         Method monitor = ShizukuBridgeUserService.class.getDeclaredMethod("monitorBridge", java.lang.Process.class);
         monitor.setAccessible(true);
         monitor.invoke(first, child);

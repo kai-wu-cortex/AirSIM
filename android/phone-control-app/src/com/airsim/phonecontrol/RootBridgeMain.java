@@ -62,6 +62,7 @@ public final class RootBridgeMain {
                 }
             } finally {
                 service.shutdown();
+                service.awaitShutdown();
                 new File(args[2]).delete();
             }
             System.exit(0); // Binder pool threads otherwise keep this app_process alive.
@@ -158,6 +159,7 @@ public final class RootBridgeMain {
                     data.writeString(request.getString("policy"));
                 }
                 case "audio_snapshot" -> code = PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT;
+                case "renew_isolation" -> code = PrivilegedBridgeProtocol.TRANSACTION_RENEW_ISOLATION_LEASE;
                 case "ensure_dialer_role" -> code = PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE;
                 case "send_sms" -> {
                     // Retired: SMS now uses a separate helper with App-owned sent

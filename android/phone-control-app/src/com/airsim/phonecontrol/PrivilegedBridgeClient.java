@@ -64,6 +64,10 @@ final class PrivilegedBridgeClient implements PrivilegedBridgeCoordinator.Transp
         return transact(PrivilegedBridgeProtocol.TRANSACTION_AUDIO_SNAPSHOT, false, false);
     }
 
+    @Override public void renewIsolationLease() throws RemoteException {
+        transact(PrivilegedBridgeProtocol.TRANSACTION_RENEW_ISOLATION_LEASE, false, false);
+    }
+
     String ensureDialerRole() throws RemoteException {
         return transact(PrivilegedBridgeProtocol.TRANSACTION_ENSURE_DIALER_ROLE, false, false);
     }

@@ -34,6 +34,14 @@ final class CallOutputPolicyMute {
         previous = snapshot;
         previousMuted = muted;
     }
+    /** Rehydrate only a previously persisted isolation snapshot, before any new writes. */
+    void prepare(boolean muted, int earpiece, int speaker) throws IOException {
+        if (previous != null) return;
+        if (earpiece < 0 || earpiece > 1000 || speaker < 0 || speaker > 1000)
+            throw new IOException("invalid saved call policy index");
+        previous = new int[]{earpiece, speaker};
+        previousMuted = muted;
+    }
     void apply() throws Exception {
         applied = false;
         if (previous == null) throw new IOException("call policy snapshot missing");

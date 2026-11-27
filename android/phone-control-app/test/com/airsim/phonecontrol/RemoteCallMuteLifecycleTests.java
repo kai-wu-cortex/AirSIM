@@ -6,6 +6,19 @@ import android.telecom.Call;
 public final class RemoteCallMuteLifecycleTests {
     private static int passed;
     public static void main(String[] args) throws Exception {
+        for (String transport : new String[]{"vowlan", "voble", "cloud"}) {
+            isolationWaitsForAnswerAndRestoresImmediately(transport);
+            AppConfig.volumePolicy = "isolate_local";
+            try { remoteLifecycle("remote_silent", transport); }
+            finally { AppConfig.volumePolicy = "minimum_nonzero_volume"; }
+        }
+        AppConfig.volumePolicy = "isolate_local";
+        try {
+            ordinaryCallsStayAudible();
+            extraNativeCallRestoresOutput();
+            destroyRestoresOriginalVolume();
+            queuedRefreshCannotRemuteAfterDestroy();
+        } finally { AppConfig.volumePolicy = "minimum_nonzero_volume"; }
         dialingWaitsForAnswerBeforeReducingSamsungOutput();
         ordinaryCallsStayAudible();
         routeChangePreservesUserCaptureVolume();
@@ -28,6 +41,39 @@ public final class RemoteCallMuteLifecycleTests {
         vobleKeepsDownlinkCaptureAlive();
         transportSwitchRestoresPreviousPolicySnapshot();
         System.out.println("RemoteCallMuteLifecycleTests passed: " + passed + " scenarios");
+    }
+
+    private static void isolationWaitsForAnswerAndRestoresImmediately(String transport) {
+        AppConfig.volumePolicy = "isolate_local";
+        Object owner = new Object();
+        DirectCallOwnership.Lease lease = null;
+        try (Fixture f = new Fixture(Call.STATE_DIALING)) {
+            if ("cloud".equals(transport)) RemoteAudioSessionRegistry.setCloud(owner, true, f.id);
+            else if ("voble".equals(transport)) {
+                RemoteAudioSessionRegistry.setVoBLE(true);
+                RemoteAudioSessionRegistry.ownCall(owner, f.id);
+            } else {
+                lease = DirectCallOwnership.begin("fixture-host");
+                DirectCallOwnership.record("fixture-host", f.id, lease);
+                RemoteAudioSessionRegistry.setVoWLAN(true);
+                DirectCallOwnership.pcmReady(lease);
+                AirSIMInCallService.refreshAudioPolicy();
+            }
+            check(!f.audio.muted, transport + " isolation must wait for answer even with ready remote media");
+            f.call.setStateForTest(Call.STATE_ACTIVE);
+            check(f.audio.muted, "answered owned call activates isolation intent");
+            f.call.setStateForTest(Call.STATE_DISCONNECTING);
+            check(!f.audio.muted && !ShizukuBridgeManager.INSTANCE.watchdog,
+                    "mic isolation must not survive in the output-tail window");
+        } finally {
+            RemoteAudioSessionRegistry.setCloud(owner, false, "");
+            RemoteAudioSessionRegistry.releaseCall(owner);
+            RemoteAudioSessionRegistry.setVoBLE(false);
+            if (lease != null) DirectCallOwnership.end(lease, false);
+            RemoteAudioSessionRegistry.setVoWLAN(false);
+            AppConfig.volumePolicy = "minimum_nonzero_volume";
+        }
+        passed++;
     }
 
     /**

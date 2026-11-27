@@ -15,6 +15,9 @@ final class PrivilegedBridgeCoordinator {
             return setLocalOutputMuted(muted, transport);
         }
         default String audioSnapshot() throws Exception { throw new java.io.IOException("snapshot unsupported"); }
+        default void renewIsolationLease() throws Exception {
+            throw new java.io.IOException("请更新权限服务后再启用实验性本机隔离");
+        }
     }
 
     private Transport transport;
@@ -59,7 +62,7 @@ final class PrivilegedBridgeCoordinator {
     }
 
     synchronized void setOutputPolicy(String policy) throws Exception {
-        if (!"preserve_volume".equals(policy) && !"minimum_nonzero_volume".equals(policy))
+        if (!"isolate_local".equals(policy) && !"preserve_volume".equals(policy) && !"minimum_nonzero_volume".equals(policy))
             throw new java.io.IOException("unsupported audio volume policy");
         outputPolicy = policy;
         if (transport != null && hasMuteIntent)
@@ -72,8 +75,13 @@ final class PrivilegedBridgeCoordinator {
 
     AudioWatchdogSnapshot audioSnapshot() throws Exception {
         Transport current;
-        synchronized (this) { current = transport; }
+        boolean renew;
+        synchronized (this) {
+            current = transport;
+            renew = desiredMuted && hasMuteIntent && "isolate_local".equals(outputPolicy);
+        }
         if (current == null) throw new java.io.IOException("privileged transport disconnected");
+        if (renew) current.renewIsolationLease();
         // A slow OEM AudioManager query must not hold the mute/restore coordinator lock.
         return AudioWatchdogSnapshot.parse(current.audioSnapshot());
     }

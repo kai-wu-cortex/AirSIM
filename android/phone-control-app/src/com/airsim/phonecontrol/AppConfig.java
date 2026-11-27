@@ -42,11 +42,11 @@ public final class AppConfig {
 
     public static String callAudioVolumeSelection(Context context) {
         String value = preferences(context).getString("call_audio_volume", "auto");
-        return "minimum".equals(value) || "preserve".equals(value) ? value : "auto";
+        return "isolate".equals(value) || "minimum".equals(value) || "preserve".equals(value) ? value : "auto";
     }
 
     public static void setCallAudioVolumeSelection(Context context, String value) {
-        String normalized = "minimum".equals(value) || "preserve".equals(value) ? value : "auto";
+        String normalized = "isolate".equals(value) || "minimum".equals(value) || "preserve".equals(value) ? value : "auto";
         preferences(context).edit().putString("call_audio_volume", normalized).apply();
     }
 

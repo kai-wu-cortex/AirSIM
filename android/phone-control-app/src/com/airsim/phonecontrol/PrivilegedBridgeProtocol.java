@@ -16,6 +16,7 @@ final class PrivilegedBridgeProtocol {
     static final int TRANSACTION_RESOLVE_SMS_SUBSCRIPTION = 9;
     static final int TRANSACTION_SMS_PREFLIGHT = 10;
     static final int TRANSACTION_SEND_SMS_CONFIRMED = 11;
+    static final int TRANSACTION_RENEW_ISOLATION_LEASE = 12;
     static final int STREAM_VOICE_CALL = 0;
     /** Transport tag appended to TRANSACTION_SET_LOCAL_OUTPUT_MUTED. */
     static final String TRANSPORT_VOWLAN = "vowlan";
