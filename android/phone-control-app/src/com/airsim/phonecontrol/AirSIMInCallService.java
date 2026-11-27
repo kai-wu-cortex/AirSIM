@@ -112,13 +112,14 @@ public final class AirSIMInCallService extends InCallService {
 		if (localAudio == null || instance != this) return;
         java.util.List<String> liveCalls = new java.util.ArrayList<>();
         boolean relayingAudio = false;
+        boolean isolateLocal = "isolate_local".equals(AppConfig.callAudioVolumePolicy(this));
         for (Map.Entry<Call, String> item : callStates.entrySet()) {
             if (!"ended".equals(item.getValue())) liveCalls.add(CallRepository.id(item.getKey()));
             // A prepared incoming PCM connection is not an answered call. Also do not
             // treat STATE_DISCONNECTING (mapped to dialing by the legacy wire protocol)
             // as permission to re-mute while hangup/media cleanup is still asynchronous.
             if (item.getKey().getState() != Call.STATE_DISCONNECTING
-                    && ((!"samsung".equalsIgnoreCase(android.os.Build.MANUFACTURER)
+                    && ((!isolateLocal && !"samsung".equalsIgnoreCase(android.os.Build.MANUFACTURER)
                         && "dialing".equals(item.getValue())) || "active".equals(item.getValue())
                     || "held".equals(item.getValue()))) relayingAudio = true;
         }
@@ -129,7 +130,7 @@ public final class AirSIMInCallService extends InCallService {
         // the unique, authenticated call with a ready PCM owner may silence output.
         // Media loss while the carrier call is active restores local audio. A
         // confirmed teardown may retain the existing policy for at most two seconds.
-        // Microphone and PCM gain remain untouched.
+        // Physical isolation includes the microphone after answer; PCM gain is untouched.
         // Audio ownership is independent of the presentation mode: when the
         // authenticated iPhone owns the media, Android must mute its local output
         // in both remote_silent and local_and_push. The mode controls presentation
@@ -139,7 +140,7 @@ public final class AirSIMInCallService extends InCallService {
         Call sole = callStates.size() == 1 ? callStates.keySet().iterator().next() : null;
         boolean terminal = sole != null && (sole.getState() == Call.STATE_DISCONNECTING
                 || sole.getState() == Call.STATE_DISCONNECTED);
-        boolean retaining = outputTail.update(sole == null ? "" : CallRepository.id(sole),
+        boolean retaining = !isolateLocal && outputTail.update(sole == null ? "" : CallRepository.id(sole),
                 terminal, shouldSilence, policyTransport, System.nanoTime() / 1_000_000L);
         if (retaining) {
             shouldSilence = true;

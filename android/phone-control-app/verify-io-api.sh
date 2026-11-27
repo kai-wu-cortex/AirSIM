@@ -5,7 +5,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CLASSES=${1:-"$ROOT/build/android/classes"}
 JAVA_HOME=${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}
-REPORT=$(mktemp -t airsim-io-api)
+REPORT=$(mktemp "${TMPDIR:-/tmp}/airsim-io-api.XXXXXX")
 trap 'rm -f "$REPORT"' EXIT HUP INT TERM
 find "$CLASSES" -name '*.class' -print0 | xargs -0 "$JAVA_HOME/bin/javap" -c -p > "$REPORT"
 if grep -E 'java/io/[^ ]+\.(toString:\(Ljava/nio/charset/Charset;|readNBytes:|writeBytes:\(\[B\)|nullInputStream:)|java/util/[^ ]+\.toArray:\(Ljava/util/function/IntFunction;|java/lang/(CharSequence|StringBuilder|StringBuffer)\.isEmpty:|java/net/(URLEncoder|URLDecoder)\.(encode|decode):\(Ljava/lang/String;Ljava/nio/charset/Charset;' "$REPORT"; then

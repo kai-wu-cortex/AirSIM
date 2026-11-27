@@ -9,6 +9,7 @@ mkdir -p "$OUT"
 "$TASK_JAVA_HOME/bin/javac" --release 17 -cp "$ANDROID_JAR" \
   -sourcepath "$ROOT/src" -d "$OUT" \
   "$ROOT/src/com/airsim/phonecontrol/ShizukuBridgeUserService.java" \
+  "$ROOT/src/com/airsim/phonecontrol/AudioWatchdogSnapshot.java" \
   "$ROOT/src/com/airsim/phonecontrol/ShellProviderQuery.java"
 "$TASK_JAVA_HOME/bin/javac" --release 17 -cp "$OUT:$ANDROID_JAR" -d "$OUT" \
   "$ROOT"/test/android/os/Build.java "$ROOT"/test/android/util/Log.java \

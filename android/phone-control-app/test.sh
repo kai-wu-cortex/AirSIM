@@ -323,6 +323,11 @@ sh "$ROOT/verify-io-api.sh" "$DIAGNOSTICS_OUT"
 "$JAVA" -cp "$OUT" com.airsim.phonecontrol.BoundedAudioOperationTests
 
 "$JAVAC" --release 17 -cp "$OUT" -d "$OUT" \
+  "$ROOT"/src/com/airsim/phonecontrol/LocalAudioIsolationController.java \
+  "$ROOT"/test/com/airsim/phonecontrol/LocalAudioIsolationControllerTests.java
+"$JAVA" -cp "$OUT" com.airsim.phonecontrol.LocalAudioIsolationControllerTests
+
+"$JAVAC" --release 17 -cp "$OUT" -d "$OUT" \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANNetworkRecoveryGate.java \
   "$ROOT"/src/com/airsim/phonecontrol/VoWLANAdvertisementEpoch.java \
   "$ROOT"/test/com/airsim/phonecontrol/VoWLANNetworkRecoveryTests.java

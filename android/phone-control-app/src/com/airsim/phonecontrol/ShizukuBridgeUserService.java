@@ -45,6 +45,7 @@ public final class ShizukuBridgeUserService extends Binder {
     private android.net.LocalServerSocket bridgeOwnership;
     private Context serviceContext;
     private volatile LocalOutputMuteController outputMute;
+    private volatile LocalAudioIsolationController localIsolation;
     private volatile String outputStrategy = "vowlan";
     private volatile CallOutputPolicyMute callOutputPolicyMute;
     private final PCMHealthEvidence pcmEvidence = new PCMHealthEvidence();
@@ -372,11 +373,27 @@ public final class ShizukuBridgeUserService extends Binder {
             verifyIdentity();
             LocalOutputMuteController.Strategy desired = LocalOutputMuteController.wireStrategy(policy);
             outputStrategy = "voble".equals(transport) ? "voble" : "vowlan";
+            if (localIsolation != null && (!muted || desired != LocalOutputMuteController.Strategy.ISOLATE_LOCAL)) {
+                localIsolation.setIsolated(false);
+                localIsolation = null;
+                if (!muted && outputMute == null) return "local_audio_isolation_restored verified=true";
+            }
             if (!muted) {
                 if (outputMute == null) return "local_output_unchanged";
                 String result = outputMute.setMuted(false);
                 outputMute = null;
                 return result;
+            }
+            if (desired == LocalOutputMuteController.Strategy.ISOLATE_LOCAL) {
+                if (outputMute != null) {
+                    outputMute.setMuted(false);
+                    outputMute = null;
+                }
+                AudioManager audio = shellAudioManager();
+                if (audioOperations.run(audio::getMode) != AudioManager.MODE_IN_CALL)
+                    throw new IOException("physical audio isolation requires an answered carrier call");
+                if (localIsolation == null) localIsolation = new LocalAudioIsolationController(isolationBackend(audio));
+                return localIsolation.setIsolated(true);
             }
             if (outputMute != null && !outputMute.policyName().equals(policy)) {
                 // Restore the previous reduction before preserving user volume.
@@ -389,6 +406,27 @@ public final class ShizukuBridgeUserService extends Binder {
             // obey this separate, user-selected output/capture policy.
             return outputMute.setMuted(true);
         }
+    }
+
+    private LocalAudioIsolationController.Api isolationBackend(AudioManager audio) throws Exception {
+        SystemCallOutputPolicy policy = new SystemCallOutputPolicy();
+        return new LocalAudioIsolationController.Api() {
+            public boolean microphoneMuted() throws Exception {
+                return audioOperations.run(audio::isMicrophoneMute);
+            }
+            public void microphoneMuted(boolean muted) throws Exception {
+                audioOperations.run(() -> { audio.setMicrophoneMute(muted); return null; });
+            }
+            public boolean streamMuted() throws Exception {
+                return audioOperations.run(() -> audio.isStreamMute(AudioManager.STREAM_VOICE_CALL));
+            }
+            public int index(int device) throws Exception {
+                return audioOperations.run(() -> policy.index(device));
+            }
+            public void set(int device, int index, boolean muted) throws Exception {
+                audioOperations.run(() -> { policy.set(device, index, muted); return null; });
+            }
+        };
     }
 
     private LocalOutputMuteController.Backend audioBackend() throws Exception {
@@ -456,10 +494,20 @@ public final class ShizukuBridgeUserService extends Binder {
                 + " mode=" + audio.getMode() + " speaker=" + audio.isSpeakerphoneOn()
                 + " pcm=" + pcmRunning + " output_transport=" + outputStrategy + " output_policy="
                 + outputPolicyDiagnostic()
+                + isolationSnapshot(audio)
                 + " " + pcmEvidence.snapshot());
     }
 
+    /** Called inside the bounded read operation; do not nest an audioOperations.run here. */
+    private String isolationSnapshot(AudioManager audio) throws Exception {
+        if (localIsolation == null) return "";
+        SystemCallOutputPolicy policy = new SystemCallOutputPolicy();
+        return " mic_muted=" + audio.isMicrophoneMute()
+                + " earpiece_index=" + policy.index(1) + " speaker_index=" + policy.index(2);
+    }
+
     private String outputPolicyDiagnostic() {
+        if (localIsolation != null) return "isolate_local";
         LocalOutputMuteController current = outputMute;
         if (current != null)
             return current.policyName() + (current.usesMinimumVolume()
@@ -524,9 +572,10 @@ public final class ShizukuBridgeUserService extends Binder {
 
     private String statusLocked() {
         return "uid=" + Process.myUid()
-                + " service_revision=12"
+                + " service_revision=13"
                 + " pcm=" + (bridgeProcess != null && bridgeProcess.isAlive() ? "running" : "stopped")
-                + " local_output=" + (outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
+                + " local_output=" + (localIsolation != null && localIsolation.verified() ? "isolated"
+                    : outputMute != null && outputMute.isVerifiedMinimum() ? "minimum"
                     : outputMute != null && outputMute.isVerifiedMuted() ? "muted" : "normal")
                 + " output_policy=" + outputPolicyDiagnostic()
                 + " " + pcmEvidence.snapshot();

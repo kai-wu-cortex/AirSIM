@@ -806,8 +806,8 @@ public final class MainActivity extends Activity {
         volumeCard.setPadding(dp(16), dp(16), dp(16), dp(16));
         volumeCard.addView(description("部分手机的通话音量也会影响转发给 iPhone 的声音。此设置适用于 VoWLAN、VoBLE 和使用此音频桥的云端通话。"));
         RadioGroup volumeChoices = new RadioGroup(this);
-        String[] volumeKeys = {"auto", "preserve", "minimum"};
-        String[] volumeLabels = {"自动适配", "保留通话音量 · 优先远端声音", "降低本机声音 · 最低非零音量"};
+        String[] volumeKeys = {"auto", "isolate", "preserve", "minimum"};
+        String[] volumeLabels = {"自动适配", "本机完全静音 · 麦克风、听筒及扬声器", "保留通话音量 · 优先远端声音", "降低本机声音 · 最低非零音量"};
         java.util.Map<Integer, String> volumeIDs = new java.util.HashMap<>();
         for (int index = 0; index < volumeKeys.length; index++) {
             RadioButton option = new RadioButton(this);
@@ -820,6 +820,15 @@ public final class MainActivity extends Activity {
         volumeChoices.setOnCheckedChangeListener((group, id) -> {
             String choice = volumeIDs.get(id);
             if (choice == null) return;
+            String currentChoice = AppConfig.callAudioVolumeSelection(this);
+            if (choice.equals(currentChoice)) return;
+            if (LocalOutputMuteController.configuredStrategy(choice, Build.MANUFACTURER, Build.MODEL)
+                    == LocalOutputMuteController.Strategy.ISOLATE_LOCAL && !CallRepository.callIDs().isEmpty()) {
+                for (java.util.Map.Entry<Integer, String> entry : volumeIDs.entrySet())
+                    if (currentChoice.equals(entry.getValue())) group.check(entry.getKey());
+                toast("请在通话结束后启用本机完全静音");
+                return;
+            }
             AppConfig.setCallAudioVolumeSelection(this, choice);
             ShizukuBridgeManager.get(this).refreshCallAudioVolumePolicy();
             volumeExplanation.setText(callAudioVolumeExplanation());
@@ -2132,9 +2141,12 @@ public final class MainActivity extends Activity {
     }
 
     private String callAudioVolumeExplanation() {
+        if ("isolate_local".equals(AppConfig.callAudioVolumePolicy(this)))
+            return "远端接听并接管通话后，关闭安卓本机麦克风，将听筒和扬声器输出设为零。挂断或远端音频断开时恢复原状态。\n"
+                    + "已在 realme RMX3888 验证本机无声且 iPhone 双向正常；其他机型需验证。";
         boolean preserve = "preserve_volume".equals(AppConfig.callAudioVolumePolicy(this));
         String auto = "auto".equals(AppConfig.callAudioVolumeSelection(this))
-                ? "自动适配：目前 Pixel 6 保留音量，其他设备沿用降低本机声音策略。\n" : "";
+                ? "自动适配：realme RMX3888 使用本机完全静音，Pixel 6 保留音量，其他设备降低本机声音。\n" : "";
         return auto + (preserve
                 ? "当前保留安卓通话音量：通话中可用安卓音量键调到清晰档位，看门狗不会调低，挂断后保留你的调整。若音量已很低，请手动调高。\n此音频桥尚不能独立降低本机输出并保证采集音量，安卓本机可能发声或漏音。"
                 : "当前会将安卓通话音量维持在最低非零档，结束后恢复。若 iPhone 声音过小，选择“保留通话音量”。\n本机低音量不代表绝对静音；无法保证降低本机声音不影响远端采集。");

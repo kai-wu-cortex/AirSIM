@@ -2,7 +2,8 @@ package android.media;
 public class AudioManager {
     public static final int STREAM_VOICE_CALL = 0, ADJUST_MUTE = -100, ADJUST_UNMUTE = 100;
     public int volume = 5, writes;
-    public boolean muted, rejectWrites;
+    public boolean muted, rejectWrites, microphone;
+    public int mode = 2;
     public boolean isStreamMute(int stream) { return muted; }
     public int getStreamVolume(int stream) { return volume; }
     public int getLastAudibleStreamVolume(int stream) { return volume; }
@@ -14,6 +15,8 @@ public class AudioManager {
     public void adjustStreamVolume(int stream, int direction, int flags) {
         muted = direction == ADJUST_MUTE; writes++;
     }
-    public int getMode() { return 2; }
+    public int getMode() { return mode; }
+    public boolean isMicrophoneMute() { return microphone; }
+    public void setMicrophoneMute(boolean value) { microphone = value; }
     public boolean isSpeakerphoneOn() { return false; }
 }

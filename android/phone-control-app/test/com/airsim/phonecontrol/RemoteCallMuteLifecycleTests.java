@@ -6,6 +6,7 @@ import android.telecom.Call;
 public final class RemoteCallMuteLifecycleTests {
     private static int passed;
     public static void main(String[] args) throws Exception {
+        isolationWaitsForAnswerAndRestoresImmediately();
         dialingWaitsForAnswerBeforeReducingSamsungOutput();
         ordinaryCallsStayAudible();
         routeChangePreservesUserCaptureVolume();
@@ -28,6 +29,24 @@ public final class RemoteCallMuteLifecycleTests {
         vobleKeepsDownlinkCaptureAlive();
         transportSwitchRestoresPreviousPolicySnapshot();
         System.out.println("RemoteCallMuteLifecycleTests passed: " + passed + " scenarios");
+    }
+
+    private static void isolationWaitsForAnswerAndRestoresImmediately() {
+        AppConfig.volumePolicy = "isolate_local";
+        Object owner = new Object();
+        try (Fixture f = new Fixture(Call.STATE_DIALING)) {
+            RemoteAudioSessionRegistry.setCloud(owner, true, f.id);
+            check(!f.audio.muted, "isolation must wait for answer even with ready remote media");
+            f.call.setStateForTest(Call.STATE_ACTIVE);
+            check(f.audio.muted, "answered owned call activates isolation intent");
+            f.call.setStateForTest(Call.STATE_DISCONNECTING);
+            check(!f.audio.muted && !ShizukuBridgeManager.INSTANCE.watchdog,
+                    "mic isolation must not survive in the output-tail window");
+        } finally {
+            RemoteAudioSessionRegistry.setCloud(owner, false, "");
+            AppConfig.volumePolicy = "minimum_nonzero_volume";
+        }
+        passed++;
     }
 
     /**

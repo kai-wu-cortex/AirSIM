@@ -6,7 +6,8 @@ import java.util.Map;
 
 /** Observed OS flags, never an assertion that a physical speaker is acoustically silent. */
 record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speaker, boolean pcm,
-        String mediaEvidence, boolean minimumVolumePolicy, int minimumVolume, boolean requiresUnmutedCapture, boolean preservesVolume) {
+        String mediaEvidence, boolean minimumVolumePolicy, int minimumVolume, boolean requiresUnmutedCapture, boolean preservesVolume,
+        boolean isolatesLocal, boolean microphoneMuted, int earpieceIndex, int speakerIndex) {
     static AudioWatchdogSnapshot parse(String value) throws IOException {
         Map<String, String> fields = new HashMap<>();
         for (String item : (value == null ? "" : value).trim().split("\\s+")) {
@@ -19,15 +20,20 @@ record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speake
             if (volume < 0) throw new IllegalArgumentException();
             boolean captureSafe = "minimum_nonzero_volume".equals(fields.get("output_policy"));
             boolean minimumPolicy = captureSafe || "minimum_volume".equals(fields.get("output_policy"));
+            boolean isolate = "isolate_local".equals(fields.get("output_policy"));
             int minimum = Integer.parseInt(fields.getOrDefault("minimum_volume", "-1"));
             if (minimum < -1 || minimum > 1000) throw new IllegalArgumentException();
             String evidence = java.util.List.of("pcm_event", "pcm_initialized", "pcm_capture", "pcm_route",
                     "pcm_down_bytes", "pcm_down_peak", "pcm_up_bytes", "pcm_up_peak", "output_policy",
+                    "mic_muted", "earpiece_index", "speaker_index",
                     "pcm_failure", "pcm_error_phase", "pcm_error_code", "pcm_error_class", "pcm_failure_count").stream()
                 .filter(key -> fields.getOrDefault(key, "").matches("[a-zA-Z0-9_.$]{1,64}"))
                 .map(key -> key + "=" + fields.get(key)).collect(java.util.stream.Collectors.joining(" "));
             return new AudioWatchdogSnapshot(bool(fields, "muted"), volume, mode,
-                    bool(fields, "speaker"), bool(fields, "pcm"), evidence, minimumPolicy, minimum, captureSafe, "preserve_volume".equals(fields.get("output_policy")));
+                    bool(fields, "speaker"), bool(fields, "pcm"), evidence, minimumPolicy, minimum, captureSafe, "preserve_volume".equals(fields.get("output_policy")),
+                    isolate, isolate && bool(fields, "mic_muted"),
+                    isolate ? Integer.parseInt(fields.get("earpiece_index")) : -1,
+                    isolate ? Integer.parseInt(fields.get("speaker_index")) : -1);
         } catch (RuntimeException error) { throw new IOException("invalid audio snapshot", error); }
     }
     private static boolean bool(Map<String, String> fields, String key) {
@@ -41,6 +47,7 @@ record AudioWatchdogSnapshot(boolean muted, int volume, int mode, boolean speake
                 + (minimumVolumePolicy ? " minimum_volume=" + minimumVolume : "");
     }
     boolean targetSatisfied() {
+        if (isolatesLocal) return microphoneMuted && earpieceIndex == 0 && speakerIndex == 0;
         if (preservesVolume) return true; // User volume is not an output-policy fault.
         return minimumVolumePolicy
                 ? minimumVolume >= (requiresUnmutedCapture ? 1 : 0) && volume == minimumVolume

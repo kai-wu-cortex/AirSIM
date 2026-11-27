@@ -59,7 +59,7 @@ final class PrivilegedBridgeCoordinator {
     }
 
     synchronized void setOutputPolicy(String policy) throws Exception {
-        if (!"preserve_volume".equals(policy) && !"minimum_nonzero_volume".equals(policy))
+        if (!"isolate_local".equals(policy) && !"preserve_volume".equals(policy) && !"minimum_nonzero_volume".equals(policy))
             throw new java.io.IOException("unsupported audio volume policy");
         outputPolicy = policy;
         if (transport != null && hasMuteIntent)
